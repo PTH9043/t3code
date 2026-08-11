@@ -22,6 +22,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import {
   checkPortAvailabilityOnHosts,
   createDevRunnerEnv,
+  DEV_RUNNER_VP_ENTRYPOINT,
   devPortProbeHosts,
   findFirstAvailableOffset,
   getDevRunnerModeArgs,
@@ -351,6 +352,28 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(env.T3CODE_NO_BROWSER, undefined);
         assert.equal(env.T3CODE_HOST, undefined);
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:4222");
+      }),
+    );
+
+    it.effect("provides the selected backend port to desktop without an inherited port", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: {},
+          serverOffset: 2,
+          webOffset: 2,
+          t3Home: "/tmp/my-t3",
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.T3CODE_PORT, "13775");
+        assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:13775");
+        assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:13775");
       }),
     );
 
@@ -863,7 +886,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(error.operation, "spawn");
         assert.equal(error.mode, "dev:server");
         assert.equal(error.executable, "vp");
-        assert.equal(error.argumentCount, 5);
+        assert.equal(error.argumentCount, 6);
         assert.equal(error.shell, false);
         assert.equal(error.cause, cause);
         assert.ok(!error.message.includes(cause.message));
@@ -1026,7 +1049,10 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
                 readonly args: ReadonlyArray<string>;
                 readonly options?: { readonly env?: Record<string, string | undefined> };
               };
-              if (spawned.command === "vp") {
+              if (
+                spawned.command === process.execPath &&
+                spawned.args[0] === DEV_RUNNER_VP_ENTRYPOINT
+              ) {
                 captured = spawned.options?.env;
                 return Effect.succeed(mockProcess(0));
               }
@@ -1163,7 +1189,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         }
         assert.equal(error.mode, "dev:server");
         assert.equal(error.executable, "vp");
-        assert.equal(error.argumentCount, 5);
+        assert.equal(error.argumentCount, 6);
         assert.equal(error.shell, false);
         assert.equal(error.exitCode, 17);
         assert.ok(!("cause" in error));
@@ -1197,7 +1223,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(error.operation, "wait-for-exit");
         assert.equal(error.mode, "dev:server");
         assert.equal(error.executable, "vp");
-        assert.equal(error.argumentCount, 5);
+        assert.equal(error.argumentCount, 6);
         assert.equal(error.shell, false);
         assert.equal(error.cause, cause);
         assert.ok(!error.message.includes(cause.message));

@@ -1,7 +1,9 @@
 import {
+  DesktopUpdateAutomationPermissionsSchema,
   DesktopUpdateChannelSchema,
   type DesktopRuntimeInfo,
   type DesktopUpdateActionResult,
+  type DesktopUpdateAutomationPermissions,
   type DesktopUpdateChannel,
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
@@ -89,6 +91,18 @@ export class DesktopUpdateChannelPersistenceError extends Schema.TaggedErrorClas
   }
 }
 
+export class DesktopUpdateAutomationPersistenceError extends Schema.TaggedErrorClass<DesktopUpdateAutomationPersistenceError>()(
+  "DesktopUpdateAutomationPersistenceError",
+  {
+    permissions: DesktopUpdateAutomationPermissionsSchema,
+    cause: Schema.instanceOf(DesktopAppSettings.DesktopSettingsWriteError),
+  },
+) {
+  override get message(): string {
+    return "Failed to persist desktop update automation permissions.";
+  }
+}
+
 export class DesktopUpdatePollerError extends Schema.TaggedErrorClass<DesktopUpdatePollerError>()(
   "DesktopUpdatePollerError",
   {
@@ -156,6 +170,10 @@ export class DesktopUpdates extends Context.Service<
     readonly setChannel: (
       channel: DesktopUpdateChannel,
     ) => Effect.Effect<DesktopUpdateState, DesktopUpdateSetChannelError>;
+    readonly getAutomationPermissions: Effect.Effect<DesktopUpdateAutomationPermissions>;
+    readonly setAutomationPermissions: (
+      permissions: DesktopUpdateAutomationPermissions,
+    ) => Effect.Effect<DesktopUpdateAutomationPermissions, DesktopUpdateAutomationPersistenceError>;
     readonly check: (reason: string) => Effect.Effect<DesktopUpdateCheckResult>;
     readonly download: Effect.Effect<DesktopUpdateActionResult>;
     readonly install: Effect.Effect<DesktopUpdateActionResult>;
@@ -192,6 +210,15 @@ function createBaseUpdateState(
     ...createInitialDesktopUpdateState(environment.appVersion, environment.runtimeInfo, channel),
     enabled,
     status: enabled ? "idle" : "disabled",
+  };
+}
+
+function getAutomationPermissions(
+  settings: DesktopAppSettings.DesktopSettings,
+): DesktopUpdateAutomationPermissions {
+  return {
+    autoDownload: settings.autoDownloadUpdates,
+    autoInstall: settings.autoInstallUpdates,
   };
 }
 
@@ -253,6 +280,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const readAutomationPermissions = desktopSettings.get.pipe(Effect.map(getAutomationPermissions));
 
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const updateCheckInFlightRef = yield* Ref.make(false);
@@ -451,6 +479,28 @@ export const make = Effect.gen(function* () {
     { discard: true },
   );
 
+  const recoverBackendsAfterInstallFailure = Effect.fn(
+    "desktop.updates.recoverBackendsAfterInstallFailure",
+  )(function* (instances: ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>) {
+    if (instances.length === 0) return;
+    yield* logUpdaterWarning("desktop update install failed; restarting drained backends", {
+      backendCount: instances.length,
+    });
+    yield* Effect.forEach(
+      instances,
+      (instance) =>
+        instance.start.pipe(
+          Effect.catchCause((cause) =>
+            logUpdaterError("failed to restart backend after update install failure", {
+              backendId: instance.id,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
+      { concurrency: 1, discard: true },
+    );
+  });
+
   const installDownloadedUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     if (
@@ -461,24 +511,26 @@ export const make = Effect.gen(function* () {
       return { accepted: false, completed: false };
     }
 
+    const instances = yield* pool.list;
+    const snapshots = yield* Effect.forEach(instances, (instance) =>
+      instance.snapshot.pipe(Effect.map((snapshot) => ({ instance, snapshot }))),
+    );
+    const instancesToResume = snapshots
+      .filter(({ snapshot }) => snapshot.desiredRunning)
+      .map(({ instance }) => instance);
+
     yield* Ref.set(desktopState.quitting, true);
     yield* Ref.set(updateInstallInFlightRef, true);
 
     return yield* Effect.gen(function* () {
-      // Stop every backend in the pool, not just the primary. With
-      // parallel WSL + Windows backends, leaving the WSL instance up
-      // means quitAndInstall's app.quit() exits before the pool's
-      // scope cascade has a chance to run its stop finalizer, so the
-      // WSL child gets hard-killed by the OS instead of receiving
-      // SIGTERM + grace. Stops run concurrently with the same 5s
-      // budget the primary had on its own.
-      const instances = yield* pool.list;
+      // Drain every backend before handing control to the native updater.
+      // A failed updater handoff is recoverable: the windows stay mounted
+      // and every backend that was desired-running is started again below.
       yield* Effect.forEach(
         instances,
         (instance) => instance.stop({ timeout: Duration.seconds(5) }),
-        { concurrency: "unbounded" },
+        { concurrency: 1 },
       );
-      yield* electronWindow.destroyAll;
       yield* electronUpdater.quitAndInstall({
         isSilent: true,
         isForceRunAfter: true,
@@ -488,6 +540,7 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({
         ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
           function* (error) {
+            yield* recoverBackendsAfterInstallFailure(instancesToResume);
             yield* resetInstallAction;
             yield* updateState((current) =>
               reduceDesktopUpdateStateOnInstallFailure(current, error.message),
@@ -502,12 +555,17 @@ export const make = Effect.gen(function* () {
           },
         ),
       }),
-      Effect.onInterrupt(() => resetInstallAction),
+      Effect.onInterrupt(() =>
+        recoverBackendsAfterInstallFailure(instancesToResume).pipe(
+          Effect.andThen(resetInstallAction),
+        ),
+      ),
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
           if (Cause.hasInterruptsOnly(cause)) {
             return yield* Effect.failCause(cause);
           }
+          yield* recoverBackendsAfterInstallFailure(instancesToResume);
           yield* resetInstallAction;
           const error = new DesktopUpdateUnexpectedActionError({ action: "install", cause });
           yield* updateState((current) =>
@@ -583,6 +641,13 @@ export const make = Effect.gen(function* () {
             version: info.version,
             releaseNoteGroups: releaseNotes.length,
           });
+          const permissions = yield* readAutomationPermissions;
+          if (permissions.autoDownload) {
+            yield* logUpdaterInfo("automatically downloading permitted update", {
+              version: info.version,
+            });
+            yield* downloadAvailableUpdate.pipe(Effect.asVoid);
+          }
         }),
       ),
       Effect.catchCause((cause) => {
@@ -688,6 +753,13 @@ export const make = Effect.gen(function* () {
           const state = yield* Ref.get(updateStateRef);
           yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
           yield* logUpdaterInfo("update downloaded", { version: info.version });
+          const permissions = yield* readAutomationPermissions;
+          if (permissions.autoInstall) {
+            yield* logUpdaterInfo("automatically installing permitted update", {
+              version: info.version,
+            });
+            yield* installDownloadedUpdate.pipe(Effect.asVoid);
+          }
         }),
       ),
       Effect.catchCause((cause) => {
@@ -707,6 +779,19 @@ export const make = Effect.gen(function* () {
     getState: Ref.get(updateStateRef),
     emitState,
     disabledReason: resolveDisabledReason,
+    getAutomationPermissions: readAutomationPermissions,
+    setAutomationPermissions: Effect.fn("desktop.updates.setAutomationPermissions")(function* (
+      permissions: DesktopUpdateAutomationPermissions,
+    ) {
+      const change = yield* desktopSettings
+        .setUpdateAutomationPermissions(permissions)
+        .pipe(
+          Effect.mapError(
+            (cause) => new DesktopUpdateAutomationPersistenceError({ permissions, cause }),
+          ),
+        );
+      return getAutomationPermissions(change.settings);
+    }),
     configure: Effect.gen(function* () {
       const context = yield* Effect.context<never>();
       const runEffect = (effect: Effect.Effect<void>) => {

@@ -67,7 +67,9 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.appRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
+      assert.equal(environment.appUserModelId, "com.newautousage.controlcenter.dev");
+      assert.equal(environment.branding.baseName, "NewAutoUsage AI 제어센터");
+      assert.equal(environment.displayName, "NewAutoUsage AI 제어센터 (개발)");
       assert.equal(environment.linuxWmClass, "t3code-dev");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
@@ -95,6 +97,32 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
       assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
       assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
+    }),
+  );
+
+  it.effect("defaults packaged Windows storage to the NewAutoUsage F drive", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({
+        platform: "win32",
+        isPackaged: true,
+      });
+
+      assert.equal(environment.baseDir, DesktopEnvironment.DEFAULT_PACKAGED_WINDOWS_HOME);
+      assert.equal(environment.stateDir.replaceAll("\\", "/"), "F:/NewAutoUsage/userdata");
+    }),
+  );
+
+  it.effect("keeps an explicit packaged Windows home above the F drive default", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {
+          platform: "win32",
+          isPackaged: true,
+        },
+        { T3CODE_HOME: "D:/CustomNewAutoUsage" },
+      );
+
+      assert.equal(environment.baseDir, "D:/CustomNewAutoUsage");
     }),
   );
 

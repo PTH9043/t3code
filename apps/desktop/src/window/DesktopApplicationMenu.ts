@@ -65,17 +65,17 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",
-      title: "You're up to date!",
-      message: `T3 Code ${updateState.currentVersion} is currently the newest version available.`,
-      buttons: ["OK"],
+      title: "최신 버전입니다",
+      message: `NewAutoUsage AI 제어센터 ${updateState.currentVersion} 버전이 현재 최신 버전입니다.`,
+      buttons: ["확인"],
     });
   } else if (updateState.status === "error") {
     yield* electronDialog.showMessageBox({
       type: "warning",
-      title: "Update check failed",
-      message: "Could not check for updates.",
-      detail: updateState.message ?? "An unknown error occurred. Please try again later.",
-      buttons: ["OK"],
+      title: "업데이트 확인 실패",
+      message: "업데이트를 확인하지 못했습니다.",
+      detail: updateState.message ?? "알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도하세요.",
+      buttons: ["확인"],
     });
   }
 }).pipe(Effect.withSpan("desktop.menu.checkForUpdates"));
@@ -90,10 +90,10 @@ const handleCheckForUpdatesMenuClick = Effect.gen(function* () {
     });
     yield* electronDialog.showMessageBox({
       type: "info",
-      title: "Updates unavailable",
-      message: "Automatic updates are not available right now.",
+      title: "업데이트를 사용할 수 없음",
+      message: "현재 자동 업데이트를 사용할 수 없습니다.",
       detail: disabledReason.value,
-      buttons: ["OK"],
+      buttons: ["확인"],
     });
     return;
   }
@@ -143,53 +143,56 @@ export const make = Effect.gen(function* () {
       template.push({
         label: appName,
         submenu: [
-          { role: "about" },
+          { role: "about", label: `${appName} 정보` },
           {
-            label: "Check for Updates...",
+            label: "업데이트 확인...",
             click: checkForUpdatesClick,
           },
           { type: "separator" },
           {
-            label: "Settings...",
+            label: "설정...",
             accelerator: "CmdOrCtrl+,",
             click: settingsClick,
           },
           { type: "separator" },
-          { role: "services" },
+          { role: "services", label: "서비스" },
           { type: "separator" },
-          { role: "hide" },
-          { role: "hideOthers" },
-          { role: "unhide" },
+          { role: "hide", label: `${appName} 숨기기` },
+          { role: "hideOthers", label: "다른 앱 숨기기" },
+          { role: "unhide", label: "모두 표시" },
           { type: "separator" },
-          { role: "quit" },
+          { role: "quit", label: `${appName} 종료` },
         ],
       });
     }
 
     template.push(
       {
-        label: "File",
+        label: "파일",
         submenu: [
           ...(environment.platform === "darwin"
             ? []
             : [
                 {
-                  label: "Settings...",
+                  label: "설정...",
                   accelerator: "CmdOrCtrl+,",
                   click: settingsClick,
                 },
                 { type: "separator" as const },
               ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
+          {
+            role: environment.platform === "darwin" ? "close" : "quit",
+            label: environment.platform === "darwin" ? "창 닫기" : "종료",
+          },
         ],
       },
-      { role: "editMenu" },
+      { role: "editMenu", label: "편집" },
       {
-        label: "View",
+        label: "보기",
         submenu: [
-          { role: "reload" },
-          { role: "forceReload" },
-          { role: "toggleDevTools" },
+          { role: "reload", label: "새로고침" },
+          { role: "forceReload", label: "강제로 새로고침" },
+          { role: "toggleDevTools", label: "개발자 도구 전환" },
           { type: "separator" },
           /*
             Not the zoom roles: those act on the focused webContents, so with
@@ -197,25 +200,26 @@ export const make = Effect.gen(function* () {
             page and the app UI appears stuck. These always zoom the main
             window (see DesktopWindow.zoomMain).
           */
-          { label: "Actual Size", accelerator: "CmdOrCtrl+0", click: zoomClick("reset") },
-          { label: "Zoom In", accelerator: "CmdOrCtrl+=", click: zoomClick("in") },
+          { label: "글자 크기 초기화", accelerator: "CmdOrCtrl+0", click: zoomClick("reset") },
+          { label: "글자 크게", accelerator: "CmdOrCtrl+=", click: zoomClick("in") },
           {
-            label: "Zoom In",
+            label: "글자 크게",
             accelerator: "CmdOrCtrl+Plus",
             visible: false,
             click: zoomClick("in"),
           },
-          { label: "Zoom Out", accelerator: "CmdOrCtrl+-", click: zoomClick("out") },
+          { label: "글자 작게", accelerator: "CmdOrCtrl+-", click: zoomClick("out") },
           { type: "separator" },
-          { role: "togglefullscreen" },
+          { role: "togglefullscreen", label: "전체 화면 전환" },
         ],
       },
-      { role: "windowMenu" },
+      { role: "windowMenu", label: "창" },
       {
         role: "help",
+        label: "도움말",
         submenu: [
           {
-            label: "Check for Updates...",
+            label: "업데이트 확인...",
             click: checkForUpdatesClick,
           },
         ],

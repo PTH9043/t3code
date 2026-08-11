@@ -128,8 +128,8 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
   if (!wasQuitting) {
     yield* electronDialog.showErrorBox(
-      "T3 Code failed to start",
-      `Stage: ${stage}\n${message}${detail}`,
+      "NewAutoUsage AI 제어센터를 시작하지 못했습니다",
+      `시작 단계: ${stage}\n${message}${detail}`,
     );
   }
   yield* shutdown.request;

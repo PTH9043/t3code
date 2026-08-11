@@ -26,8 +26,10 @@ import {
 import {
   checkForUpdate,
   downloadUpdate,
+  getUpdateAutomationPermissions,
   getUpdateState,
   installUpdate,
+  setUpdateAutomationPermissions,
   setUpdateChannel,
 } from "./methods/updates.ts";
 import {
@@ -41,6 +43,7 @@ import {
   pickThemeFiles,
   setTheme,
   showContextMenu,
+  toggleWindowMaximized,
 } from "./methods/window.ts";
 import * as PreviewIpc from "./methods/preview.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
@@ -83,10 +86,13 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(pickThemeFiles);
   yield* ipc.handle(confirm);
   yield* ipc.handle(setTheme);
+  yield* ipc.handle(toggleWindowMaximized);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);
+  yield* ipc.handle(getUpdateAutomationPermissions);
+  yield* ipc.handle(setUpdateAutomationPermissions);
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
   yield* ipc.handle(checkForUpdate);

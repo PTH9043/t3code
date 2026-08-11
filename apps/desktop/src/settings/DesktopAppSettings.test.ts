@@ -28,6 +28,8 @@ const DesktopSettingsPatch = Schema.Struct({
   serverExposureMode: Schema.optionalKey(Schema.Literals(["local-only", "network-accessible"])),
   tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
   tailscaleServePort: Schema.optionalKey(Schema.Number),
+  autoDownloadUpdates: Schema.optionalKey(Schema.Boolean),
+  autoInstallUpdates: Schema.optionalKey(Schema.Boolean),
   updateChannel: Schema.optionalKey(Schema.Literals(["latest", "nightly"])),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
   wslBackendEnabled: Schema.optionalKey(Schema.Boolean),
@@ -111,6 +113,8 @@ describe("DesktopSettings", () => {
         serverExposureMode: "local-only",
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        autoDownloadUpdates: false,
+        autoInstallUpdates: false,
         updateChannel: "nightly",
         updateChannelConfiguredByUser: false,
         wslBackendEnabled: false,
@@ -129,6 +133,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
+          autoDownloadUpdates: true,
+          autoInstallUpdates: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
         });
@@ -140,6 +146,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
+          autoDownloadUpdates: true,
+          autoInstallUpdates: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
           wslBackendEnabled: false,
@@ -162,6 +170,14 @@ describe("DesktopSettings", () => {
         assert.isTrue(updateChannel.changed);
         assert.equal(updateChannel.settings.updateChannel, "nightly");
         assert.equal(updateChannel.settings.updateChannelConfiguredByUser, true);
+
+        const automation = yield* settings.setUpdateAutomationPermissions({
+          autoDownload: false,
+          autoInstall: true,
+        });
+        assert.isTrue(automation.changed);
+        assert.isFalse(automation.settings.autoDownloadUpdates);
+        assert.isTrue(automation.settings.autoInstallUpdates);
       }),
     ),
   );
@@ -247,6 +263,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
+          autoDownloadUpdates: false,
+          autoInstallUpdates: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           wslBackendEnabled: false,
@@ -303,6 +321,8 @@ describe("DesktopSettings", () => {
             serverExposureMode: "network-accessible",
             tailscaleServeEnabled: true,
             tailscaleServePort: 8443,
+            autoDownloadUpdates: false,
+            autoInstallUpdates: false,
             updateChannel: "nightly",
             updateChannelConfiguredByUser: true,
             wslBackendEnabled: false,
@@ -335,6 +355,32 @@ describe("DesktopSettings", () => {
     ),
   );
 
+  it.effect("persists desktop update automation permissions", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+
+        const change = yield* settings.setUpdateAutomationPermissions({
+          autoDownload: true,
+          autoInstall: true,
+        });
+
+        assert.isTrue(change.changed);
+        assert.isTrue(change.settings.autoDownloadUpdates);
+        assert.isTrue(change.settings.autoInstallUpdates);
+        const persisted = yield* decodeDesktopSettingsPatch(
+          yield* fileSystem.readFileString(environment.desktopSettingsPath),
+        );
+        assert.deepEqual(persisted, {
+          autoDownloadUpdates: true,
+          autoInstallUpdates: true,
+        } satisfies typeof DesktopSettingsPatch.Type);
+      }),
+    ),
+  );
+
   it.effect("migrates legacy implicit update channels to the runtime default", () =>
     withSettings(
       Effect.gen(function* () {
@@ -351,6 +397,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          autoDownloadUpdates: false,
+          autoInstallUpdates: false,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
           wslBackendEnabled: false,
@@ -379,6 +427,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          autoDownloadUpdates: false,
+          autoInstallUpdates: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
           wslBackendEnabled: false,
@@ -406,6 +456,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: true,
           tailscaleServePort: 443,
+          autoDownloadUpdates: false,
+          autoInstallUpdates: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           wslBackendEnabled: false,

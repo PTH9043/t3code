@@ -29,7 +29,10 @@ interface UpdatesHarnessOptions {
   >;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
+  readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
+  readonly startBackend?: Effect.Effect<void>;
   readonly stopBackend?: Effect.Effect<void>;
+  readonly backendDesiredRunning?: boolean;
   readonly env?: Record<string, string | undefined>;
 }
 
@@ -37,6 +40,10 @@ const flushCallbacks = Effect.yieldNow;
 
 function makeHarness(options: UpdatesHarnessOptions = {}) {
   let checkCount = 0;
+  let downloadCount = 0;
+  let installCount = 0;
+  let backendStartCount = 0;
+  let backendStopCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
@@ -82,8 +89,13 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     checkForUpdates: Effect.sync(() => {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
-    downloadUpdate: Effect.void,
-    quitAndInstall: () => Effect.void,
+    downloadUpdate: Effect.sync(() => {
+      downloadCount += 1;
+    }),
+    quitAndInstall: () =>
+      Effect.sync(() => {
+        installCount += 1;
+      }).pipe(Effect.andThen(options.quitAndInstall ?? Effect.void)),
     on: (eventName, listener) =>
       Effect.acquireRelease(
         Effect.sync(() => {
@@ -115,12 +127,17 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
     id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
     label: Effect.succeed("Windows"),
-    start: Effect.void,
-    stop: () => options.stopBackend ?? Effect.void,
+    start: Effect.sync(() => {
+      backendStartCount += 1;
+    }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),
+    stop: () =>
+      Effect.sync(() => {
+        backendStopCount += 1;
+      }).pipe(Effect.andThen(options.stopBackend ?? Effect.void)),
     currentConfig: Effect.succeed(Option.none()),
     snapshot: Effect.succeed({
-      desiredRunning: false,
-      ready: false,
+      desiredRunning: options.backendDesiredRunning ?? true,
+      ready: options.backendDesiredRunning ?? true,
       activePid: Option.none(),
       restartAttempt: 0,
       restartScheduled: false,
@@ -162,6 +179,8 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         setServerExposureMode: () => Effect.die("unexpected server exposure update"),
         setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),
         setUpdateChannel: () => Effect.fail(setUpdateChannelError),
+        setUpdateAutomationPermissions: () =>
+          Effect.die("unexpected update automation permission change"),
         setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
         setWslDistro: () => Effect.die("unexpected WSL distro change"),
         setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
@@ -190,9 +209,13 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   return {
     layer,
+    backendStartCount: () => backendStartCount,
+    backendStopCount: () => backendStopCount,
     checkCount: () => checkCount,
+    downloadCount: () => downloadCount,
     feedUrls: () => feedUrls,
     fullChangelog: () => fullChangelog,
+    installCount: () => installCount,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
@@ -290,6 +313,84 @@ describe("DesktopUpdates", () => {
         assert.equal(state.availableVersion, "1.2.4");
         assert.isNotNull(state.checkedAt);
         assert.equal(harness.sentStates.at(-1)?.status, "available");
+        assert.equal(harness.downloadCount(), 0);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("automatically downloads updates only after the user grants permission", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* settings.setUpdateAutomationPermissions({ autoDownload: true, autoInstall: false });
+        yield* updates.configure;
+
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+        yield* flushCallbacks;
+
+        assert.equal(harness.downloadCount(), 1);
+        assert.equal((yield* updates.getState).status, "downloading");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect(
+    "automatically installs downloaded updates only after the user grants permission",
+    () => {
+      const harness = makeHarness();
+
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const settings = yield* DesktopAppSettings.DesktopAppSettings;
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* settings.setUpdateAutomationPermissions({
+            autoDownload: false,
+            autoInstall: true,
+          });
+          yield* updates.configure;
+
+          harness.emit("update-downloaded", { version: "1.2.4" });
+          yield* flushCallbacks;
+          yield* flushCallbacks;
+
+          assert.equal(harness.installCount(), 1);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
+  it.effect("restarts drained backends when the native installer handoff fails", () => {
+    const harness = makeHarness({
+      quitAndInstall: Effect.fail(
+        new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
+          channel: "latest",
+          isSilent: true,
+          isForceRunAfter: true,
+          cause: new Error("installer unavailable"),
+        }),
+      ),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const result = yield* updates.install;
+
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+        assert.equal(harness.backendStopCount(), 1);
+        assert.equal(harness.backendStartCount(), 1);
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.equal((yield* updates.getState).errorContext, "install");
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
@@ -492,6 +593,7 @@ describe("DesktopUpdates", () => {
         yield* updates.configure;
         harness.emit("update-downloaded", { version: "1.2.4" });
         yield* flushCallbacks;
+        assert.equal(harness.installCount(), 0);
 
         const result = yield* updates.install;
         assert.isTrue(result.accepted);
@@ -524,6 +626,27 @@ describe("DesktopUpdates", () => {
         assert.equal(state.channel, "nightly");
         assert.equal(persistedSettings.updateChannel, "nightly");
         assert.equal(persistedSettings.updateChannelConfiguredByUser, true);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("persists update automation permissions through the settings service", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+
+        const permissions = yield* updates.setAutomationPermissions({
+          autoDownload: true,
+          autoInstall: true,
+        });
+        const persistedSettings = yield* settings.get;
+
+        assert.deepEqual(permissions, { autoDownload: true, autoInstall: true });
+        assert.isTrue(persistedSettings.autoDownloadUpdates);
+        assert.isTrue(persistedSettings.autoInstallUpdates);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

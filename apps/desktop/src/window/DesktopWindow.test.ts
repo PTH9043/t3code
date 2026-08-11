@@ -214,6 +214,8 @@ function makeTestLayer(input: {
     setServerExposureMode: () => Effect.die("unexpected server exposure update"),
     setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),
     setUpdateChannel: () => Effect.die("unexpected update channel change"),
+    setUpdateAutomationPermissions: () =>
+      Effect.die("unexpected update automation permission change"),
     setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
     setWslDistro: () => Effect.die("unexpected WSL distro change"),
     setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
@@ -432,8 +434,8 @@ describe("DesktopWindow", () => {
         assert.isTrue(createdWindowOptions[0]?.disableAutoHideCursor);
         assert.isFalse(createdWindowOptions[0]?.webPreferences?.backgroundThrottling);
         assert.deepEqual(fakeWindow.setAutoHideCursor.mock.calls, [[false]]);
-        assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["t3code-dev://app/"]);
-        assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
+        assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["t3code-dev://app/control-center"]);
+        assert.equal(fakeWindow.openDevTools.mock.calls.length, 0);
       }).pipe(Effect.provide(layer));
     }),
   );
@@ -961,8 +963,8 @@ describe("DesktopWindow", () => {
 
         yield* TestClock.adjust(100);
         assert.deepEqual(fakeWindow.loadURL.mock.calls, [
-          ["t3code-dev://app/"],
-          ["t3code-dev://app/"],
+          ["t3code-dev://app/control-center"],
+          ["t3code-dev://app/control-center"],
         ]);
         assert.equal(fakeWindow.reload.mock.calls.length, 0);
 

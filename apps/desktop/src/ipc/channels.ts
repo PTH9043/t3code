@@ -6,10 +6,15 @@ export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 export const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 export const MENU_ACTION_CHANNEL = "desktop:menu-action";
 export const GET_WINDOW_FULLSCREEN_STATE_CHANNEL = "desktop:get-window-fullscreen-state";
+export const TOGGLE_WINDOW_MAXIMIZED_CHANNEL = "desktop:toggle-window-maximized";
 export const WINDOW_FULLSCREEN_STATE_CHANNEL = "desktop:window-fullscreen-state";
 export const UPDATE_STATE_CHANNEL = "desktop:update-state";
 export const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 export const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
+export const UPDATE_GET_AUTOMATION_PERMISSIONS_CHANNEL =
+  "desktop:update-get-automation-permissions";
+export const UPDATE_SET_AUTOMATION_PERMISSIONS_CHANNEL =
+  "desktop:update-set-automation-permissions";
 export const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 export const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 export const UPDATE_CHECK_CHANNEL = "desktop:update-check";

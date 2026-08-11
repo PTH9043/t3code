@@ -23,6 +23,11 @@ describe("ElectronProtocol", () => {
     unhandleMock.mockReset();
   });
 
+  it("opens the AI control center as the desktop start screen", () => {
+    assert.equal(ElectronProtocol.getDesktopUrl(true), "t3code-dev://app/control-center");
+    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code://app/control-center");
+  });
+
   it.effect("proxies the stable renderer origin to the current app server", () =>
     Effect.gen(function* () {
       let handler: ((request: Request) => Promise<Response>) | undefined;

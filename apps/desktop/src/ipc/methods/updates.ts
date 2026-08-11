@@ -1,5 +1,6 @@
 import {
   DesktopUpdateActionResultSchema,
+  DesktopUpdateAutomationPermissionsSchema,
   DesktopUpdateChannelSchema,
   DesktopUpdateCheckResultSchema,
   DesktopUpdateStateSchema,
@@ -28,6 +29,26 @@ export const setUpdateChannel = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.updates.setChannel")(function* (channel) {
     const updates = yield* DesktopUpdates.DesktopUpdates;
     return yield* updates.setChannel(channel);
+  }),
+});
+
+export const getUpdateAutomationPermissions = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.UPDATE_GET_AUTOMATION_PERMISSIONS_CHANNEL,
+  payload: Schema.Void,
+  result: DesktopUpdateAutomationPermissionsSchema,
+  handler: Effect.fn("desktop.ipc.updates.getAutomationPermissions")(function* () {
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    return yield* updates.getAutomationPermissions;
+  }),
+});
+
+export const setUpdateAutomationPermissions = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.UPDATE_SET_AUTOMATION_PERMISSIONS_CHANNEL,
+  payload: DesktopUpdateAutomationPermissionsSchema,
+  result: DesktopUpdateAutomationPermissionsSchema,
+  handler: Effect.fn("desktop.ipc.updates.setAutomationPermissions")(function* (permissions) {
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    return yield* updates.setAutomationPermissions(permissions);
   }),
 });
 

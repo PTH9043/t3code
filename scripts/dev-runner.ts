@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import { resolveGitWorktreePath, resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import { HostProcessEnvironment, HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Hash from "effect/Hash";
@@ -28,6 +28,9 @@ const BASE_SERVER_PORT = 13773;
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
+export const DEV_RUNNER_VP_ENTRYPOINT = NodeURL.fileURLToPath(
+  new URL("../node_modules/vite-plus/bin/vp", import.meta.url),
+);
 const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
 // HTTP(S) requests to these ports are blocked by the Fetch standard before a
 // browser reaches the network. Keep the complete list here so explicit or
@@ -801,11 +804,15 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       }
     }
 
-    const spawnCommand = yield* resolveSpawnCommand(
-      "vp",
-      [...MODE_ARGS[input.mode], ...input.runArgs],
-      { env },
-    );
+    // Execute Vite+ through the current Node runtime instead of resolving the
+    // Windows `vp.cmd` shim from PATH. This keeps direct `node
+    // scripts/dev-runner.ts ...` launches non-interactive and makes the runner
+    // work when a parent process did not prepend node_modules/.bin to PATH.
+    const spawnCommand = {
+      command: process.execPath,
+      args: [DEV_RUNNER_VP_ENTRYPOINT, ...MODE_ARGS[input.mode], ...input.runArgs],
+      shell: false,
+    } as const;
     const processContext = {
       mode: input.mode,
       executable: "vp" as const,

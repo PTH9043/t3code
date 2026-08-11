@@ -8,7 +8,11 @@ import type * as Electron from "electron";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
-import { getLocalEnvironmentBootstraps, getWindowFullscreenState } from "./window.ts";
+import {
+  getLocalEnvironmentBootstraps,
+  getWindowFullscreenState,
+  toggleWindowMaximized,
+} from "./window.ts";
 
 const readyWslConfig: DesktopBackendManager.DesktopBackendStartConfig = {
   executablePath: "wsl.exe",
@@ -137,6 +141,56 @@ describe("getWindowFullscreenState", () => {
 
     return Effect.gen(function* () {
       assert.isTrue(yield* getWindowFullscreenState.handler());
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ElectronWindow.ElectronWindow)({
+          currentMainOrFirst: Effect.succeed(Option.some(window)),
+        }),
+      ),
+    );
+  });
+});
+
+describe("toggleWindowMaximized", () => {
+  it.effect("maximizes a restored native window", () => {
+    let maximized = false;
+    const window = {
+      isMaximized: () => maximized,
+      maximize: () => {
+        maximized = true;
+      },
+      unmaximize: () => {
+        maximized = false;
+      },
+    } as Electron.BrowserWindow;
+
+    return Effect.gen(function* () {
+      assert.isTrue(yield* toggleWindowMaximized.handler(undefined));
+      assert.isTrue(maximized);
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ElectronWindow.ElectronWindow)({
+          currentMainOrFirst: Effect.succeed(Option.some(window)),
+        }),
+      ),
+    );
+  });
+
+  it.effect("restores a maximized native window", () => {
+    let maximized = true;
+    const window = {
+      isMaximized: () => maximized,
+      maximize: () => {
+        maximized = true;
+      },
+      unmaximize: () => {
+        maximized = false;
+      },
+    } as Electron.BrowserWindow;
+
+    return Effect.gen(function* () {
+      assert.isFalse(yield* toggleWindowMaximized.handler(undefined));
+      assert.isFalse(maximized);
     }).pipe(
       Effect.provide(
         Layer.mock(ElectronWindow.ElectronWindow)({

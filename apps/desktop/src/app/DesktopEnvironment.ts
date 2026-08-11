@@ -79,7 +79,8 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = "NewAutoUsage AI 제어센터";
+export const DEFAULT_PACKAGED_WINDOWS_HOME = "F:/NewAutoUsage";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -97,10 +98,16 @@ function resolveDesktopAppBranding(input: {
   readonly appVersion: string;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
+  const displayName =
+    stageLabel === "Dev"
+      ? `${APP_BASE_NAME} (개발)`
+      : stageLabel === "Nightly"
+        ? `${APP_BASE_NAME} (야간)`
+        : APP_BASE_NAME;
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName,
   };
 }
 
@@ -142,6 +149,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
+  const t3Home = Option.orElse(config.t3Home, () =>
+    input.isPackaged && input.platform === "win32"
+      ? Option.some(DEFAULT_PACKAGED_WINDOWS_HOME)
+      : Option.none(),
+  );
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -153,7 +165,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -166,7 +178,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     baseDir,
     isDevelopment,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home,
   });
   const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
@@ -213,7 +225,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment ? "com.newautousage.controlcenter.dev" : "com.newautousage.controlcenter",
     ),
     linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
     linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",

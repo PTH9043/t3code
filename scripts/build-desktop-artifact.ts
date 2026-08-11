@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as NodeModule from "node:module";
+import * as NodeProcess from "node:process";
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -35,7 +36,7 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+const DESKTOP_APP_ID = "com.newautousage.controlcenter";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -626,7 +627,7 @@ interface StagePackageJson {
 }
 
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
-export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
+export const DESKTOP_ELECTRON_LANGUAGES = ["ko", "en-US"] as const;
 export const DESKTOP_FILE_EXCLUSIONS = [
   // T3 Code always passes the user's installed Claude executable to the SDK,
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
@@ -1517,8 +1518,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? "NewAutoUsage AI 제어센터 (야간)"
+    : (desktopPackageJson.productName ?? "NewAutoUsage AI 제어센터");
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1538,7 +1539,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    artifactName: "NewAutoUsage-AI-Control-Center-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [...DESKTOP_FILE_EXCLUSIONS],
     directories: {
@@ -1723,6 +1724,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcessPlatform;
+  const vpCommand = (args: readonly string[]) => ({
+    command: NodeProcess.execPath,
+    args: [path.join(repoRoot, "node_modules", "vite-plus", "bin", "vp"), ...args],
+    shell: false,
+  });
   const workspaceConfig = yield* readWorkspaceConfig();
   const workspaceCatalog = workspaceConfig.catalog ?? {};
   const workspaceOverrides = workspaceConfig.overrides ?? {};
@@ -1793,7 +1799,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
+    const spawnCommand = vpCommand(["run", "build:desktop"]);
     yield* runCommand(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: repoRoot,
@@ -1961,7 +1967,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand = vpCommand(STAGE_INSTALL_ARGS);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: stageAppDir,
@@ -2034,7 +2040,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     "--publish",
     "never",
   ];
-  const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
+  const builderCommand = vpCommand(builderArgs);
   yield* runCommand(
     ChildProcess.make(builderCommand.command, builderCommand.args, {
       cwd: repoRoot,

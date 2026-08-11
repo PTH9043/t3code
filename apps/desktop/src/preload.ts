@@ -119,6 +119,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   getWindowFullscreenState: () =>
     ipcRenderer.sendSync(IpcChannels.GET_WINDOW_FULLSCREEN_STATE_CHANNEL) === true,
+  toggleWindowMaximized: () => ipcRenderer.invoke(IpcChannels.TOGGLE_WINDOW_MAXIMIZED_CHANNEL),
   onWindowFullscreenStateChange: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, fullscreen: unknown) => {
       if (typeof fullscreen !== "boolean") return;
@@ -133,6 +134,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getUpdateState: () => ipcRenderer.invoke(IpcChannels.UPDATE_GET_STATE_CHANNEL),
   setUpdateChannel: (channel) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),
+  getUpdateAutomationPermissions: () =>
+    ipcRenderer.invoke(IpcChannels.UPDATE_GET_AUTOMATION_PERMISSIONS_CHANNEL),
+  setUpdateAutomationPermissions: (permissions) =>
+    ipcRenderer.invoke(IpcChannels.UPDATE_SET_AUTOMATION_PERMISSIONS_CHANNEL, permissions),
   checkForUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_DOWNLOAD_CHANNEL),
   installUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_INSTALL_CHANNEL),

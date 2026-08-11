@@ -11,6 +11,7 @@ import * as Electron from "electron";
 export const DESKTOP_HOST = "app";
 export const DESKTOP_PRODUCTION_SCHEME = "t3code";
 export const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+export const DESKTOP_START_PATH = "/control-center";
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
@@ -21,7 +22,7 @@ export function getDesktopOrigin(isDevelopment: boolean): string {
 }
 
 export function getDesktopUrl(isDevelopment: boolean): string {
-  return `${getDesktopOrigin(isDevelopment)}/`;
+  return `${getDesktopOrigin(isDevelopment)}${DESKTOP_START_PATH}`;
 }
 
 export class ElectronProtocolRegistrationError extends Schema.TaggedErrorClass<ElectronProtocolRegistrationError>()(

@@ -30,7 +30,7 @@ const environmentInput = {
 
 const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
   metadata: Effect.die("unexpected metadata read"),
-  name: Effect.succeed("T3 Code"),
+  name: Effect.succeed("NewAutoUsage AI 제어센터"),
   whenReady: Effect.void,
   quit: Effect.void,
   exit: () => Effect.void,
@@ -64,6 +64,8 @@ const desktopUpdatesLayer = Layer.succeed(DesktopUpdates.DesktopUpdates, {
   disabledReason: Effect.succeed(Option.none()),
   configure: Effect.void,
   setChannel: () => Effect.die("unexpected setChannel"),
+  getAutomationPermissions: Effect.die("unexpected getAutomationPermissions"),
+  setAutomationPermissions: () => Effect.die("unexpected setAutomationPermissions"),
   check: () => Effect.die("unexpected check"),
   download: Effect.die("unexpected download"),
   install: Effect.die("unexpected install"),
@@ -130,12 +132,12 @@ describe("DesktopApplicationMenu", () => {
       yield* configureMenu(selectedAction, applicationMenuTemplate);
 
       const template = yield* Deferred.await(applicationMenuTemplate);
-      const fileMenu = template.find((item) => item.label === "File");
+      const fileMenu = template.find((item) => item.label === "파일");
       assert.isDefined(fileMenu);
       if (!Array.isArray(fileMenu.submenu)) {
         throw new Error("Expected File menu submenu to be an array.");
       }
-      const settingsItem = fileMenu.submenu.find((item) => item.label === "Settings...");
+      const settingsItem = fileMenu.submenu.find((item) => item.label === "설정...");
       assert.isDefined(settingsItem);
       const settingsClick = settingsItem.click;
       if (typeof settingsClick !== "function") {
@@ -159,7 +161,7 @@ describe("DesktopApplicationMenu", () => {
       yield* configureMenu(selectedAction, applicationMenuTemplate);
 
       const template = yield* Deferred.await(applicationMenuTemplate);
-      const viewMenu = template.find((item) => item.label === "View");
+      const viewMenu = template.find((item) => item.label === "보기");
       assert.isDefined(viewMenu);
       if (!Array.isArray(viewMenu.submenu)) {
         throw new Error("Expected View menu submenu to be an array.");
@@ -169,7 +171,7 @@ describe("DesktopApplicationMenu", () => {
         viewMenu.submenu.find((item) => item.role?.toLowerCase().includes("zoom")),
       );
 
-      const zoomIn = viewMenu.submenu.find((item) => item.label === "Zoom In");
+      const zoomIn = viewMenu.submenu.find((item) => item.label === "글자 크게");
       assert.isDefined(zoomIn);
       assert.equal(zoomIn.accelerator, "CmdOrCtrl+=");
       if (typeof zoomIn.click !== "function") {

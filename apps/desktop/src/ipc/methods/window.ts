@@ -70,6 +70,24 @@ export const getWindowFullscreenState = DesktopIpc.makeSyncIpcMethod({
   }),
 });
 
+export const toggleWindowMaximized = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.TOGGLE_WINDOW_MAXIMIZED_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.toggleWindowMaximized")(function* () {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.currentMainOrFirst;
+    if (Option.isNone(window)) return false;
+
+    if (window.value.isMaximized()) {
+      window.value.unmaximize();
+    } else {
+      window.value.maximize();
+    }
+    return window.value.isMaximized();
+  }),
+});
+
 export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL,
   result: Schema.Array(DesktopEnvironmentBootstrapSchema),
