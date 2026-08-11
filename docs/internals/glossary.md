@@ -80,6 +80,18 @@ The current materialized view of orchestration state. In [the contracts][1], it 
 
 A side-effecting service that handles follow-up work after events or runtime signals. Examples include [CheckpointReactor.ts][6], [ProviderCommandReactor.ts][12], and [ProviderRuntimeIngestion.ts][5].
 
+#### Workspace collaboration run
+
+A durable multi-agent execution for one project goal. New runs carry a dependency graph, while runs created before task-graph support retain the legacy linear steps. The runtime is coordinated by [WorkspaceCollaborationReactor.ts][25]; see [workspace-collaboration.md][27].
+
+#### Task graph
+
+The durable directed acyclic graph inside a workspace collaboration run. Nodes contain one scoped handoff, dependencies, logical-agent routing, bounded attempts, outputs, confidence, and validation state. Pure parsing, graph materialization, ready-frontier calculation, and cycle checks live in [workspaceTaskGraph.ts][26].
+
+#### Fable, Codex, and Grok logical agents
+
+Collaboration graph roles, not new provider drivers. Fable is the coordinator and validator, Codex is the builder, and Grok is the current-information researcher. Workspace role bindings route those logical agents to existing provider instances. See [workspace-collaboration.md][27].
+
 #### Receipt
 
 A typed signal emitted when an async milestone completes, such as `checkpoint.baseline.captured`, `checkpoint.diff.finalized`, or `turn.processing.quiesced`. Receipts are a test-only mechanism: the production `RuntimeReceiptBusLive` publish is a no-op and only the test layer is PubSub-backed. Do not build production behavior on them. See [RuntimeReceiptBus.ts][13] and [CheckpointReactor.ts][6].
@@ -154,6 +166,7 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 - [Provider architecture][16]
 - [Permission modes][18]
 - [Workspace layout][2]
+- [Workspace collaboration task graphs][27]
 
 [1]: ../../packages/contracts/src/orchestration.ts
 [2]: ./workspace-layout.md
@@ -179,3 +192,6 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ../../apps/server/src/orchestration/Layers/WorkspaceCollaborationReactor.ts
+[26]: ../../apps/server/src/orchestration/workspaceTaskGraph.ts
+[27]: ./workspace-collaboration.md

@@ -1,73 +1,67 @@
-# Keeping T3 Code in Sync
+# T3 Code 업데이트
 
-The T3 Code web or desktop app and the server it connects to work best when they use the same
-version. If they do not match, T3 Code shows a warning with the right update option for that server.
+T3 Code 웹·데스크톱 앱과 연결된 서버는 같은 버전을 사용할 때 가장 안정적으로 동작합니다. 버전이 다르면 T3 Code가 해당 서버에 맞는 업데이트 방법을 안내합니다.
 
-## Where to Find the Update
+## 업데이트 안내 위치
 
-You may see the warning in either of these places:
+업데이트 안내는 다음 위치에 표시됩니다.
 
-- above the message box in the current conversation
-- **Settings** → **Connections**, beside the affected connection
+- 현재 대화의 메시지 입력창 위
+- **설정 → 연결**의 해당 연결 옆
 
-Dismissing the conversation warning only hides that reminder for those two versions. It does not
-update the server, and the version difference remains visible in Connections.
+대화의 안내를 닫아도 그 두 버전에 대한 알림만 숨겨집니다. 서버가 업데이트되는 것은 아니며 버전 차이는 연결 설정에 계속 표시됩니다.
 
-## Before You Update
+## 업데이트 전 확인
 
-Let active agent work and terminal commands finish first. Updating restarts the server, so the
-connection will disappear briefly and work that is still running may be interrupted.
+진행 중인 에이전트 작업과 터미널 명령을 먼저 끝내는 것이 좋습니다. 업데이트 중에는 서버가 다시 시작되므로 연결이 잠시 끊기고 실행 중인 작업이 중단될 수 있습니다.
 
-The update does not remove saved threads, settings, or project files.
+업데이트해도 저장된 대화, 설정과 프로젝트 파일은 삭제되지 않습니다.
 
-## Choose the Action You See
+## 데스크톱 자동 업데이트 권한
 
-| Action                     | What to do                                                                                                                                                                  |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Update server**          | Available for the T3 Code Linux background service. Select the button and leave T3 Code open while it prepares, tests, restarts, and reconnects.                            |
-| **Update the desktop app** | Open the T3 Code desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                     |
-| **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current T3 Code server, and relaunch it with the copied command and any startup options you normally use. |
+배포용 데스크톱 앱은 애플리케이션 업데이트를 자동으로 확인할 수 있습니다. **설정 → 권한**에서 업데이트 발견 뒤 허용할 동작을 각각 선택합니다.
 
-The available action depends on how that server was started. T3 Code does not update connected
-servers silently in the background.
+- **자동 다운로드**를 허용하면 설치 파일을 백그라운드에서 내려받습니다. 이 단계에서는 앱을 다시 시작하지 않습니다.
+- **자동 설치 및 재시작**을 허용하면 다운로드가 끝난 앱을 종료하고 업데이트를 설치한 뒤 다시 엽니다.
 
-An older background-service launcher may ask you to run the exact
-`npx t3@<version> service update` command on the server machine. That one local update installs the
-rollback support needed for later remote updates, including versions that change the database.
+두 권한은 기본적으로 꺼져 있으며 데스크톱 호스트에 저장됩니다. 자동 설치 전에는 연결된 서버 백엔드를 하나씩 정리합니다. 설치 프로그램으로 넘기는 과정이 실패하면 이전에 실행 중이던 백엔드를 다시 시작합니다. 다만 진행 중인 에이전트 턴과 터미널 명령은 중단될 수 있으므로 자동 재시작을 허용할 수 있을 때만 켜세요.
 
-After selecting **Update**, the notice becomes a live status line: **Downloading…** while the new
-version is fetched and verified, then **Restarting…** while the server restarts into it. The same
-status appears in the conversation and in Connections, so navigating between them does not lose the
-update. A failure remains visible with its error and an option to retry.
+소스 빌드와 패키징되지 않은 개발 빌드는 권한 설정을 저장하지만 배포용 자동 업데이트는 실행하지 않습니다.
 
-**Copy update command** gives you `npx t3@<client-version>`, which relaunches the server directly
-at the matching version. Add whatever startup options you normally use.
+## 표시되는 작업 선택
 
-If the server instead runs as the T3 Code background service, update the service on the host and
-pin the same version:
+| 표시되는 작업            | 수행 방법                                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **서버 업데이트**        | T3 Code 리눅스 백그라운드 서비스에서 사용할 수 있습니다. 버튼을 누른 뒤 준비·검증·재시작·재연결이 끝날 때까지 T3 Code를 열어 두세요. |
+| **데스크톱 앱 업데이트** | 서버를 실행하는 컴퓨터에서 T3 Code 데스크톱 앱을 열고 앱 업데이트를 설치하세요. 필요하면 앱을 다시 여세요.                           |
+| **업데이트 명령 복사**   | 명령을 복사해 서버 컴퓨터의 터미널에서 현재 T3 Code 서버를 중지한 뒤 평소 사용하는 시작 옵션과 함께 실행하세요.                      |
+
+표시되는 작업은 서버를 시작한 방식에 따라 달라집니다. T3 Code는 연결된 서버를 사용자 모르게 백그라운드에서 업데이트하지 않습니다.
+
+이전 버전의 백그라운드 서비스 실행기는 서버 컴퓨터에서 정확한 `npx t3@<version> service update` 명령을 실행하라고 안내할 수 있습니다. 이 명령을 한 번 실행하면 데이터베이스 변경이 포함된 이후 버전에서도 롤백 가능한 원격 업데이트를 사용할 수 있습니다.
+
+**업데이트**를 선택하면 새 버전을 받는 동안 **다운로드 중…**, 서버를 교체하는 동안 **다시 시작 중…** 상태가 표시됩니다. 같은 상태가 대화와 연결 설정에 함께 나타나므로 화면을 옮겨도 진행 상황이 사라지지 않습니다. 실패하면 오류와 다시 시도 작업이 그대로 남습니다.
+
+**업데이트 명령 복사**는 `npx t3@<client-version>` 형식의 명령을 제공합니다. 평소 사용하는 시작 옵션을 뒤에 추가하세요.
+
+서버가 T3 Code 백그라운드 서비스로 실행 중이면 호스트에서 다음 명령으로 같은 버전을 고정합니다.
 
 ```sh
 npx t3@<client-version> service update
 ```
 
-`service update` installs the version of the CLI that invoked it, so `npx t3@latest service update`
-only resolves the skew when your client happens to be on the latest release. The exact version from
-the warning always works.
+`service update`는 해당 명령을 실행한 CLI 버전을 설치합니다. 따라서 클라이언트가 최신 버전일 때가 아니라면 `npx t3@latest service update`만으로 버전 차이가 해결되지 않을 수 있습니다. 안내에 표시된 정확한 버전을 사용하는 것이 안전합니다.
 
-See [Running T3 Code in the Background](./background-service.md) for install, status, and removal
-commands.
+설치·상태 확인·제거 명령은 [T3 Code 백그라운드 실행](./background-service.md)을 참고하세요.
 
-## After the Update
+## 업데이트 후
 
-Keep the web or desktop app open while the server restarts. The update completes only after the
-service launcher reports that exact update committed and the replacement server is ready to accept
-commands. A rollback is reported immediately instead of waiting for a generic reconnect timeout.
+서버가 다시 시작되는 동안 웹 또는 데스크톱 앱을 열어 두세요. 서비스 실행기가 지정한 버전의 적용을 확정하고 새 서버가 명령을 받을 준비를 마쳐야 업데이트가 완료됩니다. 롤백이 발생하면 일반 재연결 시간 초과를 기다리지 않고 즉시 표시됩니다.
 
-If a step fails:
+실패한 경우 다음 순서로 확인하세요.
 
-1. Retry the offered action once.
-2. Make sure you updated the machine named in the warning, not only the device you are using.
-3. For a command-line server, relaunch it with `npx t3@<client-version>`, replacing
-   `<client-version>` with the client version shown in the warning.
+1. 표시된 작업을 한 번 다시 시도합니다.
+2. 현재 사용하는 기기가 아니라 안내에 표시된 서버 컴퓨터를 업데이트했는지 확인합니다.
+3. 명령줄 서버라면 안내에 표시된 클라이언트 버전으로 `npx t3@<client-version>`을 실행해 다시 시작합니다.
 
-For remote connection setup and access troubleshooting, see [Remote Access](./remote-access.md).
+원격 연결 설정과 문제 해결은 [원격 접속](./remote-access.md)을 참고하세요.

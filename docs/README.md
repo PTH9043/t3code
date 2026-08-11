@@ -8,6 +8,8 @@
 - [Organizing threads](./user/thread-sidebar.md)
 - [Remote access](./user/remote-access.md)
 - [Keeping app and server in sync](./user/updating.md)
+- [워크스페이스 프로그램 운영](./user/workspace-programs.md)
+- [Fable 작업 오케스트레이션](./user/workspace-orchestration.md)
 - [Source control integrations](./user/source-control.md)
 - [Background service (Linux)](./user/background-service.md)
 - Providers: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md)
@@ -31,6 +33,7 @@ policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../A
 - [Server updates](./internals/server-updates.md)
 - [Resource telemetry](./internals/resource-telemetry.md)
 - [Environment auth](./internals/environment-auth.md)
+- [Workspace collaboration task graphs](./internals/workspace-collaboration.md)
 - [T3 Connect](./internals/t3-connect.md)
 - [CI gates](./internals/ci.md)
 
