@@ -1,15 +1,19 @@
 import {
   ApprovalRequestId,
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  type ProjectId,
   ThreadId,
+  type WorkspaceConversationRagSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -17,6 +21,12 @@ import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../per
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionWorkspaceKnowledgeRepository } from "../../persistence/Services/ProjectionWorkspaceKnowledge.ts";
+import { ProjectionWorkspaceRagRepository } from "../../persistence/Services/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceAgentRoleRepository } from "../../persistence/Services/ProjectionWorkspaceAgentRoles.ts";
+import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
+import { ProjectionWorkspaceScheduleRepository } from "../../persistence/Services/ProjectionWorkspaceSchedules.ts";
+import { ProjectionWorkspaceProgramRepository } from "../../persistence/Services/ProjectionWorkspacePrograms.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -36,6 +46,12 @@ import {
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
+import { ProjectionWorkspaceKnowledgeRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceKnowledge.ts";
+import { ProjectionWorkspaceRagRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceAgentRoleRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceAgentRoles.ts";
+import { ProjectionWorkspaceCollaborationRunRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceCollaborationRuns.ts";
+import { ProjectionWorkspaceScheduleRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceSchedules.ts";
+import { ProjectionWorkspaceProgramRepositoryLive } from "../../persistence/Layers/ProjectionWorkspacePrograms.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
@@ -54,9 +70,21 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import {
+  conversationRagThreadItemPrefix,
+  toConversationRagKnowledgeItem,
+} from "../workspaceConversationRag.ts";
+
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
+  workspaceKnowledge: "projection.workspace-knowledge-v2",
+  workspaceRag: "projection.workspace-rag-v2",
+  workspaceAgentRoles: "projection.workspace-agent-roles-v1",
+  workspaceCollaborationRuns: "projection.workspace-collaboration-runs-v1",
+  workspaceSchedules: "projection.workspace-schedules-v1",
+  workspacePrograms: "projection.workspace-programs-v1",
   threads: "projection.threads",
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
@@ -473,6 +501,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const eventStore = yield* OrchestrationEventStore;
     const projectionStateRepository = yield* ProjectionStateRepository;
     const projectionProjectRepository = yield* ProjectionProjectRepository;
+    const projectionWorkspaceKnowledgeRepository = yield* ProjectionWorkspaceKnowledgeRepository;
+    const projectionWorkspaceRagRepository = yield* ProjectionWorkspaceRagRepository;
+    const projectionWorkspaceAgentRoleRepository = yield* ProjectionWorkspaceAgentRoleRepository;
+    const projectionWorkspaceCollaborationRunRepository =
+      yield* ProjectionWorkspaceCollaborationRunRepository;
+    const projectionWorkspaceScheduleRepository = yield* ProjectionWorkspaceScheduleRepository;
+    const projectionWorkspaceProgramRepository = yield* ProjectionWorkspaceProgramRepository;
     const projectionThreadRepository = yield* ProjectionThreadRepository;
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
@@ -480,6 +515,134 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
+
+    const makeConversationProjectionState = () => ({
+      projectSettings: new Map<string, WorkspaceConversationRagSettings>(),
+      threads: new Map<string, { readonly projectId: ProjectId; readonly title: string }>(),
+    });
+    type ConversationProjectionState = ReturnType<typeof makeConversationProjectionState>;
+
+    const trackConversationProjectionEvent = (
+      state: ConversationProjectionState,
+      event: OrchestrationEvent,
+    ) => {
+      switch (event.type) {
+        case "project.created":
+          state.projectSettings.set(
+            event.payload.projectId,
+            event.payload.workspaceControl?.conversationRag ??
+              DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+          );
+          return;
+        case "project.workspace-control-updated":
+          state.projectSettings.set(
+            event.payload.projectId,
+            event.payload.workspaceControl.conversationRag,
+          );
+          return;
+        case "project.deleted":
+          state.projectSettings.delete(event.payload.projectId);
+          return;
+        case "thread.created":
+          state.threads.set(event.payload.threadId, {
+            projectId: event.payload.projectId,
+            title: event.payload.title,
+          });
+          return;
+        case "thread.meta-updated": {
+          const existing = state.threads.get(event.payload.threadId);
+          if (existing && event.payload.title !== undefined) {
+            state.threads.set(event.payload.threadId, {
+              ...existing,
+              title: event.payload.title,
+            });
+          }
+          return;
+        }
+        default:
+          return;
+      }
+    };
+
+    const resolveConversationThread = Effect.fn("resolveConversationThread")(function* (
+      state: ConversationProjectionState,
+      threadId: ThreadId,
+    ) {
+      const cached = state.threads.get(threadId);
+      if (cached !== undefined) return cached;
+      const row = yield* projectionThreadRepository.getById({ threadId });
+      if (Option.isNone(row)) return null;
+      const resolved = { projectId: row.value.projectId, title: row.value.title } as const;
+      state.threads.set(threadId, resolved);
+      return resolved;
+    });
+
+    const resolveConversationSettings = Effect.fn("resolveConversationSettings")(function* (
+      state: ConversationProjectionState,
+      projectId: ProjectId,
+    ) {
+      const cached = state.projectSettings.get(projectId);
+      if (cached !== undefined) return cached;
+      const row = yield* projectionProjectRepository.getById({ projectId });
+      if (Option.isNone(row)) return null;
+      const settings = row.value.workspaceControl.conversationRag;
+      state.projectSettings.set(projectId, settings);
+      return settings;
+    });
+
+    const conversationItemForMessage = Effect.fn("conversationItemForMessage")(function* (
+      state: ConversationProjectionState,
+      event: Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
+    ) {
+      if (
+        event.payload.role !== "user" ||
+        event.payload.inputOrigin !== "user" ||
+        event.payload.streaming
+      ) {
+        return null;
+      }
+      const thread = yield* resolveConversationThread(state, event.payload.threadId);
+      if (thread === null) return null;
+      const settings = yield* resolveConversationSettings(state, thread.projectId);
+      if (settings === null || !settings.enabled) return null;
+      return toConversationRagKnowledgeItem({
+        projectId: thread.projectId,
+        threadId: event.payload.threadId,
+        threadTitle: thread.title,
+        sourceId: event.payload.messageId,
+        text: event.payload.text,
+        attachments: event.payload.attachments ?? [],
+        createdAt: event.payload.createdAt,
+        settings,
+      });
+    });
+
+    const conversationItemForUserInputResponse = Effect.fn("conversationItemForUserInputResponse")(
+      function* (
+        state: ConversationProjectionState,
+        event: Extract<OrchestrationEvent, { type: "thread.user-input-response-requested" }>,
+      ) {
+        const thread = yield* resolveConversationThread(state, event.payload.threadId);
+        if (thread === null) return null;
+        const settings = yield* resolveConversationSettings(state, thread.projectId);
+        if (settings === null || !settings.enabled) return null;
+        const sortedAnswers = Object.fromEntries(
+          Object.entries(event.payload.answers).sort(([left], [right]) =>
+            left.localeCompare(right),
+          ),
+        );
+        return toConversationRagKnowledgeItem({
+          projectId: thread.projectId,
+          threadId: event.payload.threadId,
+          threadTitle: thread.title,
+          sourceId: event.payload.requestId,
+          text: encodeUnknownJsonString(sortedAnswers),
+          attachments: [],
+          createdAt: event.payload.createdAt,
+          settings,
+        });
+      },
+    );
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -496,6 +659,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             workspaceRoot: event.payload.workspaceRoot,
             defaultModelSelection: event.payload.defaultModelSelection,
             scripts: event.payload.scripts,
+            workspaceControl: event.payload.workspaceControl ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+            runtimeViewedThrough: event.payload.runtimeViewedThrough ?? null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             deletedAt: null,
@@ -524,6 +689,36 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "project.workspace-control-updated": {
+          const existingRow = yield* projectionProjectRepository.getById({
+            projectId: event.payload.projectId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionProjectRepository.upsert({
+            ...existingRow.value,
+            workspaceControl: event.payload.workspaceControl,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "project.runtime-viewed": {
+          const existingRow = yield* projectionProjectRepository.getById({
+            projectId: event.payload.projectId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionProjectRepository.upsert({
+            ...existingRow.value,
+            runtimeViewedThrough: event.payload.viewedThrough,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
         case "project.deleted": {
           const existingRow = yield* projectionProjectRepository.getById({
             projectId: event.payload.projectId,
@@ -539,6 +734,266 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        default:
+          return;
+      }
+    });
+
+    const workspaceKnowledgeConversationState = makeConversationProjectionState();
+
+    // Kept as a dedicated versioned projector so installations upgrading from
+    // an older projects projection replay historical knowledge events instead
+    // of inheriting the projects projector's already-advanced cursor.
+    const applyWorkspaceKnowledgeProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceKnowledgeProjection",
+    )(function* (event, _attachmentSideEffects) {
+      trackConversationProjectionEvent(workspaceKnowledgeConversationState, event);
+      switch (event.type) {
+        case "project.knowledge-item-upserted":
+          yield* projectionWorkspaceKnowledgeRepository.upsert({
+            id: event.payload.itemId,
+            projectId: event.payload.projectId,
+            kind: event.payload.kind,
+            title: event.payload.title,
+            content: event.payload.content,
+            status: event.payload.status,
+            origin: event.payload.origin,
+            relativeFolder: event.payload.relativeFolder,
+            tags: event.payload.tags,
+            createdAt: event.payload.updatedAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+
+        case "project.knowledge-item-archived":
+          yield* projectionWorkspaceKnowledgeRepository.archive({
+            projectId: event.payload.projectId,
+            itemId: event.payload.itemId,
+            archivedAt: event.payload.archivedAt,
+          });
+          return;
+
+        case "thread.message-sent": {
+          const item = yield* conversationItemForMessage(
+            workspaceKnowledgeConversationState,
+            event,
+          );
+          if (item !== null) yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          return;
+        }
+
+        case "thread.user-input-response-requested": {
+          const item = yield* conversationItemForUserInputResponse(
+            workspaceKnowledgeConversationState,
+            event,
+          );
+          if (item !== null) yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          return;
+        }
+
+        case "thread.deleted": {
+          const thread = yield* resolveConversationThread(
+            workspaceKnowledgeConversationState,
+            event.payload.threadId,
+          );
+          if (thread !== null) {
+            yield* projectionWorkspaceKnowledgeRepository.removeConversationInputs({
+              projectId: thread.projectId,
+              itemPrefix: conversationRagThreadItemPrefix(event.payload.threadId),
+            });
+          }
+          workspaceKnowledgeConversationState.threads.delete(event.payload.threadId);
+          return;
+        }
+
+        case "project.workspace-control-updated":
+          if (!event.payload.workspaceControl.conversationRag.enabled) {
+            yield* projectionWorkspaceKnowledgeRepository.removeConversationInputs({
+              projectId: event.payload.projectId,
+            });
+          }
+          return;
+
+        case "project.deleted":
+          yield* projectionWorkspaceKnowledgeRepository.removeConversationInputs({
+            projectId: event.payload.projectId,
+          });
+          return;
+
+        default:
+          return;
+      }
+    });
+
+    const workspaceRagConversationState = makeConversationProjectionState();
+
+    // RAG is a derived, rebuildable index with its own cursor. It is reconstructed
+    // from Workspace knowledge plus explicitly human-originated conversation events
+    // and is never queried without an explicit project id.
+    const applyWorkspaceRagProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceRagProjection",
+    )(function* (event, _attachmentSideEffects) {
+      trackConversationProjectionEvent(workspaceRagConversationState, event);
+      switch (event.type) {
+        case "project.knowledge-item-upserted":
+          yield* projectionWorkspaceRagRepository.replaceItem({
+            id: event.payload.itemId,
+            projectId: event.payload.projectId,
+            kind: event.payload.kind,
+            title: event.payload.title,
+            content: event.payload.content,
+            status: event.payload.status,
+            origin: event.payload.origin,
+            relativeFolder: event.payload.relativeFolder,
+            tags: event.payload.tags,
+            createdAt: event.payload.updatedAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+
+        case "project.knowledge-item-archived":
+          yield* projectionWorkspaceRagRepository.removeItem({
+            projectId: event.payload.projectId,
+            itemId: event.payload.itemId,
+          });
+          return;
+
+        case "thread.message-sent": {
+          const item = yield* conversationItemForMessage(workspaceRagConversationState, event);
+          if (item !== null) yield* projectionWorkspaceRagRepository.replaceItem(item);
+          return;
+        }
+
+        case "thread.user-input-response-requested": {
+          const item = yield* conversationItemForUserInputResponse(
+            workspaceRagConversationState,
+            event,
+          );
+          if (item !== null) yield* projectionWorkspaceRagRepository.replaceItem(item);
+          return;
+        }
+
+        case "thread.deleted": {
+          const thread = yield* resolveConversationThread(
+            workspaceRagConversationState,
+            event.payload.threadId,
+          );
+          if (thread !== null) {
+            yield* projectionWorkspaceRagRepository.removeConversationInputs({
+              projectId: thread.projectId,
+              itemPrefix: conversationRagThreadItemPrefix(event.payload.threadId),
+            });
+          }
+          workspaceRagConversationState.threads.delete(event.payload.threadId);
+          return;
+        }
+
+        case "project.workspace-control-updated":
+          if (!event.payload.workspaceControl.conversationRag.enabled) {
+            yield* projectionWorkspaceRagRepository.removeConversationInputs({
+              projectId: event.payload.projectId,
+            });
+          }
+          return;
+
+        case "project.deleted":
+          yield* projectionWorkspaceRagRepository.removeConversationInputs({
+            projectId: event.payload.projectId,
+          });
+          return;
+
+        default:
+          return;
+      }
+    });
+
+    const applyWorkspaceAgentRolesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceAgentRolesProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "project.agent-role-upserted":
+          yield* projectionWorkspaceAgentRoleRepository.upsert(event.payload);
+          return;
+        case "project.agent-role-removed":
+          yield* projectionWorkspaceAgentRoleRepository.remove({
+            projectId: event.payload.projectId,
+            role: event.payload.role,
+          });
+          return;
+        default:
+          return;
+      }
+    });
+
+    const applyWorkspaceCollaborationRunsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceCollaborationRunsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "project.collaboration-run-requested":
+        case "project.collaboration-run-upserted":
+          yield* projectionWorkspaceCollaborationRunRepository.upsert(event.payload.run);
+          return;
+        case "project.collaboration-run-cancel-requested":
+          yield* projectionWorkspaceCollaborationRunRepository.requestCancel({
+            projectId: event.payload.projectId,
+            runId: event.payload.runId,
+            cancelledAt: event.payload.cancelledAt,
+          });
+          return;
+        default:
+          return;
+      }
+    });
+
+    const applyWorkspaceSchedulesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceSchedulesProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "project.schedule-upserted":
+          yield* projectionWorkspaceScheduleRepository.upsertDefinition(event.payload);
+          return;
+        case "project.schedule-removed":
+          yield* projectionWorkspaceScheduleRepository.remove({
+            projectId: event.payload.projectId,
+            scheduleId: event.payload.scheduleId,
+          });
+          return;
+        case "project.schedule-runtime-updated":
+          yield* projectionWorkspaceScheduleRepository.updateRuntime(event.payload);
+          return;
+        case "project.deleted":
+          yield* projectionWorkspaceScheduleRepository.removeByProjectId(event.payload.projectId);
+          return;
+        default:
+          return;
+      }
+    });
+
+    const applyWorkspaceProgramsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkspaceProgramsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "project.program-upserted":
+          yield* projectionWorkspaceProgramRepository.upsertProgram(event.payload.program);
+          return;
+        case "project.program-removed":
+          yield* projectionWorkspaceProgramRepository.removeProgram({
+            projectId: event.payload.projectId,
+            programId: event.payload.programId,
+          });
+          return;
+        case "project.program-run-upserted":
+          yield* projectionWorkspaceProgramRepository.upsertRun(event.payload.run);
+          return;
+        case "project.program-integrity-updated":
+          yield* projectionWorkspaceProgramRepository.updateIntegrity(event.payload);
+          return;
+        case "project.program-incident-upserted":
+          yield* projectionWorkspaceProgramRepository.upsertIncident(event.payload.incident);
+          return;
+        case "project.deleted":
+          yield* projectionWorkspaceProgramRepository.removeByProjectId(event.payload.projectId);
+          return;
         default:
           return;
       }
@@ -1604,6 +2059,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyProjectsProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspaceKnowledge,
+        apply: applyWorkspaceKnowledgeProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspaceRag,
+        apply: applyWorkspaceRagProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspaceAgentRoles,
+        apply: applyWorkspaceAgentRolesProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspaceCollaborationRuns,
+        apply: applyWorkspaceCollaborationRunsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspaceSchedules,
+        apply: applyWorkspaceSchedulesProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workspacePrograms,
+        apply: applyWorkspaceProgramsProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
         apply: applyThreadMessagesProjection,
       },
@@ -1730,6 +2209,12 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   makeOrchestrationProjectionPipeline(),
 ).pipe(
   Layer.provideMerge(ProjectionProjectRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceKnowledgeRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceRagRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceAgentRoleRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceCollaborationRunRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceScheduleRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceProgramRepositoryLive),
   Layer.provideMerge(ProjectionThreadRepositoryLive),
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),

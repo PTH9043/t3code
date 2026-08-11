@@ -96,6 +96,49 @@ export function requireActiveProjectWorkspaceRootAbsent(input: {
   );
 }
 
+function normalizeRootBoundary(value: string): string {
+  return normalizeProjectPathForComparison(value).replaceAll("\\", "/");
+}
+
+/**
+ * A Workspace owns its physical long-term-memory tree exclusively. Equality
+ * and ancestor/descendant overlap are both rejected so a child directory can
+ * never become a covert sharing channel between two projects.
+ */
+export function requireActiveLongTermMemoryRootNonOverlapping(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly longTermMemoryRoot: string;
+  readonly exceptProjectId?: ProjectId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const requestedRoot = normalizeRootBoundary(input.longTermMemoryRoot);
+  const existingProject = input.readModel.projects.find((project) => {
+    const existingRoot = project.workspaceControl?.longTermMemoryRoot ?? null;
+    if (
+      project.deletedAt !== null ||
+      project.id === input.exceptProjectId ||
+      existingRoot === null
+    ) {
+      return false;
+    }
+    const normalizedExistingRoot = normalizeRootBoundary(existingRoot);
+    return (
+      requestedRoot === normalizedExistingRoot ||
+      requestedRoot.startsWith(`${normalizedExistingRoot}/`) ||
+      normalizedExistingRoot.startsWith(`${requestedRoot}/`)
+    );
+  });
+  if (existingProject === undefined) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Long-term memory root '${requestedRoot}' overlaps active project '${existingProject.id}'.`,
+    ),
+  );
+}
+
 export function requireThread(input: {
   readonly readModel: OrchestrationReadModel;
   readonly command: OrchestrationCommand;

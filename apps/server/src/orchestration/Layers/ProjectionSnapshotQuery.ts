@@ -12,6 +12,7 @@ import {
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   ProjectScript,
+  WorkspaceControlSettings,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -25,6 +26,9 @@ import {
   ModelSelection,
   ProjectId,
   ThreadId,
+  TrimmedNonEmptyString,
+  WorkspaceKnowledgeItem,
+  WorkspaceKnowledgeListInput,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -52,12 +56,24 @@ import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionTh
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
+import { ProjectionWorkspaceRagRepository } from "../../persistence/Services/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceRagRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceAgentRoleRepository } from "../../persistence/Services/ProjectionWorkspaceAgentRoles.ts";
+import { ProjectionWorkspaceAgentRoleRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceAgentRoles.ts";
+import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
+import { ProjectionWorkspaceCollaborationRunRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceCollaborationRuns.ts";
+import { ProjectionWorkspaceScheduleRepository } from "../../persistence/Services/ProjectionWorkspaceSchedules.ts";
+import { ProjectionWorkspaceScheduleRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceSchedules.ts";
+import { ProjectionWorkspaceProgramRepository } from "../../persistence/Services/ProjectionWorkspacePrograms.ts";
+import { ProjectionWorkspaceProgramRepositoryLive } from "../../persistence/Layers/ProjectionWorkspacePrograms.ts";
 import {
   decodeThreadDetailPageCursor,
   encodeThreadDetailPageCursor,
 } from "../threadDetailCursor.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import { composeWorkspacePrompt as composeWorkspacePromptContext } from "../workspacePrompt.ts";
+import { deriveWorkspaceRuntimeSnapshot } from "../workspaceRuntime.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionFullThreadDiffContext,
@@ -73,6 +89,12 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
+    workspaceControl: Schema.fromJsonString(WorkspaceControlSettings),
+  }),
+);
+const ProjectionWorkspaceKnowledgeDbRowSchema = WorkspaceKnowledgeItem.mapFields(
+  Struct.assign({
+    tags: Schema.fromJsonString(Schema.Array(TrimmedNonEmptyString)),
   }),
 );
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
@@ -317,6 +339,8 @@ function mapProjectShellRow(
     repositoryIdentity,
     defaultModelSelection: row.defaultModelSelection,
     scripts: row.scripts,
+    workspaceControl: row.workspaceControl,
+    runtimeViewedThrough: row.runtimeViewedThrough,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -348,6 +372,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+  const projectionWorkspaceRagRepository = yield* ProjectionWorkspaceRagRepository;
+  const projectionWorkspaceAgentRoleRepository = yield* ProjectionWorkspaceAgentRoleRepository;
+  const projectionWorkspaceCollaborationRunRepository =
+    yield* ProjectionWorkspaceCollaborationRunRepository;
+  const projectionWorkspaceScheduleRepository = yield* ProjectionWorkspaceScheduleRepository;
+  const projectionWorkspaceProgramRepository = yield* ProjectionWorkspaceProgramRepository;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
@@ -392,11 +422,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
+          workspace_control_json AS "workspaceControl",
+          runtime_viewed_through AS "runtimeViewedThrough",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           deleted_at AS "deletedAt"
         FROM projection_projects
         ORDER BY created_at ASC, project_id ASC
+      `,
+  });
+
+  const listWorkspaceKnowledgeRows = SqlSchema.findAll({
+    Request: WorkspaceKnowledgeListInput,
+    Result: ProjectionWorkspaceKnowledgeDbRowSchema,
+    execute: ({ projectId }) =>
+      sql`
+        SELECT
+          item_id AS "id",
+          project_id AS "projectId",
+          kind,
+          title,
+          content,
+          status,
+          origin,
+          relative_folder AS "relativeFolder",
+          tags_json AS "tags",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_workspace_knowledge_items
+        WHERE project_id = ${projectId}
+        ORDER BY updated_at DESC, item_id ASC
       `,
   });
 
@@ -845,6 +900,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
+          workspace_control_json AS "workspaceControl",
+          runtime_viewed_through AS "runtimeViewedThrough",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           deleted_at AS "deletedAt"
@@ -867,6 +924,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
+          workspace_control_json AS "workspaceControl",
+          runtime_viewed_through AS "runtimeViewedThrough",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           deleted_at AS "deletedAt"
@@ -1543,6 +1602,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
                 defaultModelSelection: row.defaultModelSelection,
                 scripts: row.scripts,
+                workspaceControl: row.workspaceControl,
+                runtimeViewedThrough: row.runtimeViewedThrough,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
                 deletedAt: row.deletedAt,
@@ -1672,6 +1733,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   workspaceRoot: row.workspaceRoot,
                   defaultModelSelection: row.defaultModelSelection,
                   scripts: row.scripts,
+                  workspaceControl: row.workspaceControl,
+                  runtimeViewedThrough: row.runtimeViewedThrough,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
                   deletedAt: row.deletedAt,
@@ -2163,6 +2226,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     repositoryIdentity,
                     defaultModelSelection: option.value.defaultModelSelection,
                     scripts: option.value.scripts,
+                    workspaceControl: option.value.workspaceControl,
+                    runtimeViewedThrough: option.value.runtimeViewedThrough,
                     createdAt: option.value.createdAt,
                     updatedAt: option.value.updatedAt,
                     deletedAt: option.value.deletedAt,
@@ -2171,6 +2236,139 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
         ),
       );
+
+  const listWorkspaceKnowledge: ProjectionSnapshotQueryShape["listWorkspaceKnowledge"] = (input) =>
+    listWorkspaceKnowledgeRows(input).pipe(
+      Effect.map((items) => {
+        const kinds = input.kinds === undefined ? null : new Set(input.kinds);
+        const statuses = input.statuses === undefined ? null : new Set(input.statuses);
+        return {
+          items: items.filter(
+            (item) =>
+              (kinds === null || kinds.has(item.kind)) &&
+              (statuses === null || statuses.has(item.status)),
+          ),
+        };
+      }),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listWorkspaceKnowledge:query",
+          "ProjectionSnapshotQuery.listWorkspaceKnowledge:decodeRows",
+        ),
+      ),
+    );
+
+  const searchWorkspaceRag: NonNullable<ProjectionSnapshotQueryShape["searchWorkspaceRag"]> = (
+    input,
+  ) => projectionWorkspaceRagRepository.search(input);
+
+  const composeWorkspacePrompt: NonNullable<
+    ProjectionSnapshotQueryShape["composeWorkspacePrompt"]
+  > = (input) =>
+    Effect.gen(function* () {
+      const knowledge = yield* listWorkspaceKnowledge!({
+        projectId: input.projectId,
+        statuses: ["active"],
+      });
+      const rag =
+        input.includeRag === false
+          ? { matches: [] }
+          : yield* projectionWorkspaceRagRepository.search({
+              projectId: input.projectId,
+              query: input.task,
+              ...(input.ragLimit !== undefined ? { limit: input.ragLimit } : {}),
+              ...(input.includeLongTermMemory !== undefined
+                ? { includeLongTermMemory: input.includeLongTermMemory }
+                : {}),
+            });
+      return composeWorkspacePromptContext({
+        request: input,
+        items: knowledge.items,
+        ragMatches: rag.matches,
+      });
+    });
+
+  const listWorkspaceAgentRoles: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspaceAgentRoles"]
+  > = (input) =>
+    projectionWorkspaceAgentRoleRepository
+      .listByProjectId(input.projectId)
+      .pipe(Effect.map((roles) => ({ roles })));
+
+  const listWorkspaceCollaborationRuns: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspaceCollaborationRuns"]
+  > = (input) =>
+    projectionWorkspaceCollaborationRunRepository.list(input).pipe(
+      Effect.map((runs) => {
+        const active = runs.filter((run) =>
+          ["queued", "running", "cancel-requested"].includes(run.status),
+        );
+        const terminal = runs.filter(
+          (run) => !["queued", "running", "cancel-requested"].includes(run.status),
+        );
+        return { runs: [...active, ...terminal].slice(0, 10) };
+      }),
+    );
+
+  const listWorkspaceSchedules: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspaceSchedules"]
+  > = (input) =>
+    projectionWorkspaceScheduleRepository
+      .listByProjectId(input.projectId)
+      .pipe(Effect.map((schedules) => ({ schedules })));
+
+  const listWorkspacePrograms: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspacePrograms"]
+  > = (input) =>
+    projectionWorkspaceProgramRepository
+      .listPrograms(input.projectId)
+      .pipe(Effect.map((programs) => ({ programs })));
+
+  const listWorkspaceProgramRuns: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspaceProgramRuns"]
+  > = (input) =>
+    projectionWorkspaceProgramRepository.listRuns(input).pipe(Effect.map((runs) => ({ runs })));
+
+  const listWorkspaceIncidents: NonNullable<
+    ProjectionSnapshotQueryShape["listWorkspaceIncidents"]
+  > = (input) =>
+    projectionWorkspaceProgramRepository
+      .listIncidents(input)
+      .pipe(Effect.map((incidents) => ({ incidents })));
+
+  const getWorkspaceRuntime: NonNullable<ProjectionSnapshotQueryShape["getWorkspaceRuntime"]> =
+    Effect.fn("ProjectionSnapshotQuery.getWorkspaceRuntime")(function* (input) {
+      const shell = yield* getShellSnapshot();
+      const project = shell.projects.find((candidate) => candidate.id === input.projectId);
+      const threads = shell.threads.filter((thread) => thread.projectId === input.projectId);
+      const programs = yield* projectionWorkspaceProgramRepository.listPrograms(input.projectId);
+      const programRuns = yield* projectionWorkspaceProgramRepository.listRuns({
+        projectId: input.projectId,
+        limit: 200,
+      });
+      const incidents = yield* projectionWorkspaceProgramRepository.listIncidents({
+        projectId: input.projectId,
+        limit: 200,
+      });
+      const collaborationRuns = yield* projectionWorkspaceCollaborationRunRepository.list({
+        projectId: input.projectId,
+      });
+      const schedules = yield* projectionWorkspaceScheduleRepository.listByProjectId(
+        input.projectId,
+      );
+
+      return deriveWorkspaceRuntimeSnapshot({
+        projectId: input.projectId,
+        projectUpdatedAt: project?.updatedAt ?? "1970-01-01T00:00:00.000Z",
+        projectRuntimeViewedThrough: project?.runtimeViewedThrough ?? null,
+        threads,
+        programs,
+        programRuns,
+        incidents,
+        collaborationRuns,
+        schedules,
+      });
+    });
 
   const getProjectShellById: ProjectionSnapshotQueryShape["getProjectShellById"] = (projectId) =>
     getActiveProjectRowById({ projectId }).pipe(
@@ -2658,6 +2856,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     searchThreads,
     getSnapshotSequence,
     getCounts,
+    listWorkspaceKnowledge,
+    searchWorkspaceRag,
+    composeWorkspacePrompt,
+    listWorkspaceAgentRoles,
+    listWorkspaceCollaborationRuns,
+    listWorkspaceSchedules,
+    listWorkspacePrograms,
+    listWorkspaceProgramRuns,
+    listWorkspaceIncidents,
+    getWorkspaceRuntime,
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
@@ -2672,4 +2880,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 export const OrchestrationProjectionSnapshotQueryLive = Layer.effect(
   ProjectionSnapshotQuery,
   makeProjectionSnapshotQuery,
+).pipe(
+  Layer.provideMerge(ProjectionWorkspaceRagRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceAgentRoleRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceCollaborationRunRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceScheduleRepositoryLive),
+  Layer.provideMerge(ProjectionWorkspaceProgramRepositoryLive),
 );

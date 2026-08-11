@@ -1,4 +1,6 @@
 import {
+  DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   EventId,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -12,6 +14,7 @@ import type * as PlatformError from "effect/PlatformError";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   listThreadsByProjectId,
+  requireActiveLongTermMemoryRootNonOverlapping,
   requireActiveProjectWorkspaceRootAbsent,
   requireProject,
   requireProjectAbsent,
@@ -236,6 +239,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         workspaceRoot: command.workspaceRoot,
         exceptProjectId: command.projectId,
       });
+      if (command.longTermMemoryRoot !== undefined) {
+        yield* requireActiveLongTermMemoryRootNonOverlapping({
+          readModel,
+          command,
+          longTermMemoryRoot: command.longTermMemoryRoot,
+          exceptProjectId: command.projectId,
+        });
+      }
 
       return {
         ...(yield* withEventBase({
@@ -251,6 +262,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           workspaceRoot: command.workspaceRoot,
           defaultModelSelection: command.defaultModelSelection ?? null,
           scripts: [],
+          workspaceControl: {
+            ...DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+            longTermMemoryRoot: command.longTermMemoryRoot ?? null,
+            conversationRag:
+              command.conversationRag ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+          },
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -289,6 +306,562 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
           updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "project.workspace-control.update": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      if (command.longTermMemoryRoot !== null) {
+        yield* requireActiveLongTermMemoryRootNonOverlapping({
+          readModel,
+          command,
+          longTermMemoryRoot: command.longTermMemoryRoot,
+          exceptProjectId: command.projectId,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "project.workspace-control-updated",
+        payload: {
+          projectId: command.projectId,
+          workspaceControl: {
+            isolationMode: "strict",
+            longTermMemoryRoot: command.longTermMemoryRoot,
+            conversationRag:
+              command.conversationRag ??
+              project.workspaceControl?.conversationRag ??
+              DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+          },
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "project.runtime.view": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      const currentViewedThrough = project.runtimeViewedThrough ?? null;
+      const viewedThrough =
+        currentViewedThrough !== null && currentViewedThrough > command.viewedThrough
+          ? currentViewedThrough
+          : command.viewedThrough;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.runtime-viewed",
+        payload: {
+          projectId: command.projectId,
+          viewedThrough,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.knowledge.item.upsert": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.knowledge-item-upserted",
+        payload: {
+          projectId: command.projectId,
+          itemId: command.itemId,
+          kind: command.kind,
+          title: command.title,
+          content: command.content,
+          status: command.status,
+          origin: command.origin,
+          relativeFolder: command.relativeFolder,
+          tags: command.tags,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.knowledge.item.archive": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.knowledge-item-archived",
+        payload: {
+          projectId: command.projectId,
+          itemId: command.itemId,
+          archivedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.agent-role.upsert": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.agent-role-upserted",
+        payload: {
+          projectId: command.projectId,
+          role: command.role,
+          displayName: command.displayName,
+          modelSelection: command.modelSelection,
+          runtimeMode: command.runtimeMode,
+          interactionMode: command.interactionMode,
+          instructions: command.instructions,
+          enabled: command.enabled,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.agent-role.remove": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.agent-role-removed",
+        payload: {
+          projectId: command.projectId,
+          role: command.role,
+          removedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.collaboration.run.request": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-requested",
+        payload: {
+          run: {
+            id: command.runId,
+            projectId: command.projectId,
+            source: "user",
+            scheduleId: null,
+            incidentId: null,
+            task: command.task,
+            status: "queued",
+            steps: [],
+            graph: null,
+            finalOutput: null,
+            error: null,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+      };
+    }
+
+    case "project.collaboration.run.schedule": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-requested",
+        payload: {
+          run: {
+            id: command.runId,
+            projectId: command.projectId,
+            source: "schedule",
+            scheduleId: command.scheduleId,
+            incidentId: null,
+            task: command.task,
+            status: "queued",
+            steps: [],
+            graph: null,
+            finalOutput: null,
+            error: null,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+      };
+    }
+
+    case "project.collaboration.run.cancel": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-cancel-requested",
+        payload: {
+          projectId: command.projectId,
+          runId: command.runId,
+          cancelledAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.collaboration.run.update": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.run.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.run.projectId,
+          occurredAt: command.run.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-upserted",
+        payload: { run: command.run },
+      };
+    }
+
+    case "project.schedule.upsert": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.schedule-upserted",
+        payload: {
+          scheduleId: command.scheduleId,
+          projectId: command.projectId,
+          title: command.title,
+          task: command.task,
+          enabled: command.enabled,
+          timing: command.timing,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.schedule.remove": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.schedule-removed",
+        payload: {
+          scheduleId: command.scheduleId,
+          projectId: command.projectId,
+          removedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.schedule.runtime.update": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.schedule-runtime-updated",
+        payload: {
+          scheduleId: command.scheduleId,
+          projectId: command.projectId,
+          nextTriggerAt: command.nextTriggerAt,
+          lastTriggeredAt: command.lastTriggeredAt,
+          lastRunId: command.lastRunId,
+          lastError: command.lastError,
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "project.program.upsert": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.program-upserted",
+        payload: {
+          program: {
+            id: command.programId,
+            projectId: command.projectId,
+            name: command.name,
+            command: command.command,
+            relativeDirectory: command.relativeDirectory,
+            environmentVariableNames: command.environmentVariableNames,
+            startPolicy: command.startPolicy,
+            healthCheck: command.healthCheck,
+            errorPatterns: command.errorPatterns,
+            enabled: command.enabled,
+            integrity: {
+              ...DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
+              enabled: command.integrityEnabled ?? false,
+              validationCommands: command.integrityValidationCommands ?? [],
+              requiredCleanPasses: command.integrityRequiredCleanPasses ?? 2,
+              status: command.integrityEnabled === true ? "queued" : "disabled",
+              updatedAt: command.createdAt,
+            },
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+      };
+    }
+
+    case "project.program.remove":
+    case "project.program.start":
+    case "project.program.stop":
+    case "project.program.restart": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const eventType =
+        command.type === "project.program.remove"
+          ? "project.program-removed"
+          : command.type === "project.program.start"
+            ? "project.program-start-requested"
+            : command.type === "project.program.stop"
+              ? "project.program-stop-requested"
+              : "project.program-restart-requested";
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: eventType,
+        payload:
+          command.type === "project.program.remove"
+            ? {
+                projectId: command.projectId,
+                programId: command.programId,
+                removedAt: command.createdAt,
+              }
+            : {
+                projectId: command.projectId,
+                programId: command.programId,
+                requestedAt: command.createdAt,
+              },
+      } as OrchestrationEvent;
+    }
+
+    case "project.program.integrity.start":
+    case "project.program.integrity.stop": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type:
+          command.type === "project.program.integrity.start"
+            ? "project.program-integrity-start-requested"
+            : "project.program-integrity-stop-requested",
+        payload: {
+          projectId: command.projectId,
+          programId: command.programId,
+          requestedAt: command.createdAt,
+        },
+      } as OrchestrationEvent;
+    }
+
+    case "project.program.run.update": {
+      yield* requireProject({ readModel, command, projectId: command.run.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.run.projectId,
+          occurredAt: command.run.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.program-run-upserted",
+        payload: { run: command.run },
+      };
+    }
+
+    case "project.program.integrity.update": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.integrity.updatedAt ?? (yield* nowIso),
+          commandId: command.commandId,
+        })),
+        type: "project.program-integrity-updated",
+        payload: {
+          projectId: command.projectId,
+          programId: command.programId,
+          integrity: command.integrity,
+        },
+      };
+    }
+
+    case "project.program.incident.upsert": {
+      yield* requireProject({ readModel, command, projectId: command.incident.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.incident.projectId,
+          occurredAt: command.incident.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.program-incident-upserted",
+        payload: { incident: command.incident },
+      };
+    }
+
+    case "project.program.incident.repair.request": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.program-incident-repair-requested",
+        payload: {
+          projectId: command.projectId,
+          incidentId: command.incidentId,
+          instruction: command.instruction,
+          requestedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.program.incident.resolve": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.program-incident-resolve-requested",
+        payload: {
+          projectId: command.projectId,
+          incidentId: command.incidentId,
+          requestedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.collaboration.run.incident": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-requested",
+        payload: {
+          run: {
+            id: command.runId,
+            projectId: command.projectId,
+            source: "incident",
+            scheduleId: null,
+            incidentId: command.incidentId,
+            task: command.task,
+            status: "queued",
+            steps: [],
+            graph: null,
+            finalOutput: null,
+            error: null,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
         },
       };
     }
@@ -948,6 +1521,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           messageId: command.message.messageId,
           role: "user",
+          inputOrigin: command.inputOrigin ?? "user",
           text: command.message.text,
           attachments: command.message.attachments,
           turnId: null,

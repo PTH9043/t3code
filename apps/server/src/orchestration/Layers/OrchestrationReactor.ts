@@ -9,6 +9,10 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { WorkspaceKnowledgeReactor } from "../Services/WorkspaceKnowledgeReactor.ts";
+import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
+import { WorkspaceSchedulerReactor } from "../Services/WorkspaceSchedulerReactor.ts";
+import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
@@ -16,6 +20,10 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerCommandReactor = yield* ProviderCommandReactor;
   const checkpointReactor = yield* CheckpointReactor;
   const threadDeletionReactor = yield* ThreadDeletionReactor;
+  const workspaceKnowledgeReactor = yield* WorkspaceKnowledgeReactor;
+  const workspaceCollaborationReactor = yield* WorkspaceCollaborationReactor;
+  const workspaceSchedulerReactor = yield* WorkspaceSchedulerReactor;
+  const workspaceProgramSupervisor = yield* Effect.serviceOption(WorkspaceProgramSupervisor);
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
@@ -23,6 +31,12 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* providerCommandReactor.start();
     yield* checkpointReactor.start();
     yield* threadDeletionReactor.start();
+    yield* workspaceKnowledgeReactor.start();
+    yield* workspaceCollaborationReactor.start();
+    yield* workspaceSchedulerReactor.start();
+    if (workspaceProgramSupervisor._tag === "Some") {
+      yield* workspaceProgramSupervisor.value.start();
+    }
     yield* agentAwarenessRelay.start();
   });
 

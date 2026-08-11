@@ -79,7 +79,26 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           ),
         );
 
+    const normalizeLongTermMemoryRoot = (memoryRoot: string, createIfMissing: boolean) =>
+      workspacePaths.normalizeWorkspaceRoot(memoryRoot, { createIfMissing }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationDispatchCommandError({
+              message: `Invalid long-term memory root: ${cause.message}`,
+            }),
+        ),
+      );
+
     if (canonicalCommand.type === "project.create") {
+      const requestedLongTermMemoryRoot =
+        canonicalCommand.longTermMemoryRoot ??
+        path.join(
+          serverConfig.baseDir,
+          "workspaces",
+          canonicalCommand.projectId,
+          "memory",
+          "long-term",
+        );
       return {
         ...canonicalCommand,
         workspaceRoot: yield* normalizeProjectWorkspaceRootForCreate(
@@ -87,6 +106,14 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           canonicalCommand.createWorkspaceRootIfMissing,
         ),
         createWorkspaceRootIfMissing: canonicalCommand.createWorkspaceRootIfMissing === true,
+        longTermMemoryRoot: yield* normalizeLongTermMemoryRoot(
+          requestedLongTermMemoryRoot,
+          canonicalCommand.longTermMemoryRoot === undefined ||
+            canonicalCommand.createLongTermMemoryRootIfMissing === true,
+        ),
+        createLongTermMemoryRootIfMissing:
+          canonicalCommand.longTermMemoryRoot === undefined ||
+          canonicalCommand.createLongTermMemoryRootIfMissing === true,
       } satisfies OrchestrationCommand;
     }
 
@@ -97,6 +124,29 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       return {
         ...canonicalCommand,
         workspaceRoot: yield* normalizeProjectWorkspaceRoot(canonicalCommand.workspaceRoot),
+      } satisfies OrchestrationCommand;
+    }
+
+    if (
+      canonicalCommand.type === "project.workspace-control.update" &&
+      canonicalCommand.longTermMemoryRoot !== null
+    ) {
+      return {
+        ...canonicalCommand,
+        longTermMemoryRoot: yield* normalizeLongTermMemoryRoot(
+          canonicalCommand.longTermMemoryRoot,
+          canonicalCommand.createLongTermMemoryRootIfMissing === true,
+        ),
+      } satisfies OrchestrationCommand;
+    }
+
+    if (
+      canonicalCommand.type === "project.knowledge.item.upsert" &&
+      canonicalCommand.relativeFolder !== null
+    ) {
+      return {
+        ...canonicalCommand,
+        relativeFolder: canonicalCommand.relativeFolder.replaceAll("\\", "/"),
       } satisfies OrchestrationCommand;
     }
 

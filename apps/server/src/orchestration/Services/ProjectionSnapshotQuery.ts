@@ -21,6 +21,26 @@ import type {
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
+  WorkspaceKnowledgeListInput,
+  WorkspaceKnowledgeListResult,
+  WorkspacePromptComposeInput,
+  WorkspacePromptComposeResult,
+  WorkspaceRagSearchInput,
+  WorkspaceRagSearchResult,
+  WorkspaceAgentRoleListInput,
+  WorkspaceAgentRoleListResult,
+  WorkspaceCollaborationRunListInput,
+  WorkspaceCollaborationRunListResult,
+  WorkspaceScheduleListInput,
+  WorkspaceScheduleListResult,
+  WorkspaceProgramListInput,
+  WorkspaceProgramListResult,
+  WorkspaceProgramRunListInput,
+  WorkspaceProgramRunListResult,
+  WorkspaceIncidentListInput,
+  WorkspaceIncidentListResult,
+  WorkspaceRuntimeSnapshot,
+  WorkspaceRuntimeSnapshotInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
@@ -118,6 +138,53 @@ export interface ProjectionSnapshotQueryShape {
    * Read aggregate projection counts without hydrating the full read model.
    */
   readonly getCounts: () => Effect.Effect<ProjectionSnapshotCounts, ProjectionRepositoryError>;
+
+  /** List knowledge owned by exactly one Workspace; no cross-project query exists. */
+  readonly listWorkspaceKnowledge?: (
+    input: WorkspaceKnowledgeListInput,
+  ) => Effect.Effect<WorkspaceKnowledgeListResult, ProjectionRepositoryError>;
+
+  /** Search the derived RAG index for exactly one Workspace. */
+  readonly searchWorkspaceRag?: (
+    input: WorkspaceRagSearchInput,
+  ) => Effect.Effect<WorkspaceRagSearchResult, ProjectionRepositoryError>;
+
+  /** Compose directives, goals, prompts, memory, and RAG for one Workspace. */
+  readonly composeWorkspacePrompt?: (
+    input: WorkspacePromptComposeInput,
+  ) => Effect.Effect<WorkspacePromptComposeResult, ProjectionRepositoryError>;
+
+  /** List role-to-provider-instance bindings for one Workspace. */
+  readonly listWorkspaceAgentRoles?: (
+    input: WorkspaceAgentRoleListInput,
+  ) => Effect.Effect<WorkspaceAgentRoleListResult, ProjectionRepositoryError>;
+
+  /** List collaboration runs owned by one Workspace. */
+  readonly listWorkspaceCollaborationRuns?: (
+    input: WorkspaceCollaborationRunListInput,
+  ) => Effect.Effect<WorkspaceCollaborationRunListResult, ProjectionRepositoryError>;
+
+  /** List unattended schedules owned by one Workspace. */
+  readonly listWorkspaceSchedules?: (
+    input: WorkspaceScheduleListInput,
+  ) => Effect.Effect<WorkspaceScheduleListResult, ProjectionRepositoryError>;
+
+  readonly listWorkspacePrograms?: (
+    input: WorkspaceProgramListInput,
+  ) => Effect.Effect<WorkspaceProgramListResult, ProjectionRepositoryError>;
+
+  readonly listWorkspaceProgramRuns?: (
+    input: WorkspaceProgramRunListInput,
+  ) => Effect.Effect<WorkspaceProgramRunListResult, ProjectionRepositoryError>;
+
+  readonly listWorkspaceIncidents?: (
+    input: WorkspaceIncidentListInput,
+  ) => Effect.Effect<WorkspaceIncidentListResult, ProjectionRepositoryError>;
+
+  /** Derive one Workspace's agent, program, incident, collaboration, and schedule status. */
+  readonly getWorkspaceRuntime?: (
+    input: WorkspaceRuntimeSnapshotInput,
+  ) => Effect.Effect<WorkspaceRuntimeSnapshot, ProjectionRepositoryError>;
 
   /**
    * Read the active project for an exact workspace root match.

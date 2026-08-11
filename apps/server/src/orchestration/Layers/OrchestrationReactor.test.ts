@@ -9,6 +9,10 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { WorkspaceKnowledgeReactor } from "../Services/WorkspaceKnowledgeReactor.ts";
+import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
+import { WorkspaceSchedulerReactor } from "../Services/WorkspaceSchedulerReactor.ts";
+import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -23,7 +27,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, checkpoint, and thread deletion reactors", async () => {
+  it("starts all orchestration reactors", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -65,6 +69,44 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(WorkspaceKnowledgeReactor, {
+            start: () => {
+              started.push("workspace-knowledge-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(WorkspaceCollaborationReactor, {
+            start: () => {
+              started.push("workspace-collaboration-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(WorkspaceSchedulerReactor, {
+            start: () => {
+              started.push("workspace-scheduler-reactor");
+              return Effect.void;
+            },
+            tick: Effect.void,
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(WorkspaceProgramSupervisor, {
+            start: () => {
+              started.push("workspace-program-supervisor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+            discover: () => Effect.succeed({ candidates: [] }),
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             start: () => {
@@ -85,6 +127,10 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
       "thread-deletion-reactor",
+      "workspace-knowledge-reactor",
+      "workspace-collaboration-reactor",
+      "workspace-scheduler-reactor",
+      "workspace-program-supervisor",
       "agent-awareness-relay",
     ]);
 

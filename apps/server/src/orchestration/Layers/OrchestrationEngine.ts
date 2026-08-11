@@ -63,10 +63,49 @@ function commandToAggregateRef(command: OrchestrationCommand): {
   switch (command.type) {
     case "project.create":
     case "project.meta.update":
+    case "project.workspace-control.update":
+    case "project.runtime.view":
+    case "project.knowledge.item.upsert":
+    case "project.knowledge.item.archive":
+    case "project.agent-role.upsert":
+    case "project.agent-role.remove":
+    case "project.collaboration.run.request":
+    case "project.collaboration.run.cancel":
+    case "project.collaboration.run.schedule":
+    case "project.schedule.upsert":
+    case "project.schedule.remove":
+    case "project.schedule.runtime.update":
+    case "project.program.upsert":
+    case "project.program.remove":
+    case "project.program.start":
+    case "project.program.stop":
+    case "project.program.restart":
+    case "project.program.integrity.start":
+    case "project.program.integrity.stop":
+    case "project.program.incident.repair.request":
+    case "project.program.incident.resolve":
+    case "project.collaboration.run.incident":
     case "project.delete":
       return {
         aggregateKind: "project",
         aggregateId: command.projectId,
+      };
+    case "project.collaboration.run.update":
+      return {
+        aggregateKind: "project",
+        aggregateId: command.run.projectId,
+      };
+    case "project.program.run.update":
+    case "project.program.integrity.update":
+      return {
+        aggregateKind: "project",
+        aggregateId:
+          command.type === "project.program.run.update" ? command.run.projectId : command.projectId,
+      };
+    case "project.program.incident.upsert":
+      return {
+        aggregateKind: "project",
+        aggregateId: command.incident.projectId,
       };
     default:
       return {
