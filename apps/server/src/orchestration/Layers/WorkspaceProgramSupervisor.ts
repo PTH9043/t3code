@@ -322,6 +322,8 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
   const livePrograms = new Map<string, LiveProgram>();
   const incidentByFingerprint = new Map<string, WorkspaceIncident>();
   const restartIncidentByProgram = new Map<string, WorkspaceIncidentId>();
+  /** Last time each (program, fingerprint) pair opened an incident, to coalesce repeats. */
+  const incidentCoalesceAt = new Map<string, number>();
   const integrityProgramByRun = new Map<
     WorkspaceCollaborationRunId,
     { readonly projectId: ProjectId; readonly programId: WorkspaceProgramId }
@@ -623,10 +625,9 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
 
   const persistLiveRun = Effect.fn("WorkspaceProgramSupervisor.persistLiveRun")(function* (
     state: LiveProgram,
-    force: boolean,
   ) {
     const at = yield* nowIso;
-    if (!force && Date.parse(at) - state.lastPersistedAt < LOG_PERSIST_INTERVAL_MS) return;
+    if (Date.parse(at) - state.lastPersistedAt < LOG_PERSIST_INTERVAL_MS) return;
     state.lastPersistedAt = Date.parse(at);
     state.run = { ...state.run, updatedAt: at };
     yield* dispatchRun(state.run);
@@ -1105,16 +1106,24 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
         if (!permissions.collectLogs) return;
         const clean = redactSecrets(normalizeLog(item.data), state.program);
         state.run = { ...state.run, recentLogTail: appendLog(state.run.recentLogTail, clean) };
-        yield* persistLiveRun(state, false);
+        yield* persistLiveRun(state);
         for (const pattern of state.program.errorPatterns) {
           if (!matchesErrorPattern(pattern, clean)) continue;
-          yield* persistLiveRun(state, true);
+          // A service failing under load prints its error line on every request. Every
+          // command here carries up to 64KiB and crosses the single serial command queue
+          // shared with the user's own turns, so repeats of the same finding coalesce.
+          const incidentFingerprint = fingerprint(["log-pattern", pattern]);
+          const coalesceKey = `${item.key}:${incidentFingerprint}`;
+          const at = Date.parse(yield* nowIso);
+          const lastOpenedAt = incidentCoalesceAt.get(coalesceKey);
+          if (lastOpenedAt !== undefined && at - lastOpenedAt < LOG_PERSIST_INTERVAL_MS) continue;
+          incidentCoalesceAt.set(coalesceKey, at);
           yield* openIncident({
             program: state.program,
             run: state.run,
             kind: "log-pattern",
             severity: "error",
-            fingerprint: fingerprint(["log-pattern", pattern]),
+            fingerprint: incidentFingerprint,
             summary: `${state.program.name} 로그에서 오류 패턴이 감지됐습니다.`,
             evidence: state.run.recentLogTail,
           });
@@ -1127,6 +1136,9 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
         state.unsubscribeData();
         state.unsubscribeExit();
         livePrograms.delete(item.key);
+        for (const key of incidentCoalesceAt.keys()) {
+          if (key.startsWith(`${item.key}:`)) incidentCoalesceAt.delete(key);
+        }
         const stoppedAt = yield* nowIso;
         state.run = {
           ...state.run,
