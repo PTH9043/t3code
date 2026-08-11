@@ -35,6 +35,7 @@ import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import { WorkspaceCollaborationRunsRouteScreen } from "./features/orchestration/WorkspaceCollaborationRunsRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
 import { AddProjectRepositoryRoute } from "./features/projects/AddProjectRepositoryRoute";
@@ -63,6 +64,7 @@ import {
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
+import { useThreadShells } from "./state/entities";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -145,56 +147,56 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsRouteScreen,
       linking: "",
       options: {
-        title: "Settings",
+        title: "설정",
       },
     }),
     SettingsEnvironments: createNativeStackScreen({
       screen: SettingsEnvironmentsRouteScreen,
       linking: "environments",
       options: {
-        title: "Environments",
+        title: "연결 환경",
       },
     }),
     SettingsEnvironmentNew: createNativeStackScreen({
       screen: ConnectionsNewRouteScreen,
       linking: "environment-new",
       options: {
-        title: "Add Environment",
+        title: "연결 환경 추가",
       },
     }),
     SettingsArchive: createNativeStackScreen({
       screen: ArchivedThreadsRouteScreen,
       linking: "archive",
       options: {
-        title: "Archived Threads",
+        title: "보관한 대화",
       },
     }),
     SettingsAppearance: createNativeStackScreen({
       screen: SettingsAppearanceRouteScreen,
       linking: "appearance",
       options: {
-        title: "Appearance",
+        title: "화면 모양",
       },
     }),
     SettingsProjectGrouping: createNativeStackScreen({
       screen: SettingsProjectGroupingRouteScreen,
       linking: "project-grouping",
       options: {
-        title: "Project Grouping",
+        title: "프로젝트 묶음",
       },
     }),
     SettingsClientStorage: createNativeStackScreen({
       screen: SettingsClientStorageRouteScreen,
       linking: "client-storage",
       options: {
-        title: "Client Storage",
+        title: "기기 저장소",
       },
     }),
     SettingsAuth: createNativeStackScreen({
       screen: SettingsAuthRouteScreen,
       linking: "auth",
       options: {
-        title: "Sign in",
+        title: "로그인",
       },
     }),
     SettingsWaitlist: createNativeStackScreen({
@@ -202,7 +204,7 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsAuthRouteScreen,
       linking: "waitlist",
       options: {
-        title: "Sign in",
+        title: "로그인",
       },
     }),
   },
@@ -230,7 +232,7 @@ const NewTaskSheetStack = createNativeStackNavigator({
       screen: NewTaskRouteScreen,
       linking: "",
       options: {
-        title: "Choose project",
+        title: "프로젝트 선택",
       },
     }),
     NewTaskDraft: createNativeStackScreen({
@@ -244,7 +246,7 @@ const NewTaskSheetStack = createNativeStackNavigator({
       screen: AddProjectSourceRoute,
       linking: "add-project",
       options: {
-        title: "Add Project",
+        title: "프로젝트 추가",
       },
     }),
     AddProjectRepository: createNativeStackScreen({
@@ -302,6 +304,12 @@ function ThreadOutboxDrainWorker() {
   return null;
 }
 
+function AgentNotificationWorker({ pathname }: { readonly pathname: string }) {
+  const threads = useThreadShells();
+  useAgentNotificationNavigation({ activeWorkspacePathname: pathname, threads });
+  return null;
+}
+
 function RootStackLayout(props: {
   readonly children: React.ReactNode;
   readonly state: NavigationState;
@@ -309,7 +317,6 @@ function RootStackLayout(props: {
   const navigation = useNavigation();
   const { pendingShare } = useIncomingShare();
   const sharePresentationRef = useRef(EMPTY_INCOMING_SHARE_PRESENTATION_STATE);
-  useAgentNotificationNavigation();
   // Presents the T3 Connect onboarding sheet after an in-session sign-in.
   useConnectOnboardingNavigation();
   // Launcher app shortcuts: routes shortcut taps and tracks opened threads.
@@ -338,6 +345,7 @@ function RootStackLayout(props: {
   return (
     <HardwareKeyboardCommandProvider pathname={pathname}>
       <ThreadOutboxDrainWorker />
+      <AgentNotificationWorker pathname={workspacePathname} />
       <ShowcaseCaptureCoordinator pathname={pathname} />
       <ClerkSettingsSheetDetentProvider initiallyExpanded={false}>
         <AdaptiveWorkspaceLayout pathname={workspacePathname}>
@@ -375,13 +383,13 @@ function NotFoundScreen() {
       style={[{ flex: 1 }, screenBgStyle]}
     >
       <Text className="text-3xl font-t3-bold text-foreground" selectable>
-        Route not found
+        화면을 찾을 수 없습니다
       </Text>
       <Pressable
         style={returnHomeButtonStyle}
         onPress={() => navigation.dispatch(StackActions.replace("Home"))}
       >
-        <Text className="text-base font-t3-bold text-primary-foreground">Return home</Text>
+        <Text className="text-base font-t3-bold text-primary-foreground">홈으로 돌아가기</Text>
       </Pressable>
     </ScrollView>
   );
@@ -403,6 +411,11 @@ export const RootStack = createNativeStackNavigator({
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
       },
+    }),
+    WorkspaceCollaborationRuns: createNativeStackScreen({
+      screen: WorkspaceCollaborationRunsRouteScreen,
+      linking: "workspaces/:environmentId/:projectId/collaboration",
+      options: GLASS_HEADER_OPTIONS,
     }),
     Thread: createNativeStackScreen({
       screen: ThreadRouteScreen,
@@ -439,7 +452,7 @@ export const RootStack = createNativeStackNavigator({
           SHEET_BACKGROUND_COLOR !== undefined
             ? { backgroundColor: SHEET_BACKGROUND_COLOR }
             : undefined,
-        title: "Files",
+        title: "파일",
       },
     }),
     ThreadFile: createNativeStackScreen({
@@ -505,7 +518,7 @@ export const RootStack = createNativeStackNavigator({
       linking: "settings/legal",
       options: {
         ...LEGAL_DOCUMENT_HEADER_OPTIONS,
-        title: "Legal",
+        title: "법적 고지",
       },
     }),
     ConnectOnboarding: createNativeStackScreen({
@@ -515,7 +528,7 @@ export const RootStack = createNativeStackNavigator({
         // A root-level Android formSheet does not host the native stack bar;
         // the route renders an embedded AndroidSheetHeader instead.
         ...(Platform.OS === "android" ? { headerShown: false } : SHEET_SOLID_HEADER_OPTIONS),
-        title: "Set up T3 Connect",
+        title: "T3 Connect 설정",
         gestureEnabled: true,
         presentation: "formSheet",
         sheetAllowedDetents: [0.6, 0.95],
@@ -526,7 +539,7 @@ export const RootStack = createNativeStackNavigator({
       screen: ConnectionsRouteScreen,
       linking: "connections",
       options: {
-        title: "Environments",
+        title: "연결 환경",
         // Android: full page; the screen renders its own AndroidScreenHeader,
         // so the native bar stays hidden. iOS keeps the sheet.
         ...(Platform.OS === "android"

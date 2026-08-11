@@ -60,9 +60,9 @@ function formatWorkspaceLabel(input: {
 }): string {
   const branchName = input.selectedBranchName ?? input.currentBranchName;
   if (input.workspaceMode === "worktree") {
-    return branchName ? `New worktree · ${branchName}` : "New worktree";
+    return branchName ? `새 작업 트리 · ${branchName}` : "새 작업 트리";
   }
-  return branchName ? `Current · ${branchName}` : "Current checkout";
+  return branchName ? `현재 · ${branchName}` : "현재 체크아웃";
 }
 
 export function NewTaskDraftScreen(props: {
@@ -418,7 +418,7 @@ export function NewTaskDraftScreen(props: {
           error instanceof Error ? error.message : "The shared content could not be saved.",
           [
             {
-              text: "Cancel import",
+              text: "가져오기 취소",
               style: "cancel",
               onPress: () => {
                 const cancelImport = async (): Promise<void> => {
@@ -457,7 +457,7 @@ export function NewTaskDraftScreen(props: {
                         : "The shared content could not be restored safely.",
                       [
                         {
-                          text: "Retry import",
+                          text: "가져오기 다시 시도",
                           onPress: () => {
                             cancellingShareImportKeyRef.current = null;
                             setIsCancellingShareImport(false);
@@ -465,7 +465,7 @@ export function NewTaskDraftScreen(props: {
                           },
                         },
                         {
-                          text: "Retry cancel",
+                          text: "취소 다시 시도",
                           onPress: () => void cancelImport(),
                         },
                       ],
@@ -477,7 +477,7 @@ export function NewTaskDraftScreen(props: {
               },
             },
             {
-              text: "Retry",
+              text: "다시 시도",
               onPress: () => setShareImportAttempt((attempt) => attempt + 1),
             },
           ],
@@ -562,7 +562,7 @@ export function NewTaskDraftScreen(props: {
       ...buildProviderOptionMenuActions(providerOptionDescriptors),
       {
         id: "options-runtime",
-        title: "Runtime",
+        title: "실행 권한",
         subtitle:
           flow.runtimeMode === "approval-required"
             ? "Approve actions"
@@ -570,12 +570,12 @@ export function NewTaskDraftScreen(props: {
               ? "Auto-accept edits"
               : flow.runtimeMode === "auto"
                 ? "Auto"
-                : "Full access",
+                : "전체 권한",
         subactions: [
-          { id: "options:runtime:approval-required", title: "Approve actions" },
-          { id: "options:runtime:auto-accept-edits", title: "Auto-accept edits" },
-          { id: "options:runtime:auto", title: "Auto" },
-          { id: "options:runtime:full-access", title: "Full access" },
+          { id: "options:runtime:approval-required", title: "작업 승인" },
+          { id: "options:runtime:auto-accept-edits", title: "파일 수정 자동 승인" },
+          { id: "options:runtime:auto", title: "자동" },
+          { id: "options:runtime:full-access", title: "전체 권한" },
         ].map((option) => {
           const value = option.id.replace("options:runtime:", "");
           return {
@@ -587,11 +587,11 @@ export function NewTaskDraftScreen(props: {
       },
       {
         id: "options-interaction",
-        title: "Interaction",
-        subtitle: flow.interactionMode === "plan" ? "Plan" : "Default",
+        title: "상호작용",
+        subtitle: flow.interactionMode === "plan" ? "계획" : "기본",
         subactions: [
-          { id: "options:interaction:default", title: "Default" },
-          { id: "options:interaction:plan", title: "Plan" },
+          { id: "options:interaction:default", title: "기본" },
+          { id: "options:interaction:plan", title: "계획" },
         ].map((option) => {
           const value = option.id.replace("options:interaction:", "");
           return {
@@ -611,7 +611,7 @@ export function NewTaskDraftScreen(props: {
         ? [
             {
               id: "workspace:branch:none",
-              title: flow.branchesLoading ? "Loading branches…" : "No branches available",
+              title: flow.branchesLoading ? "브랜치를 불러오는 중…" : "사용 가능한 브랜치 없음",
               attributes: { disabled: true },
             },
           ]
@@ -632,17 +632,17 @@ export function NewTaskDraftScreen(props: {
     return [
       {
         id: "workspace:mode",
-        title: "Mode",
-        subtitle: flow.workspaceMode === "local" ? "Current checkout" : "New worktree",
+        title: "작업 방식",
+        subtitle: flow.workspaceMode === "local" ? "현재 체크아웃" : "새 작업 트리",
         subactions: (["local", "worktree"] as const).map((value) => ({
           id: `workspace:mode:${value}`,
-          title: value === "local" ? "Current checkout" : "New worktree",
+          title: value === "local" ? "현재 체크아웃" : "새 작업 트리",
           state: flow.workspaceMode === value ? ("on" as const) : undefined,
         })),
       },
       {
         id: "workspace:branch",
-        title: "Branch",
+        title: "브랜치",
         subtitle: flow.selectedBranchName ?? "Choose branch",
         subactions: branchActions,
       },
@@ -650,8 +650,8 @@ export function NewTaskDraftScreen(props: {
         ? [
             {
               id: "workspace:start-from-origin",
-              title: "Start from origin",
-              subtitle: "Base the worktree on the latest origin branch",
+              title: "원격 브랜치에서 시작",
+              subtitle: "최신 원격 브랜치를 기준으로 작업 트리 생성",
               image: "arrow.triangle.pull",
               state: flow.startFromOrigin ? ("on" as const) : undefined,
             },
@@ -917,10 +917,10 @@ export function NewTaskDraftScreen(props: {
         {Platform.OS === "android" ? (
           <>
             <NativeStackScreenOptions options={{ headerShown: false }} />
-            <AndroidScreenHeader title="New Thread" onBack={() => navigation.goBack()} />
+            <AndroidScreenHeader title="새 대화" onBack={() => navigation.goBack()} />
           </>
         ) : (
-          <NativeStackScreenOptions options={{ title: "Loading task" }} />
+          <NativeStackScreenOptions options={{ title: "작업 불러오는 중" }} />
         )}
       </View>
     );
@@ -989,7 +989,7 @@ export function NewTaskDraftScreen(props: {
         onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}
       >
         <ComposerToolbarTrigger
-          accessibilityLabel="Model"
+          accessibilityLabel="모델"
           disabled={isIncomingShareTransferPending}
           iconNode={<ProviderIcon provider={flow.selectedModelOption?.providerDriver} size={16} />}
           label={flow.selectedModelOption?.label ?? "Model"}
@@ -1000,7 +1000,7 @@ export function NewTaskDraftScreen(props: {
         onPressAction={({ nativeEvent }) => handleOptionsMenuAction(nativeEvent.event)}
       >
         <ComposerToolbarTrigger
-          accessibilityLabel="Configuration"
+          accessibilityLabel="구성"
           disabled={isIncomingShareTransferPending}
           icon="slider.horizontal.3"
           label={configurationLabel}
@@ -1011,7 +1011,7 @@ export function NewTaskDraftScreen(props: {
         onPressAction={({ nativeEvent }) => handleEnvironmentMenuAction(nativeEvent.event)}
       >
         <ComposerToolbarTrigger
-          accessibilityLabel="Environment"
+          accessibilityLabel="연결 환경"
           disabled={isIncomingShareTransferPending}
           icon="desktopcomputer"
           label={selectedEnvironmentLabel}
@@ -1022,7 +1022,7 @@ export function NewTaskDraftScreen(props: {
         onPressAction={({ nativeEvent }) => handleWorkspaceMenuAction(nativeEvent.event)}
       >
         <ComposerToolbarTrigger
-          accessibilityLabel="Workspace"
+          accessibilityLabel="프로젝트"
           disabled={isIncomingShareTransferPending}
           icon="point.topleft.down.curvedto.point.bottomright.up"
           label={workspaceLabel}
@@ -1034,7 +1034,7 @@ export function NewTaskDraftScreen(props: {
   const startButton = (
     <ComposerToolbarButton
       accessibilityLabel={
-        flow.submitting ? "Starting task" : environmentConnected ? "Start task" : "Queue task"
+        flow.submitting ? "작업 시작 중" : environmentConnected ? "작업 시작" : "작업 대기열에 추가"
       }
       icon={environmentConnected ? "arrow.up" : "tray.and.arrow.up"}
       onPress={() => void handleStart()}
@@ -1051,7 +1051,7 @@ export function NewTaskDraftScreen(props: {
     return (
       <View className="flex-1 bg-screen">
         <NativeStackScreenOptions options={{ headerShown: false }} />
-        <AndroidScreenHeader title="New Thread" onBack={() => navigation.goBack()} />
+        <AndroidScreenHeader title="새 대화" onBack={() => navigation.goBack()} />
 
         <KeyboardAvoidingView automaticOffset behavior="padding" className="flex-1">
           <View className="flex-1" />

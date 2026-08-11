@@ -37,6 +37,33 @@ export interface HomeProjectScope {
   readonly projectRefs: ReadonlyArray<ScopedProjectRef>;
 }
 
+export function findHomeProjectScopeKeyForRef(
+  scopes: ReadonlyArray<HomeProjectScope>,
+  projectRef: ScopedProjectRef | null,
+): string | null {
+  if (projectRef === null) return null;
+  return (
+    scopes.find((scope) =>
+      scope.projectRefs.some(
+        (member) =>
+          member.environmentId === projectRef.environmentId &&
+          member.projectId === projectRef.projectId,
+      ),
+    )?.key ?? null
+  );
+}
+
+/** Mobile conversation lists always belong to one project scope. */
+export function resolveRequiredHomeProjectScopeKey(
+  scopes: ReadonlyArray<HomeProjectScope>,
+  currentKey: string | null,
+): string | null {
+  if (currentKey !== null && scopes.some((scope) => scope.key === currentKey)) {
+    return currentKey;
+  }
+  return scopes[0]?.key ?? null;
+}
+
 function getProjectSortTimestamp(
   project: EnvironmentProject,
   sortOrder: HomeProjectSortOrder,

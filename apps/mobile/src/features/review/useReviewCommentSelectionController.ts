@@ -89,7 +89,7 @@ export function useReviewCommentSelectionController(input: {
       pendingNativeCommentSelection.sectionTitle === selectedSection?.title
     ) {
       return {
-        title: "Select range end",
+        title: "범위 끝 선택",
         onOpenComment: null,
       };
     }

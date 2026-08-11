@@ -1,8 +1,4 @@
-function dataFromNotificationResponse(response: unknown): Record<string, unknown> | null {
-  if (typeof response !== "object" || response === null) {
-    return null;
-  }
-  const notification = (response as { readonly notification?: unknown }).notification;
+function dataFromNotification(notification: unknown): Record<string, unknown> | null {
   if (typeof notification !== "object" || notification === null) {
     return null;
   }
@@ -16,6 +12,15 @@ function dataFromNotificationResponse(response: unknown): Record<string, unknown
   }
   const data = (content as { readonly data?: unknown }).data;
   return typeof data === "object" && data !== null ? (data as Record<string, unknown>) : null;
+}
+
+function notificationFromResponse(response: unknown): unknown {
+  if (typeof response !== "object" || response === null) return null;
+  return (response as { readonly notification?: unknown }).notification ?? null;
+}
+
+function dataFromNotificationResponse(response: unknown): Record<string, unknown> | null {
+  return dataFromNotification(notificationFromResponse(response));
 }
 
 function identifierFromNotificationResponse(response: unknown): string | null {
@@ -85,6 +90,26 @@ export function extractAgentNotificationDeepLink(response: unknown): string | nu
     return encodeThreadDeepLink({ environmentId, threadId });
   }
   return null;
+}
+
+export interface AgentNotificationTarget {
+  readonly environmentId: string;
+  readonly threadId: string;
+}
+
+/** Reads the project-resolvable target from an incoming foreground notification. */
+export function extractAgentNotificationTarget(
+  notification: unknown,
+): AgentNotificationTarget | null {
+  const data = dataFromNotification(notification);
+  const environmentId = data?.environmentId;
+  const threadId = data?.threadId;
+  return typeof environmentId === "string" &&
+    environmentId.length > 0 &&
+    typeof threadId === "string" &&
+    threadId.length > 0
+    ? { environmentId, threadId }
+    : null;
 }
 
 export function routeAgentNotificationResponseOnce(input: {

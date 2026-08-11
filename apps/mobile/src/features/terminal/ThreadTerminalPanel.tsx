@@ -1,4 +1,9 @@
-import { DEFAULT_TERMINAL_ID, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_TERMINAL_ID,
+  type EnvironmentId,
+  type ProjectId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { SymbolView } from "../../components/AppSymbol";
 import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { Pressable, View } from "react-native";
@@ -17,6 +22,7 @@ import {
 
 interface ThreadTerminalPanelProps {
   readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
   readonly threadId: ThreadId;
   readonly cwd: string;
   readonly worktreePath: string | null;
@@ -43,12 +49,20 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
   const subscriptionIdentity = useMemo<ThreadTerminalSubscriptionIdentity>(
     () => ({
       environmentId: props.environmentId,
+      projectId: props.projectId,
       threadId: props.threadId,
       terminalId,
       cwd: props.cwd,
       worktreePath: props.worktreePath,
     }),
-    [props.cwd, props.environmentId, props.threadId, props.worktreePath, terminalId],
+    [
+      props.cwd,
+      props.environmentId,
+      props.projectId,
+      props.threadId,
+      props.worktreePath,
+      terminalId,
+    ],
   );
   const attachInput = useMemo(
     () =>
@@ -94,6 +108,7 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
       environmentId: props.environmentId,
       input: {
         threadId: props.threadId,
+        projectId: props.projectId,
         terminalId,
         cwd: props.cwd,
         worktreePath: props.worktreePath,
@@ -112,6 +127,7 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
     openTerminal,
     props.cwd,
     props.environmentId,
+    props.projectId,
     props.threadId,
     props.worktreePath,
     terminal.status,
@@ -147,6 +163,7 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
       environmentId: props.environmentId,
       input: {
         threadId: props.threadId,
+        projectId: props.projectId,
         terminalId,
       },
     });
@@ -159,24 +176,25 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
         environmentId: props.environmentId,
         input: {
           threadId: props.threadId,
+          projectId: props.projectId,
           terminalId,
           cols: size.cols,
           rows: size.rows,
         },
       });
     },
-    [props.environmentId, props.threadId, resizeTerminal, terminalId],
+    [props.environmentId, props.projectId, props.threadId, resizeTerminal, terminalId],
   );
 
   useEffect(() => {
-    if (isRunning) {
+    if (isRunning && terminal.access === "controller") {
       sendResize(lastGridSizeRef.current);
     }
-  }, [isRunning, sendResize]);
+  }, [isRunning, sendResize, terminal.access]);
 
   const handleInput = useCallback(
     (data: string) => {
-      if (!isRunning) {
+      if (!isRunning || terminal.access !== "controller") {
         return;
       }
 
@@ -184,12 +202,21 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
         environmentId: props.environmentId,
         input: {
           threadId: props.threadId,
+          projectId: props.projectId,
           terminalId,
           data,
         },
       });
     },
-    [isRunning, props.environmentId, props.threadId, terminalId, writeTerminal],
+    [
+      isRunning,
+      props.environmentId,
+      props.projectId,
+      props.threadId,
+      terminal.access,
+      terminalId,
+      writeTerminal,
+    ],
   );
 
   const handleResize = useCallback(
@@ -200,13 +227,13 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
       }
 
       lastGridSizeRef.current = size;
-      if (!isRunning) {
+      if (!isRunning || terminal.access !== "controller") {
         return;
       }
 
       sendResize(size);
     },
-    [isRunning, sendResize],
+    [isRunning, sendResize, terminal.access],
   );
 
   if (!props.visible) {
@@ -218,16 +245,20 @@ export const ThreadTerminalPanel = memo(function ThreadTerminalPanel(
       <View className="flex-row items-center justify-between border-b border-white/10 px-3 py-2">
         <View className="min-w-0 flex-1">
           <Text className="font-t3-bold text-sm text-neutral-100" numberOfLines={1}>
-            Terminal
+            터미널
           </Text>
           <Text className="text-2xs text-neutral-500" numberOfLines={1}>
-            {nativeTerminalAvailable ? "Native Ghostty surface" : "Text fallback active"}
+            {terminal.access === "observer"
+              ? "읽기 전용 관찰 중"
+              : nativeTerminalAvailable
+                ? "네이티브 터미널"
+                : "텍스트 대체 화면"}
           </Text>
         </View>
         <View className="flex-row items-center gap-2">
           {terminal.error ? (
             <Text className="max-w-44 text-right text-2xs text-red-300" numberOfLines={1}>
-              {terminal.error}
+              터미널 연결 오류
             </Text>
           ) : null}
           <Pressable

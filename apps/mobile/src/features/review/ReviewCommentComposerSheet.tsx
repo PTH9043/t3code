@@ -79,7 +79,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
     selectedLines.length === 1
       ? firstNumber !== null
         ? `Line ${firstNumber}`
-        : "File comment"
+        : "파일 의견"
       : firstNumber !== null && lastNumber !== null
         ? `Lines ${firstNumber}-${lastNumber}`
         : `${selectedLines.length} lines selected`;
@@ -179,14 +179,14 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
               <SymbolView name="xmark" size={18} tintColor={iconTint} type="monochrome" />
             </Pressable>
 
-            <Text className="text-lg font-t3-bold text-foreground">Add Comment</Text>
+            <Text className="text-lg font-t3-bold text-foreground">의견 추가</Text>
 
             <View className="h-12 w-12" />
           </View>
 
           {!target ? (
             <View className="rounded-[22px] border border-border bg-card px-4 py-5">
-              <Text className="text-base font-t3-bold text-foreground">No selection</Text>
+              <Text className="text-base font-t3-bold text-foreground">선택한 내용 없음</Text>
               <Text className="mt-1 text-sm leading-normal text-foreground-muted">
                 Select a diff line or range first.
               </Text>
@@ -255,7 +255,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
               </View>
 
               <View className="min-h-0 flex-1 gap-2">
-                <Text className="text-sm font-t3-bold text-foreground">Comment</Text>
+                <Text className="text-sm font-t3-bold text-foreground">의견</Text>
                 <View className="min-h-[132px] flex-1 overflow-hidden rounded-[20px] border border-border bg-card">
                   <View className="min-h-0 flex-1 px-4 pt-3.5">
                     <TextInputWrapper onPaste={handleNativePaste} style={{ flex: 1, minHeight: 0 }}>
@@ -263,7 +263,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
                         autoFocus
                         multiline
                         scrollEnabled
-                        placeholder="Leave a comment..."
+                        placeholder="의견을 남겨 주세요..."
                         textAlignVertical="top"
                         value={commentText}
                         onChangeText={setCommentText}
@@ -295,15 +295,15 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
         {!isAndroid && target ? (
           <View className="flex-row items-center gap-3 bg-sheet px-5 py-2">
             <ControlPill
-              accessibilityLabel="Add image"
+              accessibilityLabel="이미지 추가"
               icon="plus"
               onPress={() => void handlePickImages()}
             />
             <View className="flex-1" />
             <ControlPill
-              accessibilityLabel="Comment"
+              accessibilityLabel="의견"
               icon="arrow.up"
-              label="Comment"
+              label="의견"
               variant="primary"
               disabled={!canSubmit}
               onPress={handleSubmit}
@@ -321,15 +321,15 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
             style={{ paddingBottom: Math.max(insets.bottom, 10) }}
           >
             <ControlPill
-              accessibilityLabel="Add image"
+              accessibilityLabel="이미지 추가"
               icon="plus"
               onPress={() => void handlePickImages()}
             />
             <View className="flex-1" />
             <ControlPill
-              accessibilityLabel="Comment"
+              accessibilityLabel="의견"
               icon="arrow.up"
-              label="Comment"
+              label="의견"
               variant="primary"
               disabled={!canSubmit}
               onPress={handleSubmit}

@@ -139,16 +139,16 @@ export function ConnectionsNewRouteScreen({
         options={{
           // Android renders its own in-screen header below instead of the native bar.
           ...(Platform.OS === "android" ? { headerShown: false } : null),
-          title: showScanner ? "Scan QR Code" : "Add Environment",
+          title: showScanner ? "QR 코드 스캔" : "연결 환경 추가",
         }}
       />
       {Platform.OS === "android" ? (
         <AndroidScreenHeader
-          title={showScanner ? "Scan QR Code" : "Add Environment"}
+          title={showScanner ? "QR 코드 스캔" : "연결 환경 추가"}
           onBack={() => navigation.goBack()}
           actions={[
             {
-              accessibilityLabel: showScanner ? "Close scanner" : "Scan QR code",
+              accessibilityLabel: showScanner ? "스캐너 닫기" : "QR 코드 스캔",
               icon: showScanner ? "xmark" : "camera",
               onPress: () => {
                 if (showScanner) {
@@ -205,7 +205,7 @@ export function ConnectionsNewRouteScreen({
                 <ConnectionSheetButton
                   compact
                   icon="camera"
-                  label="Allow camera"
+                  label="카메라 허용"
                   tone="secondary"
                   onPress={() => {
                     void openScanner();
@@ -248,7 +248,7 @@ export function ConnectionsNewRouteScreen({
 
               <ConnectionSheetButton
                 icon="plus"
-                label={isSubmitting ? "Pairing..." : "Add environment"}
+                label={isSubmitting ? "연결 중..." : "연결 환경 추가"}
                 disabled={connectDisabled}
                 tone="primary"
                 onPress={() => {

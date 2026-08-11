@@ -15,7 +15,7 @@ export function SettingsLegalDocumentCloseHeaderButton() {
 
   return (
     <Pressable
-      accessibilityLabel="Close legal document"
+      accessibilityLabel="법적 고지 닫기"
       accessibilityRole="button"
       hitSlop={12}
       onPress={() => navigation.goBack()}
@@ -42,7 +42,7 @@ export function SettingsLegalDocumentExternalHeaderButton({
 
   return (
     <Pressable
-      accessibilityLabel="Open legal documents in external browser"
+      accessibilityLabel="법적 고지를 외부 브라우저에서 열기"
       accessibilityRole="button"
       hitSlop={12}
       onPress={() => void Linking.openURL(safeExternalUrl).catch(() => undefined)}
@@ -115,14 +115,16 @@ export function SettingsLegalDocumentRouteScreen({
             }}
             className="items-center rounded-xl bg-foreground px-4 py-3 active:opacity-80"
           >
-            <Text className="font-t3-bold text-base text-sheet">Try Again</Text>
+            <Text className="font-t3-bold text-base text-sheet">다시 시도</Text>
           </Pressable>
           <Pressable
             accessibilityRole="link"
             onPress={() => openExternalUrl(documentUrl)}
             className="items-center rounded-xl px-4 py-3 active:bg-foreground/5"
           >
-            <Text className="font-t3-medium text-base text-foreground-muted">Open in Browser</Text>
+            <Text className="font-t3-medium text-base text-foreground-muted">
+              브라우저에서 열기
+            </Text>
           </Pressable>
         </View>
       </View>

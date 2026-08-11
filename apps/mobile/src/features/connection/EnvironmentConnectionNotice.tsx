@@ -12,7 +12,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 function noticeTitle(phase: EnvironmentConnectionPhase, environmentLabel: string): string {
   switch (phase) {
     case "offline":
-      return "You are offline";
+      return "오프라인 상태입니다";
     case "connecting":
       return `Connecting to ${environmentLabel}...`;
     case "reconnecting":
@@ -103,7 +103,7 @@ export function EnvironmentConnectionNotice(props: {
             className="mt-1 rounded-full bg-subtle px-4 py-2.5 active:opacity-70"
             onPress={props.onRetry}
           >
-            <Text className="text-sm font-t3-bold text-foreground">Retry now</Text>
+            <Text className="text-sm font-t3-bold text-foreground">지금 다시 연결</Text>
           </Pressable>
         ) : null}
       </View>

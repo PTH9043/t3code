@@ -1,7 +1,7 @@
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 import { useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects, useThreadShells } from "../../state/entities";
@@ -16,7 +16,7 @@ import { AndroidHomeFabLayout } from "./AndroidHomeFab";
 import { HomeScreen } from "./HomeScreen";
 import { HomeHeader } from "./HomeHeader";
 import { useHomeListOptions } from "./home-list-options";
-import { buildHomeProjectScopes } from "./homeThreadList";
+import { buildHomeProjectScopes, resolveRequiredHomeProjectScopeKey } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionAwareBrandHeaderOptions } from "./WorkspaceConnectionTitle";
@@ -77,26 +77,54 @@ export function HomeRouteScreen() {
   } = useHomeListOptions(availableEnvironmentIds);
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
-  const projectFilterOptions = useMemo(
+  const projectScopes = useMemo(
     () =>
       buildHomeProjectScopes({
         projects,
         environmentId: selectedEnvironmentId,
         projectGroupingMode: listOptions.projectGroupingMode,
-      }).map((scope) => ({
+      }),
+    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+  );
+  const effectiveSelectedProjectKey = useMemo(
+    () => resolveRequiredHomeProjectScopeKey(projectScopes, selectedProjectKey),
+    [projectScopes, selectedProjectKey],
+  );
+  const projectFilterOptions = useMemo(
+    () =>
+      projectScopes.map((scope) => ({
         key: scope.key,
         label: scope.title,
       })),
-    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+    [projectScopes],
   );
   useEffect(() => {
-    if (
-      selectedProjectKey !== null &&
-      !projectFilterOptions.some((project) => project.key === selectedProjectKey)
-    ) {
-      setSelectedProjectKey(null);
+    if (selectedProjectKey !== effectiveSelectedProjectKey) {
+      setSelectedProjectKey(effectiveSelectedProjectKey);
     }
-  }, [projectFilterOptions, selectedProjectKey]);
+  }, [effectiveSelectedProjectKey, selectedProjectKey]);
+  const selectedProjectScope = useMemo(
+    () =>
+      effectiveSelectedProjectKey === null
+        ? null
+        : (projectScopes.find((scope) => scope.key === effectiveSelectedProjectKey) ?? null),
+    [effectiveSelectedProjectKey, projectScopes],
+  );
+  const openNewConversation = useCallback(() => {
+    const project = selectedProjectScope?.representative;
+    if (!project) {
+      navigation.navigate("NewTaskSheet", { screen: "NewTask" });
+      return;
+    }
+    navigation.navigate("NewTaskSheet", {
+      screen: "NewTaskDraft",
+      params: {
+        environmentId: String(project.environmentId),
+        projectId: String(project.id),
+        title: project.title,
+      },
+    });
+  }, [navigation, selectedProjectScope]);
 
   // In split layouts the persistent sidebar IS the thread list — Home becomes
   // an empty detail pane so selecting a thread never transitions layouts.
@@ -109,23 +137,19 @@ export function HomeRouteScreen() {
         <WorkspaceSidebarToolbar
           afterSidebarButton={
             <NativeHeaderToolbar.Button
-              accessibilityLabel="New task"
+              accessibilityLabel="새 대화"
               icon="square.and.pencil"
-              onPress={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+              onPress={openNewConversation}
             />
           }
         />
-        <WorkspaceEmptyDetail
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-        />
+        <WorkspaceEmptyDetail onStartNewTask={openNewConversation} />
       </>
     );
   }
 
   return (
-    <AndroidHomeFabLayout
-      onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-    >
+    <AndroidHomeFabLayout onStartNewTask={openNewConversation}>
       <>
         {/* Restore the compact title after the split branch blanks the detail
             header. The brand slot doubles as the connection status surface:
@@ -142,7 +166,7 @@ export function HomeRouteScreen() {
           projects={projectFilterOptions}
           searchQuery={searchQuery}
           selectedEnvironmentId={selectedEnvironmentId}
-          selectedProjectKey={selectedProjectKey}
+          selectedProjectKey={effectiveSelectedProjectKey}
           projectSortOrder={listOptions.projectSortOrder}
           threadSortOrder={listOptions.threadSortOrder}
           onEnvironmentChange={setSelectedEnvironmentId}
@@ -153,7 +177,7 @@ export function HomeRouteScreen() {
           onOpenSettings={() => navigation.navigate("SettingsSheet", { screen: "Settings" })}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+          onStartNewTask={openNewConversation}
           onThreadSortOrderChange={setThreadSortOrder}
         />
 
@@ -197,7 +221,13 @@ export function HomeRouteScreen() {
               },
             });
           }}
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+          onOpenCollaborationRuns={(project) =>
+            navigation.navigate("WorkspaceCollaborationRuns", {
+              environmentId: String(project.environmentId),
+              projectId: String(project.id),
+            })
+          }
+          onStartNewTask={openNewConversation}
           onThreadSortOrderChange={setThreadSortOrder}
           pendingTasks={pendingTasks}
           projectGroupingMode={listOptions.projectGroupingMode}
@@ -206,7 +236,7 @@ export function HomeRouteScreen() {
           savedConnectionsById={savedConnectionsById}
           searchQuery={searchQuery}
           selectedEnvironmentId={selectedEnvironmentId}
-          selectedProjectKey={selectedProjectKey}
+          selectedProjectKey={effectiveSelectedProjectKey}
           threads={threads}
           threadSortOrder={listOptions.threadSortOrder}
         />

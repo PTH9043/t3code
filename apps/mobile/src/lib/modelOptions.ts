@@ -34,8 +34,8 @@ function providerDisplayLabel(provider: {
   readonly instanceId: string;
 }): string {
   if (provider.displayName) return provider.displayName;
-  if (provider.driver === "codex") return "Codex";
-  if (provider.driver === "claudeAgent") return "Claude";
+  if (provider.driver === "codex") return "코덱스";
+  if (provider.driver === "claudeAgent") return "클로드";
   return provider.instanceId;
 }
 

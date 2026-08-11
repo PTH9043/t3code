@@ -506,6 +506,15 @@ function AdaptiveWorkspaceLayoutContent(
     },
     [layout.usesSplitView, pathname, navigation, selectedThreadKey],
   );
+  const handleOpenCollaborationRuns = useCallback(
+    (project: EnvironmentProject) => {
+      navigation.navigate("WorkspaceCollaborationRuns", {
+        environmentId: String(project.environmentId),
+        projectId: String(project.id),
+      });
+    },
+    [navigation],
+  );
 
   return (
     <HomeListOptionsProvider projectGroupingMode={projectGroupingMode}>
@@ -529,6 +538,7 @@ function AdaptiveWorkspaceLayoutContent(
                 selectedThreadKey={selectedThreadKey}
                 onOpenSettings={handleOpenSettings}
                 onOpenEnvironmentSettings={handleOpenEnvironmentSettings}
+                onOpenCollaborationRuns={handleOpenCollaborationRuns}
                 onNewThreadInProject={handleNewThreadInProject}
                 onSelectThread={handleSelectThread}
                 onSearchQueryChange={setPrimarySidebarSearchQuery}

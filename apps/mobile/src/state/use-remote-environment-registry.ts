@@ -203,9 +203,9 @@ export function useRemoteConnections() {
         "Remove environment?",
         `Disconnect and forget ${environment.environmentLabel} on this device.`,
         [
-          { text: "Cancel", style: "cancel" },
+          { text: "취소", style: "cancel" },
           {
-            text: "Remove",
+            text: "제거",
             style: "destructive",
             onPress: () => {
               void controller.removeEnvironment(environmentId);

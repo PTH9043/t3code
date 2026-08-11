@@ -82,7 +82,7 @@ function resolveSecondaryAction(input: {
       accessibilityLabel: `Delete ${input.threadTitle}`,
       backgroundColor: "#ff2d55",
       icon: "trash",
-      label: "Delete",
+      label: "삭제",
       onPress: () => {
         input.close();
         input.onDelete();

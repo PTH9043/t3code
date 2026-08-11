@@ -71,11 +71,11 @@ function selectionHaptic(): void {
 }
 
 function actionFailureTitle(action: ThreadListAction): string {
-  if (action === "archive") return "Could not archive thread";
-  if (action === "unarchive") return "Could not unarchive thread";
-  if (action === "settle") return "Could not settle thread";
-  if (action === "unsettle") return "Could not un-settle thread";
-  return "Could not delete thread";
+  if (action === "archive") return "대화를 보관하지 못했습니다";
+  if (action === "unarchive") return "대화 보관을 해제하지 못했습니다";
+  if (action === "settle") return "대화를 완료 처리하지 못했습니다";
+  if (action === "unsettle") return "대화 완료 처리를 되돌리지 못했습니다";
+  return "대화를 삭제하지 못했습니다";
 }
 
 /** Resolves to true iff the action was dispatched and succeeded. */
@@ -189,9 +189,9 @@ function useConfirmDeleteThread(
       const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
       if (process.env.EXPO_OS === "ios") {
         Alert.alert(title, message, [
-          { text: "Cancel", style: "cancel" },
+          { text: "취소", style: "cancel" },
           {
-            text: "Delete",
+            text: "삭제",
             style: "destructive",
             onPress: () => {
               void executeAction("delete", thread);
@@ -203,7 +203,7 @@ function useConfirmDeleteThread(
       showConfirmDialog({
         title,
         message,
-        confirmText: "Delete",
+        confirmText: "삭제",
         destructive: true,
         onConfirm: () => {
           void executeAction("delete", thread);

@@ -41,7 +41,7 @@ export class MobilePreferencesLoadError extends Schema.TaggedErrorClass<MobilePr
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "Failed to load mobile preferences.";
+    return "모바일 설정을 불러오지 못했습니다.";
   }
 }
 
@@ -50,7 +50,7 @@ export class MobilePreferencesSaveError extends Schema.TaggedErrorClass<MobilePr
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "Failed to save mobile preferences.";
+    return "모바일 설정을 저장하지 못했습니다.";
   }
 }
 

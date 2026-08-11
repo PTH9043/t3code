@@ -84,8 +84,8 @@ function ConfiguredConnectOnboardingRouteScreen() {
     <View collapsable={false} className="flex-1 bg-sheet">
       {Platform.OS === "android" ? (
         <AndroidSheetHeader
-          title="Set up T3 Connect"
-          actions={[{ accessibilityLabel: "Close", icon: "xmark", onPress: handleClose }]}
+          title="T3 Connect 설정"
+          actions={[{ accessibilityLabel: "닫기", icon: "xmark", onPress: handleClose }]}
         />
       ) : (
         <NativeHeaderToolbar placement="right">

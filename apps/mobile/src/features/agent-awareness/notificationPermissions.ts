@@ -15,7 +15,7 @@ export class NotificationPermissionReadError extends Schema.TaggedErrorClass<Not
   },
 ) {
   override get message(): string {
-    return "Failed to read notification permissions on iOS.";
+    return "iOS 알림 권한을 확인하지 못했습니다.";
   }
 }
 
@@ -26,7 +26,7 @@ export class NotificationPermissionRequestError extends Schema.TaggedErrorClass<
   },
 ) {
   override get message(): string {
-    return "Failed to request notification permissions on iOS.";
+    return "iOS 알림 권한을 요청하지 못했습니다.";
   }
 }
 

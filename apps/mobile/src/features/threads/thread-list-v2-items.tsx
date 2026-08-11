@@ -55,10 +55,10 @@ const MONO_FONT = Platform.select({
 const STATUS_LABEL_BY_STATUS: Partial<
   Record<ThreadListV2Status, { label: string; className: string }>
 > = {
-  approval: { label: "Approval", className: "text-amber-700 dark:text-amber-300" },
-  input: { label: "Input", className: "text-indigo-600 dark:text-indigo-300" },
-  working: { label: "Working", className: "text-sky-600 dark:text-sky-400" },
-  failed: { label: "Failed", className: "text-red-700 dark:text-red-300" },
+  approval: { label: "승인", className: "text-amber-700 dark:text-amber-300" },
+  input: { label: "입력", className: "text-indigo-600 dark:text-indigo-300" },
+  working: { label: "작업 중", className: "text-sky-600 dark:text-sky-400" },
+  failed: { label: "실패", className: "text-red-700 dark:text-red-300" },
 };
 
 function threadTimeLabel(thread: EnvironmentThreadShell): string {
@@ -68,24 +68,24 @@ function threadTimeLabel(thread: EnvironmentThreadShell): string {
 // Menus stay lifecycle-focused: settle/un-settle plus delete. Archive keeps
 // its own surface (thread screen / settings) rather than crowding the row.
 const CARD_MENU_ACTIONS: MenuAction[] = [
-  { id: "settle", title: "Settle", image: "checkmark" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "settle", title: "완료 처리", image: "checkmark" },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 const SLIM_MENU_ACTIONS: MenuAction[] = [
-  { id: "unsettle", title: "Un-settle", image: "arrow.uturn.backward" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "unsettle", title: "완료 처리 취소", image: "arrow.uturn.backward" },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 const SNOOZED_MENU_ACTIONS: MenuAction[] = [
-  { id: "unsnooze", title: "Wake thread", image: "clock" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "unsnooze", title: "대화 깨우기", image: "clock" },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 // Pre-settlement servers: no lifecycle items, archive fills the gap.
 const LEGACY_MENU_ACTIONS: MenuAction[] = [
-  { id: "archive", title: "Archive", image: "archivebox" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "archive", title: "보관", image: "archivebox" },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 /** Rounded-row radius shared with the v1 sidebar rows. */
@@ -186,7 +186,7 @@ export const ThreadListV2SettledShelfHeader = memo(function ThreadListV2SettledS
 });
 
 const PENDING_TASK_MENU_ACTIONS: MenuAction[] = [
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 /**
@@ -238,7 +238,7 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
         <Text className="flex-1 text-sm font-t3-medium text-foreground-muted" numberOfLines={1}>
           {projectTitle}
         </Text>
-        <Text className="text-xs text-foreground-tertiary">Queued</Text>
+        <Text className="text-xs text-foreground-tertiary">대기 중</Text>
       </View>
       {/* One line, unlike the two an active row allows: a queued title is
           derived from the whole prompt rather than written as a title, so the
@@ -265,7 +265,7 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
   return (
     <>
       {props.showPendingDivider ? (
-        <ThreadListV2SectionDivider label="Pending" pane={props.pane} />
+        <ThreadListV2SectionDivider label="대기 중" pane={props.pane} />
       ) : null}
       <ControlPillMenu
         actions={PENDING_TASK_MENU_ACTIONS}
@@ -480,21 +480,21 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               ? [
                   {
                     id: "move-pin-up",
-                    title: "Move up",
+                    title: "위로 이동",
                     image: "arrow.up",
                     attributes: { disabled: props.canMovePinnedUp !== true },
                   } satisfies MenuAction,
                   {
                     id: "move-pin-down",
-                    title: "Move down",
+                    title: "아래로 이동",
                     image: "arrow.down",
                     attributes: { disabled: props.canMovePinnedDown !== true },
                   } satisfies MenuAction,
                 ]
               : []),
             pinnedRow
-              ? { id: "unpin", title: "Unpin", image: "pin.slash" }
-              : { id: "pin", title: "Pin", image: "pin" },
+              ? { id: "unpin", title: "고정 해제", image: "pin.slash" }
+              : { id: "pin", title: "고정", image: "pin" },
           ]
         : [],
     [
@@ -507,15 +507,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
-      { id: "settle", title: "Settle", image: "checkmark" },
+      { id: "settle", title: "완료 처리", image: "checkmark" },
       {
         id: "snooze",
-        title: "Snooze",
+        title: "잠시 미루기",
         image: "clock",
         subactions: snoozePresetActions,
       },
       ...pinMenuItem,
-      { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+      { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
     ],
     [pinMenuItem, snoozePresetActions],
   );
@@ -567,7 +567,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       return {
         accessibilityLabel: `Archive ${thread.title}`,
         icon: "archivebox" as const,
-        label: "Archive",
+        label: "보관",
         onPress: handleArchive,
       };
     }
@@ -575,7 +575,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       return {
         accessibilityLabel: `Wake ${thread.title} now`,
         icon: "clock" as const,
-        label: "Wake",
+        label: "깨우기",
         onPress: handleUnsnooze,
       };
     }
@@ -583,13 +583,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ? {
           accessibilityLabel: `Un-settle ${thread.title}`,
           icon: "arrow.uturn.backward" as const,
-          label: "Un-settle",
+          label: "완료 처리 취소",
           onPress: handleUnsettle,
         }
       : {
           accessibilityLabel: `Settle ${thread.title}`,
           icon: "checkmark" as const,
-          label: "Settle",
+          label: "완료 처리",
           onPress: handleSettle,
         };
   }, [
@@ -606,11 +606,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         ? {
             accessibilityLabel: `Choose when to snooze ${thread.title}`,
             icon: "clock" as const,
-            label: "Snooze",
+            label: "미루기",
             menu: {
               actions: snoozePresetActions,
               onPressAction: handleMenuAction,
-              title: "Snooze until",
+              title: "다음 시각까지 미루기",
             },
             onPress: () => undefined,
           }

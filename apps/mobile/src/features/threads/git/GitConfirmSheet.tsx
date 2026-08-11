@@ -104,7 +104,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
       {Platform.OS === "android" ? (
-        <AndroidSheetHeader title="Confirm action" onBack={() => navigation.goBack()} />
+        <AndroidSheetHeader title="작업 확인" onBack={() => navigation.goBack()} />
       ) : (
         <View className="min-h-4 pt-2" />
       )}
@@ -129,7 +129,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
         />
         <SheetActionButton
           icon="arrow.branch"
-          label="Feature branch & continue"
+          label="기능 브랜치에서 계속"
           tone="primary"
           onPress={() => void movePendingActionToFeatureBranch()}
         />

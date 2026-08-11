@@ -131,8 +131,8 @@ export function AgentActivity(
   // minimal glyph — must agree, and a failure anywhere should dominate a
   // newer success.
   const allDone = props.activeCount === 0;
-  const doneLabel = failedRow ? "Failed" : "Done";
-  const outcomeLabel = failedRow ? "Agent work failed" : "Agent work completed";
+  const doneLabel = failedRow ? "실패" : "완료";
+  const outcomeLabel = failedRow ? "에이전트 작업 실패" : "에이전트 작업 완료";
 
   // Header copy: "5 active agents" + (", 1 needs attention"). The banner renders
   // the two parts in-line so the attention half can carry the accent color;
@@ -329,7 +329,7 @@ export function AgentActivity(
         {attentionRow
           ? attentionRow.phase === "waiting_for_approval"
             ? "Approval"
-            : "Input"
+            : "입력"
           : activeLabel}
       </Text>
     ),

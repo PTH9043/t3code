@@ -40,7 +40,7 @@ const pocketPiEndpoint = {
 export const SHOWCASE_CONNECTED_CLOUD_ENVIRONMENTS: ReadonlyArray<ConnectedEnvironmentSummary> = [
   {
     environmentId: EnvironmentId.make("showcase-aurora-gpu"),
-    environmentLabel: "Aurora GPU Pod",
+    environmentLabel: "오로라 GPU 팟",
     displayUrl: "https://aurora-gpu.t3.sh",
     isRelayManaged: true,
     connectionState: "connected",
@@ -53,7 +53,7 @@ export const SHOWCASE_AVAILABLE_CLOUD_ENVIRONMENTS: ReadonlyArray<RelayEnvironme
   {
     environment: {
       environmentId: pocketPiId,
-      label: "Pocket Pi",
+      label: "포켓 파이",
       endpoint: pocketPiEndpoint,
       linkedAt: "2026-07-16T08:00:00.000Z",
     },

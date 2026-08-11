@@ -304,7 +304,7 @@ function ReviewFileNavigator({
               hideShadow={false}
               navigationItemStyle="editor"
               subtitle={`${files.length} ${files.length === 1 ? "file" : "files"}`}
-              title="Changed files"
+              title="변경된 파일"
               titleColor={foregroundColor}
               titleFontSize={17}
               titleFontWeight="700"
@@ -320,7 +320,7 @@ function ReviewFileNavigator({
     <View className="flex-1 border-l border-border bg-sheet">
       <View className="border-b border-border" style={{ paddingTop: headerInset }}>
         <View className="px-4 py-3">
-          <Text className="text-sm font-t3-bold text-foreground">Changed files</Text>
+          <Text className="text-sm font-t3-bold text-foreground">변경된 파일</Text>
           <Text className="text-xs text-foreground-muted">
             {files.length} {files.length === 1 ? "file" : "files"}
           </Text>
@@ -542,7 +542,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
     if (sectionMenu.turns.length > 0) {
       actions.push({
         id: "turns",
-        title: "Turn",
+        title: "턴",
         subactions: sectionMenu.turns.map((section) => ({
           id: `section:${section.id}`,
           title: section.id === selectedSection?.id ? `${section.title} (selected)` : section.title,
@@ -555,7 +555,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
     // stays a menu action there (iOS refreshes via pull-to-refresh instead).
     actions.push({
       id: "refresh",
-      title: "Refresh current diff",
+      title: "현재 차이 새로고침",
       attributes: {
         disabled: !selectedSection || selectedSection.isLoading,
       },
@@ -606,7 +606,9 @@ export function ReviewSheet(props: ReviewSheetProps) {
     if (error) {
       children.push(
         <View key="review-error" className="border-b border-border bg-card px-4 py-3">
-          <Text className="text-sm font-t3-bold text-foreground">Review unavailable</Text>
+          <Text className="text-sm font-t3-bold text-foreground">
+            검토 내용을 불러올 수 없습니다
+          </Text>
           <Text className="text-xs leading-normal text-foreground-muted">{error}</Text>
         </View>,
       );
@@ -655,7 +657,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
 
       {isAndroid ? (
         <AndroidScreenHeader
-          title="Review changes"
+          title="변경 내용 검토"
           subtitle={androidHeaderSubtitle || "Select a diff"}
           onBack={handleReturnToThread}
           trailing={
@@ -666,7 +668,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
                 onPressAction={handleAndroidSectionMenuAction}
               >
                 <AndroidHeaderIconButton
-                  accessibilityLabel="Select review diff"
+                  accessibilityLabel="검토할 차이 선택"
                   icon="ellipsis.circle"
                 />
               </ControlPillMenu>
@@ -677,7 +679,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
 
       <WorkspaceSidebarToolbar>
         <NativeHeaderToolbar.Button
-          accessibilityLabel="Back to chat"
+          accessibilityLabel="대화로 돌아가기"
           icon="chevron.left"
           onPress={handleReturnToThread}
         />
@@ -688,7 +690,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
           {panes.supportsAuxiliaryPane ? (
             <NativeHeaderToolbar.Button
               accessibilityLabel={
-                panes.auxiliaryPaneVisible ? "Hide changed files" : "Show changed files"
+                panes.auxiliaryPaneVisible ? "변경된 파일 숨기기" : "변경된 파일 보기"
               }
               icon="sidebar.right"
               onPress={toggleAuxiliaryPane}
@@ -707,7 +709,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
             />
           ) : null}
           {showSectionToolbar ? (
-            <NativeHeaderToolbar.Menu icon="ellipsis" title="Select diff" separateBackground>
+            <NativeHeaderToolbar.Menu icon="ellipsis" title="차이 선택" separateBackground>
               <NativeHeaderToolbar.Menu inline>
                 <NativeHeaderToolbar.MenuAction
                   disabled={sectionMenu.workingTree === null}
@@ -718,7 +720,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
                     }
                   }}
                 >
-                  <NativeHeaderToolbar.Label>Working tree</NativeHeaderToolbar.Label>
+                  <NativeHeaderToolbar.Label>작업 트리</NativeHeaderToolbar.Label>
                 </NativeHeaderToolbar.MenuAction>
                 <NativeHeaderToolbar.MenuAction
                   disabled={sectionMenu.branchChanges === null}
@@ -729,7 +731,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
                     }
                   }}
                 >
-                  <NativeHeaderToolbar.Label>Branch changes</NativeHeaderToolbar.Label>
+                  <NativeHeaderToolbar.Label>브랜치 변경</NativeHeaderToolbar.Label>
                 </NativeHeaderToolbar.MenuAction>
                 <NativeHeaderToolbar.MenuAction
                   disabled={sectionMenu.latestTurn === null}
@@ -740,10 +742,10 @@ export function ReviewSheet(props: ReviewSheetProps) {
                     }
                   }}
                 >
-                  <NativeHeaderToolbar.Label>Latest turn</NativeHeaderToolbar.Label>
+                  <NativeHeaderToolbar.Label>최근 턴</NativeHeaderToolbar.Label>
                 </NativeHeaderToolbar.MenuAction>
                 {sectionMenu.turns.length > 0 ? (
-                  <NativeHeaderToolbar.Menu title="Turn">
+                  <NativeHeaderToolbar.Menu title="턴">
                     {sectionMenu.turns.map((section) => (
                       <NativeHeaderToolbar.MenuAction
                         key={section.id}
@@ -836,7 +838,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
             {listHeader}
             {!selectedSection ? (
               <View className="border-b border-border bg-card px-4 py-5">
-                <Text className="text-sm font-t3-bold text-foreground">No review diffs</Text>
+                <Text className="text-sm font-t3-bold text-foreground">검토할 차이가 없습니다</Text>
                 <Text className="text-xs leading-normal text-foreground-muted">
                   This thread has no ready turn diffs and the worktree diff is empty.
                 </Text>
@@ -848,7 +850,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
               </View>
             ) : parsedDiff.kind === "empty" ? (
               <View className="border-b border-border bg-card px-4 py-5">
-                <Text className="text-sm font-t3-bold text-foreground">No changes</Text>
+                <Text className="text-sm font-t3-bold text-foreground">변경 사항이 없습니다</Text>
                 <Text className="text-xs leading-normal text-foreground-muted">
                   {selectedSection.subtitle ?? "This diff is empty."}
                 </Text>

@@ -5,6 +5,7 @@ import { consumeLastAgentNotificationResponse } from "./notificationResponseCons
 
 import {
   extractAgentNotificationDeepLink,
+  extractAgentNotificationTarget,
   routeAgentNotificationResponseOnce,
 } from "./notificationPayload";
 
@@ -151,6 +152,21 @@ describe("extractAgentNotificationDeepLink", () => {
       extractAgentNotificationDeepLink(responseWithData({ deepLink: "/threads/env/thread?x=1" })),
     ).toBeNull();
     expect(extractAgentNotificationDeepLink({})).toBeNull();
+  });
+});
+
+describe("extractAgentNotificationTarget", () => {
+  it("reads environment and thread ids from a foreground notification", () => {
+    const response = responseWithData({ environmentId: "env-1", threadId: "thread-1" });
+
+    expect(extractAgentNotificationTarget(response.notification)).toEqual({
+      environmentId: "env-1",
+      threadId: "thread-1",
+    });
+  });
+
+  it("does not classify unrelated foreground notifications as agent activity", () => {
+    expect(extractAgentNotificationTarget(responseWithData({}).notification)).toBeNull();
   });
 });
 

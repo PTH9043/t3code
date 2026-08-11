@@ -14,6 +14,7 @@ import {
 } from "react-native-keyboard-controller";
 
 import { AndroidHeaderIconButton, AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { AppText as Text } from "../../components/AppText";
 import {
   ComposerToolbarButton,
   ComposerToolbarRow,
@@ -264,6 +265,11 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     terminalId,
     value: null,
   });
+  const [controlModeEntry, setControlModeEntry] = useState<{
+    readonly terminalId: string;
+    readonly value: "auto" | "control";
+  }>({ terminalId, value: "auto" });
+  const controlMode = controlModeEntry.terminalId === terminalId ? controlModeEntry.value : "auto";
   const shouldRedirectToRunningTerminal =
     requestedTerminalId === null &&
     runningSession !== null &&
@@ -310,6 +316,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       !shouldRedirectToRunningTerminal
         ? {
             threadId: selectedThread.id,
+            projectId: selectedThread.projectId,
             terminalId,
             cwd: launchLocation.cwd,
             worktreePath: launchLocation.worktreePath,
@@ -317,6 +324,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
             rows: initialAttachGridSize.rows,
             ...(pendingLaunch?.env ? { env: pendingLaunch.env } : {}),
             ...(pendingLaunch ? { restartIfNotRunning: true } : {}),
+            controlMode,
           }
         : null,
     [
@@ -326,6 +334,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       initialAttachGridSize,
       isEnvironmentReady,
       launchLocation,
+      controlMode,
       pendingLaunch,
       selectedThread,
       shouldRedirectToRunningTerminal,
@@ -352,6 +361,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     readyReplayKey: readyBufferReplayKey,
   });
   const isRunning = terminal.status === "running" || terminal.status === "starting";
+  const isController = terminal.access === "controller";
 
   // When the process ends while this screen is attached (e.g. typing `exit`),
   // close the session and leave the screen, mirroring the web drawer's
@@ -387,6 +397,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
+        projectId: selectedThread.projectId,
         terminalId,
         cwd: terminalAttachInput.cwd,
         worktreePath: terminalAttachInput.worktreePath,
@@ -487,7 +498,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       { kind: "send", key: "esc", label: "esc", data: "\u001b" },
       ...modifierActions,
       { kind: "send", key: "tab", label: "tab", data: "\t" },
-      { kind: "clear", key: "clear", label: "clear" },
+      { kind: "clear", key: "clear", label: "지우기" },
       { kind: "send", key: "up", label: "↑", data: "\u001b[A" },
       { kind: "send", key: "down", label: "↓", data: "\u001b[B" },
       { kind: "send", key: "left", label: "←", data: "\u001b[D" },
@@ -609,6 +620,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     if (
       !initialInput ||
       !selectedThread ||
+      !isController ||
       terminal.version === 0 ||
       sentInitialInputKeyRef.current === launchTargetKey
     ) {
@@ -619,12 +631,14 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
+        projectId: selectedThread.projectId,
         terminalId,
         data: initialInput,
       },
     });
   }, [
     launchTargetKey,
+    isController,
     pendingLaunch?.initialInput,
     selectedThread,
     terminal.version,
@@ -694,7 +708,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
   const writeInput = useCallback(
     (data: string) => {
-      if (!selectedThread || !isRunning) {
+      if (!selectedThread || !isRunning || !isController) {
         return;
       }
 
@@ -702,12 +716,13 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         environmentId: selectedThread.environmentId,
         input: {
           threadId: selectedThread.id,
+          projectId: selectedThread.projectId,
           terminalId,
           data,
         },
       });
     },
-    [isRunning, selectedThread, terminalId, writeTerminal],
+    [isController, isRunning, selectedThread, terminalId, writeTerminal],
   );
 
   const handleInput = useCallback(
@@ -755,7 +770,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       }
 
       setLastGridSize(size);
-      if (!selectedThread || !isRunning) {
+      if (!selectedThread || !isRunning || !isController) {
         return;
       }
 
@@ -763,6 +778,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         environmentId: selectedThread.environmentId,
         input: {
           threadId: selectedThread.id,
+          projectId: selectedThread.projectId,
           terminalId,
           cols: size.cols,
           rows: size.rows,
@@ -771,6 +787,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     },
     [
       isRunning,
+      isController,
       lastGridSize.cols,
       lastGridSize.rows,
       bufferReplayKey,
@@ -866,6 +883,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         environmentId: selectedThread.environmentId,
         input: {
           threadId: selectedThread.id,
+          projectId: selectedThread.projectId,
           terminalId,
         },
       });
@@ -933,7 +951,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     () => [
       {
         id: "text-size",
-        title: "Text size",
+        title: "글자 크기",
         subactions: [
           {
             id: "font-decrease",
@@ -959,9 +977,9 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       ),
       {
         id: "terminal-new",
-        title: "Open new terminal",
+        title: "새 터미널 열기",
         image: "plus",
-        subtitle: `Start another shell in ${basename(selectedThreadProject?.workspaceRoot ?? null) ?? "this workspace"}`,
+        subtitle: `${basename(selectedThreadProject?.workspaceRoot ?? null) ?? "이 프로젝트"}에서 새 셸 시작`,
       },
     ],
     [fontSize, selectedThreadProject?.workspaceRoot, terminalId, terminalMenuSessions],
@@ -990,7 +1008,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
   );
 
   const handleClearTerminal = useCallback(() => {
-    if (!selectedThread) {
+    if (!selectedThread || !isController) {
       return;
     }
 
@@ -999,10 +1017,11 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
+        projectId: selectedThread.projectId,
         terminalId,
       },
     });
-  }, [clearTerminal, selectedThread, terminalId]);
+  }, [clearTerminal, isController, selectedThread, terminalId]);
 
   const handleToolbarActionPress = useCallback(
     (action: TerminalToolbarAction) => {
@@ -1050,14 +1069,14 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
   if (!selectedThread) {
     if (workspaceState.isLoadingConnections) {
-      return <LoadingScreen message="Opening terminal…" />;
+      return <LoadingScreen message="터미널 여는 중…" />;
     }
 
     return (
       <View className="flex-1 bg-screen">
         <EmptyState
-          title="Thread unavailable"
-          detail="This terminal route needs an active thread and workspace."
+          title="대화를 찾을 수 없음"
+          detail="터미널을 열려면 프로젝트에 속한 대화가 필요합니다."
         />
       </View>
     );
@@ -1067,15 +1086,15 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     return (
       <View className="flex-1 bg-screen">
         <EmptyState
-          title="Terminal unavailable"
-          detail="This thread does not have a workspace root yet, so there is nowhere to open a shell."
+          title="터미널을 열 수 없음"
+          detail="이 대화가 속한 프로젝트 폴더를 찾지 못해 셸을 열 수 없습니다."
         />
       </View>
     );
   }
 
   if (!environment.isReady && environment.presentation === null) {
-    return <LoadingScreen message="Opening terminal…" />;
+    return <LoadingScreen message="터미널 여는 중…" />;
   }
 
   return (
@@ -1088,7 +1107,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
           // Android draws its own in-flow header (AndroidScreenHeader below);
           // the native stack header stays iOS-only.
           headerShown: Platform.OS !== "android",
-          title: "Terminal",
+          title: "터미널",
           unstable_headerSubtitle:
             usesNativeHeaderGlass && headerSubtitle.length > 0 ? headerSubtitle : undefined,
         }}
@@ -1096,7 +1115,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
       {Platform.OS === "android" ? (
         <AndroidScreenHeader
-          title="Terminal"
+          title="터미널"
           subtitle={headerSubtitle}
           onBack={navigation.canGoBack() ? () => navigation.goBack() : undefined}
           trailing={
@@ -1104,7 +1123,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
               {layout.usesSplitView ? (
                 <AndroidHeaderIconButton
                   accessibilityLabel={
-                    panes.primarySidebarVisible ? "Maximize terminal" : "Show threads"
+                    panes.primarySidebarVisible ? "터미널 크게 보기" : "대화 목록 보기"
                   }
                   icon={
                     panes.primarySidebarVisible
@@ -1124,7 +1143,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
                   })}
                   onPressAction={handleAndroidTerminalMenuAction}
                 >
-                  <AndroidHeaderIconButton accessibilityLabel="Terminal options" icon="terminal" />
+                  <AndroidHeaderIconButton accessibilityLabel="터미널 옵션" icon="terminal" />
                 </ControlPillMenu>
               ) : null}
             </>
@@ -1135,7 +1154,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       {layout.usesSplitView ? (
         <NativeHeaderToolbar placement="left">
           <NativeHeaderToolbar.Button
-            accessibilityLabel={panes.primarySidebarVisible ? "Maximize terminal" : "Show threads"}
+            accessibilityLabel={panes.primarySidebarVisible ? "터미널 크게 보기" : "대화 목록 보기"}
             icon={
               panes.primarySidebarVisible ? "arrow.up.left.and.arrow.down.right" : "sidebar.left"
             }
@@ -1147,25 +1166,25 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
       {isEnvironmentReady ? (
         <NativeHeaderToolbar placement="right">
-          <NativeHeaderToolbar.Menu icon="terminal" title="Terminal options" separateBackground>
+          <NativeHeaderToolbar.Menu icon="terminal" title="터미널 옵션" separateBackground>
             <NativeHeaderToolbar.Label>
               {getTerminalStatusLabel({
                 status: terminal.status,
                 hasRunningSubprocess: terminal.hasRunningSubprocess,
               })}
             </NativeHeaderToolbar.Label>
-            <NativeHeaderToolbar.Menu icon="textformat.size" inline title="Text size">
-              <NativeHeaderToolbar.Label>Text size</NativeHeaderToolbar.Label>
+            <NativeHeaderToolbar.Menu icon="textformat.size" inline title="글자 크기">
+              <NativeHeaderToolbar.Label>글자 크기</NativeHeaderToolbar.Label>
               <NativeHeaderToolbar.MenuAction
                 disabled={fontSize <= MIN_TERMINAL_FONT_SIZE}
-                discoverabilityLabel="Decrease terminal text size"
+                discoverabilityLabel="터미널 글자 작게"
                 onPress={handleDecreaseFontSize}
               >
                 <NativeHeaderToolbar.Label>{`A- ${Math.max(MIN_TERMINAL_FONT_SIZE, fontSize - TERMINAL_FONT_SIZE_STEP).toFixed(1)} pt`}</NativeHeaderToolbar.Label>
               </NativeHeaderToolbar.MenuAction>
               <NativeHeaderToolbar.MenuAction
                 disabled={fontSize >= MAX_TERMINAL_FONT_SIZE}
-                discoverabilityLabel="Increase terminal text size"
+                discoverabilityLabel="터미널 글자 크게"
                 onPress={handleIncreaseFontSize}
               >
                 <NativeHeaderToolbar.Label>{`A+ ${Math.min(MAX_TERMINAL_FONT_SIZE, fontSize + TERMINAL_FONT_SIZE_STEP).toFixed(1)} pt`}</NativeHeaderToolbar.Label>
@@ -1189,9 +1208,9 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
             <NativeHeaderToolbar.MenuAction
               icon="plus"
               onPress={handleOpenNewTerminal}
-              subtitle={`Start another shell in ${basename(selectedThreadProject.workspaceRoot) ?? "this workspace"}`}
+              subtitle={`${basename(selectedThreadProject.workspaceRoot) ?? "이 프로젝트"}에서 새 셸 시작`}
             >
-              <NativeHeaderToolbar.Label>Open new terminal</NativeHeaderToolbar.Label>
+              <NativeHeaderToolbar.Label>새 터미널 열기</NativeHeaderToolbar.Label>
             </NativeHeaderToolbar.MenuAction>
           </NativeHeaderToolbar.Menu>
         </NativeHeaderToolbar>
@@ -1203,7 +1222,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
             environmentLabel={
               environment.presentation?.entry.target.label ??
               selectedEnvironmentConnection?.environmentLabel ??
-              "Environment"
+              "환경"
             }
             connection={
               environment.presentation?.connection ?? {
@@ -1212,11 +1231,28 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
                 traceId: null,
               }
             }
-            resourceName="terminal"
+            resourceName="터미널"
             onRetry={handleRetryEnvironment}
           />
         ) : (
           <>
+            {terminal.access === "observer" ? (
+              <View className="mx-3 mt-2 flex-row items-center justify-between gap-2 rounded-[8px] border border-amber-400/30 bg-amber-500/10 px-3 py-2">
+                <Text className="min-w-0 flex-1 text-xs text-amber-100">
+                  {terminal.controllerAttached
+                    ? "읽기 전용 관찰 중 · 다른 화면에서 입력하고 있습니다"
+                    : "읽기 전용 관찰 중 · 현재 입력권이 비어 있습니다"}
+                </Text>
+                {!terminal.controllerAttached ? (
+                  <Pressable
+                    className="rounded-[7px] border border-amber-300/30 bg-amber-200/10 px-2.5 py-1.5"
+                    onPress={() => setControlModeEntry({ terminalId, value: "control" })}
+                  >
+                    <Text className="font-t3-medium text-xs text-amber-50">입력권 가져오기</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
             <View className="flex-1" style={{ paddingBottom: terminalBottomInset }}>
               <TerminalSurface
                 autoFocus={!SHOWCASE_ENABLED}
@@ -1273,7 +1309,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
                       })}
                     </ComposerToolbarScroller>
                     <ComposerToolbarButton
-                      accessibilityLabel="Dismiss keyboard"
+                      accessibilityLabel="키보드 닫기"
                       icon={{ ios: "keyboard.chevron.compact.down", android: "keyboard_hide" }}
                       onPress={handleDismissKeyboard}
                       showChevron={false}
@@ -1283,7 +1319,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
               </KeyboardStickyView>
             ) : !keyboardState.isVisible ? (
               <Pressable
-                accessibilityLabel="Show keyboard"
+                accessibilityLabel="키보드 열기"
                 accessibilityRole="button"
                 onPress={handleShowKeyboard}
                 style={({ pressed }) => ({

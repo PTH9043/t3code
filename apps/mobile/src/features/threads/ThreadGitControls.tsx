@@ -39,10 +39,10 @@ function compactMenuBranchLabel(branch: string): string {
 
 function compactMenuStatus(gitStatus: VcsStatusResult | null): string {
   if (!gitStatus) {
-    return "Checking status";
+    return "상태 확인 중";
   }
   if (!gitStatus.isRepo) {
-    return "Not a repo";
+    return "저장소 아님";
   }
 
   const parts: string[] = [];
@@ -123,7 +123,7 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
       isRepo
         ? resolveQuickAction(gitStatus, busy, isDefaultRef, hasPrimaryRemote)
         : {
-            label: "Git unavailable",
+            label: "깃 사용 불가",
             disabled: true,
             kind: "show_hint" as const,
             hint: "This workspace is not a git repository.",
@@ -252,11 +252,11 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
   return useMemo(
     () => ({
       terminal: {
-        accessibilityLabel: "Open terminal",
+        accessibilityLabel: "터미널 열기",
         disabled: !props.canOpenTerminal,
         icon: { name: "terminal", type: "sfSymbol" },
         identifier: "thread-right-terminal",
-        label: "Terminal",
+        label: "터미널",
         menu: {
           items: [
             ...props.projectScripts.map((script) => ({
@@ -269,10 +269,10 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
             ...(props.projectScripts.length === 0
               ? [
                   {
-                    description: "This project has no saved scripts yet",
+                    description: "이 프로젝트에 저장된 실행 작업이 없습니다",
                     disabled: true,
                     icon: { name: "play", type: "sfSymbol" as const },
-                    label: "No project scripts",
+                    label: "프로젝트 실행 작업 없음",
                     onPress: () => {},
                     type: "action" as const,
                   },
@@ -294,35 +294,35 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
               type: "action" as const,
             })),
             {
-              description: "Start another shell for this thread",
+              description: "이 대화에서 다른 셸 시작",
               icon: { name: "plus", type: "sfSymbol" },
-              label: "Open new terminal",
+              label: "새 터미널 열기",
               onPress: props.onOpenNewTerminal,
               type: "action",
             },
           ],
-          title: "Terminal",
+          title: "터미널",
         },
         sharesBackground: true,
         type: "menu",
         variant: "plain",
       },
       files: {
-        accessibilityLabel: "Open files",
+        accessibilityLabel: "파일 열기",
         disabled: !props.canOpenFiles,
         icon: { name: "folder", type: "sfSymbol" },
         identifier: "thread-right-files",
-        label: "Files",
+        label: "파일",
         onPress: model.openFiles,
         sharesBackground: true,
         type: "button",
         variant: "plain",
       },
       git: {
-        accessibilityLabel: "Git actions",
+        accessibilityLabel: "깃 작업",
         icon: { name: "point.topleft.down.curvedto.point.bottomright.up", type: "sfSymbol" },
         identifier: "thread-right-git",
-        label: "Git",
+        label: "깃",
         menu: {
           items: [
             {
@@ -345,22 +345,22 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
               type: "action",
             },
             {
-              description: "Turn diffs and worktree changes",
+              description: "턴별 차이와 작업 트리 변경",
               disabled: !model.isRepo,
               icon: { name: "text.bubble", type: "sfSymbol" },
-              label: "Review changes",
+              label: "변경 내용 검토",
               onPress: model.openReview,
               type: "action",
             },
             {
-              description: "Commit, files, branches",
+              description: "커밋, 파일, 브랜치",
               icon: { name: "ellipsis", type: "sfSymbol" },
-              label: "More",
+              label: "더 보기",
               onPress: model.openGitInspector,
               type: "action",
             },
           ],
-          title: "Git",
+          title: "깃",
         },
         sharesBackground: true,
         type: "menu",
@@ -448,9 +448,9 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
               icon="play"
               disabled
               onPress={() => {}}
-              subtitle="This project has no saved scripts yet"
+              subtitle="이 프로젝트에 저장된 실행 작업이 없습니다"
             >
-              <NativeHeaderToolbar.Label>No project scripts</NativeHeaderToolbar.Label>
+              <NativeHeaderToolbar.Label>프로젝트 실행 작업 없음</NativeHeaderToolbar.Label>
             </NativeHeaderToolbar.MenuAction>
           )}
           {props.terminalSessions.map((session) => (
@@ -474,15 +474,15 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
           <NativeHeaderToolbar.MenuAction
             icon="plus"
             onPress={props.onOpenNewTerminal}
-            subtitle="Start another shell for this thread"
+            subtitle="이 대화에서 다른 셸 시작"
           >
-            <NativeHeaderToolbar.Label>Open new terminal</NativeHeaderToolbar.Label>
+            <NativeHeaderToolbar.Label>새 터미널 열기</NativeHeaderToolbar.Label>
           </NativeHeaderToolbar.MenuAction>
         </NativeHeaderToolbar.Menu>
       ) : null}
       {showActionControls && props.showDirectFileControl ? (
         <NativeHeaderToolbar.Button
-          accessibilityLabel="Open files"
+          accessibilityLabel="파일 열기"
           disabled={!props.canOpenFiles}
           icon="folder"
           onPress={model.openFiles}
@@ -526,16 +526,16 @@ export function ThreadGitMenu(props: ThreadGitMenuProps) {
         icon="text.bubble"
         disabled={!model.isRepo}
         onPress={model.openReview}
-        subtitle="Turn diffs and worktree changes"
+        subtitle="턴별 차이와 작업 트리 변경"
       >
-        <NativeHeaderToolbar.Label>Review changes</NativeHeaderToolbar.Label>
+        <NativeHeaderToolbar.Label>변경 내용 검토</NativeHeaderToolbar.Label>
       </NativeHeaderToolbar.MenuAction>
       <NativeHeaderToolbar.MenuAction
         icon="ellipsis"
         onPress={model.openGitInspector}
-        subtitle="Commit, files, branches"
+        subtitle="커밋, 파일, 브랜치"
       >
-        <NativeHeaderToolbar.Label>More</NativeHeaderToolbar.Label>
+        <NativeHeaderToolbar.Label>더 보기</NativeHeaderToolbar.Label>
       </NativeHeaderToolbar.MenuAction>
     </NativeHeaderToolbar.Menu>
   );

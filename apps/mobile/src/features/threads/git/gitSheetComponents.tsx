@@ -115,11 +115,11 @@ export function statusSummary(
   } | null,
 ): string {
   if (!gitStatus) {
-    return "Loading branch status\u2026";
+    return "브랜치 상태를 불러오는 중\u2026";
   }
 
   if (!gitStatus.isRepo) {
-    return "Not a git repository";
+    return "깃 저장소가 아닙니다";
   }
 
   const parts: string[] = [];

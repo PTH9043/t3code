@@ -7,7 +7,7 @@ export function SidebarHeaderActions(props: SidebarHeaderActionsProps) {
   return (
     <View className="h-11 flex-row gap-1">
       <T3HeaderButton
-        accessibilityLabel="Open settings"
+        accessibilityLabel="설정 열기"
         icon="gearshape"
         onPress={props.onOpenSettings}
       />

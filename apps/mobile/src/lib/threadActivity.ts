@@ -1208,10 +1208,10 @@ function deriveThreadFeedTurnFolds(
     const label = interrupted
       ? duration
         ? `You stopped after ${duration}`
-        : "You stopped this response"
+        : "사용자가 이 응답을 중지했습니다"
       : duration
         ? `Worked for ${duration}`
-        : "Worked";
+        : "작업함";
 
     foldsByAnchorId.set(firstEntry.id, {
       turnId,

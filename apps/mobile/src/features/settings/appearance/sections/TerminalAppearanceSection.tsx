@@ -26,13 +26,13 @@ export function TerminalAppearanceSection() {
   );
 
   return (
-    <SettingsSection card title="Terminal">
+    <SettingsSection card title="터미널">
       <TerminalAppearancePreview fontSize={appearance.terminalFontSize} />
       <AppearancePreviewSeparator />
       <SettingsSwitchRow
         disabled={!isReady}
         icon="terminal"
-        label="Custom font size"
+        label="사용자 지정 글자 크기"
         onValueChange={handleToggleCustom}
         value={custom}
       />
@@ -40,7 +40,7 @@ export function TerminalAppearanceSection() {
         <FontSizeSliderRow
           disabled={!isReady}
           icon="textformat.size"
-          label="Font size"
+          label="글자 크기"
           max={MAX_TERMINAL_FONT_SIZE}
           min={MIN_TERMINAL_FONT_SIZE}
           onChange={setTerminalFontSize}

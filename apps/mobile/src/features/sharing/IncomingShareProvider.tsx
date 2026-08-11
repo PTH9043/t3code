@@ -239,9 +239,9 @@ export function IncomingShareProvider(props: React.PropsWithChildren) {
       return;
     }
     Alert.alert("Could not import shared content", error.message, [
-      { text: "Dismiss", style: "cancel", onPress: () => setError(null) },
+      { text: "닫기", style: "cancel", onPress: () => setError(null) },
       {
-        text: "Retry",
+        text: "다시 시도",
         onPress: () => {
           setError(null);
           void refresh();

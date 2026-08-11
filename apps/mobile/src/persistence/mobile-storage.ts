@@ -47,7 +47,7 @@ export class MobileDeviceIdGenerationError extends Schema.TaggedErrorClass<Mobil
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "Failed to generate the mobile agent-awareness device id.";
+    return "모바일 에이전트 활동 기기 ID를 만들지 못했습니다.";
   }
 }
 

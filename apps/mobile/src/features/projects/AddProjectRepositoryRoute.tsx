@@ -20,7 +20,7 @@ export function AddProjectRepositoryRoute({
     source === "bitbucket" ||
     source === "azure-devops"
       ? addProjectRemoteSourceLabel(source)
-      : "Git URL";
+      : "깃 주소";
 
   return (
     <>

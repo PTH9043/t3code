@@ -1,14 +1,25 @@
 import { type KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
 import { DEFAULT_TERMINAL_ID, type ProjectScript } from "@t3tools/contracts";
-import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
+import {
+  nextTerminalId,
+  resolveTerminalSessionLabel as resolveSharedTerminalSessionLabel,
+} from "@t3tools/shared/terminalLabels";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 
-export {
-  getTerminalLabel,
-  nextTerminalId,
-  resolveTerminalSessionLabel,
-} from "@t3tools/shared/terminalLabels";
+export { getTerminalLabel, nextTerminalId } from "@t3tools/shared/terminalLabels";
+
+function localizeDefaultTerminalLabel(label: string): string {
+  const match = /^Terminal(?:\s+(\d+))?$/u.exec(label.trim());
+  if (!match) return label;
+  return match[1] ? `터미널 ${match[1]}` : "터미널";
+}
+
+export function resolveTerminalSessionLabel(
+  ...args: Parameters<typeof resolveSharedTerminalSessionLabel>
+): string {
+  return localizeDefaultTerminalLabel(resolveSharedTerminalSessionLabel(...args));
+}
 
 export interface TerminalMenuSession {
   readonly terminalId: string;
@@ -47,19 +58,19 @@ export function getTerminalStatusLabel(input: {
   readonly hasRunningSubprocess?: boolean;
 }): string {
   if (input.status === "running") {
-    return input.hasRunningSubprocess ? "Task running" : "Ready";
+    return input.hasRunningSubprocess ? "작업 실행 중" : "준비됨";
   }
   if (input.status === "starting") {
-    return "Starting";
+    return "시작 중";
   }
   if (input.status === "exited") {
-    return "Exited";
+    return "종료됨";
   }
   if (input.status === "error") {
-    return "Error";
+    return "오류";
   }
 
-  return "Not started";
+  return "시작 안 됨";
 }
 
 /**
@@ -108,7 +119,10 @@ export function buildTerminalMenuSessions(input: {
   }
 
   if (input.currentSession && !sessionsById.has(input.currentSession.terminalId)) {
-    sessionsById.set(input.currentSession.terminalId, input.currentSession);
+    sessionsById.set(input.currentSession.terminalId, {
+      ...input.currentSession,
+      displayLabel: localizeDefaultTerminalLabel(input.currentSession.displayLabel),
+    });
   }
 
   return Arr.sort(sessionsById.values(), terminalMenuSessionOrder);
@@ -155,7 +169,7 @@ export function resolveProjectScriptTerminalId(input: {
 }
 
 export function projectScriptMenuLabel(script: ProjectScript): string {
-  return script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name;
+  return script.runOnWorktreeCreate ? `${script.name} (설정)` : script.name;
 }
 
 export function projectScriptMenuIcon(icon: ProjectScript["icon"]) {

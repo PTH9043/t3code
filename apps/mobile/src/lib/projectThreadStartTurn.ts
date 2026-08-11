@@ -13,7 +13,7 @@ import { toUploadChatImageAttachments, type DraftComposerImageAttachment } from 
 export function deriveThreadTitleFromPrompt(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
-    return "New thread";
+    return "새 대화";
   }
 
   const compact = trimmed.replace(/\s+/g, " ");

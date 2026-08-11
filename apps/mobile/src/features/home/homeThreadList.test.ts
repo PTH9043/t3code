@@ -9,6 +9,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildHomeProjectScopes,
   buildHomeThreadGroups,
+  findHomeProjectScopeKeyForRef,
+  resolveRequiredHomeProjectScopeKey,
   sortHomeProjectScopes,
 } from "./homeThreadList";
 
@@ -72,6 +74,37 @@ function buildGroups(
 }
 
 describe("buildHomeThreadGroups", () => {
+  it("requires one project scope instead of exposing a mixed all-project view", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const projects = [
+      makeProject({
+        environmentId,
+        id: ProjectId.make("project-1"),
+        title: "First",
+      }),
+      makeProject({
+        environmentId,
+        id: ProjectId.make("project-2"),
+        title: "Second",
+      }),
+    ];
+    const scopes = buildHomeProjectScopes({
+      projects,
+      environmentId: null,
+      projectGroupingMode: "separate",
+    });
+
+    expect(resolveRequiredHomeProjectScopeKey(scopes, null)).toBe(scopes[0]?.key);
+    expect(resolveRequiredHomeProjectScopeKey(scopes, scopes[1]?.key ?? null)).toBe(scopes[1]?.key);
+    expect(resolveRequiredHomeProjectScopeKey(scopes, "removed-project")).toBe(scopes[0]?.key);
+    expect(
+      findHomeProjectScopeKeyForRef(scopes, {
+        environmentId,
+        projectId: projects[1]!.id,
+      }),
+    ).toBe(scopes[1]?.key);
+  });
+
   it("builds one v2 scope for the same repository across environments", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");

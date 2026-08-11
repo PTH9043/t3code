@@ -43,7 +43,7 @@ function ResolvedWorkspaceFileImagePreview(props: {
 
       {loadError !== null ? (
         <View className="absolute inset-0 items-center justify-center bg-card px-6">
-          <EmptyState title="Image unavailable" detail={loadError} />
+          <EmptyState title="이미지를 불러올 수 없습니다" detail={loadError} />
         </View>
       ) : null}
 
@@ -70,7 +70,7 @@ function CachedWorkspaceFileImagePreview(props: {
     return (
       <View className="flex-1 items-center justify-center bg-card px-6">
         <EmptyState
-          title="Image unavailable"
+          title="이미지를 불러올 수 없습니다"
           detail="The image could not be loaded into the local cache."
         />
       </View>

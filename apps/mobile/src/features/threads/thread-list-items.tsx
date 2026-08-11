@@ -37,6 +37,138 @@ export type ThreadListVariant = "compact" | "sidebar";
 export const THREAD_LIST_COMPACT_INSET = HOME_HORIZONTAL_INSET;
 const SIDEBAR_ROW_RADIUS = 12;
 
+export const ThreadListCollaborationRow = memo(function ThreadListCollaborationRow(props: {
+  readonly variant: ThreadListVariant;
+  readonly project: EnvironmentProject;
+  readonly onOpen: (project: EnvironmentProject) => void;
+}) {
+  const iconMutedColor = useThemeColor("--color-icon-muted");
+  const compact = props.variant === "compact";
+  const { onOpen, project } = props;
+  const handleOpen = useCallback(() => onOpen(project), [onOpen, project]);
+
+  return (
+    <View
+      className={compact ? "bg-screen px-4 pb-2" : "px-2 pb-2"}
+      style={{ paddingTop: compact ? 8 : 4 }}
+    >
+      <Pressable
+        accessibilityLabel={`${project.title} 프로젝트 운영 현황 열기`}
+        accessibilityHint="대화, 프로그램, 장애와 작업 그래프 현황을 엽니다"
+        accessibilityRole="button"
+        className="flex-row items-center gap-3 rounded-xl border border-border bg-card px-3 py-3"
+        onPress={handleOpen}
+        style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+      >
+        <View className="h-9 w-9 items-center justify-center rounded-xl bg-secondary">
+          <SymbolView
+            name="point.3.connected.trianglepath.dotted"
+            size={compact ? 20 : 18}
+            tintColor={iconMutedColor}
+            type="monochrome"
+            weight="medium"
+          />
+        </View>
+        <View className="min-w-0 flex-1">
+          <Text className="text-sm font-t3-semibold text-foreground" numberOfLines={1}>
+            {project.title} 운영 현황
+          </Text>
+          <Text className="mt-0.5 text-xs text-foreground-muted" numberOfLines={1}>
+            대화·프로그램·장애·작업 그래프
+          </Text>
+        </View>
+        <SymbolView
+          name="chevron.right"
+          size={14}
+          tintColor={iconMutedColor}
+          type="monochrome"
+          weight="semibold"
+        />
+      </Pressable>
+    </View>
+  );
+});
+
+/** Visible parent context for the flat conversation list. */
+export const ThreadListProjectHeader = memo(function ThreadListProjectHeader(props: {
+  readonly variant: ThreadListVariant;
+  readonly project: EnvironmentProject;
+  readonly title: string;
+  readonly conversationCount: number;
+  readonly newThreadTarget?: EnvironmentProject | null;
+  readonly onNewThread?: (project: EnvironmentProject) => void;
+}) {
+  const compact = props.variant === "compact";
+  const iconMutedColor = useThemeColor("--color-icon-muted");
+  const newThreadTarget = props.newThreadTarget ?? null;
+  const handleNewThread = useCallback(() => {
+    if (newThreadTarget) props.onNewThread?.(newThreadTarget);
+  }, [newThreadTarget, props.onNewThread]);
+
+  return (
+    <View
+      className={compact ? "flex-row items-center bg-screen" : "flex-row items-center"}
+      style={{
+        minHeight: compact ? 58 : 48,
+        paddingLeft: compact ? 20 : 12,
+        paddingRight: compact ? 14 : 12,
+        paddingBottom: compact ? 10 : 8,
+        paddingTop: compact ? 12 : 8,
+      }}
+    >
+      <ProjectFavicon
+        environmentId={props.project.environmentId}
+        open
+        size={compact ? 24 : 20}
+        projectTitle={props.project.title}
+        workspaceRoot={props.project.workspaceRoot}
+      />
+      <View className="ml-2.5 min-w-0 flex-1">
+        <Text className="text-[11px] font-t3-bold tracking-[0.8px] text-foreground-tertiary">
+          프로젝트
+        </Text>
+        <Text
+          className={
+            compact
+              ? "text-base font-t3-bold text-foreground"
+              : "text-sm font-t3-bold text-foreground"
+          }
+          numberOfLines={1}
+        >
+          {props.title}
+        </Text>
+      </View>
+      <View className="mr-1.5 items-end">
+        <Text className="text-xs font-t3-medium text-foreground-tertiary">
+          대화 {props.conversationCount}개
+        </Text>
+        <Text className="mt-0.5 text-[10px] font-t3-medium text-foreground-tertiary">
+          입력 RAG{" "}
+          {props.project.workspaceControl?.conversationRag.enabled === false ? "꺼짐" : "켜짐"}
+        </Text>
+      </View>
+      {newThreadTarget && props.onNewThread ? (
+        <Pressable
+          accessibilityLabel={`${props.title} 프로젝트에 새 대화 만들기`}
+          accessibilityRole="button"
+          hitSlop={12}
+          onPress={handleNewThread}
+          className="size-9 items-center justify-center rounded-full bg-subtle"
+          style={({ pressed }) => ({ opacity: pressed ? 0.55 : 1 })}
+        >
+          <SymbolView
+            name="plus"
+            size={compact ? 18 : 16}
+            tintColor={iconMutedColor}
+            type="monochrome"
+            weight="semibold"
+          />
+        </Pressable>
+      ) : null}
+    </View>
+  );
+});
+
 function pullRequestTintColor(
   state: ThreadPr["state"],
   colorScheme: ReturnType<typeof useColorScheme>,
@@ -86,9 +218,10 @@ export const ThreadListGroupHeader = memo(function ThreadListGroupHeader(props: 
   /** Project a quick new thread should target; null hides the button. */
   readonly newThreadTarget?: EnvironmentProject | null;
   readonly onNewThread?: (project: EnvironmentProject) => void;
+  readonly onOpenCollaborationRuns?: (project: EnvironmentProject) => void;
 }) {
   const iconMutedColor = useThemeColor("--color-icon-muted");
-  const { groupKey, onGroupAction, onNewThread } = props;
+  const { groupKey, onGroupAction, onNewThread, onOpenCollaborationRuns } = props;
   const newThreadTarget = props.newThreadTarget ?? null;
   const compact = props.variant === "compact";
   const handleToggle = useCallback(
@@ -100,7 +233,13 @@ export const ThreadListGroupHeader = memo(function ThreadListGroupHeader(props: 
       onNewThread?.(newThreadTarget);
     }
   }, [newThreadTarget, onNewThread]);
+  const handleOpenCollaborationRuns = useCallback(() => {
+    if (newThreadTarget) {
+      onOpenCollaborationRuns?.(newThreadTarget);
+    }
+  }, [newThreadTarget, onOpenCollaborationRuns]);
   const showNewThreadButton = onNewThread !== undefined && newThreadTarget !== null;
+  const showCollaborationButton = onOpenCollaborationRuns !== undefined && newThreadTarget !== null;
 
   // The new-thread button is a SIBLING of the collapse toggle, not a child:
   // nested touchables are unreachable to VoiceOver/TalkBack (the parent
@@ -124,8 +263,8 @@ export const ThreadListGroupHeader = memo(function ThreadListGroupHeader(props: 
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: !props.collapsed }}
-        accessibilityLabel={`${props.title}, ${props.threadCount} threads`}
-        accessibilityHint={props.collapsed ? "Expands the project" : "Collapses the project"}
+        accessibilityLabel={`${props.title}, 대화 ${props.threadCount}개`}
+        accessibilityHint={props.collapsed ? "프로젝트를 펼칩니다" : "프로젝트를 접습니다"}
         className={
           compact ? "flex-1 flex-row items-center gap-2.5" : "flex-1 flex-row items-center gap-2"
         }
@@ -159,9 +298,26 @@ export const ThreadListGroupHeader = memo(function ThreadListGroupHeader(props: 
           {props.threadCount}
         </Text>
       </Pressable>
+      {showCollaborationButton ? (
+        <Pressable
+          accessibilityLabel={`${props.title} 프로젝트 운영 현황 열기`}
+          accessibilityRole="button"
+          hitSlop={{ ...verticalHitSlop, left: 10, right: 8 }}
+          onPress={handleOpenCollaborationRuns}
+          style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1, paddingLeft: 10 })}
+        >
+          <SymbolView
+            name="point.3.connected.trianglepath.dotted"
+            size={compact ? 19 : 16}
+            tintColor={iconMutedColor}
+            type="monochrome"
+            weight="medium"
+          />
+        </Pressable>
+      ) : null}
       {showNewThreadButton ? (
         <Pressable
-          accessibilityLabel={`Create new thread in ${props.title}`}
+          accessibilityLabel={`${props.title} 프로젝트에 새 대화 만들기`}
           accessibilityRole="button"
           hitSlop={{ ...verticalHitSlop, left: 10, right: 14 }}
           onPress={handleNewThread}
@@ -205,7 +361,7 @@ export const ThreadListShowMoreRow = memo(function ThreadListShowMoreRow(props: 
   const button = (label: string, icon: "chevron.down" | "chevron.up", onPress: () => void) => (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label === "Show more" ? "Show more threads" : "Show fewer threads"}
+      accessibilityLabel={label === "더 보기" ? "대화 더 보기" : "대화 간단히 보기"}
       className="rounded-full bg-subtle"
       hitSlop={6}
       onPress={onPress}
@@ -248,8 +404,8 @@ export const ThreadListShowMoreRow = memo(function ThreadListShowMoreRow(props: 
         paddingVertical: compact ? 12 : 8,
       }}
     >
-      {showsMore ? button("Show more", "chevron.down", handleShowMore) : null}
-      {props.canShowLess ? button("Show less", "chevron.up", handleShowLess) : null}
+      {showsMore ? button("더 보기", "chevron.down", handleShowMore) : null}
+      {props.canShowLess ? button("간단히 보기", "chevron.up", handleShowLess) : null}
     </View>
   );
 });
@@ -257,7 +413,7 @@ export const ThreadListShowMoreRow = memo(function ThreadListShowMoreRow(props: 
 /* ─── Pending task row ───────────────────────────────────────────────── */
 
 const PENDING_TASK_MENU_ACTIONS: MenuAction[] = [
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 /**
@@ -294,7 +450,7 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
   const statusPill = (
     <View className="rounded-full bg-zinc-500/12 px-1.5 py-0.5 dark:bg-zinc-500/16">
-      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">Pending</Text>
+      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">대기</Text>
     </View>
   );
 
@@ -410,8 +566,8 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 /* ─── Thread row ─────────────────────────────────────────────────────── */
 
 const THREAD_ROW_MENU_ACTIONS: MenuAction[] = [
-  { id: "archive", title: "Archive", image: "archivebox" },
-  { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+  { id: "archive", title: "보관", image: "archivebox" },
+  { id: "delete", title: "삭제", image: "trash", attributes: { destructive: true } },
 ];
 
 export const ThreadListRow = memo(function ThreadListRow(props: {
@@ -474,7 +630,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => ({
       accessibilityLabel: `Archive ${thread.title}`,
       icon: "archivebox" as const,
-      label: "Archive",
+      label: "보관",
       onPress: handleArchive,
     }),
     [handleArchive, thread.title],

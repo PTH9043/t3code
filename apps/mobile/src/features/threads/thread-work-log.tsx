@@ -283,17 +283,9 @@ export function ThreadWorkGroupToggle(props: {
 }) {
   const colorScheme = useColorScheme();
   const pressedBackground = colorScheme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.035)";
-  const noun = props.onlyToolActivities
-    ? props.hiddenCount === 1
-      ? "tool call"
-      : "tool calls"
-    : props.hiddenCount === 1
-      ? "log entry"
-      : "log entries";
-  const collapsedLabel = `Show ${props.hiddenCount} previous ${noun}`;
-  const expandedLabel = props.onlyToolActivities
-    ? "Show fewer tool calls"
-    : "Show fewer log entries";
+  const noun = props.onlyToolActivities ? "도구 호출" : "로그 항목";
+  const collapsedLabel = `이전 ${noun} ${props.hiddenCount}개 보기`;
+  const expandedLabel = props.onlyToolActivities ? "도구 호출 적게 보기" : "로그 항목 적게 보기";
 
   return (
     <View className="-mx-1 mb-1 px-1 py-0">

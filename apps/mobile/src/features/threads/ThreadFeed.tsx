@@ -341,7 +341,7 @@ function MarkdownCodeBlock(props: {
           {languageLabel}
         </NativeText>
         <CopyTextButton
-          accessibilityLabel="Copy code"
+          accessibilityLabel="코드 복사"
           text={content}
           tintColor={props.copyTintColor}
           buttonSize={32}
@@ -928,7 +928,7 @@ function renderFeedEntry(
             </Text>
             {message.text.trim().length > 0 ? (
               <CopyTextButton
-                accessibilityLabel="Copy message"
+                accessibilityLabel="메시지 복사"
                 text={message.text}
                 tintColor={iconSubtleColor}
                 buttonSize={28}
@@ -985,7 +985,7 @@ function renderFeedEntry(
         {showAssistantMeta ? (
           <View className="mt-1 flex-row items-center gap-1">
             <CopyTextButton
-              accessibilityLabel="Copy message"
+              accessibilityLabel="메시지 복사"
               text={message.text}
               tintColor={iconSubtleColor}
               buttonSize={28}
@@ -1922,7 +1922,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
                     className="items-center py-2"
                   >
                     <Text className="text-xs text-foreground-secondary">
-                      {props.loadEarlier.loading ? "Loading earlier turns…" : "Load earlier turns"}
+                      {props.loadEarlier.loading ? "이전 턴 불러오는 중…" : "이전 턴 불러오기"}
                     </Text>
                   </Pressable>
                 ) : null}
@@ -1939,7 +1939,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         props.contentPresentation.kind === "ready" ? (
           <View pointerEvents="none" style={StyleSheet.absoluteFill}>
             <ThreadFeedPlaceholder
-              title="No conversation yet"
+              title="아직 대화가 없습니다"
               detail="Ask the agent to inspect the repo, run a command, or continue the active thread."
               topInset={topContentInset}
               bottomInset={bottomContentInset}

@@ -43,9 +43,9 @@ export function SettingsClientStorageRouteScreen() {
       `Clear cache for ${label}?`,
       "This removes offline threads, server metadata, and cached branches for this environment. The saved connection and credentials stay intact.",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "취소", style: "cancel" },
         {
-          text: "Clear Cache",
+          text: "캐시 비우기",
           style: "destructive",
           onPress: () =>
             clearCache({ type: "environment", environmentId: environment.environmentId }),
@@ -59,9 +59,9 @@ export function SettingsClientStorageRouteScreen() {
       "Clear all client caches?",
       "This removes offline data for every environment. Connections, credentials, account data, and app preferences stay intact.",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "취소", style: "cancel" },
         {
-          text: "Clear All Caches",
+          text: "모든 캐시 비우기",
           style: "destructive",
           onPress: () => clearCache({ type: "all" }),
         },
@@ -78,7 +78,7 @@ export function SettingsClientStorageRouteScreen() {
         className="flex-1"
         contentContainerClassName="gap-6 px-5 pt-4 pb-[18px]"
       >
-        <SettingsSection title="Environment caches">
+        <SettingsSection title="연결 환경 캐시">
           {AsyncResult.isFailure(summaryResult) ? (
             <View className="items-center gap-2 px-6 py-8">
               <SymbolView
@@ -88,7 +88,9 @@ export function SettingsClientStorageRouteScreen() {
                 type="monochrome"
                 weight="regular"
               />
-              <Text className="text-center text-base text-foreground">Storage unavailable</Text>
+              <Text className="text-center text-base text-foreground">
+                저장소를 사용할 수 없습니다
+              </Text>
               <Text className="text-center text-sm text-foreground-muted">
                 Restart the app and try again.
               </Text>
@@ -123,7 +125,7 @@ export function SettingsClientStorageRouteScreen() {
                 type="monochrome"
                 weight="regular"
               />
-              <Text className="text-center text-base text-foreground">No cached data</Text>
+              <Text className="text-center text-base text-foreground">저장된 캐시가 없습니다</Text>
               <Text className="text-center text-sm text-foreground-muted">
                 Offline cache records will appear here after environments are used.
               </Text>
@@ -132,7 +134,7 @@ export function SettingsClientStorageRouteScreen() {
         </SettingsSection>
 
         <View className="gap-3">
-          <SettingsSection title="Actions">
+          <SettingsSection title="작업">
             <Pressable
               accessibilityRole="button"
               disabled={isClearing || !summary || summary.recordCount === 0}
@@ -147,7 +149,7 @@ export function SettingsClientStorageRouteScreen() {
                 weight="regular"
               />
               <Text className="flex-1 text-lg tabular-nums text-danger-foreground">
-                {summary ? `Clear ${formatBytes(summary.payloadBytes)}` : "Clear caches"}
+                {summary ? `${formatBytes(summary.payloadBytes)} 비우기` : "캐시 비우기"}
               </Text>
               {isClearing ? <ActivityIndicator color={dangerForegroundColor} /> : null}
             </Pressable>

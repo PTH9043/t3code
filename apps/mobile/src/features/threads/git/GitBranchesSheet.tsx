@@ -60,7 +60,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
       {Platform.OS === "android" ? (
-        <AndroidSheetHeader title="Branches & worktrees" onBack={() => navigation.goBack()} />
+        <AndroidSheetHeader title="브랜치와 작업 트리" onBack={() => navigation.goBack()} />
       ) : null}
       <ScrollView
         className="flex-1"
@@ -80,7 +80,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           />
           <SheetActionButton
             icon="plus"
-            label="Create & checkout"
+            label="만들고 전환"
             tone="primary"
             disabled={busy || newBranchName.trim().length === 0}
             onPress={() => {
@@ -112,7 +112,7 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
           />
           <SheetActionButton
             icon="square.split.2x1"
-            label="Create worktree"
+            label="작업 트리 만들기"
             tone="primary"
             disabled={
               busy ||
@@ -150,10 +150,10 @@ export function GitBranchesSheet(_props: GitBranchesSheetProps) {
             const subtitle = branch.worktreePath
               ? branch.worktreePath === currentWorktreePath
                 ? "Checked out in this thread"
-                : "Checked out in another worktree"
+                : "다른 작업 트리에서 사용 중"
               : branch.isDefault
                 ? "Default branch"
-                : "Local branch";
+                : "로컬 브랜치";
 
             return (
               <Pressable

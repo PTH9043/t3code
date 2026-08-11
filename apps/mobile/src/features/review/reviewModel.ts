@@ -162,7 +162,7 @@ function gitSubtitle(section: ReviewDiffPreviewSource): string | null {
   if (section.baseRef) {
     return `${section.baseRef} ... ${section.headRef ?? "HEAD"}`;
   }
-  return "Base branch unavailable";
+  return "기준 브랜치를 사용할 수 없습니다";
 }
 
 function stripGitPrefix(pathValue: string | undefined): string | null {
@@ -295,7 +295,7 @@ export function getReviewFilePreviewState(file: ReviewRenderableFile): ReviewFil
     return {
       kind: "suppressed",
       reason: "non-text",
-      title: "Non-text file",
+      title: "텍스트가 아닌 파일",
       message: "Diff preview is not available for this file format.",
       actionLabel: null,
     };
@@ -307,9 +307,9 @@ export function getReviewFilePreviewState(file: ReviewRenderableFile): ReviewFil
     return {
       kind: "suppressed",
       reason: "large",
-      title: "Large diff",
+      title: "큰 변경 내용",
       message: "Large diffs are not rendered by default.",
-      actionLabel: "Load diff",
+      actionLabel: "변경 내용 불러오기",
     };
   }
 

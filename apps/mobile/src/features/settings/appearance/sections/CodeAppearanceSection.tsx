@@ -26,7 +26,7 @@ export function CodeAppearanceSection() {
   );
 
   return (
-    <SettingsSection card title="Code & Diffs">
+    <SettingsSection card title="코드와 변경 비교">
       <CodeAppearancePreview
         fontSize={appearance.codeFontSize}
         wordBreak={appearance.codeWordBreak}
@@ -35,7 +35,7 @@ export function CodeAppearanceSection() {
       <SettingsSwitchRow
         disabled={!isReady}
         icon="chevron.left.forwardslash.chevron.right"
-        label="Custom font size"
+        label="사용자 지정 글자 크기"
         onValueChange={handleToggleCustom}
         value={custom}
       />
@@ -43,7 +43,7 @@ export function CodeAppearanceSection() {
         <FontSizeSliderRow
           disabled={!isReady}
           icon="textformat.size"
-          label="Font size"
+          label="글자 크기"
           max={MAX_CODE_FONT_SIZE}
           min={MIN_CODE_FONT_SIZE}
           onChange={setCodeFontSize}
@@ -55,7 +55,7 @@ export function CodeAppearanceSection() {
       <SettingsSwitchRow
         disabled={!isReady}
         icon="text.word.spacing"
-        label="Word break"
+        label="긴 단어 줄바꿈"
         onValueChange={setCodeWordBreak}
         value={appearance.codeWordBreak}
       />

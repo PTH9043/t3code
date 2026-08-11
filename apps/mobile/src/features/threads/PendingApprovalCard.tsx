@@ -35,7 +35,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
           disabled={props.respondingApprovalId === props.approval.requestId}
           onPress={() => void props.onRespond(props.approval.requestId, "accept")}
         >
-          <Text className="font-t3-extrabold text-sm text-white">Allow once</Text>
+          <Text className="font-t3-extrabold text-sm text-white">한 번 허용</Text>
         </Pressable>
         <Pressable
           className="items-center justify-center rounded-[14px] bg-neutral-200 px-3.5 py-3 dark:bg-neutral-800"
@@ -51,7 +51,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
           disabled={props.respondingApprovalId === props.approval.requestId}
           onPress={() => void props.onRespond(props.approval.requestId, "decline")}
         >
-          <Text className="font-t3-bold text-sm text-rose-700 dark:text-rose-300">Decline</Text>
+          <Text className="font-t3-bold text-sm text-rose-700 dark:text-rose-300">거부</Text>
         </Pressable>
       </View>
     </View>

@@ -117,7 +117,7 @@ function FileContent(props: {
   if (props.fileError && props.fileContents === null) {
     return (
       <View className="flex-1 items-center justify-center bg-sheet px-6">
-        <EmptyState title="File unavailable" detail={props.fileError} />
+        <EmptyState title="파일을 불러올 수 없습니다" detail={props.fileError} />
       </View>
     );
   }
@@ -199,9 +199,9 @@ function useThreadFilesWorkspace(params: {
 function FilesUnavailable() {
   return (
     <View className="flex-1 items-center justify-center bg-sheet px-6">
-      <NativeStackScreenOptions options={{ title: "Files" }} />
+      <NativeStackScreenOptions options={{ title: "파일" }} />
       <EmptyState
-        title="Files unavailable"
+        title="파일을 불러올 수 없습니다"
         detail="This thread does not have an active workspace path."
       />
     </View>
@@ -340,7 +340,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
         />
       );
     }
-    return <LoadingScreen message="Opening files..." messagePlacement="above-spinner" />;
+    return <LoadingScreen message="파일을 여는 중..." messagePlacement="above-spinner" />;
   }
 
   if (cwd === null) {
@@ -374,7 +374,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
             ? () => [
                 createNativeMailSearchToolbarItem({
                   onSearchTextChange: setSearchQuery,
-                  placeholder: "Search files",
+                  placeholder: "파일 검색",
                   searchTextChangeId: "files-search-text",
                 }),
               ]
@@ -385,7 +385,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
                 allowToolbarIntegration: true,
                 autoCapitalize: "none",
                 hideNavigationBar: false,
-                placeholder: "Search files",
+                placeholder: "파일 검색",
                 onChangeText: (event) => {
                   setSearchQuery(event.nativeEvent.text);
                 },
@@ -398,12 +398,12 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
       {isAndroid ? (
         <>
           <AndroidScreenHeader
-            title="Files"
+            title="파일"
             subtitle={projectName}
             onBack={handleReturnToThread}
             actions={[
               {
-                accessibilityLabel: "Refresh files",
+                accessibilityLabel: "파일 새로고침",
                 icon: "arrow.clockwise",
                 onPress: entriesQuery.refresh,
               },
@@ -412,11 +412,11 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
           <View className="flex-row items-center gap-2 border-b border-border px-3 py-2">
             <SymbolView name="magnifyingglass" size={17} tintColor={iconColor} type="monochrome" />
             <TextInput
-              accessibilityLabel="Search files"
+              accessibilityLabel="파일 검색"
               autoCapitalize="none"
               autoCorrect={false}
               className="min-h-10 flex-1 rounded-xl py-2 text-sm"
-              placeholder="Search files"
+              placeholder="파일 검색"
               value={searchQuery}
               onChangeText={setSearchQuery}
             />
@@ -427,7 +427,9 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
           {layout.usesSplitView ? (
             <NativeHeaderToolbar placement="left">
               <NativeHeaderToolbar.Button
-                accessibilityLabel={panes.primarySidebarVisible ? "Maximize files" : "Show threads"}
+                accessibilityLabel={
+                  panes.primarySidebarVisible ? "파일 크게 보기" : "대화 목록 보기"
+                }
                 icon={
                   panes.primarySidebarVisible
                     ? "arrow.up.left.and.arrow.down.right"
@@ -547,7 +549,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   useRegisterWorkspaceInspector(fileInspector.supported ? renderWorkspaceInspector : undefined);
 
   if (selectedThread === null || environmentId === null || threadId === null) {
-    return <LoadingScreen message="Opening file..." messagePlacement="above-spinner" />;
+    return <LoadingScreen message="파일을 여는 중..." messagePlacement="above-spinner" />;
   }
 
   if (cwd === null) {
@@ -557,8 +559,8 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   if (relativePath === null) {
     return (
       <View className="flex-1 items-center justify-center bg-sheet px-6">
-        <NativeStackScreenOptions options={{ title: "Files" }} />
-        <EmptyState title="File unavailable" detail="This file path is invalid." />
+        <NativeStackScreenOptions options={{ title: "파일" }} />
+        <EmptyState title="파일을 불러올 수 없습니다" detail="파일 경로가 올바르지 않습니다." />
       </View>
     );
   }
@@ -584,7 +586,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
         <WorkspaceSidebarToolbar>
           {fileInspector.supported ? (
             <NativeHeaderToolbar.Button
-              accessibilityLabel="Return to chat"
+              accessibilityLabel="대화로 돌아가기"
               icon="chevron.left"
               onPress={() => {
                 navigation.dispatch(
@@ -601,14 +603,14 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
           {fileInspector.supported ? (
             <NativeHeaderToolbar.Button
               accessibilityLabel={
-                panes.auxiliaryPaneVisible ? "Hide file navigator" : "Show file navigator"
+                panes.auxiliaryPaneVisible ? "파일 탐색기 숨기기" : "파일 탐색기 보기"
               }
               icon="sidebar.right"
               onPress={toggleAuxiliaryPane}
               separateBackground
             />
           ) : null}
-          <NativeHeaderToolbar.Menu accessibilityLabel="File actions" icon="ellipsis">
+          <NativeHeaderToolbar.Menu accessibilityLabel="파일 작업" icon="ellipsis">
             {canPreview && !isImageFile ? (
               <NativeHeaderToolbar.Menu inline>
                 <NativeHeaderToolbar.MenuAction

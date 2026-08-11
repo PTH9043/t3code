@@ -75,7 +75,7 @@ export function buildProviderOptionMenuActions(
           }))
         : ([false, true] as const).map((value) => ({
             id: providerOptionEvent(descriptor.id, value),
-            title: value ? "On" : "Off",
+            title: value ? "켜짐" : "꺼짐",
             state: currentValue === value ? ("on" as const) : undefined,
           }));
 
@@ -86,7 +86,7 @@ export function buildProviderOptionMenuActions(
         descriptor.type === "boolean"
           ? currentValue
             ? "On"
-            : "Off"
+            : "꺼짐"
           : getProviderOptionCurrentLabel(descriptor),
       subactions: choices,
     };
@@ -103,7 +103,7 @@ export function providerOptionsConfigurationLabel(
     const label = getProviderOptionCurrentLabel(descriptor);
     return label ? [label] : [];
   });
-  return labels.length > 0 ? labels.join(" · ") : "Configuration";
+  return labels.length > 0 ? labels.join(" · ") : "구성";
 }
 
 export function applyProviderOptionMenuEvent(

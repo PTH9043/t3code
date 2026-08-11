@@ -24,18 +24,18 @@ const GROUPING_OPTIONS: ReadonlyArray<{
 }> = [
   {
     mode: "repository",
-    label: "Group by repository",
-    description: "Matching repositories appear as one project.",
+    label: "저장소별 묶기",
+    description: "같은 저장소를 하나의 프로젝트로 표시합니다.",
   },
   {
     mode: "repository_path",
-    label: "Group by repository path",
-    description: "Keep monorepo paths separate.",
+    label: "저장소 경로별 묶기",
+    description: "모노레포 안의 경로를 각각 분리합니다.",
   },
   {
     mode: "separate",
-    label: "Keep separate",
-    description: "Show every workspace as its own project.",
+    label: "각각 분리",
+    description: "각 폴더를 독립 프로젝트로 표시합니다.",
   },
 ];
 
@@ -55,7 +55,7 @@ export function SettingsProjectGroupingRouteScreen() {
       {Platform.OS === "android" ? (
         <>
           <NativeStackScreenOptions options={{ headerShown: false }} />
-          <AndroidScreenHeader title="Project Grouping" onBack={() => navigation.goBack()} />
+          <AndroidScreenHeader title="프로젝트 묶음" onBack={() => navigation.goBack()} />
         </>
       ) : null}
       <ScrollView
@@ -65,7 +65,7 @@ export function SettingsProjectGroupingRouteScreen() {
         contentContainerClassName="gap-3 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
-        <SettingsSection title="Default grouping">
+        <SettingsSection title="기본 묶음 방식">
           {GROUPING_OPTIONS.map((option, index) => (
             <Pressable
               key={option.mode}

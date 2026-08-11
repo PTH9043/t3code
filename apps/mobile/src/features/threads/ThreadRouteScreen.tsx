@@ -97,7 +97,7 @@ function firstRouteParam(value: string | string[] | undefined): string | null {
 }
 
 function OpeningThreadLoadingScreen() {
-  return <LoadingScreen message="Opening thread…" messagePlacement="above-spinner" />;
+  return <LoadingScreen message="대화를 여는 중…" messagePlacement="above-spinner" />;
 }
 
 type ThreadRouteScreenRouteProps = StaticScreenProps<{
@@ -123,7 +123,7 @@ function ThreadUnavailableScreen() {
       className="bg-screen flex-1"
     >
       <EmptyState
-        title="Thread unavailable"
+        title="대화를 불러올 수 없습니다"
         detail="This thread is not available in the current mobile snapshot."
       />
     </ScrollView>
@@ -614,7 +614,7 @@ function ThreadRouteContent(
     auxiliaryPaneControl:
       !layout.usesSplitView && fileInspector.supported && selectedThreadCwd !== null
         ? {
-            accessibilityLabel: "Toggle inspector",
+            accessibilityLabel: "상세 창 전환",
             onPress: handleToggleInspector,
           }
         : undefined,
@@ -648,7 +648,7 @@ function ThreadRouteContent(
       ...(props.onReturnToThread
         ? [
             withNativeGlassHeaderItem({
-              accessibilityLabel: "Return to chat",
+              accessibilityLabel: "대화로 돌아가기",
               icon: { name: "chevron.left", type: "sfSymbol" as const },
               identifier: "thread-left-return",
               onPress: props.onReturnToThread,
@@ -657,9 +657,7 @@ function ThreadRouteContent(
           ]
         : []),
       withNativeGlassHeaderItem({
-        accessibilityLabel: panes.primarySidebarVisible
-          ? "Maximize content"
-          : "Show thread sidebar",
+        accessibilityLabel: panes.primarySidebarVisible ? "Maximize content" : "대화 목록 보기",
         icon: {
           name: panes.primarySidebarVisible ? "arrow.up.left.and.arrow.down.right" : "sidebar.left",
           type: "sfSymbol" as const,
@@ -669,7 +667,7 @@ function ThreadRouteContent(
         type: "button" as const,
       }),
       withNativeGlassHeaderItem({
-        accessibilityLabel: "New task",
+        accessibilityLabel: "새 작업",
         icon: { name: "square.and.pencil", type: "sfSymbol" as const },
         identifier: "thread-left-new-task",
         onPress: () => navigation.navigate("NewTaskSheet", { screen: "NewTask" }),
@@ -684,33 +682,33 @@ function ThreadRouteContent(
     const actions: AndroidHeaderAction[] = [];
     if (props.onReturnToThread) {
       actions.push({
-        accessibilityLabel: "Return to chat",
+        accessibilityLabel: "대화로 돌아가기",
         icon: "chevron.left",
         onPress: props.onReturnToThread,
       });
     }
     if (selectedThreadCwd !== null) {
       actions.push({
-        accessibilityLabel: "Open files",
+        accessibilityLabel: "파일 열기",
         icon: "folder",
         onPress: handleOpenFilesInspector,
       });
     }
     if (selectedThreadProject?.workspaceRoot) {
       actions.push({
-        accessibilityLabel: "Open terminal",
+        accessibilityLabel: "터미널 열기",
         icon: "terminal",
         onPress: () => handleOpenTerminal(null),
       });
     }
     actions.push({
-      accessibilityLabel: "Open git controls",
+      accessibilityLabel: "깃 작업 열기",
       icon: "point.topleft.down.curvedto.point.bottomright.up",
       onPress: handleOpenGitInspector,
     });
     if (fileInspector.supported && selectedThreadCwd !== null) {
       actions.push({
-        accessibilityLabel: "Toggle inspector",
+        accessibilityLabel: "상세 창 전환",
         icon: "sidebar.right",
         onPress: handleToggleInspector,
       });
@@ -734,7 +732,7 @@ function ThreadRouteContent(
   const compactHomeHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       withNativeGlassHeaderItem({
-        accessibilityLabel: "Go to threads list",
+        accessibilityLabel: "대화 목록으로 이동",
         icon: { name: "list.bullet", type: "sfSymbol" as const },
         identifier: "thread-left-home",
         onPress: () => navigation.dispatch(StackActions.replace("Home")),

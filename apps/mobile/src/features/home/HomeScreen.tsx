@@ -38,7 +38,9 @@ import { environmentServerConfigsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import {
   PendingTaskListRow,
+  ThreadListCollaborationRow,
   ThreadListGroupHeader,
+  ThreadListProjectHeader,
   ThreadListRow,
   ThreadListShowMoreRow,
 } from "../threads/thread-list-items";
@@ -68,6 +70,7 @@ import {
 import {
   buildHomeProjectScopes,
   buildHomeThreadGroups,
+  resolveRequiredHomeProjectScopeKey,
   sortHomeProjectScopes,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
@@ -118,6 +121,7 @@ interface HomeScreenProps {
   readonly onSelectPendingTask: (pendingTask: PendingNewTask) => void;
   readonly onDeletePendingTask: (pendingTask: PendingNewTask) => void;
   readonly onNewThreadInProject: (project: EnvironmentProject) => void;
+  readonly onOpenCollaborationRuns: (project: EnvironmentProject) => void;
 }
 
 /* ─── Layout constants ───────────────────────────────────────────────── */
@@ -138,16 +142,16 @@ function deriveEmptyState(props: {
   const { catalogState } = props;
   if (catalogState.isLoadingConnections) {
     return {
-      title: "Loading environments",
-      detail: "Checking saved environments on this device.",
+      title: "연결 환경을 불러오는 중",
+      detail: "이 기기에 저장된 연결 환경을 확인하고 있습니다.",
       loading: true,
     };
   }
 
   if (!catalogState.hasConnections) {
     return {
-      title: "No environments connected",
-      detail: "Add an environment to load projects and start coding sessions.",
+      title: "연결된 실행 환경이 없습니다",
+      detail: "실행 환경을 추가하면 프로젝트를 불러오고 대화를 시작할 수 있습니다.",
       loading: false,
     };
   }
@@ -159,10 +163,10 @@ function deriveEmptyState(props: {
     !catalogState.hasLoadedShellSnapshot
   ) {
     return {
-      title: "Environment unavailable",
+      title: "연결 환경을 사용할 수 없습니다",
       detail:
         catalogState.connectionError ??
-        "The saved environment is offline. Check the URL or start the environment, then retry.",
+        "저장된 환경이 오프라인입니다. 주소를 확인하거나 환경을 시작한 뒤 다시 시도하세요.",
       loading: false,
     };
   }
@@ -173,23 +177,23 @@ function deriveEmptyState(props: {
     catalogState.connectionError === null
   ) {
     return {
-      title: "Connecting to environment",
-      detail: "Loading projects and threads from the saved environment.",
+      title: "실행 환경에 연결하는 중",
+      detail: "저장된 실행 환경에서 프로젝트와 대화를 불러오고 있습니다.",
       loading: true,
     };
   }
 
   if (props.projectCount === 0 && catalogState.hasLoadedShellSnapshot) {
     return {
-      title: "No projects found",
-      detail: "The connected environment did not report any projects.",
+      title: "등록된 프로젝트가 없습니다",
+      detail: "연결된 실행 환경에서 프로젝트를 찾지 못했습니다.",
       loading: false,
     };
   }
 
   return {
-    title: "No threads yet",
-    detail: "Create a task to start a new coding session in one of your connected projects.",
+    title: "아직 대화가 없습니다",
+    detail: "프로젝트를 선택하고 새 대화를 시작하세요.",
     loading: false,
   };
 }
@@ -309,59 +313,55 @@ export function HomeScreen(props: HomeScreenProps) {
       }),
     [props.projectGroupingMode, props.projects, props.selectedEnvironmentId],
   );
+  const effectiveSelectedProjectKey = useMemo(
+    () => resolveRequiredHomeProjectScopeKey(projectScopes, props.selectedProjectKey),
+    [projectScopes, props.selectedProjectKey],
+  );
   const selectedProjectScope = useMemo(
     () =>
-      props.selectedProjectKey === null
+      effectiveSelectedProjectKey === null
         ? null
         : (projectScopes.find(
             (scope) =>
-              scope.key === props.selectedProjectKey ||
+              scope.key === effectiveSelectedProjectKey ||
               scope.projectRefs.some(
                 (projectRef) =>
                   scopedProjectKey(projectRef.environmentId, projectRef.projectId) ===
-                  props.selectedProjectKey,
+                  effectiveSelectedProjectKey,
               ),
           ) ?? null),
-    [projectScopes, props.selectedProjectKey],
+    [effectiveSelectedProjectKey, projectScopes],
   );
   const selectedProjectRefKeys = useMemo(
     () =>
-      selectedProjectScope === null
-        ? null
-        : new Set(
-            selectedProjectScope.projectRefs.map((projectRef) =>
-              scopedProjectKey(projectRef.environmentId, projectRef.projectId),
-            ),
-          ),
+      new Set(
+        (selectedProjectScope?.projectRefs ?? []).map((projectRef) =>
+          scopedProjectKey(projectRef.environmentId, projectRef.projectId),
+        ),
+      ),
     [selectedProjectScope],
   );
   const scopedProjects = useMemo(
     () =>
-      selectedProjectRefKeys === null
-        ? props.projects
-        : props.projects.filter((project) =>
-            selectedProjectRefKeys.has(scopedProjectKey(project.environmentId, project.id)),
-          ),
+      props.projects.filter((project) =>
+        selectedProjectRefKeys.has(scopedProjectKey(project.environmentId, project.id)),
+      ),
     [props.projects, selectedProjectRefKeys],
   );
   const scopedThreads = useMemo(
     () =>
-      selectedProjectRefKeys === null
-        ? props.threads
-        : props.threads.filter((thread) =>
-            selectedProjectRefKeys.has(scopedProjectKey(thread.environmentId, thread.projectId)),
-          ),
+      props.threads.filter((thread) =>
+        selectedProjectRefKeys.has(scopedProjectKey(thread.environmentId, thread.projectId)),
+      ),
     [props.threads, selectedProjectRefKeys],
   );
   const scopedPendingTasks = useMemo(
     () =>
-      selectedProjectRefKeys === null
-        ? props.pendingTasks
-        : props.pendingTasks.filter((pendingTask) =>
-            selectedProjectRefKeys.has(
-              scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
-            ),
-          ),
+      props.pendingTasks.filter((pendingTask) =>
+        selectedProjectRefKeys.has(
+          scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
+        ),
+      ),
     [props.pendingTasks, selectedProjectRefKeys],
   );
 
@@ -418,7 +418,7 @@ export function HomeScreen(props: HomeScreenProps) {
     return map;
   }, [props.projects]);
 
-  const v2ProjectScopeKey = props.selectedProjectKey;
+  const v2ProjectScopeKey = effectiveSelectedProjectKey;
   const v2ScopeProjects = useMemo(
     () =>
       sortHomeProjectScopes({
@@ -468,13 +468,11 @@ export function HomeScreen(props: HomeScreenProps) {
   );
   const v2ScopedProjectKeys = useMemo(
     () =>
-      v2ScopedProjectGroup === null
-        ? null
-        : new Set(
-            v2ScopedProjectGroup.projectRefs.map((projectRef) =>
-              scopedProjectKey(projectRef.environmentId, projectRef.projectId),
-            ),
-          ),
+      new Set(
+        (v2ScopedProjectGroup?.projectRefs ?? []).map((projectRef) =>
+          scopedProjectKey(projectRef.environmentId, projectRef.projectId),
+        ),
+      ),
     [v2ScopedProjectGroup],
   );
   // Thread List v2 (beta): one flat list in creation order, no grouping.
@@ -645,7 +643,7 @@ export function HomeScreen(props: HomeScreenProps) {
     return buildThreadListV2Items({
       threads: props.threads.filter((thread) => thread.archivedAt === null),
       environmentId: props.selectedEnvironmentId,
-      projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
+      projectRefs: v2ScopedProjectGroup?.projectRefs ?? [],
       searchQuery: props.searchQuery,
       matchedThreadKeys,
       changeRequestStateByKey,
@@ -699,10 +697,9 @@ export function HomeScreen(props: HomeScreenProps) {
         (pendingTask) =>
           (props.selectedEnvironmentId === null ||
             pendingTask.message.environmentId === props.selectedEnvironmentId) &&
-          (v2ScopedProjectKeys === null ||
-            v2ScopedProjectKeys.has(
-              scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
-            )) &&
+          v2ScopedProjectKeys.has(
+            scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
+          ) &&
           (v2SearchQuery.length === 0 ||
             pendingTask.title.toLocaleLowerCase().includes(v2SearchQuery)),
       ),
@@ -925,6 +922,7 @@ export function HomeScreen(props: HomeScreenProps) {
               // so the quick new-thread button is single-real-project only.
               newThreadTarget={item.group.newThreadTarget}
               onNewThread={props.onNewThreadInProject}
+              onOpenCollaborationRuns={props.onOpenCollaborationRuns}
               project={item.group.representative}
               threadCount={item.group.threads.length + item.group.pendingTasks.length}
               title={item.group.title}
@@ -993,6 +991,7 @@ export function HomeScreen(props: HomeScreenProps) {
       props.onDeletePendingTask,
       props.onDeleteThread,
       props.onNewThreadInProject,
+      props.onOpenCollaborationRuns,
       props.onSelectPendingTask,
       props.onSelectThread,
       props.searchQuery,
@@ -1016,7 +1015,7 @@ export function HomeScreen(props: HomeScreenProps) {
     props.selectedEnvironmentId === null
       ? null
       : (props.savedConnectionsById[props.selectedEnvironmentId]?.environmentLabel ??
-        "this environment");
+        "이 실행 환경");
   // Connection state surfaces in the header title slot
   // (WorkspaceConnectionTitle) — nothing renders inside the list, so
   // reconnects never shift the rows.
@@ -1038,7 +1037,7 @@ export function HomeScreen(props: HomeScreenProps) {
           <EmptyState
             title={emptyState.title}
             detail={emptyState.detail}
-            actionLabel={!props.catalogState.hasReadyEnvironment ? "Add environment" : undefined}
+            actionLabel={!props.catalogState.hasReadyEnvironment ? "실행 환경 추가" : undefined}
             onAction={!props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined}
             variant="plain"
           />
@@ -1054,25 +1053,56 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? null : <HomeTopContentSpacer />;
 
-  // Project scoping lives in the header filter menu (no inline chip row on
-  // mobile — the menu is the one filter surface).
-  const v2ListHeader = listHeader;
+  // Keep the selected project visible as the parent of the flat conversation
+  // rows; the project menu changes this parent rather than enabling a mixed list.
+  const v2CollaborationProject =
+    v2ScopedProjectGroup?.projects.length === 1 ? v2ScopedProjectGroup.representative : null;
+  const v2ListHeader = (
+    <View>
+      {listHeader}
+      {v2ScopedProjectGroup ? (
+        <ThreadListProjectHeader
+          variant="compact"
+          project={v2ScopedProjectGroup.representative}
+          title={v2ScopedProjectGroup.title}
+          conversationCount={
+            scopedThreads.filter((thread) => thread.archivedAt === null).length +
+            scopedPendingTasks.length
+          }
+          newThreadTarget={
+            v2ScopedProjectGroup.projects.length === 1 ? v2ScopedProjectGroup.representative : null
+          }
+          onNewThread={props.onNewThreadInProject}
+        />
+      ) : null}
+      {v2CollaborationProject ? (
+        <ThreadListCollaborationRow
+          variant="compact"
+          project={v2CollaborationProject}
+          onOpen={props.onOpenCollaborationRuns}
+        />
+      ) : null}
+    </View>
+  );
 
   const listEmpty = !hasResults ? (
     hasSearchQuery && threadSearch.isPending ? null : hasSearchQuery ? (
-      <EmptyState title="No results" detail={`No threads matching "${props.searchQuery}".`} />
+      <EmptyState
+        title="검색 결과가 없습니다"
+        detail={`“${props.searchQuery}”와 일치하는 대화가 없습니다.`}
+      />
     ) : selectedProjectScope !== null ? (
       <EmptyState
-        title={`No threads in ${selectedProjectScope.title}`}
-        detail="Choose another project or create a new task."
+        title={`${selectedProjectScope.title}에 대화가 없습니다`}
+        detail="이 프로젝트에서 새 대화를 시작하세요."
       />
     ) : selectedEnvironmentLabel ? (
       <EmptyState
-        title={`No threads in ${selectedEnvironmentLabel}`}
-        detail="Choose another environment or create a new task."
+        title={`${selectedEnvironmentLabel}에 대화가 없습니다`}
+        detail="다른 실행 환경을 선택하거나 새 대화를 시작하세요."
       />
     ) : (
-      <EmptyState title="No threads yet" detail="Create a task to start a new coding session." />
+      <EmptyState title="아직 대화가 없습니다" detail="프로젝트에서 새 대화를 시작하세요." />
     )
   ) : null;
   // Self-contained: v1's listEmpty keys off projectGroups, which ignores the
@@ -1081,11 +1111,14 @@ export function HomeScreen(props: HomeScreenProps) {
   // is a list row even while collapsed.
   const v2ListEmpty =
     hasSearchQuery && threadSearch.isPending ? null : hasSearchQuery ? (
-      <EmptyState title="No results" detail={`No threads matching "${props.searchQuery}".`} />
+      <EmptyState
+        title="검색 결과가 없습니다"
+        detail={`“${props.searchQuery}”와 일치하는 대화가 없습니다.`}
+      />
     ) : v2ScopedProjectGroup !== null ? (
       <EmptyState
-        title={`No threads in ${v2ScopedProjectGroup.title}`}
-        detail="Choose another project or create a new task."
+        title={`${v2ScopedProjectGroup.title}에 대화가 없습니다`}
+        detail="이 프로젝트에서 새 대화를 시작하세요."
       />
     ) : (
       listEmpty
@@ -1105,7 +1138,7 @@ export function HomeScreen(props: HomeScreenProps) {
               settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0 ? (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Show ${Math.min(threadListV2Layout.hiddenSettledCount, THREAD_LIST_V2_SETTLED_PAGE_COUNT)} more settled threads`}
+                  accessibilityLabel={`완료된 대화 ${Math.min(threadListV2Layout.hiddenSettledCount, THREAD_LIST_V2_SETTLED_PAGE_COUNT)}개 더 보기`}
                   onPress={showMoreSettled}
                   className="mx-4 mt-2 items-center rounded-lg border border-dashed border-border py-2.5"
                   style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}

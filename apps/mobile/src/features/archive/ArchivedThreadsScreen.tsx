@@ -79,11 +79,11 @@ function ArchivedThreadsHeader(props: {
     () => [
       {
         id: "environment",
-        title: "Environment",
+        title: "연결 환경",
         subactions: [
           {
             id: "environment:all",
-            title: "All environments",
+            title: "모든 연결 환경",
             state: props.selectedEnvironmentId === null ? ("on" as const) : undefined,
           },
           ...props.environments.map((environment) => ({
@@ -98,16 +98,16 @@ function ArchivedThreadsHeader(props: {
       },
       {
         id: "sort",
-        title: "Sort by archived date",
+        title: "보관 날짜순 정렬",
         subactions: [
           {
             id: "sort:newest",
-            title: "Newest first",
+            title: "최신순",
             state: props.sortOrder === "newest" ? ("on" as const) : undefined,
           },
           {
             id: "sort:oldest",
-            title: "Oldest first",
+            title: "오래된순",
             state: props.sortOrder === "oldest" ? ("on" as const) : undefined,
           },
         ],
@@ -145,7 +145,7 @@ function ArchivedThreadsHeader(props: {
         >
           <View className="min-h-12 flex-row items-center gap-2">
             <Pressable
-              accessibilityLabel="Navigate up"
+              accessibilityLabel="이전 화면으로"
               accessibilityRole="button"
               hitSlop={8}
               onPress={() => navigation.goBack()}
@@ -166,11 +166,11 @@ function ArchivedThreadsHeader(props: {
                 type="monochrome"
               />
               <TextInput
-                accessibilityLabel="Search archived threads"
+                accessibilityLabel="보관한 대화 검색"
                 autoCapitalize="none"
                 onChangeText={props.onSearchQueryChange}
                 value={props.searchQuery}
-                placeholder="Search archived threads"
+                placeholder="보관한 대화 검색"
                 placeholderTextColorClassName="accent-placeholder"
                 className="flex-1 py-2 text-base font-sans text-foreground"
               />
@@ -181,7 +181,7 @@ function ArchivedThreadsHeader(props: {
               onPressAction={handleAndroidFilterAction}
             >
               <Pressable
-                accessibilityLabel="Filter and sort archived threads"
+                accessibilityLabel="보관한 대화 필터와 정렬"
                 accessibilityRole="button"
                 className="size-11 items-center justify-center rounded-full bg-subtle"
               >
@@ -203,15 +203,15 @@ function ArchivedThreadsHeader(props: {
     );
   }
   const archiveFilterMenu = {
-    title: "Archived thread options",
+    title: "보관한 대화 옵션",
     items: [
       {
         type: "submenu" as const,
-        title: "Environment",
+        title: "연결 환경",
         items: [
           {
             type: "action" as const,
-            title: "All environments",
+            title: "모든 연결 환경",
             state: props.selectedEnvironmentId === null ? ("on" as const) : ("off" as const),
             onPress: () => props.onEnvironmentChange(null),
           },
@@ -228,17 +228,17 @@ function ArchivedThreadsHeader(props: {
       },
       {
         type: "submenu" as const,
-        title: "Sort by archived date",
+        title: "보관 날짜순 정렬",
         items: [
           {
             type: "action" as const,
-            title: "Newest first",
+            title: "최신순",
             state: props.sortOrder === "newest" ? ("on" as const) : ("off" as const),
             onPress: () => props.onSortOrderChange("newest"),
           },
           {
             type: "action" as const,
-            title: "Oldest first",
+            title: "오래된순",
             state: props.sortOrder === "oldest" ? ("on" as const) : ("off" as const),
             onPress: () => props.onSortOrderChange("oldest"),
           },
@@ -265,7 +265,7 @@ function ArchivedThreadsHeader(props: {
                     : "line.3.horizontal.decrease",
                   onComposePress: props.onRefresh,
                   onSearchTextChange: props.onSearchQueryChange,
-                  placeholder: "Search",
+                  placeholder: "검색",
                   searchTextChangeId: "archived-search-text",
                 }),
               ]
@@ -288,7 +288,7 @@ function ArchivedThreadsHeader(props: {
                 autoCapitalize: "none",
                 hideNavigationBar: false,
                 obscureBackground: false,
-                placeholder: "Search archived threads",
+                placeholder: "보관한 대화 검색",
                 onChangeText: (event) => {
                   props.onSearchQueryChange(event.nativeEvent.text);
                 },
@@ -303,29 +303,29 @@ function ArchivedThreadsHeader(props: {
         <NativeHeaderToolbar placement="right">
           {usesNativeChrome ? (
             <NativeHeaderToolbar.Button
-              accessibilityLabel="Refresh archived threads"
+              accessibilityLabel="보관한 대화 새로고침"
               icon="arrow.clockwise"
               onPress={props.onRefresh}
               separateBackground
             />
           ) : null}
           <NativeHeaderToolbar.Menu
-            accessibilityLabel="Filter and sort archived threads"
+            accessibilityLabel="보관한 대화 필터와 정렬"
             icon={
               hasCustomFilter
                 ? "line.3.horizontal.decrease.circle.fill"
                 : "line.3.horizontal.decrease.circle"
             }
             separateBackground
-            title="Archived thread options"
+            title="보관한 대화 옵션"
           >
-            <NativeHeaderToolbar.Menu title="Environment">
-              <NativeHeaderToolbar.Label>Environment</NativeHeaderToolbar.Label>
+            <NativeHeaderToolbar.Menu title="연결 환경">
+              <NativeHeaderToolbar.Label>연결 환경</NativeHeaderToolbar.Label>
               <NativeHeaderToolbar.MenuAction
                 isOn={props.selectedEnvironmentId === null}
                 onPress={() => props.onEnvironmentChange(null)}
               >
-                <NativeHeaderToolbar.Label>All environments</NativeHeaderToolbar.Label>
+                <NativeHeaderToolbar.Label>모든 연결 환경</NativeHeaderToolbar.Label>
               </NativeHeaderToolbar.MenuAction>
               {props.environments.map((environment) => (
                 <NativeHeaderToolbar.MenuAction
@@ -338,19 +338,19 @@ function ArchivedThreadsHeader(props: {
               ))}
             </NativeHeaderToolbar.Menu>
 
-            <NativeHeaderToolbar.Menu title="Sort by archived date">
-              <NativeHeaderToolbar.Label>Sort by archived date</NativeHeaderToolbar.Label>
+            <NativeHeaderToolbar.Menu title="보관 날짜순 정렬">
+              <NativeHeaderToolbar.Label>보관 날짜순 정렬</NativeHeaderToolbar.Label>
               <NativeHeaderToolbar.MenuAction
                 isOn={props.sortOrder === "newest"}
                 onPress={() => props.onSortOrderChange("newest")}
               >
-                <NativeHeaderToolbar.Label>Newest first</NativeHeaderToolbar.Label>
+                <NativeHeaderToolbar.Label>최신순</NativeHeaderToolbar.Label>
               </NativeHeaderToolbar.MenuAction>
               <NativeHeaderToolbar.MenuAction
                 isOn={props.sortOrder === "oldest"}
                 onPress={() => props.onSortOrderChange("oldest")}
               >
-                <NativeHeaderToolbar.Label>Oldest first</NativeHeaderToolbar.Label>
+                <NativeHeaderToolbar.Label>오래된순</NativeHeaderToolbar.Label>
               </NativeHeaderToolbar.MenuAction>
             </NativeHeaderToolbar.Menu>
           </NativeHeaderToolbar.Menu>
@@ -427,7 +427,7 @@ function ArchivedThreadRow(props: {
       primaryAction={{
         accessibilityLabel: `Unarchive ${props.thread.title}`,
         icon: "arrow.uturn.backward",
-        label: "Unarchive",
+        label: "보관 해제",
         onPress: props.onUnarchive,
       }}
       simultaneousWithExternalGesture={props.simultaneousSwipeGesture}
@@ -488,7 +488,7 @@ function ArchiveError(props: { readonly message: string; readonly onRetry: () =>
       </Text>
       <Text className="mt-1 text-sm text-foreground-muted">{props.message}</Text>
       <Pressable className="mt-3 self-start active:opacity-60" onPress={props.onRetry}>
-        <Text className="text-sm font-t3-bold text-danger-foreground">Try again</Text>
+        <Text className="text-sm font-t3-bold text-danger-foreground">다시 시도</Text>
       </Pressable>
     </View>
   );
@@ -606,7 +606,7 @@ export function ArchivedThreadsScreen(props: {
             ? "Try another search or environment."
             : "Threads you archive will appear here."
         }
-        title={isFiltered ? "No matching threads" : "No archived threads"}
+        title={isFiltered ? "조건에 맞는 대화가 없습니다" : "보관한 대화가 없습니다"}
       />
     );
   }, [isFiltered, isInitialLoad, refreshTint]);

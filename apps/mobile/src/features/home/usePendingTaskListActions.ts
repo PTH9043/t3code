@@ -31,9 +31,9 @@ export function usePendingTaskListActions(): {
       "Delete pending task?",
       `“${pendingTask.title}” has not been sent yet and will be removed from the outbox.`,
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "취소", style: "cancel" },
         {
-          text: "Delete",
+          text: "삭제",
           style: "destructive",
           onPress: () => {
             // Release the edit lock only after removal succeeds, and only if

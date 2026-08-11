@@ -74,7 +74,7 @@ export function SettingsRouteScreen() {
         <>
           {/* Android renders its own in-screen header instead of the native bar. */}
           <NativeStackScreenOptions options={{ headerShown: false }} />
-          <AndroidScreenHeader title="Settings" onBack={() => navigation.goBack()} />
+          <AndroidScreenHeader title="설정" onBack={() => navigation.goBack()} />
         </>
       ) : (
         <NativeStackScreenOptions
@@ -83,7 +83,7 @@ export function SettingsRouteScreen() {
               Platform.OS === "ios"
                 ? () => [
                     withNativeGlassHeaderItem({
-                      accessibilityLabel: "Close settings",
+                      accessibilityLabel: "설정 닫기",
                       icon: { name: "xmark", type: "sfSymbol" } as const,
                       identifier: "settings-close",
                       label: "",
@@ -116,10 +116,10 @@ function LocalSettingsRouteScreen() {
           paddingBottom: Math.max(insets.bottom, 18) + 18,
         }}
       >
-        <SettingsSection title="Configuration">
+        <SettingsSection title="구성">
           <SettingsRow
             icon="desktopcomputer"
-            label="Environments"
+            label="연결 환경"
             value={`${environmentCount}`}
             target="SettingsEnvironments"
           />
@@ -127,8 +127,8 @@ function LocalSettingsRouteScreen() {
 
         <GeneralSettingsSection />
 
-        <SettingsSection title="Appearance">
-          <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
+        <SettingsSection title="화면 모양">
+          <SettingsRow icon="paintbrush" label="화면 모양" target="SettingsAppearance" />
         </SettingsSection>
 
         <LegacySettingsSection />
@@ -161,8 +161,8 @@ function ConfiguredSettingsRouteScreen() {
   const connections = useMemo(() => Object.values(savedConnectionsById), [savedConnectionsById]);
   const environmentCount = connections.length;
   const accountLabel = useMemo(() => {
-    if (!isLoaded) return "Checking";
-    if (!isSignedIn) return "Sign in";
+    if (!isLoaded) return "확인 중";
+    if (!isSignedIn) return "로그인";
     return user?.primaryEmailAddress?.emailAddress ?? "Signed in";
   }, [isLoaded, isSignedIn, user?.primaryEmailAddress?.emailAddress]);
 
@@ -261,8 +261,8 @@ function ConfiguredSettingsRouteScreen() {
       "Notifications disabled",
       "Notifications were denied for this app. Open Settings to enable them.",
       [
-        { text: "Cancel", style: "cancel" },
-        { text: "Open Settings", onPress: () => void Linking.openSettings() },
+        { text: "취소", style: "cancel" },
+        { text: "설정 열기", onPress: () => void Linking.openSettings() },
       ],
     );
   }, []);
@@ -272,9 +272,9 @@ function ConfiguredSettingsRouteScreen() {
       "Sign in to T3 Connect",
       "Live Activity updates require T3 Connect so relay can deliver updates to this device.",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "취소", style: "cancel" },
         {
-          text: "Continue",
+          text: "계속",
           onPress: () => navigation.navigate("SettingsSheet", { screen: "SettingsAuth" }),
         },
       ],
@@ -366,8 +366,8 @@ function ConfiguredSettingsRouteScreen() {
         "Disable notifications",
         "Notification permission is controlled by iOS. Open Settings to disable notifications for T3 Code.",
         [
-          { text: "Cancel", style: "cancel" },
-          { text: "Open Settings", onPress: () => void Linking.openSettings() },
+          { text: "취소", style: "cancel" },
+          { text: "설정 열기", onPress: () => void Linking.openSettings() },
         ],
       );
     },
@@ -457,10 +457,10 @@ function ConfiguredSettingsRouteScreen() {
         }}
       >
         <View className="gap-3">
-          <SettingsSection title="Account">
+          <SettingsSection title="계정">
             <SettingsRow
               icon="person.crop.circle"
-              label="T3 Account"
+              label="T3 계정"
               value={accountLabel}
               onPress={openAccount}
             />
@@ -470,16 +470,16 @@ function ConfiguredSettingsRouteScreen() {
           </Text>
         </View>
 
-        <SettingsSection title="Configuration">
+        <SettingsSection title="구성">
           <SettingsRow
             icon="desktopcomputer"
-            label="Environments"
+            label="연결 환경"
             value={`${environmentCount}`}
             target="SettingsEnvironments"
           />
           <SettingsSwitchRow
             icon="bell.badge"
-            label="Device Notifications"
+            label="기기 알림"
             disabled={
               !agentAwarenessPushAvailable ||
               notificationStatus === "checking" ||
@@ -501,7 +501,7 @@ function ConfiguredSettingsRouteScreen() {
               liveActivityStatus === "linking"
             }
             icon="bolt.circle"
-            label="Live Activity Updates"
+            label="실시간 활동 업데이트"
             // Same gate: a saved preference is meaningless until the device
             // registration the relay needs to push updates has succeeded.
             value={
@@ -515,8 +515,8 @@ function ConfiguredSettingsRouteScreen() {
 
         <GeneralSettingsSection />
 
-        <SettingsSection title="Appearance">
-          <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
+        <SettingsSection title="화면 모양">
+          <SettingsRow icon="paintbrush" label="화면 모양" target="SettingsAppearance" />
         </SettingsSection>
 
         <LegacySettingsSection />
@@ -531,8 +531,8 @@ function ConfiguredSettingsRouteScreen() {
 
 function GeneralSettingsSection() {
   return (
-    <SettingsSection title="General">
-      <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+    <SettingsSection title="일반">
+      <SettingsRow icon="folder" label="프로젝트 묶음" target="SettingsProjectGrouping" />
     </SettingsSection>
   );
 }
@@ -548,10 +548,10 @@ function LegacySettingsSection() {
 
   return (
     <View className="gap-3">
-      <SettingsSection title="Legacy">
+      <SettingsSection title="이전 방식">
         <SettingsSwitchRow
           icon="sidebar.left"
-          label="Legacy Thread List"
+          label="이전 대화 목록"
           value={!threadListV2Enabled}
           onValueChange={(value) => savePreferences({ legacyThreadListEnabled: value })}
         />
@@ -631,7 +631,7 @@ function AppSettingsSection() {
         type="monochrome"
         weight="regular"
       />
-      <Text className="flex-1 text-lg text-foreground">Version</Text>
+      <Text className="flex-1 text-lg text-foreground">버전</Text>
       <View className="items-end">
         <Text className="text-lg text-foreground-muted">{versionLabel}</Text>
         {statusLabel ? (
@@ -642,9 +642,9 @@ function AppSettingsSection() {
   );
 
   return (
-    <SettingsSection title="App">
-      <SettingsRow icon="internaldrive" label="Client Storage" target="SettingsClientStorage" />
-      <SettingsRow icon="doc.text" label="Legal" fullScreenTarget="SettingsLegal" />
+    <SettingsSection title="앱">
+      <SettingsRow icon="internaldrive" label="기기 저장소" target="SettingsClientStorage" />
+      <SettingsRow icon="doc.text" label="법적 고지" fullScreenTarget="SettingsLegal" />
       {Updates.isEnabled ? (
         <Pressable
           accessibilityLabel={`Version ${versionLabel}`}
@@ -667,8 +667,8 @@ function capitalize(value: string): string {
 
 function ArchivedThreadsSettingsSection() {
   return (
-    <SettingsSection title="Threads">
-      <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
+    <SettingsSection title="대화">
+      <SettingsRow icon="archivebox" label="보관한 대화" target="SettingsArchive" />
     </SettingsSection>
   );
 }

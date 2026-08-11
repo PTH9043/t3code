@@ -91,11 +91,11 @@ export function SettingsEnvironmentsRouteScreen() {
           {/* Android renders its own in-screen header instead of the native bar. */}
           <NativeStackScreenOptions options={{ headerShown: false }} />
           <AndroidScreenHeader
-            title="Environments"
+            title="연결 환경"
             onBack={() => navigation.goBack()}
             actions={[
               {
-                accessibilityLabel: "Add environment",
+                accessibilityLabel: "연결 환경 추가",
                 icon: "plus",
                 onPress: () =>
                   navigation.navigate("SettingsSheet", { screen: "SettingsEnvironmentNew" }),

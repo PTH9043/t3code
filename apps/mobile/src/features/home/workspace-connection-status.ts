@@ -17,7 +17,7 @@ export function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): bool
 }
 
 export function workspaceConnectionStatusLabel(state: WorkspaceState): string {
-  if (state.networkStatus === "offline") return "You are offline";
+  if (state.networkStatus === "offline") return "오프라인 상태입니다";
   if (state.connectingEnvironments.length === 1) {
     return `Reconnecting to ${state.connectingEnvironments[0]!.environmentLabel}`;
   }
@@ -28,7 +28,7 @@ export function workspaceConnectionStatusLabel(state: WorkspaceState): string {
   if (state.hasPendingShellSnapshot) {
     return state.hasLoadedShellSnapshot ? "Syncing threads..." : "Loading threads...";
   }
-  return "Not connected";
+  return "연결되지 않음";
 }
 
 /** Header-title presentation of the connection state, or null while connected. */

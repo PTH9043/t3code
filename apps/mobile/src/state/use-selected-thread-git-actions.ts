@@ -99,7 +99,7 @@ export function useSelectedThreadGitActions() {
             target,
             {
               operation: "refresh_status",
-              label: "Refreshing source control status",
+              label: "소스 제어 상태 새로고침 중",
             },
             execute,
           );
@@ -156,7 +156,7 @@ export function useSelectedThreadGitActions() {
         const error = Cause.squash(result.cause);
         const message = error instanceof Error ? error.message : "Git action failed.";
         setPendingConnectionError(message);
-        showGitActionResult({ type: "error", title: "Git action failed", description: message });
+        showGitActionResult({ type: "error", title: "깃 작업 실패", description: message });
         return null;
       }
       return result.value;

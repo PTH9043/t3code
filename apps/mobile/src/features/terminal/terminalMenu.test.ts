@@ -58,6 +58,9 @@ function makeKnownSession(input: {
         : null,
       buffer: "",
       status: input.status,
+      access: "controller",
+      controllerAttached: false,
+      observerCount: 0,
       error: null,
       hasRunningSubprocess: false,
       updatedAt: input.updatedAt ?? "2026-04-15T20:00:00.000Z",
@@ -92,7 +95,7 @@ describe("buildTerminalMenuSessions", () => {
         cwd: "/workspace/feature",
         status: "running",
         hasRunningSubprocess: false,
-        displayLabel: "Terminal 3",
+        displayLabel: "터미널 3",
         updatedAt: "2026-04-15T20:05:00.000Z",
       },
     ]);
@@ -118,7 +121,7 @@ describe("buildTerminalMenuSessions", () => {
         cwd: "/workspace/exited",
         status: "exited",
         hasRunningSubprocess: false,
-        displayLabel: "Terminal 4",
+        displayLabel: "터미널 4",
         updatedAt: "2026-04-15T20:07:00.000Z",
       },
     ]);

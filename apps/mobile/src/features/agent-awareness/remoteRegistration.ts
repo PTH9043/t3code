@@ -481,7 +481,7 @@ function armAgentAwarenessLiveActivityForLocalWorkNow(input: {
     const nowIso = new Date(Date.now()).toISOString();
     const activity = AgentActivity.start({
       title: "T3 Code",
-      subtitle: "Agent work in progress",
+      subtitle: "에이전트 작업 진행 중",
       activeCount: 1,
       updatedAt: nowIso,
       activities: [
@@ -492,7 +492,7 @@ function armAgentAwarenessLiveActivityForLocalWorkNow(input: {
           threadTitle: input.threadTitle,
           modelTitle: "",
           phase: "starting",
-          status: "Connecting",
+          status: "연결 중",
           updatedAt: nowIso,
           deepLink: "/",
         },

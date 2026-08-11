@@ -101,11 +101,11 @@ function itemIcon(item: ComposerCommandItem) {
 function groupLabel(triggerKind: ComposerTriggerKind | null): string | null {
   switch (triggerKind) {
     case "slash-command":
-      return "Commands";
+      return "명령";
     case "skill":
-      return "Skills";
+      return "스킬";
     case "path":
-      return "Files";
+      return "파일";
     default:
       return null;
   }
@@ -117,13 +117,13 @@ function emptyText(triggerKind: ComposerTriggerKind | null, isLoading: boolean):
   }
   switch (triggerKind) {
     case "path":
-      return "No matching files or folders.";
+      return "조건에 맞는 파일이나 폴더가 없습니다.";
     case "skill":
-      return "No skills found.";
+      return "스킬을 찾지 못했습니다.";
     case "slash-command":
-      return "No matching commands.";
+      return "조건에 맞는 명령이 없습니다.";
     default:
-      return "No results.";
+      return "결과가 없습니다.";
   }
 }
 

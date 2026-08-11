@@ -21,14 +21,14 @@ export function projectThreadContentPresentation(input: {
   if (input.detailDeleted) {
     return {
       kind: "unavailable",
-      title: "Thread unavailable",
+      title: "대화를 불러올 수 없습니다",
       detail: "This thread was deleted or is no longer available.",
     };
   }
   if (input.detailError !== null) {
     return {
       kind: "unavailable",
-      title: "Could not load conversation",
+      title: "대화를 불러오지 못했습니다",
       detail: input.detailError,
     };
   }
@@ -43,7 +43,7 @@ export function projectThreadContentPresentation(input: {
   }
   return {
     kind: "unavailable",
-    title: "Messages not cached",
+    title: "메시지가 기기에 저장되지 않았습니다",
     detail: "Reconnect this environment to load the conversation.",
   };
 }

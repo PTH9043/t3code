@@ -21,7 +21,7 @@ export class NativeReviewDiffHighlighterUnavailableError extends Schema.TaggedEr
   {},
 ) {
   override get message(): string {
-    return "The native review diff highlighter is unavailable in this build.";
+    return "이 빌드에서는 네이티브 변경 비교 강조 기능을 사용할 수 없습니다.";
   }
 }
 

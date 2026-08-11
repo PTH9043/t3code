@@ -52,12 +52,12 @@ export function buildHomeListFilterMenu(props: {
 
   items.push({
     type: "submenu",
-    title: "Environment",
+    title: "실행 환경",
     items: [
       {
         type: "action",
-        title: "All environments",
-        subtitle: "Show threads from every environment",
+        title: "모든 실행 환경",
+        subtitle: "등록된 프로젝트를 모든 실행 환경에서 찾습니다",
         state: props.selectedEnvironmentId === null ? "on" : "off",
         onPress: () => props.onEnvironmentChange(null),
       },
@@ -76,22 +76,13 @@ export function buildHomeListFilterMenu(props: {
   if (props.projects.length > 0) {
     items.push({
       type: "submenu",
-      title: "Project",
-      items: [
-        {
-          type: "action",
-          title: "All projects",
-          subtitle: "Show threads from every project",
-          state: props.selectedProjectKey === null ? "on" : "off",
-          onPress: () => props.onProjectChange(null),
-        },
-        ...props.projects.map((project) => ({
-          type: "action" as const,
-          title: project.label,
-          state: props.selectedProjectKey === project.key ? ("on" as const) : ("off" as const),
-          onPress: () => props.onProjectChange(project.key),
-        })),
-      ],
+      title: "프로젝트",
+      items: props.projects.map((project) => ({
+        type: "action" as const,
+        title: project.label,
+        state: props.selectedProjectKey === project.key ? ("on" as const) : ("off" as const),
+        onPress: () => props.onProjectChange(project.key),
+      })),
     });
   }
 
@@ -99,7 +90,7 @@ export function buildHomeListFilterMenu(props: {
     items.push(
       {
         type: "submenu",
-        title: "Sort projects",
+        title: "프로젝트 정렬",
         items: PROJECT_SORT_OPTIONS.map((option) => ({
           type: "action",
           title: option.label,
@@ -109,7 +100,7 @@ export function buildHomeListFilterMenu(props: {
       },
       {
         type: "submenu",
-        title: "Sort threads",
+        title: "대화 정렬",
         items: THREAD_SORT_OPTIONS.map((option) => ({
           type: "action",
           title: option.label,
@@ -121,7 +112,7 @@ export function buildHomeListFilterMenu(props: {
   }
 
   return {
-    title: "Thread list options",
+    title: "프로젝트와 대화 목록 설정",
     items,
   };
 }

@@ -249,7 +249,7 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
             <View className="ml-12 h-px bg-border" />
             <SheetListRow
               icon="arrow.down.circle"
-              title="Pull latest"
+              title="최신 변경 가져오기"
               subtitle={`${behindCount} commit${behindCount === 1 ? "" : "s"} behind upstream`}
               disabled={busy || !isRepo}
               onPress={() => void gitActions.onPullSelectedThreadBranch()}
@@ -259,8 +259,8 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
         <View className="ml-12 h-px bg-border" />
         <SheetListRow
           icon="text.bubble"
-          title="Review changes"
-          subtitle="Inspect turn diffs, worktree changes, and base branch diff"
+          title="변경 내용 검토"
+          subtitle="턴별 차이, 작업 트리 변경, 기준 브랜치 차이 확인"
           disabled={busy || !isRepo}
           onPress={() => {
             const params = { environmentId, threadId };
@@ -274,8 +274,8 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
         <View className="ml-12 h-px bg-border" />
         <SheetListRow
           icon="point.topleft.down.curvedto.point.bottomright.up"
-          title="Branches & worktrees"
-          subtitle="Switch branch, create branch, or move to a worktree"
+          title="브랜치와 작업 트리"
+          subtitle="브랜치 전환·생성 또는 작업 트리로 이동"
           disabled={busy || !isRepo}
           onPress={() =>
             navigation.navigate("GitBranches", {
@@ -286,7 +286,7 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
         />
       </View>
 
-      {currentWorktreePath ? <MetaCard label="Worktree" value={currentWorktreePath} /> : null}
+      {currentWorktreePath ? <MetaCard label="작업 트리" value={currentWorktreePath} /> : null}
     </ScrollView>
   );
 
@@ -405,7 +405,7 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
           onBack={() => navigation.goBack()}
           actions={[
             {
-              accessibilityLabel: "Refresh repository status",
+              accessibilityLabel: "저장소 상태 새로고침",
               disabled: busy,
               icon: "arrow.clockwise",
               onPress: () => void gitActions.refreshSelectedThreadGitStatus(),

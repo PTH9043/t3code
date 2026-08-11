@@ -20,9 +20,7 @@ export function WorkspaceSidebarToolbar(
     <NativeHeaderToolbar placement="left">
       {props.children}
       <NativeHeaderToolbar.Button
-        accessibilityLabel={
-          panes.primarySidebarVisible ? "Maximize content" : "Show thread sidebar"
-        }
+        accessibilityLabel={panes.primarySidebarVisible ? "내용 크게 보기" : "대화 목록 보기"}
         icon={panes.primarySidebarVisible ? "arrow.up.left.and.arrow.down.right" : "sidebar.left"}
         onPress={togglePrimarySidebar}
       />

@@ -205,7 +205,7 @@ function composerConnectionStatus(input: {
             : `Failed to connect. Retrying ${environmentLabel}...`,
       };
     case "offline":
-      return { kind: "unavailable", label: "You are offline" };
+      return { kind: "unavailable", label: "오프라인 상태입니다" };
     case "error":
       return {
         kind: "unavailable",
@@ -224,9 +224,9 @@ function composerConnectionStatus(input: {
   // cached messages are already visible.
   switch (input.threadSyncPhase) {
     case "loading":
-      return { kind: "syncing", label: "Loading messages..." };
+      return { kind: "syncing", label: "메시지 불러오는 중..." };
     case "syncing":
-      return { kind: "syncing", label: "Syncing messages..." };
+      return { kind: "syncing", label: "메시지 동기화 중..." };
     default:
       return null;
   }
@@ -313,7 +313,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const sendLabel =
     props.connectionState !== "connected" || props.activeThreadBusy || props.queueCount > 0
       ? "Queue"
-      : "Send";
+      : "보내기";
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
   const currentInteractionMode = props.selectedThread.interactionMode ?? "default";
@@ -378,21 +378,21 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           type: "slash-command" as const,
           command: "model",
           label: "/model",
-          description: "Switch model",
+          description: "모델 변경",
         },
         {
           id: "cmd:plan",
           type: "slash-command" as const,
           command: "plan",
           label: "/plan",
-          description: "Switch to plan mode",
+          description: "계획 모드로 변경",
         },
         {
           id: "cmd:default",
           type: "slash-command" as const,
           command: "default",
           label: "/default",
-          description: "Switch to default mode",
+          description: "기본 모드로 변경",
         },
       ];
       const builtIn = allBuiltIn.filter((item) => item.command.includes(q));
@@ -617,7 +617,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ...buildProviderOptionMenuActions(providerOptionDescriptors),
       {
         id: "options-runtime",
-        title: "Runtime",
+        title: "실행 권한",
         subtitle:
           currentRuntimeMode === "approval-required"
             ? "Approve actions"
@@ -625,12 +625,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               ? "Auto-accept edits"
               : currentRuntimeMode === "auto"
                 ? "Auto"
-                : "Full access",
+                : "전체 권한",
         subactions: [
-          { id: "options:runtime:approval-required", title: "Approve actions" },
-          { id: "options:runtime:auto-accept-edits", title: "Auto-accept edits" },
-          { id: "options:runtime:auto", title: "Auto" },
-          { id: "options:runtime:full-access", title: "Full access" },
+          { id: "options:runtime:approval-required", title: "작업 승인" },
+          { id: "options:runtime:auto-accept-edits", title: "파일 수정 자동 승인" },
+          { id: "options:runtime:auto", title: "자동" },
+          { id: "options:runtime:full-access", title: "전체 권한" },
         ].map((option) => {
           const value = option.id.replace("options:runtime:", "");
           return {
@@ -642,11 +642,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       },
       {
         id: "options-interaction",
-        title: "Interaction",
-        subtitle: currentInteractionMode === "plan" ? "Plan" : "Default",
+        title: "상호작용",
+        subtitle: currentInteractionMode === "plan" ? "계획" : "기본",
         subactions: [
-          { id: "options:interaction:default", title: "Default" },
-          { id: "options:interaction:plan", title: "Plan" },
+          { id: "options:interaction:default", title: "기본" },
+          { id: "options:interaction:plan", title: "계획" },
         ].map((option) => {
           const value = option.id.replace("options:interaction:", "");
           return {
@@ -856,7 +856,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 fadeTransparent={toolbarFadeTransparent}
               >
                 <ComposerToolbarButton
-                  accessibilityLabel="Add attachment"
+                  accessibilityLabel="첨부 파일 추가"
                   icon="plus"
                   onPress={() => void props.onPickDraftImages()}
                   showChevron={false}
@@ -866,7 +866,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}
                 >
                   <ComposerToolbarTrigger
-                    accessibilityLabel="Model"
+                    accessibilityLabel="모델"
                     iconNode={
                       <ProviderIcon provider={currentModelOption?.providerDriver} size={16} />
                     }
@@ -878,14 +878,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   onPressAction={({ nativeEvent }) => handleOptionsMenuAction(nativeEvent.event)}
                 >
                   <ComposerToolbarTrigger
-                    accessibilityLabel="Configuration"
+                    accessibilityLabel="구성"
                     icon="slider.horizontal.3"
                     label={configurationLabel}
                   />
                 </ControlPillMenu>
                 {showStopAction ? (
                   <ComposerToolbarButton
-                    accessibilityLabel="Stop"
+                    accessibilityLabel="중지"
                     icon="stop.fill"
                     variant="danger"
                     onPress={props.onStopThread}

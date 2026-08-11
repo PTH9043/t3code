@@ -14,14 +14,14 @@ export const SHOWCASE_PENDING_TASK_DEFINITIONS = [
   {
     projectId: "t3code",
     id: "offline-launch-checklist",
-    text: "Ship the offline launch checklist before touchdown ✈️",
+    text: "착륙 전에 오프라인 출시 점검표 마무리 ✈️",
     branch: "feat/offline-launchpad",
     minutesAgo: 8,
   },
   {
     projectId: "react",
     id: "train-tunnel-suspense",
-    text: "Polish the Suspense handoff for the train tunnel 🚇",
+    text: "열차 터널용 Suspense 전환 다듬기 🚇",
     branch: "perf/tunnel-handoff",
     minutesAgo: 27,
   },

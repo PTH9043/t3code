@@ -144,7 +144,7 @@ export function ConnectionEnvironmentRow(props: {
                 <TextInput
                   autoCapitalize="words"
                   autoCorrect={false}
-                  placeholder="My MacBook"
+                  placeholder="내 맥북"
                   value={label}
                   onChangeText={setLabel}
                   className="rounded-[14px] border border-input-border bg-input px-4 py-3 text-base text-foreground"

@@ -123,21 +123,21 @@ function relayProtectedErrorMessage(error: RelayProtectedErrorType): string {
       switch (error.reason) {
         case "missing_bearer":
         case "invalid_bearer":
-          return "Relay rejected the cloud session token.";
+          return "릴레이가 클라우드 세션 토큰을 거부했습니다.";
         case "invalid_dpop":
-          return "Relay rejected the DPoP proof.";
+          return "릴레이가 DPoP 증명을 거부했습니다.";
         case "not_authorized":
-          return "Relay rejected the authenticated request.";
+          return "릴레이가 인증 요청을 거부했습니다.";
       }
     case "RelayEnvironmentLinkProofExpiredError":
-      return "Relay rejected an expired environment link proof.";
+      return "릴레이가 만료된 환경 연결 증명을 거부했습니다.";
     case "RelayEnvironmentLinkProofInvalidError":
       return `Relay rejected the environment link proof (${error.reason}).`;
     case "RelayEnvironmentConnectNotAuthorizedError":
       // "Not authorized" covers non-auth causes too; surface the reason so a
       // missing link doesn't read as a credential problem.
       if (error.reason === "environment_link_not_found") {
-        return "Relay has no active link for this environment. The environment server may not have re-established its link yet.";
+        return "릴레이에 이 환경의 활성 연결이 없습니다. 환경 서버가 아직 연결을 복구하지 못했을 수 있습니다.";
       }
       return error.reason
         ? `Relay rejected the environment connection request (${error.reason}).`
@@ -145,7 +145,7 @@ function relayProtectedErrorMessage(error: RelayProtectedErrorType): string {
     case "RelayEnvironmentEndpointUnavailableError":
       return `Relay could not reach the environment endpoint (${error.reason}).`;
     case "RelayEnvironmentEndpointTimedOutError":
-      return "Relay timed out while contacting the environment endpoint.";
+      return "릴레이가 환경 엔드포인트에 연결하는 동안 시간이 초과되었습니다.";
     case "RelayEnvironmentLinkFailedError":
       return `Relay could not link the environment (${error.reason}).`;
     case "RelayEnvironmentLinkUnavailableError":
@@ -153,7 +153,7 @@ function relayProtectedErrorMessage(error: RelayProtectedErrorType): string {
     case "RelayEnvironmentLinkLimitExceededError":
       return `Relay refused the link: this account already has its maximum of ${error.maxTunnels} managed tunnels. Unlink an environment to free one up.`;
     case "RelayAgentActivityPublishProofExpiredError":
-      return "Relay rejected an expired agent activity publish proof.";
+      return "릴레이가 만료된 에이전트 활동 게시 증명을 거부했습니다.";
     case "RelayAgentActivityPublishProofInvalidError":
       return `Relay rejected the agent activity publish proof (${error.reason}).`;
     case "RelayInternalError":

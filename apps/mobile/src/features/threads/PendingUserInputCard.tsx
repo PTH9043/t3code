@@ -85,7 +85,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
               onChangeText={(value) =>
                 props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
               }
-              placeholder="Or type a custom answer"
+              placeholder="또는 직접 답변 입력"
               className="min-h-[54px] rounded-2xl border border-neutral-200 bg-white px-3.5 py-3 font-sans text-base text-neutral-950 dark:border-white/8 dark:bg-neutral-950/70 dark:text-neutral-50"
             />
           </View>
@@ -101,7 +101,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
         }
         onPress={() => void props.onSubmit()}
       >
-        <Text className="font-t3-extrabold text-sm text-white">Submit answers</Text>
+        <Text className="font-t3-extrabold text-sm text-white">답변 제출</Text>
       </Pressable>
     </View>
   );

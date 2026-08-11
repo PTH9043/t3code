@@ -11,7 +11,10 @@ import { LegendList } from "@legendapp/list/react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { sortPinnedThreadsByOrderKey } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  sortPinnedThreadsByOrderKey,
+  sortThreads,
+} from "@t3tools/client-runtime/state/thread-sort";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { Platform, Pressable, StyleSheet, TextInput, View, useColorScheme } from "react-native";
@@ -52,7 +55,12 @@ import {
   type HomeGroupDisplayState,
   type HomeListItem,
 } from "../home/homeListItems";
-import { buildHomeProjectScopes, buildHomeThreadGroups } from "../home/homeThreadList";
+import {
+  buildHomeProjectScopes,
+  buildHomeThreadGroups,
+  findHomeProjectScopeKeyForRef,
+  resolveRequiredHomeProjectScopeKey,
+} from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { useThreadListActions } from "../home/useThreadListActions";
@@ -66,7 +74,9 @@ import { createSidebarHeaderItems } from "./sidebar-native-header-items";
 import { SidebarNavigationShell } from "./sidebar-navigation-shell";
 import {
   PendingTaskListRow,
+  ThreadListCollaborationRow,
   ThreadListGroupHeader,
+  ThreadListProjectHeader,
   ThreadListRow,
   ThreadListShowMoreRow,
 } from "./thread-list-items";
@@ -142,6 +152,7 @@ interface ThreadNavigationSidebarProps {
   readonly onOpenSettings: () => void;
   readonly onOpenEnvironmentSettings: () => void;
   readonly onNewThreadInProject: (project: EnvironmentProject) => void;
+  readonly onOpenCollaborationRuns: (project: EnvironmentProject) => void;
   readonly onSearchQueryChange: (query: string) => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onRequestVisibility: () => void;
@@ -270,6 +281,10 @@ function ThreadNavigationSidebarPane(
       }),
     [options.projectGroupingMode, options.selectedEnvironmentId, projects],
   );
+  const effectiveSelectedProjectKey = useMemo(
+    () => resolveRequiredHomeProjectScopeKey(projectScopes, selectedProjectKey),
+    [projectScopes, selectedProjectKey],
+  );
   const projectFilterOptions = useMemo(
     () =>
       projectScopes.map((scope) => ({
@@ -295,58 +310,107 @@ function ThreadNavigationSidebarPane(
   );
   const selectedProjectScope = useMemo(
     () =>
-      selectedProjectKey === null
+      effectiveSelectedProjectKey === null
         ? null
-        : (projectScopes.find((scope) => scope.key === selectedProjectKey) ?? null),
-    [projectScopes, selectedProjectKey],
+        : (projectScopes.find((scope) => scope.key === effectiveSelectedProjectKey) ?? null),
+    [effectiveSelectedProjectKey, projectScopes],
   );
+  const v2CollaborationProject =
+    threadListV2Enabled && selectedProjectScope?.projects.length === 1
+      ? selectedProjectScope.representative
+      : null;
   useEffect(() => {
-    if (
-      selectedProjectKey !== null &&
-      !projectFilterOptions.some((project) => project.key === selectedProjectKey)
-    ) {
-      setSelectedProjectKey(null);
+    if (selectedProjectKey !== effectiveSelectedProjectKey) {
+      setSelectedProjectKey(effectiveSelectedProjectKey);
     }
-  }, [projectFilterOptions, selectedProjectKey]);
+  }, [effectiveSelectedProjectKey, selectedProjectKey]);
+  const lastSelectedThreadKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastSelectedThreadKeyRef.current === props.selectedThreadKey) return;
+    lastSelectedThreadKeyRef.current = props.selectedThreadKey;
+    const selectedThread =
+      props.selectedThreadKey === null
+        ? null
+        : (threads.find(
+            (thread) =>
+              scopedThreadKey(thread.environmentId, thread.id) === props.selectedThreadKey,
+          ) ?? null);
+    const ownerScopeKey = findHomeProjectScopeKeyForRef(
+      projectScopes,
+      selectedThread
+        ? { environmentId: selectedThread.environmentId, projectId: selectedThread.projectId }
+        : null,
+    );
+    if (ownerScopeKey !== null) setSelectedProjectKey(ownerScopeKey);
+  }, [projectScopes, props.selectedThreadKey, threads]);
   const selectedProjectRefs = useMemo(
     () =>
-      selectedProjectScope === null
-        ? null
-        : new Set(
-            selectedProjectScope.projectRefs.map((projectRef) =>
-              scopedProjectKey(projectRef.environmentId, projectRef.projectId),
-            ),
-          ),
+      new Set(
+        (selectedProjectScope?.projectRefs ?? []).map((projectRef) =>
+          scopedProjectKey(projectRef.environmentId, projectRef.projectId),
+        ),
+      ),
     [selectedProjectScope],
   );
   const scopedProjects = useMemo(
     () =>
-      selectedProjectRefs === null
-        ? projects
-        : projects.filter((project) =>
-            selectedProjectRefs.has(scopedProjectKey(project.environmentId, project.id)),
-          ),
+      projects.filter((project) =>
+        selectedProjectRefs.has(scopedProjectKey(project.environmentId, project.id)),
+      ),
     [projects, selectedProjectRefs],
   );
   const scopedThreads = useMemo(
     () =>
-      selectedProjectRefs === null
-        ? threads
-        : threads.filter((thread) =>
-            selectedProjectRefs.has(scopedProjectKey(thread.environmentId, thread.projectId)),
-          ),
+      threads.filter((thread) =>
+        selectedProjectRefs.has(scopedProjectKey(thread.environmentId, thread.projectId)),
+      ),
     [selectedProjectRefs, threads],
   );
   const scopedPendingTasks = useMemo(
     () =>
-      selectedProjectRefs === null
-        ? pendingTasks
-        : pendingTasks.filter((pendingTask) =>
-            selectedProjectRefs.has(
-              scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
-            ),
-          ),
+      pendingTasks.filter((pendingTask) =>
+        selectedProjectRefs.has(
+          scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
+        ),
+      ),
     [pendingTasks, selectedProjectRefs],
+  );
+  const handleProjectChange = useCallback(
+    (projectKey: string | null) => {
+      if (projectKey === null) return;
+      const scope = projectScopes.find((candidate) => candidate.key === projectKey);
+      if (!scope) return;
+      setSelectedProjectKey(projectKey);
+
+      const memberKeys = new Set(
+        scope.projectRefs.map((projectRef) =>
+          scopedProjectKey(projectRef.environmentId, projectRef.projectId),
+        ),
+      );
+      const nextThread = sortThreads(
+        threads.filter(
+          (thread) =>
+            thread.archivedAt === null &&
+            memberKeys.has(scopedProjectKey(thread.environmentId, thread.projectId)),
+        ),
+        options.threadSortOrder,
+      )[0];
+      if (nextThread) {
+        if (scopedThreadKey(nextThread.environmentId, nextThread.id) !== props.selectedThreadKey) {
+          props.onSelectThread(nextThread);
+        }
+        return;
+      }
+      props.onNewThreadInProject(scope.representative);
+    },
+    [
+      options.threadSortOrder,
+      projectScopes,
+      props.onNewThreadInProject,
+      props.onSelectThread,
+      props.selectedThreadKey,
+      threads,
+    ],
   );
   const groups = useMemo(
     () =>
@@ -435,7 +499,7 @@ function ThreadNavigationSidebarPane(
   const [settledVisibleCount, setSettledVisibleCount] = useState(
     THREAD_LIST_V2_SETTLED_INITIAL_COUNT,
   );
-  const settledResetKey = `${options.selectedEnvironmentId ?? "all"}:${selectedProjectKey ?? "all"}:${props.searchQuery.trim()}`;
+  const settledResetKey = `${options.selectedEnvironmentId ?? "all"}:${effectiveSelectedProjectKey ?? "none"}:${props.searchQuery.trim()}`;
   const lastSettledResetKeyRef = useRef(settledResetKey);
   if (lastSettledResetKeyRef.current !== settledResetKey) {
     lastSettledResetKeyRef.current = settledResetKey;
@@ -532,7 +596,7 @@ function ThreadNavigationSidebarPane(
     return buildThreadListV2Items({
       threads: threads.filter((thread) => thread.archivedAt === null),
       environmentId: options.selectedEnvironmentId,
-      projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
+      projectRefs: selectedProjectScope?.projectRefs ?? [],
       searchQuery: props.searchQuery,
       matchedThreadKeys,
       changeRequestStateByKey,
@@ -588,10 +652,9 @@ function ThreadNavigationSidebarPane(
       (pendingTask) =>
         (options.selectedEnvironmentId === null ||
           pendingTask.message.environmentId === options.selectedEnvironmentId) &&
-        (selectedProjectRefs === null ||
-          selectedProjectRefs.has(
-            scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
-          )) &&
+        selectedProjectRefs.has(
+          scopedProjectKey(pendingTask.message.environmentId, pendingTask.creation.projectId),
+        ) &&
         (v2SearchQuery.length === 0 ||
           pendingTask.title.toLocaleLowerCase().includes(v2SearchQuery)),
     );
@@ -630,12 +693,12 @@ function ThreadNavigationSidebarPane(
     () => [
       {
         id: "environment",
-        title: "Environment",
+        title: "실행 환경",
         subactions: [
           {
             id: "environment:all",
-            title: "All environments",
-            subtitle: "Show threads from every environment",
+            title: "모든 실행 환경",
+            subtitle: "등록된 프로젝트를 모든 실행 환경에서 찾습니다",
             state: options.selectedEnvironmentId === null ? "on" : "off",
           },
           ...environments.map((environment) => ({
@@ -653,20 +716,13 @@ function ThreadNavigationSidebarPane(
         : ([
             {
               id: "project",
-              title: "Project",
-              subactions: [
-                {
-                  id: "project:all",
-                  title: "All projects",
-                  subtitle: "Show threads from every project",
-                  state: selectedProjectKey === null ? "on" : "off",
-                },
-                ...projectFilterOptions.map((project) => ({
-                  id: `project:${project.key}`,
-                  title: project.label,
-                  state: selectedProjectKey === project.key ? ("on" as const) : ("off" as const),
-                })),
-              ],
+              title: "프로젝트",
+              subactions: projectFilterOptions.map((project) => ({
+                id: `project:${project.key}`,
+                title: project.label,
+                state:
+                  effectiveSelectedProjectKey === project.key ? ("on" as const) : ("off" as const),
+              })),
             },
           ] satisfies MenuAction[])),
       // v2 lays the list out in fixed creation order — offering sort/group
@@ -677,7 +733,7 @@ function ThreadNavigationSidebarPane(
         : ([
             {
               id: "project-sort",
-              title: "Sort projects",
+              title: "프로젝트 정렬",
               subactions: PROJECT_SORT_OPTIONS.map((option) => ({
                 id: `project-sort:${option.value}`,
                 title: option.label,
@@ -686,7 +742,7 @@ function ThreadNavigationSidebarPane(
             },
             {
               id: "thread-sort",
-              title: "Sort threads",
+              title: "대화 정렬",
               subactions: THREAD_SORT_OPTIONS.map((option) => ({
                 id: `thread-sort:${option.value}`,
                 title: option.label,
@@ -695,7 +751,7 @@ function ThreadNavigationSidebarPane(
             },
           ] satisfies MenuAction[])),
     ],
-    [environments, options, projectFilterOptions, selectedProjectKey, threadListV2Enabled],
+    [environments, effectiveSelectedProjectKey, options, projectFilterOptions, threadListV2Enabled],
   );
   const handleListMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -711,14 +767,10 @@ function ThreadNavigationSidebarPane(
         if (environment) setSelectedEnvironmentId(environment.environmentId);
         return;
       }
-      if (event === "project:all") {
-        setSelectedProjectKey(null);
-        return;
-      }
       if (event.startsWith("project:")) {
         const projectKey = event.slice("project:".length);
         if (projectFilterOptions.some((project) => project.key === projectKey)) {
-          setSelectedProjectKey(projectKey);
+          handleProjectChange(projectKey);
         }
         return;
       }
@@ -739,6 +791,7 @@ function ThreadNavigationSidebarPane(
     },
     [
       environments,
+      handleProjectChange,
       projectFilterOptions,
       setProjectSortOrder,
       setSelectedEnvironmentId,
@@ -1021,6 +1074,7 @@ function ThreadNavigationSidebarPane(
               // placeholder shell rather than a real project.
               newThreadTarget={item.group.newThreadTarget}
               onNewThread={props.onNewThreadInProject}
+              onOpenCollaborationRuns={props.onOpenCollaborationRuns}
               project={item.group.representative}
               threadCount={item.group.threads.length + item.group.pendingTasks.length}
               title={item.group.title}
@@ -1104,6 +1158,7 @@ function ThreadNavigationSidebarPane(
       projectCwdByKey,
       projectTitleByProjectKey,
       props.onNewThreadInProject,
+      props.onOpenCollaborationRuns,
       props.searchQuery,
       props.selectedThreadKey,
       props.width,
@@ -1128,8 +1183,8 @@ function ThreadNavigationSidebarPane(
   // v2 ignores the sort/group options, so only the environment filter can
   // light the "customized" state while the beta is on.
   const filterCustomized = threadListV2Enabled
-    ? options.selectedEnvironmentId !== null || selectedProjectKey !== null
-    : hasCustomHomeListOptions({ ...options, selectedProjectKey });
+    ? options.selectedEnvironmentId !== null
+    : hasCustomHomeListOptions({ ...options, selectedProjectKey: null });
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
     : "line.3.horizontal.decrease.circle";
@@ -1139,20 +1194,21 @@ function ThreadNavigationSidebarPane(
         environments,
         projects: projectFilterOptions,
         selectedEnvironmentId: options.selectedEnvironmentId,
-        selectedProjectKey,
+        selectedProjectKey: effectiveSelectedProjectKey,
         projectSortOrder: options.projectSortOrder,
         threadSortOrder: options.threadSortOrder,
         onEnvironmentChange: setSelectedEnvironmentId,
-        onProjectChange: setSelectedProjectKey,
+        onProjectChange: handleProjectChange,
         onProjectSortOrderChange: setProjectSortOrder,
         onThreadSortOrderChange: setThreadSortOrder,
         listOrganization: !threadListV2Enabled,
       }),
     [
       environments,
+      effectiveSelectedProjectKey,
+      handleProjectChange,
       options,
       projectFilterOptions,
-      selectedProjectKey,
       setProjectSortOrder,
       setSelectedEnvironmentId,
       setThreadSortOrder,
@@ -1173,16 +1229,41 @@ function ThreadNavigationSidebarPane(
   const listEmpty = (
     <Text className="px-2 py-4 text-sm text-foreground-muted">
       {catalogState.isLoadingConnections
-        ? "Loading threads…"
+        ? "대화를 불러오는 중…"
         : props.searchQuery.trim().length > 0
           ? threadSearch.isPending
-            ? "Searching thread messages…"
-            : "No matching threads"
+            ? "대화 내용을 검색하는 중…"
+            : "일치하는 대화가 없습니다"
           : selectedProjectScope !== null
-            ? `No threads in ${selectedProjectScope.title}`
-            : "No threads yet"}
+            ? `${selectedProjectScope.title}에 대화가 없습니다`
+            : "등록된 프로젝트가 없습니다"}
     </Text>
   );
+  const v2ListHeader =
+    threadListV2Enabled && selectedProjectScope ? (
+      <View>
+        <ThreadListProjectHeader
+          variant="sidebar"
+          project={selectedProjectScope.representative}
+          title={selectedProjectScope.title}
+          conversationCount={
+            scopedThreads.filter((thread) => thread.archivedAt === null).length +
+            scopedPendingTasks.length
+          }
+          newThreadTarget={
+            selectedProjectScope.projects.length === 1 ? selectedProjectScope.representative : null
+          }
+          onNewThread={props.onNewThreadInProject}
+        />
+        {v2CollaborationProject ? (
+          <ThreadListCollaborationRow
+            variant="sidebar"
+            project={v2CollaborationProject}
+            onOpen={props.onOpenCollaborationRuns}
+          />
+        ) : null}
+      </View>
+    ) : null;
 
   if (props.nativeChrome) {
     return (
@@ -1205,7 +1286,7 @@ function ThreadNavigationSidebarPane(
               // hidesSearchBarWhenScrolling collapses it on scroll.
               hideWhenScrolling: false,
               obscureBackground: false,
-              placeholder: "Search",
+              placeholder: "대화 검색",
               placement: "stacked",
               onCancelButtonPress: () => {
                 props.onSearchQueryChange("");
@@ -1247,6 +1328,7 @@ function ThreadNavigationSidebarPane(
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={v2ListHeader}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>
@@ -1293,6 +1375,7 @@ function ThreadNavigationSidebarPane(
               scrollEventThrottle={16}
               showsVerticalScrollIndicator={false}
               style={styles.threadList}
+              ListHeaderComponent={v2ListHeader}
               ListEmptyComponent={listEmpty}
             />
           </GestureDetector>
@@ -1346,7 +1429,7 @@ function ThreadNavigationSidebarPane(
             size="pageTitle"
             brand={
               <Text className="flex-1 text-[34px] font-t3-bold text-foreground" numberOfLines={1}>
-                Threads
+                {selectedProjectScope?.title ?? "프로젝트"}
               </Text>
             }
           />
@@ -1354,7 +1437,7 @@ function ThreadNavigationSidebarPane(
             <ControlPillMenu actions={listMenuActions} onPressAction={handleListMenuAction}>
               <SidebarFilterButton
                 grouped
-                accessibilityLabel="Filter and sort threads"
+                accessibilityLabel="프로젝트와 대화 목록 설정"
                 icon={filterIcon}
               />
             </ControlPillMenu>
@@ -1366,12 +1449,12 @@ function ThreadNavigationSidebarPane(
           <SymbolView name="magnifyingglass" size={15} tintColor={mutedColor} type="monochrome" />
           <TextInput
             ref={searchInputRef}
-            accessibilityLabel="Search threads"
+            accessibilityLabel="대화 검색"
             autoCapitalize="none"
             autoCorrect={false}
             clearButtonMode="while-editing"
             onChangeText={props.onSearchQueryChange}
-            placeholder="Search"
+            placeholder="대화 검색"
             placeholderTextColor={placeholderColor}
             returnKeyType="search"
             className="h-[34px] flex-1 px-0 py-0 font-sans text-base text-foreground"

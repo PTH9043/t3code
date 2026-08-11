@@ -66,7 +66,7 @@ export function AndroidScreenHeader(props: {
       <View className="min-h-12 flex-row items-center gap-2">
         {props.onBack ? (
           <Pressable
-            accessibilityLabel="Navigate up"
+            accessibilityLabel="이전 화면으로"
             accessibilityRole="button"
             hitSlop={8}
             onPress={props.onBack}

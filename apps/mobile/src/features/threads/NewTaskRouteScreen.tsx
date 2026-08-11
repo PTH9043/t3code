@@ -30,16 +30,16 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
 } {
   if (catalogState.isLoadingConnections) {
     return {
-      title: "Loading environments",
-      detail: "Checking saved environments on this device.",
+      title: "연결 환경을 불러오는 중",
+      detail: "이 기기에 저장된 연결 환경을 확인하고 있습니다.",
       loading: true,
     };
   }
 
   if (!catalogState.hasConnections) {
     return {
-      title: "No environments connected",
-      detail: "Add an environment before creating a task.",
+      title: "연결된 환경이 없습니다",
+      detail: "작업을 만들기 전에 연결 환경을 추가하세요.",
       loading: false,
     };
   }
@@ -51,10 +51,10 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
     !catalogState.hasLoadedShellSnapshot
   ) {
     return {
-      title: "Environment unavailable",
+      title: "연결 환경을 사용할 수 없습니다",
       detail:
         catalogState.connectionError ??
-        "The saved environment is offline. Check the URL or start the environment, then retry.",
+        "저장된 환경이 오프라인입니다. 주소를 확인하거나 환경을 시작한 뒤 다시 시도하세요.",
       loading: false,
     };
   }
@@ -65,15 +65,15 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
     catalogState.connectionError === null
   ) {
     return {
-      title: "Connecting to environment",
-      detail: "Loading projects from the saved environment.",
+      title: "연결 환경에 접속 중",
+      detail: "저장된 환경에서 프로젝트를 불러오고 있습니다.",
       loading: true,
     };
   }
 
   return {
-    title: "No projects found",
-    detail: "The connected environment did not report any projects.",
+    title: "프로젝트가 없습니다",
+    detail: "연결된 환경에서 등록된 프로젝트를 찾지 못했습니다.",
     loading: false,
   };
 }
@@ -96,12 +96,12 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const incomingShare = routeShareId ? getShare(routeShareId) : null;
   const incomingShareSubtitle = incomingShare
     ? incomingShare.attachments.length === 0
-      ? "Choose a project for what you shared"
+      ? "공유한 내용을 사용할 프로젝트를 선택하세요"
       : incomingShare.attachments.length === 1
-        ? "Choose a project for the image you shared"
-        : `Choose a project for the ${incomingShare.attachments.length} images you shared`
+        ? "공유한 이미지를 사용할 프로젝트를 선택하세요"
+        : `공유한 이미지 ${incomingShare.attachments.length}개를 사용할 프로젝트를 선택하세요`
     : null;
-  const screenTitle = incomingShare ? "Start a task" : "Choose project";
+  const screenTitle = incomingShare ? "작업 시작" : "프로젝트 선택";
   const projectEmptyState = deriveProjectEmptyState(catalogState);
   const resumedDestinationKeyRef = useRef<string | null>(null);
   const reservedDestinationProject = incomingShare?.destination
@@ -194,7 +194,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               catalogState.hasReadyEnvironment
                 ? [
                     {
-                      accessibilityLabel: "Add project",
+                      accessibilityLabel: "프로젝트 추가",
                       icon: "plus",
                       onPress: () => navigation.navigate("NewTaskSheet", { screen: "AddProject" }),
                     },
@@ -214,7 +214,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
           <NativeHeaderToolbar placement="right">
             {layout.usesSplitView ? (
               <NativeHeaderToolbar.Button
-                accessibilityLabel="Close new task"
+                accessibilityLabel="새 작업 닫기"
                 icon="xmark"
                 onPress={() => navigation.goBack()}
                 separateBackground
