@@ -25,6 +25,7 @@ import {
   RotateCwIcon,
   SearchIcon,
   ServerCogIcon,
+  ShieldCheckIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -107,6 +108,28 @@ function candidateSourceLabel(source: string) {
   return "프로젝트 설정";
 }
 
+function integrityStatusLabel(status: WorkspaceProgram["integrity"]["status"]) {
+  if (status === "queued") return "수렴 대기";
+  if (status === "running") return "수렴 중";
+  if (status === "stopping") return "중지 중";
+  if (status === "stopped") return "수렴 중지됨";
+  if (status === "converged") return "수렴 완료";
+  if (status === "failed") return "수렴 실패";
+  return "수렴 꺼짐";
+}
+
+function integrityStatusVariant(status: WorkspaceProgram["integrity"]["status"]) {
+  if (status === "converged") return "success" as const;
+  if (status === "failed") return "error" as const;
+  if (status === "queued" || status === "running" || status === "stopping")
+    return "warning" as const;
+  return "outline" as const;
+}
+
+function integrityActive(integrity: WorkspaceProgram["integrity"]): boolean {
+  return integrity.status === "queued" || integrity.status === "running";
+}
+
 function healthLabel(run: WorkspaceProgramRun | undefined) {
   if (!run) return "확인 전";
   if (run.healthStatus === "healthy") return "정상";
@@ -186,6 +209,14 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
     label: "프로젝트 프로그램 재시작",
     reportFailure: false,
   });
+  const startIntegrity = useAtomCommand(projectEnvironment.startWorkspaceProgramIntegrity, {
+    label: "무결성 수렴 시작",
+    reportFailure: false,
+  });
+  const stopIntegrity = useAtomCommand(projectEnvironment.stopWorkspaceProgramIntegrity, {
+    label: "무결성 수렴 중지",
+    reportFailure: false,
+  });
   const repairIncident = useAtomCommand(projectEnvironment.requestWorkspaceIncidentRepair, {
     label: "오류 수정 요청",
     reportFailure: false,
@@ -205,6 +236,10 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
   const [environmentVariableNames, setEnvironmentVariableNames] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [repairInstructions, setRepairInstructions] = useState<Record<string, string>>({});
+  const [integrityDrafts, setIntegrityDrafts] = useState<Record<string, string>>({});
+  const [integrityEnabled, setIntegrityEnabled] = useState(false);
+  const [integrityValidationCommands, setIntegrityValidationCommands] = useState("");
+  const [integrityRequiredCleanPasses, setIntegrityRequiredCleanPasses] = useState(2);
 
   const latestRunByProgram = useMemo(() => {
     const result = new Map<string, WorkspaceProgramRun>();
@@ -276,6 +311,9 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
     healthCheck?: WorkspaceProgramHealthCheck | null;
     errorPatterns?: string[];
     environmentVariableNames?: string[];
+    integrityEnabled?: boolean;
+    integrityValidationCommands?: string[];
+    integrityRequiredCleanPasses?: number;
   }) => {
     setBusyKey(`save:${input.id}`);
     try {
@@ -292,6 +330,9 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
           healthCheck: input.healthCheck ?? null,
           errorPatterns: input.errorPatterns ?? [DEFAULT_ERROR_PATTERN],
           enabled: true,
+          integrityEnabled: input.integrityEnabled ?? false,
+          integrityValidationCommands: input.integrityValidationCommands ?? [],
+          integrityRequiredCleanPasses: input.integrityRequiredCleanPasses ?? 2,
         },
       });
       if (!notifyFailure(result, "프로그램을 저장하지 못했습니다")) {
@@ -329,6 +370,10 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
       });
       return;
     }
+    const selectedValidationCommands = integrityValidationCommands
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean);
     const saved = await saveProgram({
       id: WorkspaceProgramId.make(
         `${
@@ -345,12 +390,16 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
       healthCheck: healthCheck(),
       errorPatterns: errorPattern.trim() ? [errorPattern.trim()] : [],
       environmentVariableNames: selectedEnvironmentVariableNames,
+      integrityEnabled,
+      integrityValidationCommands: selectedValidationCommands,
+      integrityRequiredCleanPasses,
     });
     if (!saved) return;
     setName("");
     setCommand("");
     setRelativeDirectory("");
     setEnvironmentVariableNames("");
+    setIntegrityValidationCommands("");
   };
 
   const runAction = async (
@@ -372,6 +421,79 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
         input: { projectId: project.id, programId: program.id },
       });
       if (!notifyFailure(result, `${program.name} 작업을 처리하지 못했습니다`)) refreshAll();
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  /**
+   * Re-upserts a program with new integrity settings, carrying every other field over
+   * unchanged. The server rebuilds integrity state from the command on every upsert, so
+   * enabling here queues a convergence cycle and disabling stops the running one.
+   */
+  const saveIntegrity = async (
+    program: WorkspaceProgram,
+    integrity: {
+      enabled: boolean;
+      validationCommands?: ReadonlyArray<string>;
+      requiredCleanPasses?: number;
+    },
+  ) => {
+    setBusyKey(`integrity-save:${program.id}`);
+    try {
+      const result = await upsertProgram({
+        environmentId: project.environmentId,
+        input: {
+          projectId: project.id,
+          programId: program.id,
+          name: program.name,
+          command: program.command,
+          relativeDirectory: program.relativeDirectory,
+          environmentVariableNames: [...program.environmentVariableNames],
+          startPolicy: program.startPolicy,
+          healthCheck: program.healthCheck,
+          errorPatterns: [...program.errorPatterns],
+          enabled: program.enabled,
+          integrityEnabled: integrity.enabled,
+          integrityValidationCommands: [
+            ...(integrity.validationCommands ?? program.integrity.validationCommands),
+          ],
+          integrityRequiredCleanPasses:
+            integrity.requiredCleanPasses ?? program.integrity.requiredCleanPasses,
+        },
+      });
+      if (!notifyFailure(result, `${program.name} 무결성 설정을 저장하지 못했습니다`)) {
+        toastManager.add({
+          type: "success",
+          title: integrity.enabled
+            ? `${program.name} 무결성 수렴을 켰습니다.`
+            : `${program.name} 무결성 수렴을 껐습니다.`,
+        });
+        refreshAll();
+      }
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const runIntegrityAction = async (program: WorkspaceProgram, action: "start" | "stop") => {
+    setBusyKey(`integrity-${action}:${program.id}`);
+    try {
+      const request = action === "start" ? startIntegrity : stopIntegrity;
+      const result = await request({
+        environmentId: project.environmentId,
+        input: { projectId: project.id, programId: program.id },
+      });
+      if (!notifyFailure(result, `${program.name} 무결성 수렴을 처리하지 못했습니다`)) {
+        toastManager.add({
+          type: "success",
+          title:
+            action === "start"
+              ? `${program.name} 무결성 수렴을 시작했습니다.`
+              : `${program.name} 무결성 수렴을 중지했습니다.`,
+        });
+        refreshAll();
+      }
     } finally {
       setBusyKey(null);
     }
@@ -452,6 +574,11 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
                             : "자동 실행 권한 꺼짐"}
                         </Badge>
                       ) : null}
+                      {program.integrity.enabled ? (
+                        <Badge variant={integrityStatusVariant(program.integrity.status)}>
+                          무결성 {integrityStatusLabel(program.integrity.status)}
+                        </Badge>
+                      ) : null}
                     </div>
                     <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
                       {program.command}
@@ -488,6 +615,27 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
                     >
                       <RotateCwIcon /> 재시작
                     </Button>
+                    {program.integrity.enabled ? (
+                      integrityActive(program.integrity) ? (
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={busyKey !== null || !programPermissions.manualControl}
+                          onClick={() => void runIntegrityAction(program, "stop")}
+                        >
+                          <CircleStopIcon /> 수렴 중지
+                        </Button>
+                      ) : (
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={busyKey !== null || !programPermissions.manualControl}
+                          onClick={() => void runIntegrityAction(program, "start")}
+                        >
+                          <ShieldCheckIcon /> 무결성 수렴 시작
+                        </Button>
+                      )
+                    ) : null}
                     <Button
                       size="xs"
                       variant="ghost"
@@ -501,6 +649,94 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
                       <Trash2Icon /> 삭제
                     </Button>
                   </div>
+                </div>
+                <div className="mt-3 grid gap-2 rounded-lg border border-border/60 bg-background/55 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium">AI 무결성 수렴</p>
+                      <p className="text-xs text-muted-foreground">
+                        {program.integrity.enabled
+                          ? `주기 ${program.integrity.cycle} · 연속 통과 ${program.integrity.consecutiveCleanPasses}/${program.integrity.requiredCleanPasses} · 검증 명령 ${program.integrity.validationCommands.length}개 · 갱신 ${timestamp(program.integrity.updatedAt)}`
+                          : "점검·수정·독립 검증을 서로 다른 CLI 계정에 나눠 반복합니다."}
+                      </p>
+                    </div>
+                    <Switch
+                      checked={program.integrity.enabled}
+                      disabled={busyKey !== null || !programPermissions.manualControl}
+                      onCheckedChange={(checked) =>
+                        void saveIntegrity(program, { enabled: checked })
+                      }
+                      aria-label={`${program.name} AI 무결성 수렴`}
+                    />
+                  </div>
+                  {program.integrity.summary ? (
+                    <p className="text-xs text-muted-foreground">{program.integrity.summary}</p>
+                  ) : null}
+                  {program.integrity.enabled ? (
+                    <details className="rounded-lg border border-border/60 p-2">
+                      <summary className="cursor-pointer text-xs font-medium">
+                        검증 명령 설정
+                      </summary>
+                      <div className="mt-2 grid gap-2">
+                        <Textarea
+                          value={
+                            integrityDrafts[program.id] ??
+                            program.integrity.validationCommands.join("\n")
+                          }
+                          onChange={(event) =>
+                            setIntegrityDrafts((current) => ({
+                              ...current,
+                              [program.id]: event.currentTarget.value,
+                            }))
+                          }
+                          placeholder={"한 줄에 하나씩 입력하세요.\nvp test run src/foo\nvp lint"}
+                        />
+                        <label className="grid gap-1 text-xs text-muted-foreground">
+                          수렴 판정에 필요한 연속 통과 횟수
+                          <select
+                            className={SELECT_CLASS}
+                            value={String(program.integrity.requiredCleanPasses)}
+                            disabled={busyKey !== null || !programPermissions.manualControl}
+                            onChange={(event) =>
+                              void saveIntegrity(program, {
+                                enabled: true,
+                                requiredCleanPasses: Number(event.currentTarget.value),
+                              })
+                            }
+                          >
+                            {[1, 2, 3, 4, 5].map((value) => (
+                              <option key={value} value={value}>
+                                {value}회
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={busyKey !== null || !programPermissions.manualControl}
+                          onClick={() => {
+                            const draft =
+                              integrityDrafts[program.id] ??
+                              program.integrity.validationCommands.join("\n");
+                            setIntegrityDrafts((current) => {
+                              const { [program.id]: _dropped, ...rest } = current;
+                              return rest;
+                            });
+                            void saveIntegrity(program, {
+                              enabled: true,
+                              validationCommands: draft
+                                .split("\n")
+                                .map((value) => value.trim())
+                                .filter(Boolean),
+                            });
+                          }}
+                        >
+                          검증 명령 저장
+                        </Button>
+                      </div>
+                    </details>
+                  ) : null}
                 </div>
                 {run?.recentLogTail ? (
                   <details className="mt-3 rounded-lg border border-border/60 bg-background/55 p-3">
@@ -656,6 +892,49 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
               onCheckedChange={setAutoStart}
               aria-label="서버 시작 시 자동 실행"
             />
+          </div>
+          <div className="grid gap-3 rounded-xl border border-border/65 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">AI 무결성 수렴</p>
+                <p className="text-xs text-muted-foreground">
+                  점검·수정·독립 검증을 서로 다른 CLI 계정에 나눠 반복합니다. 프로젝트에 역할이 두
+                  개 이상 연결되어 있어야 합니다.
+                </p>
+              </div>
+              <Switch
+                checked={integrityEnabled}
+                onCheckedChange={setIntegrityEnabled}
+                aria-label="AI 무결성 수렴"
+              />
+            </div>
+            {integrityEnabled ? (
+              <>
+                <Textarea
+                  value={integrityValidationCommands}
+                  onChange={(event) => setIntegrityValidationCommands(event.currentTarget.value)}
+                  placeholder={
+                    "필수 검증 명령을 한 줄에 하나씩 입력하세요.\nvp test run src/foo\nvp lint"
+                  }
+                />
+                <label className="grid gap-1 text-xs text-muted-foreground">
+                  수렴 판정에 필요한 연속 통과 횟수
+                  <select
+                    className={SELECT_CLASS}
+                    value={String(integrityRequiredCleanPasses)}
+                    onChange={(event) =>
+                      setIntegrityRequiredCleanPasses(Number(event.currentTarget.value))
+                    }
+                  >
+                    {[1, 2, 3, 4, 5].map((value) => (
+                      <option key={value} value={value}>
+                        {value}회
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            ) : null}
           </div>
           <Button
             disabled={!name.trim() || !command.trim() || busyKey !== null}

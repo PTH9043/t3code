@@ -27,6 +27,8 @@ import {
   type StartWorkspaceProgramInput,
   type StopWorkspaceProgramInput,
   type RestartWorkspaceProgramInput,
+  type StartWorkspaceProgramIntegrityInput,
+  type StopWorkspaceProgramIntegrityInput,
   type RequestWorkspaceIncidentRepairInput,
   type ResolveWorkspaceIncidentInput,
   archiveWorkspaceKnowledgeItem,
@@ -47,6 +49,8 @@ import {
   startWorkspaceProgram,
   stopWorkspaceProgram,
   restartWorkspaceProgram,
+  startWorkspaceProgramIntegrity,
+  stopWorkspaceProgramIntegrity,
   requestWorkspaceIncidentRepair,
   resolveWorkspaceIncident,
 } from "../operations/commands.ts";
@@ -70,6 +74,8 @@ export type {
   StartWorkspaceProgramInput,
   StopWorkspaceProgramInput,
   RestartWorkspaceProgramInput,
+  StartWorkspaceProgramIntegrityInput,
+  StopWorkspaceProgramIntegrityInput,
   RequestWorkspaceIncidentRepairInput,
   ResolveWorkspaceIncidentInput,
   UpdateProjectInput,
@@ -226,6 +232,19 @@ export function createProjectEnvironmentAtoms<R, E>(
     restartWorkspaceProgram: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:restart-workspace-program",
       execute: (input: RestartWorkspaceProgramInput) => restartWorkspaceProgram(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    startWorkspaceProgramIntegrity: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:start-workspace-program-integrity",
+      execute: (input: StartWorkspaceProgramIntegrityInput) =>
+        startWorkspaceProgramIntegrity(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    stopWorkspaceProgramIntegrity: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:stop-workspace-program-integrity",
+      execute: (input: StopWorkspaceProgramIntegrityInput) => stopWorkspaceProgramIntegrity(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),
