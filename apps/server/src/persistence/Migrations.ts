@@ -51,6 +51,18 @@ import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts
 import Migration0036 from "./Migrations/036_ProjectionThreadsPinned.ts";
 import Migration0037 from "./Migrations/037_ProjectionTurnsKeysetIndex.ts";
 import Migration0038 from "./Migrations/038_ProjectionThreadsPinOrderKey.ts";
+import Migration0039 from "./Migrations/039_ProjectionProjectsWorkspaceControl.ts";
+import Migration0040 from "./Migrations/040_ProjectionWorkspaceKnowledge.ts";
+import Migration0041 from "./Migrations/041_ProjectionWorkspaceRag.ts";
+import Migration0042 from "./Migrations/042_ProjectionWorkspaceAgentRoles.ts";
+import Migration0043 from "./Migrations/043_ProjectionWorkspaceCollaborationRuns.ts";
+import Migration0044 from "./Migrations/044_ProjectionWorkspaceSchedules.ts";
+import Migration0045 from "./Migrations/045_ProjectionWorkspaceCollaborationScheduleSource.ts";
+import Migration0046 from "./Migrations/046_ProjectionWorkspacePrograms.ts";
+import Migration0047 from "./Migrations/047_ProjectionWorkspaceOperatorIncidentSource.ts";
+import Migration0048 from "./Migrations/048_ProjectionWorkspaceCollaborationTaskGraph.ts";
+import Migration0049 from "./Migrations/049_ProjectionProjectsRuntimeViewedThrough.ts";
+import Migration0050 from "./Migrations/050_ProjectionWorkspaceProgramIntegrity.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -101,6 +113,18 @@ export const migrationEntries = [
   [36, "ProjectionThreadsPinned", Migration0036],
   [37, "ProjectionTurnsKeysetIndex", Migration0037],
   [38, "ProjectionThreadsPinOrderKey", Migration0038],
+  [39, "ProjectionProjectsWorkspaceControl", Migration0039],
+  [40, "ProjectionWorkspaceKnowledge", Migration0040],
+  [41, "ProjectionWorkspaceRag", Migration0041],
+  [42, "ProjectionWorkspaceAgentRoles", Migration0042],
+  [43, "ProjectionWorkspaceCollaborationRuns", Migration0043],
+  [44, "ProjectionWorkspaceSchedules", Migration0044],
+  [45, "ProjectionWorkspaceCollaborationScheduleSource", Migration0045],
+  [46, "ProjectionWorkspacePrograms", Migration0046],
+  [47, "ProjectionWorkspaceOperatorIncidentSource", Migration0047],
+  [48, "ProjectionWorkspaceCollaborationTaskGraph", Migration0048],
+  [49, "ProjectionProjectsRuntimeViewedThrough", Migration0049],
+  [50, "ProjectionWorkspaceProgramIntegrity", Migration0050],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
