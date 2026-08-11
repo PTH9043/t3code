@@ -161,43 +161,43 @@ const PAIRING_SCOPE_OPTIONS: ReadonlyArray<{
 }> = [
   {
     scope: AuthOrchestrationReadScope,
-    title: "View environment",
-    description: "Read threads, status, diffs, and configuration.",
+    title: "실행 환경 보기",
+    description: "대화, 상태, 변경 사항과 설정을 읽을 수 있습니다.",
   },
   {
     scope: AuthOrchestrationOperateScope,
-    title: "Operate tasks",
-    description: "Start tasks and perform changes in the environment.",
+    title: "작업 실행",
+    description: "작업을 시작하고 실행 환경의 내용을 변경할 수 있습니다.",
   },
   {
     scope: AuthTerminalOperateScope,
-    title: "Use terminals",
-    description: "Create terminals and send input to running shells.",
+    title: "터미널 사용",
+    description: "터미널을 만들고 실행 중인 셸에 입력을 보낼 수 있습니다.",
   },
   {
     scope: AuthReviewWriteScope,
-    title: "Write reviews",
-    description: "Create comments while reviewing changes.",
+    title: "검토 작성",
+    description: "변경 사항을 검토하면서 댓글을 작성할 수 있습니다.",
   },
   {
     scope: AuthAccessReadScope,
-    title: "View access",
-    description: "Inspect pairing links and authorized clients.",
+    title: "접근 권한 보기",
+    description: "페어링 링크와 승인된 클라이언트를 확인할 수 있습니다.",
   },
   {
     scope: AuthAccessWriteScope,
-    title: "Manage access",
-    description: "Issue and revoke credentials for other clients.",
+    title: "접근 권한 관리",
+    description: "다른 클라이언트의 자격 증명을 발급하고 취소할 수 있습니다.",
   },
   {
     scope: AuthRelayReadScope,
-    title: "View relay",
-    description: "Inspect managed relay connectivity.",
+    title: "릴레이 보기",
+    description: "관리형 릴레이 연결 상태를 확인할 수 있습니다.",
   },
   {
     scope: AuthRelayWriteScope,
-    title: "Manage relay",
-    description: "Change managed tunnel connectivity.",
+    title: "릴레이 관리",
+    description: "관리형 터널 연결을 변경할 수 있습니다.",
   },
 ];
 
@@ -208,7 +208,7 @@ function AccessScopeSummary({
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly label: string;
 }) {
-  const scopeCountLabel = `${scopes.length} ${scopes.length === 1 ? "scope" : "scopes"}`;
+  const scopeCountLabel = `권한 ${scopes.length}개`;
 
   return (
     <Popover>
@@ -219,7 +219,7 @@ function AccessScopeSummary({
         render={
           <button
             type="button"
-            aria-label={`${label}: show ${scopeCountLabel}`}
+            aria-label={`${label}: ${scopeCountLabel} 보기`}
             className="cursor-help underline decoration-border underline-offset-2 outline-hidden hover:text-foreground focus-visible:text-foreground"
           />
         }
@@ -232,7 +232,7 @@ function AccessScopeSummary({
         tooltipStyle
         className="w-max max-w-80 whitespace-normal"
       >
-        <p className="mb-1 font-medium">Granted scopes</p>
+        <p className="mb-1 font-medium">허용된 권한</p>
         <div className="flex flex-col gap-0.5">
           {scopes.map((scope) => (
             <code key={scope} className="font-mono text-foreground/85">
@@ -257,7 +257,7 @@ function parseManualDesktopSshTarget(input: {
 }): DesktopSshEnvironmentTarget {
   const rawHost = input.host.trim();
   if (rawHost.length === 0) {
-    throw new Error("SSH host or alias is required.");
+    throw new Error("SSH 호스트 또는 별칭을 입력하세요.");
   }
 
   let hostname = rawHost;
@@ -293,11 +293,11 @@ function parseManualDesktopSshTarget(input: {
   }
 
   if (hostname.length === 0) {
-    throw new Error("SSH host or alias is required.");
+    throw new Error("SSH 호스트 또는 별칭을 입력하세요.");
   }
 
   if (port !== null && (!Number.isInteger(port) || port <= 0 || port > 65_535)) {
-    throw new Error("SSH port must be between 1 and 65535.");
+    throw new Error("SSH 포트는 1~65535 사이여야 합니다.");
   }
 
   return {
@@ -349,23 +349,24 @@ function parseRemotePairingFields(input: { readonly host: string; readonly pairi
   const host = input.host.trim();
   const pairingCode = input.pairingCode.trim();
   if (!host) {
-    throw new Error("Enter a backend host.");
+    throw new Error("백엔드 호스트를 입력하세요.");
   }
   if (!pairingCode) {
-    throw new Error("Enter a pairing code.");
+    throw new Error("페어링 코드를 입력하세요.");
   }
   return { host, pairingCode };
 }
 
 function formatDesktopSshConnectionError(error: unknown): string {
-  const fallback = "Failed to connect SSH host.";
+  const fallback = "SSH 호스트에 연결하지 못했습니다.";
   const rawMessage = error instanceof Error ? error.message : fallback;
   const withoutIpcPrefix = rawMessage.replace(
     /^Error invoking remote method 'desktop:ensure-ssh-environment':\s*/u,
     "",
   );
   const withoutTaggedErrorPrefix = withoutIpcPrefix.replace(/^Ssh[A-Za-z]+Error:\s*/u, "");
-  return withoutTaggedErrorPrefix.trim() || fallback;
+  const message = withoutTaggedErrorPrefix.trim();
+  return message && /[가-힣]/.test(message) ? message : fallback;
 }
 
 const ENDPOINT_ROW_CLASSNAME = "rounded-xl px-3 py-2.5 sm:px-4";
@@ -500,18 +501,31 @@ function isHostedAppPairingUrl(value: string): boolean {
 
 function endpointShareHint(endpoint: AdvertisedEndpoint, url: string): string {
   if (isHostedAppPairingUrl(url)) {
-    return "Opens the hosted app, no install needed";
+    return "설치 없이 호스팅 앱에서 열립니다";
   }
   switch (endpoint.reachability) {
     case "lan":
-      return "Devices on the same network";
+      return "같은 네트워크의 기기에서 사용 가능";
     case "private-network":
-      return "Devices on your private network";
+      return "개인 네트워크의 기기에서 사용 가능";
     case "public":
-      return "Reachable from anywhere";
+      return "어디서나 연결 가능";
     case "loopback":
-      return "Clients on this machine";
+      return "이 컴퓨터의 클라이언트에서 사용 가능";
   }
+}
+
+function advertisedEndpointLabel(endpoint: AdvertisedEndpoint): string {
+  if (endpoint.id.startsWith("desktop-loopback:")) return "이 컴퓨터";
+  if (endpoint.id.startsWith("desktop-lan:")) return "로컬 네트워크";
+  if (endpoint.id.startsWith("tailscale-ip:")) return "Tailscale IP";
+  if (isTailscaleHttpsEndpoint(endpoint)) return "Tailscale HTTPS";
+  if (endpoint.id.startsWith("manual:")) {
+    return endpoint.httpBaseUrl.startsWith("https://")
+      ? "사용자 지정 HTTPS"
+      : "사용자 지정 연결 주소";
+  }
+  return endpoint.label;
 }
 
 type PairingLinkListRowProps = {
@@ -577,7 +591,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       options.push({
         id: endpoint.id,
         preferenceKey: endpointDefaultPreferenceKey(endpoint),
-        label: endpoint.label,
+        label: advertisedEndpointLabel(endpoint),
         url,
         detail: endpointShareHint(endpoint, url),
         qrShareable: isQrShareableEndpoint(endpoint),
@@ -615,16 +629,16 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         type: "success",
         title:
           kind === "hosted-link"
-            ? "Hosted app link copied"
+            ? "호스팅 앱 링크를 복사했습니다"
             : kind === "link"
-              ? "Pairing URL copied"
-              : "Pairing code copied",
+              ? "페어링 URL을 복사했습니다"
+              : "페어링 코드를 복사했습니다",
         description:
           kind === "hosted-link"
-            ? "Open it in the browser on the device you want to connect."
+            ? "연결할 기기의 브라우저에서 여세요."
             : kind === "link"
-              ? "Open it in the client you want to pair to this environment."
-              : "Paste it into another client to finish pairing.",
+              ? "이 실행 환경과 페어링할 클라이언트에서 여세요."
+              : "다른 클라이언트에 붙여 넣어 페어링을 완료하세요.",
       });
     },
     onError: (error, { value, kind }) => {
@@ -637,12 +651,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           type: "error",
           title: canCopyToClipboard
             ? kind === "hosted-link"
-              ? "Could not copy hosted app link"
+              ? "호스팅 앱 링크를 복사하지 못했습니다"
               : kind === "link"
-                ? "Could not copy pairing URL"
-                : "Could not copy pairing code"
-            : "Clipboard copy unavailable",
-          description: canCopyToClipboard ? error.message : "Showing the full value instead.",
+                ? "페어링 URL을 복사하지 못했습니다"
+                : "페어링 코드를 복사하지 못했습니다"
+            : "클립보드 복사를 사용할 수 없습니다",
+          description: "직접 복사할 수 있도록 전체 값을 표시합니다.",
         }),
       );
     },
@@ -666,7 +680,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
 
   const expiresAbsolute = formatAccessTimestamp(pairingLink.expiresAt);
 
-  const primaryLabel = pairingLink.label ?? "Pairing link";
+  const primaryLabel = pairingLink.label ?? "페어링 링크";
   const selectedQrOption = selectQrEndpointOption(
     endpointCopyOptions,
     qrEndpointId,
@@ -687,7 +701,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
-              tooltipText={`Link created at ${formatAccessTimestamp(pairingLink.createdAt)}`}
+              tooltipText={`링크 생성 시각: ${formatAccessTimestamp(pairingLink.createdAt)}`}
               dotClassName="bg-amber-400"
             />
             <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
@@ -695,11 +709,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           <p className="text-xs text-muted-foreground" title={expiresAbsolute}>
             {formatExpiresInLabel(pairingLink.expiresAt, nowMs)}
             <span aria-hidden> · </span>
-            <AccessScopeSummary scopes={pairingLink.scopes} label="Pairing link scopes" />
+            <AccessScopeSummary scopes={pairingLink.scopes} label="페어링 링크 권한" />
           </p>
           {shareablePairingUrl === null ? (
             <p className="text-[11px] text-muted-foreground/70">
-              Copy the token and pair from another client using this backend&apos;s reachable host.
+              토큰을 복사한 뒤 이 백엔드에 연결 가능한 호스트 주소로 다른 클라이언트에서
+              페어링하세요.
             </p>
           ) : null}
         </div>
@@ -713,7 +728,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               onClick={() => setIsQrPanelOpen((open) => !open)}
             >
               <QrCodeIcon aria-hidden />
-              Share
+              공유
             </Button>
           ) : null}
           <Dialog
@@ -726,12 +741,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             {canCopyToClipboard ? (
               shareablePairingUrl ? null : (
                 <Button size="xs" variant="outline" onClick={handleCopyCode}>
-                  Copy code
+                  코드 복사
                 </Button>
               )
             ) : (
               <DialogTrigger render={<Button size="xs" variant="outline" />}>
-                {shareablePairingUrl ? "Show link" : "Show code"}
+                {shareablePairingUrl ? "링크 보기" : "코드 보기"}
               </DialogTrigger>
             )}
             <DialogPopup className="max-w-md">
@@ -739,16 +754,16 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                 <DialogTitle>
                   {isRevealValueUrl
                     ? isRevealValueHostedAppPairingUrl
-                      ? "Hosted app pairing link"
-                      : "Pairing link"
-                    : "Pairing code"}
+                      ? "호스팅 앱 페어링 링크"
+                      : "페어링 링크"
+                    : "페어링 코드"}
                 </DialogTitle>
                 <DialogDescription>
                   {isRevealValueUrl
                     ? isRevealValueHostedAppPairingUrl
-                      ? "Clipboard copy is unavailable here. Open or manually copy this hosted app link on the device you want to connect."
-                      : "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
-                    : "Clipboard copy is unavailable here. Manually copy this code into another client."}
+                      ? "클립보드 복사를 사용할 수 없습니다. 연결할 기기에서 이 호스팅 앱 링크를 열거나 직접 복사하세요."
+                      : "클립보드 복사를 사용할 수 없습니다. 연결할 기기에서 전체 페어링 URL을 열거나 직접 복사하세요."
+                    : "클립보드 복사를 사용할 수 없습니다. 이 코드를 다른 클라이언트에 직접 입력하세요."}
                 </DialogDescription>
               </DialogHeader>
               <DialogPanel className="space-y-4">
@@ -767,18 +782,18 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       size={132}
                       level="M"
                       marginSize={2}
-                      title="Pairing link — scan to open on another device"
+                      title="페어링 링크 — 다른 기기에서 스캔해 열기"
                     />
                   </div>
                 ) : null}
               </DialogPanel>
               <DialogFooter variant="bare">
                 <Button variant="outline" onClick={() => setIsRevealDialogOpen(false)}>
-                  Done
+                  완료
                 </Button>
                 {canCopyToClipboard ? (
                   <Button variant="outline" size="xs" onClick={handleCopyCode}>
-                    Copy code
+                    코드 복사
                   </Button>
                 ) : null}
               </DialogFooter>
@@ -790,7 +805,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             disabled={revokingPairingLinkId === pairingLink.id}
             onClick={() => void onRevoke(pairingLink.id)}
           >
-            {revokingPairingLinkId === pairingLink.id ? "Revoking…" : "Revoke"}
+            {revokingPairingLinkId === pairingLink.id ? "취소 중…" : "취소"}
           </Button>
         </div>
       </div>
@@ -804,9 +819,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               <div
                 className="space-y-1.5"
                 role="radiogroup"
-                aria-label="Endpoint the pairing QR code and URL use"
+                aria-label="페어링 QR 코드와 URL에 사용할 연결 주소"
               >
-                <p className="text-[11px] text-muted-foreground/70">Reach this machine via</p>
+                <p className="text-[11px] text-muted-foreground/70">이 컴퓨터 연결 방식</p>
                 {endpointCopyOptions.map((option) => {
                   const isSelected = option.id === selectedQrOption?.id;
                   return (
@@ -852,11 +867,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                 className="shrink-0"
                 onClick={() => copyPairingValue(qrPairingUrl, copyKindForUrl(qrPairingUrl))}
               >
-                Copy link
+                링크 복사
               </Button>
             </div>
             <Button size="xs" variant="ghost" onClick={handleCopyCode}>
-              Copy code only
+              코드만 복사
             </Button>
           </div>
           {canRenderQrForSelection ? (
@@ -866,14 +881,14 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                 size={168}
                 level="M"
                 marginSize={1}
-                title="Pairing link — scan to open on another device"
+                title="페어링 링크 — 다른 기기에서 스캔해 열기"
               />
             </div>
           ) : (
             <div className="flex size-[192px] shrink-0 items-center justify-center self-center rounded-xl border border-border/50 p-4 sm:self-start">
               <p className="text-center text-[11px] text-muted-foreground/70">
-                No QR for this endpoint. Another device scanning a loopback link would dial itself;
-                copy the URL for use on this machine instead.
+                이 연결 주소에는 QR 코드를 사용할 수 없습니다. 다른 기기에서 루프백 링크를 스캔하면
+                해당 기기 자신으로 연결되므로, 이 컴퓨터에서 쓸 URL을 복사하세요.
               </p>
             </div>
           )}
@@ -901,11 +916,11 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
   const lastConnectedAt = clientSession.lastConnectedAt;
   const statusTooltip = isLive
     ? lastConnectedAt
-      ? `Connected for ${formatElapsedDurationLabel(lastConnectedAt, nowMs)}`
-      : "Connected"
+      ? `${formatElapsedDurationLabel(lastConnectedAt, nowMs)} 동안 연결됨`
+      : "연결됨"
     : lastConnectedAt
-      ? `Last connected at ${formatAccessTimestamp(lastConnectedAt)}`
-      : "Not connected yet.";
+      ? `마지막 연결: ${formatAccessTimestamp(lastConnectedAt)}`
+      : "아직 연결된 적이 없습니다.";
   const deviceInfoBits = [
     clientSession.client.deviceType !== "unknown"
       ? clientSession.client.deviceType[0]?.toUpperCase() + clientSession.client.deviceType.slice(1)
@@ -932,7 +947,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
             <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
             {clientSession.current ? (
               <span className="text-[10px] text-muted-foreground/80 rounded-md border border-border/50 bg-muted/50 px-1 py-0.5">
-                This device
+                이 기기
               </span>
             ) : null}
           </div>
@@ -943,7 +958,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
                 <span aria-hidden> · </span>
               </>
             ) : null}
-            <AccessScopeSummary scopes={clientSession.scopes} label="Client scopes" />
+            <AccessScopeSummary scopes={clientSession.scopes} label="클라이언트 권한" />
           </p>
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
@@ -954,7 +969,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               disabled={revokingClientSessionId === clientSession.sessionId}
               onClick={() => void onRevokeSession(clientSession.sessionId)}
             >
-              {revokingClientSessionId === clientSession.sessionId ? "Revoking…" : "Revoke"}
+              {revokingClientSessionId === clientSession.sessionId ? "취소 중…" : "취소"}
             </Button>
           ) : null}
         </div>
@@ -989,11 +1004,11 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
       setPairingScopes([...AuthStandardClientScopes]);
       setDialogOpen(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+      const message = "새 페어링 링크를 만들지 못했습니다.";
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not create pairing URL",
+          title: "페어링 링크를 만들지 못했습니다",
           description: message,
         }),
       );
@@ -1018,7 +1033,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
         }
         onClick={() => void onRevokeOtherClients()}
       >
-        {isRevokingOtherClients ? "Revoking…" : "Revoke others"}
+        {isRevokingOtherClients ? "취소 중…" : "다른 클라이언트 취소"}
       </Button>
       <Dialog
         open={dialogOpen}
@@ -1034,27 +1049,26 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
           render={
             <Button size="xs" variant="default">
               <PlusIcon className="size-3" />
-              Create link
+              링크 만들기
             </Button>
           }
         />
         <DialogPopup className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Create pairing link</DialogTitle>
+            <DialogTitle>페어링 링크 만들기</DialogTitle>
             <DialogDescription>
-              Generate a one-time link that another device can use to pair with this backend as an
-              authorized client.
+              다른 기기가 이 백엔드의 승인된 클라이언트로 페어링할 수 있는 일회용 링크를 만듭니다.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-5">
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Client label (optional)
+                클라이언트 이름(선택 사항)
               </span>
               <Input
                 value={pairingLabel}
                 onChange={(event) => setPairingLabel(event.target.value)}
-                placeholder="e.g. Living room iPad"
+                placeholder="예: 거실 iPad"
                 disabled={isCreatingPairingLink}
                 autoFocus
               />
@@ -1062,9 +1076,9 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-xs font-medium text-foreground">Permissions</h3>
+                  <h3 className="text-xs font-medium text-foreground">권한</h3>
                   <p className="text-xs text-muted-foreground">
-                    Limit what the paired client can do.
+                    페어링된 클라이언트가 할 수 있는 작업을 제한합니다.
                   </p>
                 </div>
                 <div className="flex gap-1">
@@ -1074,7 +1088,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                     disabled={isCreatingPairingLink}
                     onClick={() => setPairingScopes([AuthOrchestrationReadScope])}
                   >
-                    Read only
+                    읽기 전용
                   </Button>
                   <Button
                     size="xs"
@@ -1082,7 +1096,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                     disabled={isCreatingPairingLink}
                     onClick={() => setPairingScopes([...AuthStandardClientScopes])}
                   >
-                    Standard
+                    표준
                   </Button>
                 </div>
               </div>
@@ -1108,10 +1122,10 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                 ))}
               </div>
               {pairingScopes.length === 0 ? (
-                <p className="text-xs text-destructive">Select at least one permission.</p>
+                <p className="text-xs text-destructive">권한을 하나 이상 선택하세요.</p>
               ) : pairingScopes.includes(AuthAccessWriteScope) ? (
                 <p className="text-xs text-warning">
-                  This client can create or revoke access for other devices.
+                  이 클라이언트는 다른 기기의 접근 권한을 만들거나 취소할 수 있습니다.
                 </p>
               ) : null}
             </section>
@@ -1122,13 +1136,13 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
               disabled={isCreatingPairingLink}
               onClick={() => setDialogOpen(false)}
             >
-              Cancel
+              취소
             </Button>
             <Button
               disabled={isCreatingPairingLink || pairingScopes.length === 0}
               onClick={() => void handleCreatePairingLink()}
             >
-              {isCreatingPairingLink ? "Creating…" : "Create link"}
+              {isCreatingPairingLink ? "만드는 중…" : "링크 만들기"}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -1191,7 +1205,9 @@ const PairingClientsList = memo(function PairingClientsList({
 
       {pairingLinks.length === 0 && clientSessions.length === 0 && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-muted-foreground/60">No pairing links or client sessions.</p>
+          <p className="text-xs text-muted-foreground/60">
+            페어링 링크나 클라이언트 세션이 없습니다.
+          </p>
         </div>
       ) : null}
     </>
@@ -1231,7 +1247,7 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
       <div className="flex min-h-6 min-w-0 flex-col gap-2 sm:-my-0.5 sm:flex-row sm:items-center">
         <div className="flex min-w-0 items-baseline gap-3">
           <h3 className="shrink-0 text-sm leading-5 font-medium text-foreground">
-            {endpoint.label}
+            {advertisedEndpointLabel(endpoint)}
           </h3>
           {shouldShowEndpointUrl ? (
             <p
@@ -1243,14 +1259,14 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
           ) : null}
           {!isAvailable ? (
             <span className="shrink-0 rounded-md border border-border/70 px-1 py-0.5 text-[10px] text-muted-foreground">
-              Setup required
+              설정 필요
             </span>
           ) : null}
         </div>
         <div className="ml-auto flex min-h-6 shrink-0 items-center justify-end gap-2">
           {isDefault ? (
             <span className="rounded-md border border-primary/30 bg-primary/10 px-1 py-0.5 text-[10px] text-primary">
-              Default
+              기본값
             </span>
           ) : null}
           {needsTailscaleSetup ? (
@@ -1260,7 +1276,7 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
               onClick={() => onSetupTailscaleServe(endpoint)}
               disabled={isUpdatingTailscaleServe}
             >
-              {isUpdatingTailscaleServe ? "Restarting…" : "Setup"}
+              {isUpdatingTailscaleServe ? "다시 시작 중…" : "설정"}
             </Button>
           ) : null}
           {canDisableTailscaleServe ? (
@@ -1270,12 +1286,12 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
               onClick={() => onDisableTailscaleServe(endpoint)}
               disabled={isUpdatingTailscaleServe}
             >
-              {isUpdatingTailscaleServe ? "Restarting…" : "Disable"}
+              {isUpdatingTailscaleServe ? "다시 시작 중…" : "사용 안 함"}
             </Button>
           ) : null}
           {!needsTailscaleSetup && !isDefault ? (
             <Button size="xs" variant="outline" onClick={() => onSetDefault(endpoint)}>
-              Set as default
+              기본값으로 설정
             </Button>
           ) : null}
         </div>
@@ -1306,7 +1322,7 @@ function NetworkAccessDescription({
       <span className="min-w-0 truncate">{endpoint.httpBaseUrl}</span>
       {hiddenEndpointCount > 0 ? (
         <span className="shrink-0 text-xs font-medium">
-          {expanded ? "Hide" : `+${hiddenEndpointCount}`}
+          {expanded ? "숨기기" : `+${hiddenEndpointCount}`}
         </span>
       ) : null}
     </>
@@ -1314,7 +1330,7 @@ function NetworkAccessDescription({
 
   return (
     <span className="inline-flex min-w-0 max-w-full items-baseline gap-1">
-      <span className="shrink-0">Reachable at</span>
+      <span className="shrink-0">연결 주소</span>
       {hiddenEndpointCount > 0 ? (
         <button
           type="button"
@@ -1359,11 +1375,11 @@ function SavedBackendListRow({
   const statusTooltip = connectionStatusText(environment.connection);
   const errorTraceId = environment.connection.traceId;
   const { copyToClipboard: copyTraceIdToClipboard } = useCopyToClipboard<{ traceId: string }>({
-    target: "trace ID",
+    target: "추적 ID",
     onCopy: ({ traceId }) => {
       toastManager.add({
         type: "success",
-        title: "Trace ID copied",
+        title: "추적 ID를 복사했습니다",
         description: traceId,
       });
     },
@@ -1371,8 +1387,8 @@ function SavedBackendListRow({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not copy trace ID",
-          description: error.message,
+          title: "추적 ID를 복사하지 못했습니다",
+          description: "클립보드 권한을 확인해 주세요.",
         }),
       );
     },
@@ -1435,7 +1451,7 @@ function SavedBackendListRow({
                     type="button"
                     className="w-fit cursor-help rounded-sm text-left text-muted-foreground text-xs"
                   >
-                    Server update available
+                    서버 업데이트 사용 가능
                   </button>
                 }
               />
@@ -1454,7 +1470,7 @@ function SavedBackendListRow({
                   className="shrink-0 underline underline-offset-2"
                   onClick={() => copyTraceId(errorTraceId)}
                 >
-                  Copy trace ID
+                  추적 ID 복사
                 </button>
               ) : null}
             </p>
@@ -1465,10 +1481,10 @@ function SavedBackendListRow({
           (serverUpdateState.status === "idle" || serverUpdateState.status === "failed") ? (
             <ServerUpdateAction
               environmentId={environmentId}
-              serverLabel={`${environment.label} server`}
+              serverLabel={`${environment.label} 서버`}
               selfUpdate={resolveServerSelfUpdateCapability(environment.serverConfig)}
               targetVersion={versionMismatch.clientVersion}
-              label={serverUpdateState.status === "failed" ? "Retry" : "Update"}
+              label={serverUpdateState.status === "failed" ? "다시 시도" : "업데이트"}
             />
           ) : null}
           {isWslEnvironment ? (
@@ -1476,12 +1492,12 @@ function SavedBackendListRow({
               <TooltipTrigger
                 render={
                   <Button size="xs" variant="outline" disabled>
-                    Managed above
+                    위 설정에서 관리됨
                   </Button>
                 }
               />
               <TooltipPopup side="top" className="max-w-80 whitespace-pre-wrap leading-tight">
-                The WSL backend is managed by the WSL setting above — turn it on or off there.
+                WSL 백엔드는 위의 WSL 설정에서 관리합니다. 해당 설정에서 켜거나 끄세요.
               </TooltipPopup>
             </Tooltip>
           ) : (
@@ -1493,7 +1509,7 @@ function SavedBackendListRow({
                   disabled={removingEnvironmentId === environmentId}
                   onClick={() => void onRemove(environmentId)}
                 >
-                  {removingEnvironmentId === environmentId ? "Removing…" : "Remove"}
+                  {removingEnvironmentId === environmentId ? "제거 중…" : "제거"}
                 </Button>
               ) : null}
               <Button
@@ -1506,11 +1522,11 @@ function SavedBackendListRow({
               >
                 {isConnected
                   ? removingEnvironmentId === environmentId
-                    ? "Disconnecting…"
-                    : "Disconnect"
+                    ? "연결 해제 중…"
+                    : "연결 해제"
                   : isConnecting
-                    ? "Connecting…"
-                    : "Connect"}
+                    ? "연결 중…"
+                    : "연결"}
               </Button>
             </>
           )}
@@ -1533,7 +1549,7 @@ const DesktopSshHostRow = memo(function DesktopSshHostRow({
 }: DesktopSshHostRowProps) {
   const address = formatDesktopSshTarget(target);
   const showAddress = address !== target.alias;
-  const buttonLabel = connectingHostAlias === target.alias ? "Adding…" : "Add environment";
+  const buttonLabel = connectingHostAlias === target.alias ? "추가 중…" : "실행 환경 추가";
 
   return (
     <div className="rounded-xl px-3 py-3 sm:px-4">
@@ -1565,7 +1581,7 @@ function CloudLinkSwitch({
   disabled,
   disabledReason,
   onCheckedChange,
-  ariaLabel = "Enable T3 Connect",
+  ariaLabel = "T3 Connect 사용",
 }: {
   readonly checked: boolean;
   readonly disabled: boolean;
@@ -1604,9 +1620,9 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
   const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
 
   const disabledReason = !isSignedIn
-    ? "Sign in to T3 Connect to manage this environment."
+    ? "이 실행 환경을 관리하려면 T3 Connect에 로그인하세요."
     : !canManageRelay
-      ? "Your session does not have permission to manage T3 Connect access."
+      ? "현재 세션에는 T3 Connect 접근을 관리할 권한이 없습니다."
       : null;
   const isBusy = isUpdating || isUpdatingPreference;
 
@@ -1619,15 +1635,15 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
       toastManager.add({
         type: "success",
         title: enabled
-          ? "T3 Connect linked"
+          ? "T3 Connect 연결됨"
           : publishAgentActivity
-            ? "T3 Connect tunnel disabled"
-            : "T3 Connect unlinked",
+            ? "T3 Connect 터널 사용 안 함"
+            : "T3 Connect 연결 해제됨",
         description: enabled
-          ? "This environment is available through T3 Connect."
+          ? "이 실행 환경을 T3 Connect에서 사용할 수 있습니다."
           : publishAgentActivity
-            ? "The managed tunnel was removed. Agent activity publishing stays on."
-            : "This environment is no longer available through T3 Connect.",
+            ? "관리형 터널을 제거했습니다. 에이전트 활동 공유는 계속됩니다."
+            : "이 실행 환경은 더 이상 T3 Connect에서 사용할 수 없습니다.",
       });
     }
     setIsUpdating(false);
@@ -1639,10 +1655,10 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     if (ok) {
       toastManager.add({
         type: "success",
-        title: enabled ? "Agent activity enabled" : "Agent activity disabled",
+        title: enabled ? "에이전트 활동 공유 켜짐" : "에이전트 활동 공유 꺼짐",
         description: enabled
-          ? "This environment publishes agent activity to your mobile clients."
-          : "This environment will stop publishing agent activity.",
+          ? "이 실행 환경의 에이전트 활동을 모바일 클라이언트에 공유합니다."
+          : "이 실행 환경의 에이전트 활동 공유를 중지합니다.",
       });
     }
     setIsUpdatingPreference(false);
@@ -1654,10 +1670,14 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
         title="T3 Connect"
         description={
           managedTunnelActive
-            ? "This environment is available to your other devices through T3 Connect."
-            : "Make this environment available to your other devices through T3 Connect."
+            ? "다른 기기에서 T3 Connect를 통해 이 실행 환경을 사용할 수 있습니다."
+            : "다른 기기에서 T3 Connect를 통해 이 실행 환경을 사용할 수 있게 합니다."
         }
-        status={operationError ?? primaryCloudLinkState.error}
+        status={
+          operationError || primaryCloudLinkState.error
+            ? "T3 Connect 작업을 완료하지 못했습니다."
+            : null
+        }
         control={
           <CloudLinkSwitch
             checked={managedTunnelActive}
@@ -1668,11 +1688,11 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
         }
       />
       <SettingsRow
-        title="Publish agent activity"
-        description="Send activity from this environment to your mobile clients for push notifications and Live Activities. Works without a T3 Connect tunnel."
+        title="에이전트 활동 공유"
+        description="이 실행 환경의 활동을 모바일 클라이언트로 보내 푸시 알림과 실시간 현황에 표시합니다. T3 Connect 터널 없이도 작동합니다."
         control={
           <CloudLinkSwitch
-            ariaLabel="Publish agent activity to mobile clients"
+            ariaLabel="모바일 클라이언트에 에이전트 활동 공유"
             checked={publishAgentActivity}
             disabled={!canManageRelay || !isSignedIn || primaryCloudLinkState.isPending || isBusy}
             disabledReason={disabledReason}
@@ -1695,11 +1715,11 @@ function EmptyRemoteEnvironments({ cloudEnabled = true }: { readonly cloudEnable
         <ChevronsLeftRightEllipsisIcon />
       </EmptyMedia>
       <EmptyHeader>
-        <EmptyTitle>No saved remote environments</EmptyTitle>
+        <EmptyTitle>저장된 원격 실행 환경이 없습니다</EmptyTitle>
         <EmptyDescription>
           {cloudEnabled
-            ? "Click “Add environment” to pair another environment, or connect one from T3 Connect."
-            : "Click “Add environment” to pair another environment."}
+            ? "‘실행 환경 추가’를 눌러 다른 실행 환경을 페어링하거나 T3 Connect에서 연결하세요."
+            : "‘실행 환경 추가’를 눌러 다른 실행 환경을 페어링하세요."}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
@@ -1881,7 +1901,8 @@ export function ConnectionsSettings() {
     canManageLocalBackend && desktopBridge ? desktopWslStateAtom : null,
   );
   const desktopWslState = desktopWsl.data;
-  const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
+  const desktopWslError =
+    desktopWslMutationError ?? (desktopWsl.error ? "WSL 백엔드 상태를 불러오지 못했습니다." : null);
   const isLoadingWslState = desktopWsl.isPending && desktopWsl.data === null;
   const discoveredSshHosts = desktopSshHosts.data ?? EMPTY_DISCOVERED_SSH_HOSTS;
   const unsavedDiscoveredSshHosts = useMemo(
@@ -1898,14 +1919,17 @@ export function ConnectionsSettings() {
   const hasLoadedDiscoveredSshHosts =
     desktopSshHosts.data !== null || desktopSshHosts.error !== null;
   const isLoadingDiscoveredSshHosts = desktopSshHosts.isPending;
-  const discoveredSshHostsError = sshConnectionError ?? desktopSshHosts.error;
+  const discoveredSshHostsError =
+    sshConnectionError ?? (desktopSshHosts.error ? "SSH 호스트 목록을 불러오지 못했습니다." : null);
   const desktopServerExposureState = desktopNetworkAccess.data?.serverExposureState ?? null;
   const desktopAdvertisedEndpoints =
     desktopNetworkAccess.data?.advertisedEndpoints ?? EMPTY_ADVERTISED_ENDPOINTS;
   const desktopServerExposureError =
-    desktopServerExposureMutationError ?? desktopNetworkAccess.error;
+    desktopServerExposureMutationError ??
+    (desktopNetworkAccess.error ? "네트워크 접근 상태를 불러오지 못했습니다." : null);
   const desktopAccessManagementError =
-    desktopAccessManagementMutationError ?? authAccessChanges.error;
+    desktopAccessManagementMutationError ??
+    (authAccessChanges.error ? "승인된 클라이언트 목록을 불러오지 못했습니다." : null);
   const isLoadingDesktopAccessManagement =
     authAccessChanges.isPending && authAccessChanges.data === null;
   const desktopPairingLinks = useMemo(() => {
@@ -1963,14 +1987,13 @@ export function ConnectionsSettings() {
         setIsDesktopServerExposureDialogOpen(false);
         setIsUpdatingDesktopServerExposure(false);
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to update network exposure.";
+        const message = "네트워크 접근 설정을 변경하지 못했습니다.";
         setIsDesktopServerExposureDialogOpen(false);
         setDesktopServerExposureMutationError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not update network access",
+            title: "네트워크 접근을 변경하지 못했습니다",
             description: message,
           }),
         );
@@ -1999,13 +2022,12 @@ export function ConnectionsSettings() {
       refreshDesktopNetworkAccessState();
       setPendingTailscaleServeEndpoint(null);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to configure Tailscale HTTPS.";
+      const message = "Tailscale HTTPS를 설정하지 못했습니다.";
       setDesktopServerExposureMutationError(message);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not set up Tailscale HTTPS",
+          title: "Tailscale HTTPS를 설정하지 못했습니다",
           description: message,
         }),
       );
@@ -2036,12 +2058,12 @@ export function ConnectionsSettings() {
       refreshDesktopNetworkAccessState();
       setDisableTailscaleServeDialogOpen(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to disable Tailscale HTTPS.";
+      const message = "Tailscale HTTPS를 끄지 못했습니다.";
       setDesktopServerExposureMutationError(message);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not disable Tailscale HTTPS",
+          title: "Tailscale HTTPS를 끄지 못했습니다",
           description: message,
         }),
       );
@@ -2060,12 +2082,12 @@ export function ConnectionsSettings() {
     try {
       await revokeServerPairingLink(id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke pairing link.";
+      const message = "페어링 링크를 취소하지 못했습니다.";
       setDesktopAccessManagementMutationError(message);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not revoke pairing link",
+          title: "페어링 링크를 취소하지 못했습니다",
           description: message,
         }),
       );
@@ -2081,12 +2103,12 @@ export function ConnectionsSettings() {
       try {
         await revokeServerClientSession(sessionId);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to revoke client access.";
+        const message = "클라이언트 접근 권한을 취소하지 못했습니다.";
         setDesktopAccessManagementMutationError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not revoke client access",
+            title: "클라이언트 접근 권한을 취소하지 못했습니다",
             description: message,
           }),
         );
@@ -2104,16 +2126,16 @@ export function ConnectionsSettings() {
       const revokedCount = await revokeOtherServerClientSessions();
       toastManager.add({
         type: "success",
-        title: revokedCount === 1 ? "Revoked 1 other client" : `Revoked ${revokedCount} clients`,
-        description: "Other paired clients will need a new pairing link before reconnecting.",
+        title: `다른 클라이언트 ${revokedCount}개의 접근을 취소했습니다`,
+        description: "해당 클라이언트가 다시 연결하려면 새 페어링 링크가 필요합니다.",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke other clients.";
+      const message = "다른 클라이언트의 접근 권한을 취소하지 못했습니다.";
       setDesktopAccessManagementMutationError(message);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not revoke other clients",
+          title: "다른 클라이언트의 접근 권한을 취소하지 못했습니다",
           description: message,
         }),
       );
@@ -2156,8 +2178,8 @@ export function ConnectionsSettings() {
       setAddBackendDialogOpen(false);
       toastManager.add({
         type: "success",
-        title: "Environment connected",
-        description: `${target.alias} is ready over an SSH-managed tunnel.`,
+        title: "실행 환경 연결됨",
+        description: `${target.alias}을(를) SSH 관리형 터널로 사용할 수 있습니다.`,
       });
       setIsAddingSavedBackend(false);
       return;
@@ -2172,12 +2194,13 @@ export function ConnectionsSettings() {
         pairingCode: savedBackendPairingCode,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to add backend.";
+      const rawMessage = error instanceof Error ? error.message : "";
+      const message = /[가-힣]/.test(rawMessage) ? rawMessage : "백엔드를 추가하지 못했습니다.";
       setSavedBackendError(message);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not add backend",
+          title: "백엔드를 추가하지 못했습니다",
           description: message,
         }),
       );
@@ -2189,12 +2212,12 @@ export function ConnectionsSettings() {
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        const message = error instanceof Error ? error.message : "Failed to add backend.";
+        const message = "백엔드를 추가하지 못했습니다. 호스트와 페어링 코드를 확인해 주세요.";
         setSavedBackendError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not add backend",
+            title: "백엔드를 추가하지 못했습니다",
             description: message,
           }),
         );
@@ -2211,8 +2234,8 @@ export function ConnectionsSettings() {
     setAddBackendDialogOpen(false);
     toastManager.add({
       type: "success",
-      title: "Backend added",
-      description: "The environment is saved and will reconnect on app startup.",
+      title: "백엔드 추가됨",
+      description: "실행 환경을 저장했으며 앱을 시작할 때 자동으로 다시 연결합니다.",
     });
     setIsAddingSavedBackend(false);
   }, [
@@ -2232,12 +2255,12 @@ export function ConnectionsSettings() {
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        const message = error instanceof Error ? error.message : "Failed to connect backend.";
+        const message = "백엔드에 연결하지 못했습니다. 연결 설정을 확인해 주세요.";
         setSavedBackendError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not connect backend",
+            title: "백엔드에 연결하지 못했습니다",
             description: message,
           }),
         );
@@ -2254,12 +2277,12 @@ export function ConnectionsSettings() {
       setRemovingSavedEnvironmentId(null);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        const message = error instanceof Error ? error.message : "Failed to remove backend.";
+        const message = "백엔드를 제거하지 못했습니다.";
         setSavedBackendError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not remove backend",
+            title: "백엔드를 제거하지 못했습니다",
             description: message,
           }),
         );
@@ -2289,9 +2312,9 @@ export function ConnectionsSettings() {
         toastManager.add({
           type: "success",
           title: savedDesktopSshEnvironmentsByAlias[target.alias]
-            ? "Environment reconnected"
-            : "Environment connected",
-          description: `${label?.trim() || target.alias} is ready over an SSH-managed tunnel.`,
+            ? "실행 환경 다시 연결됨"
+            : "실행 환경 연결됨",
+          description: `${label?.trim() || target.alias}을(를) SSH 관리형 터널로 사용할 수 있습니다.`,
         });
         return;
       }
@@ -2408,7 +2431,7 @@ export function ConnectionsSettings() {
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
         <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-foreground">Host</span>
+          <span className="mb-1.5 block text-xs font-medium text-foreground">호스트</span>
           <Input
             value={savedBackendHost}
             onChange={(event) => handleSavedBackendHostChange(event.target.value)}
@@ -2418,7 +2441,7 @@ export function ConnectionsSettings() {
           />
         </label>
         <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-foreground">Pairing code</span>
+          <span className="mb-1.5 block text-xs font-medium text-foreground">페어링 코드</span>
           <Input
             value={savedBackendPairingCode}
             onChange={(event) => setSavedBackendPairingCode(event.target.value)}
@@ -2430,7 +2453,7 @@ export function ConnectionsSettings() {
       </div>
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          전체 페어링 URL을 붙여 넣으면 두 입력란이 자동으로 채워집니다.
         </span>
       </div>
     </div>
@@ -2446,7 +2469,7 @@ export function ConnectionsSettings() {
         onClick={() => void handleAddSavedBackend()}
       >
         <PlusIcon className="size-3.5" />
-        {isAddingSavedBackend ? "Adding…" : "Add environment"}
+        {isAddingSavedBackend ? "추가 중…" : "실행 환경 추가"}
       </Button>
     </div>
   );
@@ -2455,19 +2478,19 @@ export function ConnectionsSettings() {
       <div className="space-y-3">
         <label className="block">
           <span className="mb-1.5 block text-xs font-medium text-foreground">
-            SSH host or alias
+            SSH 호스트 또는 별칭
           </span>
           <Input
             value={savedBackendSshHost}
             onChange={(event) => setSavedBackendSshHost(event.target.value)}
-            placeholder="Search hosts or type devbox"
+            placeholder="호스트 검색 또는 devbox 입력"
             disabled={isAddingSavedBackend}
             spellCheck={false}
           />
         </label>
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_7rem]">
           <label className="block">
-            <span className="mb-1.5 block text-xs font-medium text-foreground">Username</span>
+            <span className="mb-1.5 block text-xs font-medium text-foreground">사용자 이름</span>
             <Input
               value={savedBackendSshUsername}
               onChange={(event) => setSavedBackendSshUsername(event.target.value)}
@@ -2477,7 +2500,7 @@ export function ConnectionsSettings() {
             />
           </label>
           <label className="block">
-            <span className="mb-1.5 block text-xs font-medium text-foreground">Port</span>
+            <span className="mb-1.5 block text-xs font-medium text-foreground">포트</span>
             <Input
               value={savedBackendSshPort}
               onChange={(event) => setSavedBackendSshPort(event.target.value)}
@@ -2500,14 +2523,14 @@ export function ConnectionsSettings() {
           onClick={() => void handleAddSavedBackend()}
         >
           <PlusIcon className="size-3.5" />
-          {isAddingSavedBackend ? "Adding…" : "Add environment"}
+          {isAddingSavedBackend ? "추가 중…" : "실행 환경 추가"}
         </Button>
       </div>
       <div className="overflow-hidden rounded-lg border border-border/60">
         <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-3 py-2">
           <div className="min-w-0">
-            <p className="text-xs font-medium text-foreground">Suggested hosts</p>
-            <p className="text-[11px] text-muted-foreground">From SSH config and known hosts</p>
+            <p className="text-xs font-medium text-foreground">추천 호스트</p>
+            <p className="text-[11px] text-muted-foreground">SSH 설정 및 알려진 호스트에서 검색</p>
           </div>
           <Button
             size="xs"
@@ -2520,7 +2543,7 @@ export function ConnectionsSettings() {
             ) : (
               <RefreshCwIcon className="size-3" />
             )}
-            Refresh
+            새로 고침
           </Button>
         </div>
         <ScrollArea scrollFade className="max-h-56">
@@ -2537,7 +2560,9 @@ export function ConnectionsSettings() {
             !isLoadingDiscoveredSshHosts &&
             unsavedDiscoveredSshHosts.length === 0 ? (
               <div className={ITEM_ROW_CLASSNAME}>
-                <p className="text-xs text-muted-foreground">No new SSH hosts were discovered.</p>
+                <p className="text-xs text-muted-foreground">
+                  새로운 SSH 호스트를 찾지 못했습니다.
+                </p>
               </div>
             ) : null}
           </div>
@@ -2553,7 +2578,7 @@ export function ConnectionsSettings() {
         setPendingDesktopServerExposureMode(checked ? "network-accessible" : "local-only");
         setIsDesktopServerExposureDialogOpen(true);
       }}
-      aria-label="Enable network access"
+      aria-label="네트워크 접근 사용"
     />
   );
   const renderEndpointRows = (presentation: AccessSectionPresentation) =>
@@ -2593,12 +2618,12 @@ export function ConnectionsSettings() {
         // backend on/off or switching distros is picked up here without an
         // explicit renderer reconcile.
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to update WSL backend.";
+        const message = "WSL 백엔드 설정을 변경하지 못했습니다.";
         setDesktopWslMutationError(message);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not change WSL backend",
+            title: "WSL 백엔드 설정을 변경하지 못했습니다",
             description: message,
           }),
         );
@@ -2750,8 +2775,8 @@ export function ConnectionsSettings() {
       if (desktopWslError && canManageLocalBackend) {
         return (
           <SettingsRow
-            title="WSL backend"
-            description="Couldn't load the WSL backend state."
+            title="WSL 백엔드"
+            description="WSL 백엔드 상태를 불러오지 못했습니다."
             status={<span className="block text-destructive">{desktopWslError}</span>}
             control={
               <Button
@@ -2760,7 +2785,7 @@ export function ConnectionsSettings() {
                 onClick={loadWslState}
                 disabled={isLoadingWslState}
               >
-                {isLoadingWslState ? "Retrying…" : "Retry"}
+                {isLoadingWslState ? "다시 시도 중…" : "다시 시도"}
               </Button>
             }
           />
@@ -2779,8 +2804,8 @@ export function ConnectionsSettings() {
       if (!desktopWslState.enabled && !desktopWslState.wslOnly) return null;
       return (
         <SettingsRow
-          title="WSL backend"
-          description="WSL is no longer available, so the Windows backend is running instead. Switch off the WSL backend to clear this preference."
+          title="WSL 백엔드"
+          description="WSL을 더 이상 사용할 수 없어 Windows 백엔드로 실행 중입니다. 이 설정을 지우려면 WSL 백엔드를 꺼 주세요."
           status={
             desktopWslError ? (
               <span className="block text-destructive">{desktopWslError}</span>
@@ -2792,7 +2817,7 @@ export function ConnectionsSettings() {
               disabled={isUpdatingWslBackend}
               onClick={() => handleSelectWslMode(BACKEND_VALUE_WSL_OFF)}
             >
-              Switch to Windows
+              Windows로 전환
             </Button>
           }
         />
@@ -2809,21 +2834,21 @@ export function ConnectionsSettings() {
       : (desktopWslState.distro ?? defaultDistroName ?? BACKEND_VALUE_DEFAULT_WSL);
     const selectLabel =
       selectValue === BACKEND_VALUE_WSL_OFF
-        ? "Off"
+        ? "사용 안 함"
         : selectValue === BACKEND_VALUE_DEFAULT_WSL
-          ? "Default distro"
+          ? "기본 배포판"
           : selectValue;
     return (
       <>
         <SettingsRow
-          title="WSL backend"
-          description="Run a second backend inside a WSL distro alongside the Windows one. Pick a distro to start it; pick Off to stop it. Projects opened against the WSL backend live on the Linux side; Windows projects stay where they are."
+          title="WSL 백엔드"
+          description="Windows 백엔드와 함께 WSL 배포판 안에서 두 번째 백엔드를 실행합니다. 시작할 배포판을 선택하고, 중지하려면 사용 안 함을 선택하세요. WSL에서 연 프로젝트는 Linux 쪽에, Windows 프로젝트는 기존 위치에 유지됩니다."
           status={
             desktopWslError ? (
               <span className="block text-destructive">{desktopWslError}</span>
             ) : desktopWslState.preflightError ? (
               <span className="block text-destructive">
-                WSL backend couldn't start: {desktopWslState.preflightError}
+                WSL 백엔드를 시작하지 못했습니다. WSL 설치와 배포판 상태를 확인하세요.
               </span>
             ) : null
           }
@@ -2837,24 +2862,24 @@ export function ConnectionsSettings() {
             >
               <SelectTrigger
                 className="w-full sm:w-56"
-                aria-label="WSL backend"
+                aria-label="WSL 백엔드"
                 disabled={isUpdatingWslBackend}
               >
                 <SelectValue>{selectLabel}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value={BACKEND_VALUE_WSL_OFF}>
-                  Off
+                  사용 안 함
                 </SelectItem>
                 {desktopWslState.distros.length === 0 ? (
                   <SelectItem hideIndicator value={BACKEND_VALUE_DEFAULT_WSL}>
-                    Default distro
+                    기본 배포판
                   </SelectItem>
                 ) : (
                   desktopWslState.distros.map((distro) => (
                     <SelectItem hideIndicator key={distro.name} value={distro.name}>
                       {distro.name}
-                      {distro.isDefault ? " (default)" : ""}
+                      {distro.isDefault ? " (기본값)" : ""}
                     </SelectItem>
                   ))
                 )}
@@ -2864,15 +2889,15 @@ export function ConnectionsSettings() {
         />
         {desktopWslState.enabled ? (
           <SettingsRow
-            title="WSL only"
-            description="Stop the Windows backend and run only the WSL backend. Useful if you develop entirely inside WSL and don't want a second backend process. T3 Code restarts when you change this."
+            title="WSL만 사용"
+            description="Windows 백엔드를 중지하고 WSL 백엔드만 실행합니다. 모든 개발을 WSL 안에서 하고 두 번째 백엔드 프로세스가 필요하지 않을 때 유용합니다. 이 설정을 바꾸면 T3 Code가 다시 시작됩니다."
             className="bg-muted/20 pl-7 sm:pl-8"
             control={
               <Switch
                 checked={desktopWslState.wslOnly}
                 disabled={isUpdatingWslBackend}
                 onCheckedChange={(checked) => handleToggleWslOnly(checked)}
-                aria-label="Run WSL only"
+                aria-label="WSL만 사용"
               />
             }
           />
@@ -2888,8 +2913,8 @@ export function ConnectionsSettings() {
         tailscaleHttpsEndpoint
           ? tailscaleHttpsEndpoint.status === "available"
             ? tailscaleHttpsEndpoint.httpBaseUrl
-            : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
-          : "Start Tailscale to set up HTTPS access through MagicDNS."
+            : "Tailscale Serve로 MagicDNS HTTPS URL을 통해 이 백엔드에 접근할 수 있게 합니다."
+          : "MagicDNS를 통한 HTTPS 접근을 설정하려면 Tailscale을 시작하세요."
       }
       control={
         tailscaleHttpsEndpoint ? (
@@ -2903,7 +2928,7 @@ export function ConnectionsSettings() {
               }
               handleStartTailscaleServeDisable(tailscaleHttpsEndpoint);
             }}
-            aria-label="Enable Tailscale HTTPS"
+            aria-label="Tailscale HTTPS 사용"
           />
         ) : null
       }
@@ -2933,7 +2958,7 @@ export function ConnectionsSettings() {
   );
   const renderNetworkAccessRow = () => (
     <SettingsRow
-      title="Network access"
+      title="네트워크 접근"
       description={
         isLocalBackendNetworkAccessible ? (
           <NetworkAccessDescription
@@ -2943,16 +2968,16 @@ export function ConnectionsSettings() {
             onToggleExpanded={() => setIsAdvertisedEndpointListExpanded((expanded) => !expanded)}
             fallback={
               desktopServerExposureState?.endpointUrl
-                ? `Reachable at ${desktopServerExposureState.endpointUrl}`
+                ? `연결 주소: ${desktopServerExposureState.endpointUrl}`
                 : desktopServerExposureState?.advertisedHost
-                  ? `Exposed on all interfaces. Pairing links use ${desktopServerExposureState.advertisedHost}.`
-                  : "Exposed on all interfaces."
+                  ? `모든 네트워크 인터페이스에 공개됩니다. 페어링 링크는 ${desktopServerExposureState.advertisedHost}을(를) 사용합니다.`
+                  : "모든 네트워크 인터페이스에 공개됩니다."
             }
           />
         ) : desktopServerExposureState ? (
-          "Limited to this machine."
+          "이 컴퓨터에서만 접근할 수 있습니다."
         ) : (
-          "Loading…"
+          "불러오는 중…"
         )
       }
       status={
@@ -2965,11 +2990,11 @@ export function ConnectionsSettings() {
   );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
-      title="Network access"
+      title="네트워크 접근"
       description={
         currentAuthPolicy === "remote-reachable"
-          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
-          : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
+          ? "이 백엔드는 이미 원격 접근이 설정되어 있습니다. 네트워크 공개 설정은 서버를 실행한 곳에서 변경해야 합니다."
+          : "이 백엔드는 현재 이 컴퓨터에서만 접근할 수 있습니다. 원격 페어링을 사용하려면 루프백이 아닌 호스트로 다시 시작하세요."
       }
       control={
         <Tooltip>
@@ -2979,14 +3004,14 @@ export function ConnectionsSettings() {
                 <Switch
                   checked={isLocalBackendNetworkAccessible}
                   disabled
-                  aria-label="Enable network access"
+                  aria-label="네트워크 접근 사용"
                 />
               </span>
             }
           />
           <TooltipPopup side="top">
-            Network exposure changes restart the backend and must be controlled where the server
-            process is launched.
+            네트워크 공개 설정을 바꾸면 백엔드가 다시 시작됩니다. 서버 프로세스를 실행한 곳에서
+            변경해야 합니다.
           </TooltipPopup>
         </Tooltip>
       }
@@ -2997,15 +3022,15 @@ export function ConnectionsSettings() {
     <SettingsPageContainer>
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title="This environment">
+          <SettingsSection title="이 실행 환경">
             {primaryVersionMismatch || primaryServerUpdateState.status !== "idle" ? (
               <SettingsRow
                 title={
                   primaryServerUpdateState.status === "failed"
-                    ? "Update failed"
+                    ? "업데이트 실패"
                     : primaryServerUpdateState.status === "running"
-                      ? "Updating server"
-                      : "Server update available"
+                      ? "서버 업데이트 중"
+                      : "서버 업데이트 사용 가능"
                 }
                 description={
                   primaryServerUpdateState.status !== "idle" ? (
@@ -3015,7 +3040,7 @@ export function ConnectionsSettings() {
                       <TooltipTrigger
                         render={
                           <button type="button" className="w-fit cursor-help rounded-sm text-left">
-                            Update to match this client.
+                            이 클라이언트 버전에 맞춰 업데이트합니다.
                           </button>
                         }
                       />
@@ -3032,10 +3057,12 @@ export function ConnectionsSettings() {
                   primaryServerUpdateState.status !== "running" ? (
                     <ServerUpdateAction
                       environmentId={primaryEnvironmentId}
-                      serverLabel={primaryEnvironment?.label ?? "this server"}
+                      serverLabel={primaryEnvironment?.label ?? "이 서버"}
                       selfUpdate={resolveServerSelfUpdateCapability(primaryServerConfig)}
                       targetVersion={primaryVersionMismatch.clientVersion}
-                      label={primaryServerUpdateState.status === "failed" ? "Retry" : "Update"}
+                      label={
+                        primaryServerUpdateState.status === "failed" ? "다시 시도" : "업데이트"
+                      }
                     />
                   ) : undefined
                 }
@@ -3059,7 +3086,7 @@ export function ConnectionsSettings() {
 
           {isLocalBackendRemotelyReachable ? (
             <SettingsSection
-              title="Authorized clients"
+              title="승인된 클라이언트"
               headerAction={
                 <AuthorizedClientsHeaderAction
                   clientSessions={desktopClientSessions}
@@ -3091,13 +3118,13 @@ export function ConnectionsSettings() {
               <AlertDialogHeader>
                 <AlertDialogTitle>
                   {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "Enable network access?"
-                    : "Disable network access?"}
+                    ? "네트워크 접근을 사용할까요?"
+                    : "네트워크 접근을 끌까요?"}
                 </AlertDialogTitle>
                 <AlertDialogDescription>
                   {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "T3 Code will restart to expose this environment over the network."
-                    : "T3 Code will restart and limit this environment back to this machine."}
+                    ? "이 실행 환경을 네트워크에 공개하기 위해 T3 Code가 다시 시작됩니다."
+                    : "이 실행 환경을 다시 이 컴퓨터에서만 접근할 수 있게 하며 T3 Code가 다시 시작됩니다."}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -3105,7 +3132,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingDesktopServerExposure}
                   render={<Button variant="outline" disabled={isUpdatingDesktopServerExposure} />}
                 >
-                  Cancel
+                  취소
                 </AlertDialogClose>
                 <Button
                   variant={
@@ -3119,12 +3146,12 @@ export function ConnectionsSettings() {
                   {isUpdatingDesktopServerExposure ? (
                     <>
                       <Spinner className="size-3.5" />
-                      Restarting…
+                      다시 시작 중…
                     </>
                   ) : pendingDesktopServerExposureMode === "network-accessible" ? (
-                    "Restart and enable"
+                    "다시 시작하고 사용"
                   ) : (
-                    "Restart and disable"
+                    "다시 시작하고 끄기"
                   )}
                 </Button>
               </AlertDialogFooter>
@@ -3142,28 +3169,28 @@ export function ConnectionsSettings() {
                 <AlertDialogTitle>
                   {pendingWslChange?.kind === "disable"
                     ? pendingWslChange.wasWslOnly
-                      ? "Turn off WSL and switch back to Windows?"
-                      : "Disable WSL backend?"
+                      ? "WSL을 끄고 Windows로 돌아갈까요?"
+                      : "WSL 백엔드를 끌까요?"
                     : pendingWslChange?.kind === "distro"
-                      ? "Switch WSL distro?"
+                      ? "WSL 배포판을 전환할까요?"
                       : pendingWslChange?.kind === "enable"
-                        ? "Start the WSL backend"
+                        ? "WSL 백엔드 시작"
                         : pendingWslChange?.nextValue
-                          ? "Run only the WSL backend?"
-                          : "Re-enable the Windows backend?"}
+                          ? "WSL 백엔드만 실행할까요?"
+                          : "Windows 백엔드를 다시 사용할까요?"}
                 </AlertDialogTitle>
                 <AlertDialogDescription>
                   {pendingWslChange?.kind === "disable"
                     ? pendingWslChange.wasWslOnly
-                      ? "T3 Code will restart on the Windows backend. Threads and projects opened against WSL stay safe inside the distro and become available again when you re-enable WSL."
-                      : "The WSL backend will stop. Threads and projects opened against WSL stay safe inside the distro, but they'll be unavailable in T3 Code until you re-enable WSL."
+                      ? "T3 Code가 Windows 백엔드로 다시 시작됩니다. WSL에서 연 대화와 프로젝트는 배포판 안에 안전하게 유지되며 WSL을 다시 켜면 사용할 수 있습니다."
+                      : "WSL 백엔드가 중지됩니다. WSL에서 연 대화와 프로젝트는 배포판 안에 안전하게 유지되지만 WSL을 다시 켤 때까지 T3 Code에서 사용할 수 없습니다."
                     : pendingWslChange?.kind === "distro"
-                      ? "T3 Code will restart the WSL backend on the new distro. Sessions still running on the current distro will be interrupted."
+                      ? "새 배포판에서 WSL 백엔드를 다시 시작합니다. 현재 배포판에서 실행 중인 세션은 중단됩니다."
                       : pendingWslChange?.kind === "enable"
-                        ? "Run the WSL backend alongside the Windows one, or stop the Windows backend and use only WSL? You can change this later from Settings."
+                        ? "Windows 백엔드와 WSL 백엔드를 함께 실행하거나 Windows 백엔드를 중지하고 WSL만 사용할 수 있습니다. 나중에 설정에서 변경할 수 있습니다."
                         : pendingWslChange?.nextValue
-                          ? "T3 Code will restart and start only the WSL backend. Your Windows-side projects won't be accessible until you turn this off again."
-                          : "T3 Code will restart and bring the Windows backend back up alongside WSL."}
+                          ? "T3 Code가 다시 시작되고 WSL 백엔드만 실행됩니다. 이 설정을 다시 끌 때까지 Windows 쪽 프로젝트에 접근할 수 없습니다."
+                          : "T3 Code가 다시 시작되고 WSL과 함께 Windows 백엔드도 실행됩니다."}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -3171,7 +3198,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingWslBackend}
                   render={<Button variant="outline" disabled={isUpdatingWslBackend} />}
                 >
-                  Cancel
+                  취소
                 </AlertDialogClose>
                 {pendingWslChange?.kind === "enable" ? (
                   <>
@@ -3183,10 +3210,10 @@ export function ConnectionsSettings() {
                       {isUpdatingWslBackend ? (
                         <>
                           <Spinner className="size-3.5" />
-                          Applying…
+                          적용 중…
                         </>
                       ) : (
-                        "Use only WSL"
+                        "WSL만 사용"
                       )}
                     </Button>
                     <Button
@@ -3197,10 +3224,10 @@ export function ConnectionsSettings() {
                       {isUpdatingWslBackend ? (
                         <>
                           <Spinner className="size-3.5" />
-                          Applying…
+                          적용 중…
                         </>
                       ) : (
-                        "Run both backends"
+                        "두 백엔드 함께 실행"
                       )}
                     </Button>
                   </>
@@ -3218,20 +3245,20 @@ export function ConnectionsSettings() {
                     {isUpdatingWslBackend ? (
                       <>
                         <Spinner className="size-3.5" />
-                        Applying…
+                        적용 중…
                       </>
                     ) : pendingWslChange?.kind === "disable" ? (
                       pendingWslChange.wasWslOnly ? (
-                        "Switch to Windows"
+                        "Windows로 전환"
                       ) : (
-                        "Disable WSL"
+                        "WSL 끄기"
                       )
                     ) : pendingWslChange?.kind === "distro" ? (
-                      "Switch distro"
+                      "배포판 전환"
                     ) : pendingWslChange?.nextValue ? (
-                      "Restart and enable"
+                      "다시 시작하고 사용"
                     ) : (
-                      "Restart and disable"
+                      "다시 시작하고 끄기"
                     )}
                   </Button>
                 )}
@@ -3247,9 +3274,9 @@ export function ConnectionsSettings() {
           >
             <AlertDialogPopup>
               <AlertDialogHeader>
-                <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
+                <AlertDialogTitle>Tailscale HTTPS를 끌까요?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  T3 Code will restart the local backend without Tailscale Serve.
+                  Tailscale Serve를 사용하지 않고 로컬 백엔드를 다시 시작합니다.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -3257,7 +3284,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingTailscaleServe}
                   render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
                 >
-                  Cancel
+                  취소
                 </AlertDialogClose>
                 <Button
                   variant="destructive"
@@ -3267,10 +3294,10 @@ export function ConnectionsSettings() {
                   {isUpdatingTailscaleServe ? (
                     <>
                       <Spinner className="size-3.5" />
-                      Restarting…
+                      다시 시작 중…
                     </>
                   ) : (
-                    "Restart and disable"
+                    "다시 시작하고 끄기"
                   )}
                 </Button>
               </AlertDialogFooter>
@@ -3285,15 +3312,15 @@ export function ConnectionsSettings() {
           >
             <DialogPopup className="max-w-md">
               <DialogHeader>
-                <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
+                <DialogTitle>Tailscale HTTPS를 설정할까요?</DialogTitle>
                 <DialogDescription>
-                  T3 Code will restart the local backend with Tailscale Serve enabled and ask
-                  Tailscale to proxy HTTPS traffic to this backend.
+                  Tailscale Serve를 켠 상태로 로컬 백엔드를 다시 시작하고, HTTPS 트래픽을 이
+                  백엔드로 전달하도록 Tailscale에 요청합니다.
                 </DialogDescription>
               </DialogHeader>
               <DialogPanel className="space-y-4">
                 <label className="block">
-                  <span className="text-sm font-medium text-foreground">HTTPS port</span>
+                  <span className="text-sm font-medium text-foreground">HTTPS 포트</span>
                   <Input
                     className="mt-2"
                     type="number"
@@ -3307,15 +3334,15 @@ export function ConnectionsSettings() {
                   />
                 </label>
                 {!isTailscaleServePortValid ? (
-                  <p className="mt-2 text-xs text-destructive">Enter a port from 1 to 65535.</p>
+                  <p className="mt-2 text-xs text-destructive">1~65535 사이의 포트를 입력하세요.</p>
                 ) : null}
                 <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
-                  <p className="text-xs font-medium text-muted-foreground">HTTPS endpoint</p>
+                  <p className="text-xs font-medium text-muted-foreground">HTTPS 연결 주소</p>
                   <p
                     className="mt-1 truncate text-sm text-foreground"
                     title={pendingTailscaleServeBaseUrl ?? undefined}
                   >
-                    {pendingTailscaleServeBaseUrl ?? "Pending MagicDNS endpoint"}
+                    {pendingTailscaleServeBaseUrl ?? "MagicDNS 연결 주소 준비 중"}
                   </p>
                 </div>
               </DialogPanel>
@@ -3324,7 +3351,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingTailscaleServe}
                   render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
                 >
-                  Cancel
+                  취소
                 </DialogClose>
                 <Button
                   onClick={() => void handleConfirmTailscaleServeSetup()}
@@ -3333,10 +3360,10 @@ export function ConnectionsSettings() {
                   {isUpdatingTailscaleServe ? (
                     <>
                       <Spinner className="size-3.5" />
-                      Restarting…
+                      다시 시작 중…
                     </>
                   ) : (
-                    "Enable"
+                    "사용"
                   )}
                 </Button>
               </DialogFooter>
@@ -3344,10 +3371,10 @@ export function ConnectionsSettings() {
           </Dialog>
         </>
       ) : (
-        <SettingsSection title="This environment">
+        <SettingsSection title="이 실행 환경">
           <SettingsRow
-            title="Administrative access"
-            description="Pairing links and client-session management require the access:write scope for this backend."
+            title="관리 권한"
+            description="이 백엔드의 페어링 링크와 클라이언트 세션을 관리하려면 access:write 권한이 필요합니다."
           />
           <CloudLinkRow canManageRelay={canManageRelay} />
         </SettingsSection>
@@ -3374,36 +3401,38 @@ export function ConnectionsSettings() {
                         size="xs"
                         variant="ghost"
                         className="h-5 gap-1 rounded-sm px-1 text-[11px] font-normal text-muted-foreground/60 hover:text-muted-foreground"
-                        aria-label="Add environment"
+                        aria-label="실행 환경 추가"
                       >
                         <PlusIcon className="size-3" />
-                        <span>Add environment</span>
+                        <span>실행 환경 추가</span>
                       </Button>
                     }
                   />
                 }
               />
-              <TooltipPopup side="top">Add environment</TooltipPopup>
+              <TooltipPopup side="top">실행 환경 추가</TooltipPopup>
             </Tooltip>
             <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
               <DialogHeader>
-                <DialogTitle>Add Environment</DialogTitle>
-                <DialogDescription>Pair another environment to this client.</DialogDescription>
+                <DialogTitle>실행 환경 추가</DialogTitle>
+                <DialogDescription>
+                  다른 실행 환경을 이 클라이언트와 페어링합니다.
+                </DialogDescription>
               </DialogHeader>
               <DialogPanel>
                 <div className="space-y-4">
                   <div className="grid gap-3 sm:grid-cols-2">
                     {renderConnectionModeCard({
                       mode: "remote",
-                      title: "Remote link",
-                      description: "Enter a backend host and pairing code.",
+                      title: "원격 링크",
+                      description: "백엔드 호스트와 페어링 코드를 입력합니다.",
                       icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
                     })}
                     {desktopBridge
                       ? renderConnectionModeCard({
                           mode: "ssh",
                           title: "SSH",
-                          description: "Use local SSH config, agent, and tunnels for the backend.",
+                          description: "로컬 SSH 설정, 에이전트와 터널을 백엔드 연결에 사용합니다.",
                           icon: <TerminalIcon aria-hidden className="size-4" />,
                         })
                       : null}

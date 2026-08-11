@@ -7,10 +7,7 @@ import {
   type ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
-import {
-  squashAtomCommandFailure,
-  type AtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
+import { type AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
@@ -109,14 +106,14 @@ function dedupeProvidersByInstanceId<T extends ServerProvider>(providers: Readon
 function getProviderUpdatedTitle(provider: Pick<ServerProvider, "driver" | "version">): string {
   const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
   return provider.version
-    ? `${providerName} updated: ${formatVersion(provider.version)}`
-    : `${providerName} updated`;
+    ? `${providerName} 업데이트 완료: ${formatVersion(provider.version)}`
+    : `${providerName} 업데이트 완료`;
 }
 
 function getProviderUpdatedDescription(providerCount: number): string {
   return providerCount === 1
-    ? "New sessions will use the updated provider."
-    : "New sessions will use the updated providers.";
+    ? "새 세션부터 업데이트된 제공자를 사용합니다."
+    : "새 세션부터 업데이트된 제공자들을 사용합니다.";
 }
 
 function getProviderFailedUpdateTitle(
@@ -125,8 +122,8 @@ function getProviderFailedUpdateTitle(
   const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
   const attemptedVersion = provider.versionAdvisory?.latestVersion;
   return attemptedVersion
-    ? `${providerName} ${formatVersion(attemptedVersion)} update failed`
-    : `${providerName} update failed`;
+    ? `${providerName} ${formatVersion(attemptedVersion)} 업데이트 실패`
+    : `${providerName} 업데이트 실패`;
 }
 
 export function isProviderUpdateCandidate(
@@ -211,9 +208,9 @@ export function formatProviderList(providers: ReadonlyArray<Pick<ServerProvider,
     (provider) => PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver,
   );
   if (names.length <= 2) {
-    return names.join(" and ");
+    return names.join(", ");
   }
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+  return names.join(", ");
 }
 
 export function getProviderUpdateInitialToastView(input: {
@@ -226,8 +223,8 @@ export function getProviderUpdateInitialToastView(input: {
     title: getProviderUpdateInitialToastTitle(input.updateProviders),
     description:
       input.oneClickProviders.length > 0
-        ? "Install the update now or review provider settings."
-        : `${formatProviderList(input.updateProviders)} can be updated from provider settings.`,
+        ? "지금 업데이트하거나 제공자 설정에서 내용을 확인하세요."
+        : `제공자 설정에서 ${formatProviderList(input.updateProviders)} 업데이트를 진행할 수 있습니다.`,
   };
 }
 
@@ -235,20 +232,20 @@ export function getProviderUpdateRunningToastView(providerCount: number): Provid
   return {
     phase: "running",
     type: "loading",
-    title: providerCount === 1 ? "Updating provider" : "Updating providers",
-    description: "Running provider update command.",
+    title: "제공자 업데이트 중",
+    description: "제공자 업데이트 명령을 실행하고 있습니다.",
   };
 }
 
 export function getProviderUpdateRejectedToastView(
-  providerCount: number,
-  message: string,
+  _providerCount: number,
+  _message: string,
 ): ProviderUpdateToastView {
   return {
     phase: "failed",
     type: "error",
-    title: providerCount === 1 ? "Provider update failed" : "Provider updates failed",
-    description: message,
+    title: "제공자 업데이트 실패",
+    description: "제공자 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.",
   };
 }
 
@@ -262,7 +259,7 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "failed",
       type: "error",
-      title: failedProviders.length === 1 ? "Provider update failed" : "Provider updates failed",
+      title: "제공자 업데이트 실패",
       description: getFailedProviderUpdateDescription(failedProviders),
     };
   }
@@ -276,11 +273,9 @@ export function getProviderUpdateProgressToastView(input: {
       type: "warning",
       title:
         unchangedProviders.length === 1
-          ? "Provider still needs an update"
-          : "Providers still need updates",
-      description: `${formatProviderList(unchangedProviders)} ${
-        unchangedProviders.length === 1 ? "still appears" : "still appear"
-      } outdated. Check provider settings for details.`,
+          ? "제공자 업데이트가 아직 필요합니다"
+          : "제공자 업데이트가 아직 필요합니다",
+      description: `${formatProviderList(unchangedProviders)} 제공자가 아직 이전 버전으로 표시됩니다. 제공자 설정에서 자세한 내용을 확인하세요.`,
     };
   }
 
@@ -299,7 +294,7 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "succeeded",
       type: "success",
-      title: input.providerCount === 1 ? "Provider updated" : "Provider updates finished",
+      title: "제공자 업데이트 완료",
       description: getProviderUpdatedDescription(input.providerCount),
       dismissAfterVisibleMs: PROVIDER_UPDATE_SUCCESS_VISIBLE_MS,
     };
@@ -321,7 +316,7 @@ export function getSingleProviderUpdateProgressToastView(
     case "running":
       return {
         ...view,
-        title: `Updating ${providerName}`,
+        title: `${providerName} 업데이트 중`,
       };
     case "failed":
       return {
@@ -331,7 +326,7 @@ export function getSingleProviderUpdateProgressToastView(
     case "unchanged":
       return {
         ...view,
-        title: `${providerName} still needs an update`,
+        title: `${providerName} 업데이트가 아직 필요합니다`,
       };
     case "succeeded":
       return {
@@ -372,8 +367,7 @@ export function firstFailedProviderUpdateMessage(
   if (!failed || failed._tag !== "Failure") {
     return null;
   }
-  const error = squashAtomCommandFailure(failed);
-  return error instanceof Error ? error.message : "Provider update failed.";
+  return "제공자 업데이트에 실패했습니다.";
 }
 
 function getUpdateFinishedAt(provider: ServerProvider): string | null {
@@ -423,12 +417,12 @@ export function getProviderUpdateSidebarPillView(
       tone: "loading",
       title:
         activeProviders.length === 1
-          ? `Updating ${activeProviderName}`
-          : `Updating ${activeProviders.length} providers`,
+          ? `${activeProviderName} 업데이트 중`
+          : `제공자 ${activeProviders.length}개 업데이트 중`,
       description:
         activeProviders.length === 1
-          ? `${formatProviderList(activeProviders)} update in progress.`
-          : `${formatProviderList(activeProviders)} updates are in progress.`,
+          ? `${formatProviderList(activeProviders)} 업데이트를 진행하고 있습니다.`
+          : `${formatProviderList(activeProviders)} 업데이트를 진행하고 있습니다.`,
     };
   }
 
@@ -454,7 +448,7 @@ export function getProviderUpdateSidebarPillView(
       title:
         failedProviders.length === 1
           ? getProviderFailedUpdateTitle(failedProvider)
-          : `${failedProviders.length} provider updates failed`,
+          : `제공자 ${failedProviders.length}개 업데이트 실패`,
       description: getFailedProviderUpdateDescription(failedProviders),
       dismissible: true,
     });
@@ -478,11 +472,9 @@ export function getProviderUpdateSidebarPillView(
       tone: "warning",
       title:
         unchangedProviders.length === 1
-          ? `${unchangedProviderName} still needs an update`
-          : `${unchangedProviders.length} providers still need updates`,
-      description: `${formatProviderList(unchangedProviders)} ${
-        unchangedProviders.length === 1 ? "still appears" : "still appear"
-      } outdated. Review provider settings for details.`,
+          ? `${unchangedProviderName} 업데이트가 아직 필요합니다`
+          : `제공자 ${unchangedProviders.length}개 업데이트가 아직 필요합니다`,
+      description: `${formatProviderList(unchangedProviders)} 제공자가 아직 이전 버전으로 표시됩니다. 제공자 설정에서 자세한 내용을 확인하세요.`,
       dismissible: true,
     });
   }
@@ -504,7 +496,7 @@ export function getProviderUpdateSidebarPillView(
       title:
         succeededProviders.length === 1
           ? getProviderUpdatedTitle(succeededProvider)
-          : `${succeededProviders.length} providers updated`,
+          : `제공자 ${succeededProviders.length}개 업데이트 완료`,
       description: getProviderUpdatedDescription(succeededProviders.length),
       dismissAfterVisibleMs: PROVIDER_UPDATE_SUCCESS_VISIBLE_MS,
     });
@@ -539,19 +531,16 @@ function getProviderUpdateInitialToastTitle(
   if (providers.length === 1) {
     const provider = providers[0]!;
     const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
-    return `Update Available: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
+    return `업데이트 가능: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
   }
-  return `Updates Available: ${providers.length} providers`;
+  return `업데이트 가능: 제공자 ${providers.length}개`;
 }
 
 function getFailedProviderUpdateDescription(providers: ReadonlyArray<ServerProvider>): string {
   if (providers.length === 1) {
-    const provider = providers[0]!;
-    if (provider.updateState?.message) {
-      return provider.updateState.message;
-    }
+    return `${formatProviderList(providers)} 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.`;
   }
-  return `${formatProviderList(providers)} failed to update. Check provider settings for details.`;
+  return `${formatProviderList(providers)} 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.`;
 }
 
 // ===========================================================================
@@ -600,7 +589,7 @@ export function firstRejectedProviderUpdateMessage(
   if (!rejected) {
     return null;
   }
-  return rejected.reason instanceof Error ? rejected.reason.message : "Provider update failed.";
+  return "제공자 업데이트에 실패했습니다.";
 }
 
 /**
@@ -800,12 +789,12 @@ export function resolveEnvironmentUpdateRowStatus(input: {
   readonly isPending: boolean;
 }): ProviderUpdateRowStatus {
   if (input.error) {
-    return { kind: "failed", text: input.error };
+    return { kind: "failed", text: "업데이트에 실패했습니다." };
   }
   if (input.result) {
     switch (input.result.phase) {
       case "succeeded":
-        return { kind: "success", text: "Updated" };
+        return { kind: "success", text: "업데이트됨" };
       case "failed":
         return { kind: "failed", text: input.result.description };
       case "unchanged":
@@ -816,20 +805,20 @@ export function resolveEnvironmentUpdateRowStatus(input: {
   if (input.pill) {
     switch (input.pill.tone) {
       case "success":
-        return { kind: "success", text: "Updated" };
+        return { kind: "success", text: "업데이트됨" };
       case "error":
         return { kind: "failed", text: input.pill.description };
       case "warning":
         return { kind: "unchanged", text: input.pill.description };
       default:
-        return { kind: "loading", text: "Updating…" };
+        return { kind: "loading", text: "업데이트 중…" };
     }
   }
   // A non-terminal result snapshot or the optimistic pending flag means an
   // update is still in flight — keep showing the spinner rather than reverting
   // to the Update button as if nothing happened.
   if (input.result || input.isPending) {
-    return { kind: "loading", text: "Updating…" };
+    return { kind: "loading", text: "업데이트 중…" };
   }
   return { kind: "idle", text: environmentProviderNames(input.group) };
 }

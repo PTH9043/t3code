@@ -4,7 +4,7 @@ export type WizardNavigation =
 
 const IDENTITY_STEP = 1;
 
-export const ADD_PROVIDER_WIZARD_STEPS = ["Driver", "Identity", "Config"] as const;
+export const ADD_PROVIDER_WIZARD_STEPS = ["CLI 제공자", "계정 정보", "설정"] as const;
 
 /**
  * Resolve navigation within the add-provider wizard.

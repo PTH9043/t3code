@@ -28,7 +28,7 @@ export interface PrStatusIndicator {
 }
 
 export interface TerminalStatusIndicator {
-  label: "Terminal process running";
+  label: "터미널 프로세스 실행 중";
   colorClass: string;
   pulse: boolean;
 }
@@ -133,7 +133,7 @@ export function terminalStatusFromRunningIds(
     return null;
   }
   return {
-    label: "Terminal process running",
+    label: "터미널 프로세스 실행 중",
     colorClass: "text-teal-600 dark:text-teal-300/90",
     pulse: true,
   };
@@ -151,8 +151,8 @@ export function ThreadWorktreeIndicator({
 
   const displayPath = formatWorktreePathForDisplay(worktreePath);
   const tooltip = thread.branch
-    ? `Worktree: ${displayPath} (${thread.branch})`
-    : `Worktree: ${displayPath}`;
+    ? `작업 트리: ${displayPath} (${thread.branch})`
+    : `작업 트리: ${displayPath}`;
 
   return (
     <Tooltip>
@@ -305,7 +305,7 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   const isRemoteThread =
     primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
   const remoteEnvLabel = environment?.label ?? null;
-  const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "Remote") : null;
+  const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "원격") : null;
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
 
   if (!terminalStatus && !isRemoteThread) {
@@ -337,7 +337,7 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
           <TooltipTrigger
             render={
               <span
-                aria-label={threadEnvironmentLabel ?? "Remote"}
+                aria-label={threadEnvironmentLabel ?? "원격"}
                 className="inline-flex items-center justify-center"
               />
             }

@@ -20,37 +20,37 @@ export function presentSavedCloudEnvironmentConnection(
   switch (connection.phase) {
     case "connected":
       return {
-        buttonLabel: "Connected",
+        buttonLabel: "연결됨",
         statusText: connectionStatusText(connection),
         tone: "connected",
       };
     case "connecting":
       return {
-        buttonLabel: "Connecting…",
+        buttonLabel: "연결 중…",
         statusText: connectionStatusText(connection),
         tone: "connecting",
       };
     case "reconnecting":
       return {
-        buttonLabel: "Reconnecting…",
+        buttonLabel: "다시 연결 중…",
         statusText: connectionStatusText(connection),
         tone: "connecting",
       };
     case "error":
       return {
-        buttonLabel: "Connection failed",
+        buttonLabel: "연결 실패",
         statusText: connectionStatusText(connection),
         tone: "error",
       };
     case "offline":
       return {
-        buttonLabel: "Offline",
+        buttonLabel: "오프라인",
         statusText: connectionStatusText(connection),
         tone: "idle",
       };
     case "available":
       return {
-        buttonLabel: "Not connected",
+        buttonLabel: "연결 안 됨",
         statusText: connectionStatusText(connection),
         tone: "idle",
       };

@@ -251,23 +251,23 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
           {APP_DISPLAY_NAME}
         </p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Something went wrong.
+          문제가 발생했습니다.
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
         <div className="mt-5 flex flex-wrap gap-2">
           <Button size="sm" onClick={() => reset()}>
-            Try again
+            다시 시도
           </Button>
           <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
-            Reload app
+            앱 새로고침
           </Button>
         </div>
 
         <details className="group mt-5 overflow-hidden rounded-lg border border-border/70 bg-background/55">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="group-open:hidden">Show error details</span>
-            <span className="hidden group-open:inline">Hide error details</span>
+            <span className="group-open:hidden">오류 세부 정보 보기</span>
+            <span className="hidden group-open:inline">오류 세부 정보 숨기기</span>
           </summary>
           <pre className="max-h-56 overflow-auto border-t border-border/70 bg-background/80 px-3 py-2 text-xs text-foreground/85">
             {details}
@@ -280,14 +280,16 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
+    return /[가-힣]/.test(error.message)
+      ? error.message
+      : "예기치 않은 라우터 오류가 발생했습니다.";
   }
 
   if (typeof error === "string" && error.trim().length > 0) {
-    return error;
+    return /[가-힣]/.test(error) ? error : "예기치 않은 라우터 오류가 발생했습니다.";
   }
 
-  return "An unexpected router error occurred.";
+  return "예기치 않은 라우터 오류가 발생했습니다.";
 }
 
 function errorDetails(error: unknown): string {
@@ -302,7 +304,7 @@ function errorDetails(error: unknown): string {
   try {
     return JSON.stringify(error, null, 2);
   } catch {
-    return "No additional error details are available.";
+    return "추가 오류 세부 정보가 없습니다.";
   }
 }
 
@@ -382,8 +384,8 @@ function EventRouter() {
     if (decision._tag === "Success") {
       toastManager.add({
         type: "success",
-        title: "Keybindings updated",
-        description: "Keybindings configuration reloaded successfully.",
+        title: "키바인딩 업데이트 완료",
+        description: "키바인딩 설정을 다시 불러왔습니다.",
       });
       return;
     }
@@ -391,11 +393,13 @@ function EventRouter() {
     toastManager.add(
       stackedThreadToast({
         type: "warning",
-        title: "Invalid keybindings configuration",
-        description: decision.message,
+        title: "올바르지 않은 키바인딩 설정",
+        description: /[가-힣]/.test(decision.message)
+          ? decision.message
+          : "키바인딩 설정을 확인하세요.",
         actionVariant: "outline",
         actionProps: {
-          children: "Open keybindings.json",
+          children: "keybindings.json 열기",
           onClick: () => {
             if (!serverConfig || !primaryEnvironment) {
               return;
@@ -417,12 +421,12 @@ function EventRouter() {
                 return;
               }
               const error = squashAtomCommandFailure(result);
+              console.error("Failed to open keybindings file", error);
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Unable to open keybindings file",
-                  description:
-                    error instanceof Error ? error.message : "Unknown error opening file.",
+                  title: "키바인딩 파일을 열지 못했습니다",
+                  description: "편집기 설정을 확인한 뒤 다시 시도하세요.",
                 }),
               );
             })();

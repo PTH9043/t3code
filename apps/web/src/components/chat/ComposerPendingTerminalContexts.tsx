@@ -1,7 +1,7 @@
 import { cn } from "~/lib/utils";
 import {
   type TerminalContextDraft,
-  formatTerminalContextLabel,
+  formatTerminalContextDisplayLabel,
   isTerminalContextExpired,
 } from "~/lib/terminalContext";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
@@ -18,10 +18,10 @@ interface ComposerPendingTerminalContextChipProps {
 export function ComposerPendingTerminalContextChip({
   context,
 }: ComposerPendingTerminalContextChipProps) {
-  const label = formatTerminalContextLabel(context);
+  const label = formatTerminalContextDisplayLabel(context);
   const expired = isTerminalContextExpired(context);
   const tooltipText = expired
-    ? `Terminal context expired. Remove and re-add ${label} to include it in your message.`
+    ? `터미널 문맥이 만료되었습니다. 메시지에 포함하려면 ${label}을(를) 제거한 뒤 다시 추가하세요.`
     : context.text;
 
   return <TerminalContextInlineChip label={label} tooltipText={tooltipText} expired={expired} />;

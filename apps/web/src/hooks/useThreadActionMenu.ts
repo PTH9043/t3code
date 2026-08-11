@@ -37,11 +37,12 @@ import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
 
 function failureToast(title: string, error: unknown) {
+  console.error(error);
   toastManager.add(
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "An error occurred.",
+      description: "작업 중 오류가 발생했습니다. 잠시 후 다시 시도하세요.",
     }),
   );
 }
@@ -84,16 +85,16 @@ export function useThreadActionMenu(input: {
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
-      toastManager.add({ type: "success", title: "Path copied", description: path });
+      toastManager.add({ type: "success", title: "경로를 복사했습니다", description: path });
     },
-    onError: (error) => failureToast("Failed to copy path", error),
+    onError: (error) => failureToast("경로를 복사하지 못했습니다", error),
   });
   const { copyToClipboard: copyBranchToClipboard } = useCopyToClipboard<{ branch: string }>({
-    target: "branch name",
+    target: "브랜치 이름",
     onCopy: ({ branch }) => {
-      toastManager.add({ type: "success", title: "Branch copied", description: branch });
+      toastManager.add({ type: "success", title: "브랜치를 복사했습니다", description: branch });
     },
-    onError: (error) => failureToast("Failed to copy branch", error),
+    onError: (error) => failureToast("브랜치를 복사하지 못했습니다", error),
   });
 
   const openMenu = useCallback(
@@ -143,21 +144,21 @@ export function useThreadActionMenu(input: {
           const result = await snoozeThread(threadRef, preset.snoozedUntil);
           if (result._tag === "Failure") {
             if (!isAtomCommandInterrupted(result)) {
-              failureToast("Failed to snooze thread", squashAtomCommandFailure(result));
+              failureToast("대화를 미루지 못했습니다", squashAtomCommandFailure(result));
             }
             return;
           }
           toastManager.add(
             stackedThreadToast({
               type: "success",
-              title: `Snoozed until ${snoozeWakeDescription(preset.snoozedUntil, new Date(), timestampFormat)}`,
+              title: `${snoozeWakeDescription(preset.snoozedUntil, new Date(), timestampFormat)}까지 미뤘습니다`,
               timeout: 5_000,
               actionProps: {
-                children: "Undo",
+                children: "실행 취소",
                 onClick: () => {
                   void unsnoozeThread(threadRef).then((undone) => {
                     if (undone._tag === "Failure" && !isAtomCommandInterrupted(undone)) {
-                      failureToast("Failed to wake thread", squashAtomCommandFailure(undone));
+                      failureToast("대화를 깨우지 못했습니다", squashAtomCommandFailure(undone));
                     }
                   });
                 },
@@ -188,31 +189,33 @@ export function useThreadActionMenu(input: {
               }),
             );
             if (result._tag === "Failure") {
-              failureToast("Could not create thread", squashAtomCommandFailure(result));
+              failureToast("새 대화를 만들지 못했습니다", squashAtomCommandFailure(result));
             }
             return;
           }
           case "settle":
-            await reportFailure("Failed to settle thread", () => settleThread(threadRef));
+            await reportFailure("대화를 완료 처리하지 못했습니다", () => settleThread(threadRef));
             return;
           case "unsettle":
-            await reportFailure("Failed to un-settle thread", () => unsettleThread(threadRef));
+            await reportFailure("대화 완료 상태를 해제하지 못했습니다", () =>
+              unsettleThread(threadRef),
+            );
             return;
           case "unsnooze":
-            await reportFailure("Failed to wake thread", () => unsnoozeThread(threadRef));
+            await reportFailure("대화를 깨우지 못했습니다", () => unsnoozeThread(threadRef));
             return;
           case "pin":
-            await reportFailure("Failed to pin thread", () => pinThread(threadRef));
+            await reportFailure("대화를 고정하지 못했습니다", () => pinThread(threadRef));
             return;
           case "unpin":
-            await reportFailure("Failed to unpin thread", () => unpinThread(threadRef));
+            await reportFailure("대화 고정을 해제하지 못했습니다", () => unpinThread(threadRef));
             return;
           case "rename":
             onStartRename();
             return;
           case "regenerate-title":
             if (isRegeneratingTitle) return;
-            await reportFailure("Failed to regenerate thread title", () =>
+            await reportFailure("대화 제목을 다시 만들지 못했습니다", () =>
               updateThreadMetadata({
                 environmentId: threadRef.environmentId,
                 input: { threadId: threadRef.threadId, regenerateTitle: true },
@@ -228,8 +231,8 @@ export function useThreadActionMenu(input: {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Path unavailable",
-                  description: "This thread does not have a workspace path to copy.",
+                  title: "경로를 사용할 수 없습니다",
+                  description: "이 대화에는 복사할 작업공간 경로가 없습니다.",
                 }),
               );
               return;
@@ -247,8 +250,8 @@ export function useThreadActionMenu(input: {
               const confirmed = await settlePromise(() =>
                 api.dialogs.confirm(
                   [
-                    `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    `"${thread.title}" 대화를 삭제할까요?`,
+                    "이 대화의 기록이 영구적으로 삭제됩니다.",
                   ].join("\n"),
                 ),
               );
@@ -263,7 +266,7 @@ export function useThreadActionMenu(input: {
               // that itself, and "Failed to delete thread" would be a lie.
               readThreadShell(threadRef) !== null
             ) {
-              failureToast("Failed to delete thread", squashAtomCommandFailure(deleted));
+              failureToast("대화를 삭제하지 못했습니다", squashAtomCommandFailure(deleted));
             }
             return;
           }

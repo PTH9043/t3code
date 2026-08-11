@@ -113,19 +113,19 @@ export function ProviderModelsSection({
   const handleAdd = () => {
     const normalized = normalizeCustomModelSlug(input);
     if (!normalized) {
-      setError("Enter a model slug.");
+      setError("모델 식별자를 입력하세요.");
       return;
     }
     if (models.some((model) => !model.isCustom && model.slug === normalized)) {
-      setError("That model is already built in.");
+      setError("이미 기본 제공되는 모델입니다.");
       return;
     }
     if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
-      setError(`Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`);
+      setError(`모델 식별자는 ${MAX_CUSTOM_MODEL_LENGTH}자 이하여야 합니다.`);
       return;
     }
     if (customModels.includes(normalized)) {
-      setError("That custom model is already saved.");
+      setError("이미 저장된 사용자 지정 모델입니다.");
       return;
     }
 
@@ -186,10 +186,8 @@ export function ProviderModelsSection({
 
   return (
     <div>
-      <div className="text-xs font-medium text-foreground">Models</div>
-      <div className="mt-1 text-xs text-muted-foreground">
-        {models.length} model{models.length === 1 ? "" : "s"} available.
-      </div>
+      <div className="text-xs font-medium text-foreground">모델</div>
+      <div className="mt-1 text-xs text-muted-foreground">사용 가능한 모델 {models.length}개</div>
       <div ref={listRef} className="mt-2 max-h-40 overflow-y-auto pb-1">
         {orderedModels.map((model, index) => {
           const caps = model.capabilities;
@@ -204,10 +202,10 @@ export function ProviderModelsSection({
             nextModel !== undefined && favoriteModelSet.has(nextModel.slug) === isFavorite;
           const descriptors = caps?.optionDescriptors ?? [];
           if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
-            capLabels.push("Fast mode");
+            capLabels.push("고속 모드");
           }
           if (descriptors.some((descriptor) => descriptor.id === "thinking")) {
-            capLabels.push("Thinking");
+            capLabels.push("사고");
           }
           if (
             descriptors.some(
@@ -219,7 +217,7 @@ export function ProviderModelsSection({
                   descriptor.id === "variant"),
             )
           ) {
-            capLabels.push("Reasoning");
+            capLabels.push("추론");
           }
           const hasDetails = capLabels.length > 0 || model.name !== model.slug;
 
@@ -248,7 +246,7 @@ export function ProviderModelsSection({
                           size="icon-xs"
                           variant="ghost"
                           className="size-5 rounded-sm p-0 text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label={`Details for ${model.name}`}
+                          aria-label={`${model.name} 상세 정보`}
                         />
                       }
                     >
@@ -270,11 +268,9 @@ export function ProviderModelsSection({
                     </TooltipPopup>
                   </Tooltip>
                 ) : null}
-                {isHidden ? (
-                  <span className="text-[10px] text-muted-foreground">hidden</span>
-                ) : null}
+                {isHidden ? <span className="text-[10px] text-muted-foreground">숨김</span> : null}
                 {model.isCustom ? (
-                  <span className="text-[10px] text-muted-foreground">custom</span>
+                  <span className="text-[10px] text-muted-foreground">사용자 지정</span>
                 ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
@@ -289,16 +285,14 @@ export function ProviderModelsSection({
                           isFavorite && "text-yellow-500 hover:text-yellow-600",
                         )}
                         onClick={() => handleToggleFavorite(model.slug)}
-                        aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${
-                          isFavorite ? "from" : "to"
-                        } favorites`}
+                        aria-label={`${model.name} 즐겨찾기 ${isFavorite ? "해제" : "추가"}`}
                       />
                     }
                   >
                     <StarIcon className={cn("size-3", isFavorite && "fill-current")} />
                   </TooltipTrigger>
                   <TooltipPopup side="top">
-                    {isFavorite ? "Remove from favorites" : "Add to favorites"}
+                    {isFavorite ? "즐겨찾기 해제" : "즐겨찾기 추가"}
                   </TooltipPopup>
                 </Tooltip>
                 <Tooltip>
@@ -310,13 +304,13 @@ export function ProviderModelsSection({
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         disabled={!canMoveUp}
                         onClick={() => handleMove(model.slug, -1)}
-                        aria-label={`Move ${model.name} up`}
+                        aria-label={`${model.name} 위로 이동`}
                       />
                     }
                   >
                     <ArrowUpIcon className="size-3" />
                   </TooltipTrigger>
-                  <TooltipPopup side="top">Move up</TooltipPopup>
+                  <TooltipPopup side="top">위로 이동</TooltipPopup>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
@@ -327,13 +321,13 @@ export function ProviderModelsSection({
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         disabled={!canMoveDown}
                         onClick={() => handleMove(model.slug, 1)}
-                        aria-label={`Move ${model.name} down`}
+                        aria-label={`${model.name} 아래로 이동`}
                       />
                     }
                   >
                     <ArrowDownIcon className="size-3" />
                   </TooltipTrigger>
-                  <TooltipPopup side="top">Move down</TooltipPopup>
+                  <TooltipPopup side="top">아래로 이동</TooltipPopup>
                 </Tooltip>
                 {!model.isCustom ? (
                   <Tooltip>
@@ -344,7 +338,7 @@ export function ProviderModelsSection({
                           variant="ghost"
                           className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                           onClick={() => handleToggleHidden(model.slug)}
-                          aria-label={`${isHidden ? "Show" : "Hide"} ${model.name}`}
+                          aria-label={`${model.name} ${isHidden ? "표시" : "숨기기"}`}
                         />
                       }
                     >
@@ -355,7 +349,7 @@ export function ProviderModelsSection({
                       )}
                     </TooltipTrigger>
                     <TooltipPopup side="top">
-                      {isHidden ? "Show in picker" : "Hide from picker"}
+                      {isHidden ? "선택 목록에 표시" : "선택 목록에서 숨기기"}
                     </TooltipPopup>
                   </Tooltip>
                 ) : null}
@@ -367,14 +361,14 @@ export function ProviderModelsSection({
                           size="icon-xs"
                           variant="ghost"
                           className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                          aria-label={`Remove ${model.slug}`}
+                          aria-label={`${model.slug} 제거`}
                           onClick={() => handleRemove(model.slug)}
                         />
                       }
                     >
                       <XIcon className="size-3" />
                     </TooltipTrigger>
-                    <TooltipPopup side="top">Remove custom model</TooltipPopup>
+                    <TooltipPopup side="top">사용자 지정 모델 제거</TooltipPopup>
                   </Tooltip>
                 ) : null}
               </div>
@@ -401,7 +395,7 @@ export function ProviderModelsSection({
         />
         <Button className="shrink-0" variant="outline" onClick={handleAdd}>
           <PlusIcon className="size-3.5" />
-          Add
+          추가
         </Button>
       </div>
 

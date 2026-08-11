@@ -6,9 +6,7 @@ import {
   CopyIcon,
   DownloadIcon,
   LoaderIcon,
-  PlusIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
@@ -28,13 +26,11 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsibleContent } from "../ui/collapsible";
 import { DraftInput } from "../ui/draft-input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ScrollArea } from "../ui/scroll-area";
 import { Switch } from "../ui/switch";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
@@ -42,6 +38,8 @@ import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
+import { ProviderAccountUsage } from "./ProviderAccountUsage";
+import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -50,32 +48,6 @@ import {
   getProviderVersionLabel,
   type ProviderStatusKey,
 } from "./providerStatus";
-
-const ENVIRONMENT_VARIABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-
-let environmentVariableDraftId = 0;
-const nextEnvironmentVariableDraftId = () => `provider-env-${environmentVariableDraftId++}`;
-
-type EnvironmentDraftRow = {
-  readonly id: string;
-  readonly name: string;
-  readonly value: string;
-  readonly sensitive: boolean;
-  readonly valueRedacted?: boolean;
-};
-
-function makeEnvironmentDraftRow(
-  variable: ProviderInstanceEnvironmentVariable,
-  index: number,
-): EnvironmentDraftRow {
-  return {
-    id: `${index}:${variable.name}`,
-    name: variable.name,
-    value: variable.value,
-    sensitive: variable.sensitive,
-    ...(variable.valueRedacted !== undefined ? { valueRedacted: variable.valueRedacted } : {}),
-  };
-}
 
 /**
  * Read a string[] at `key` from the opaque config blob, filtering out
@@ -145,176 +117,11 @@ function ProviderAuthEmail(props: {
       {props.prefix ? <span className="text-muted-foreground/80">{props.prefix}</span> : null}
       <RedactedSensitiveText
         value={trimmed}
-        ariaLabel="Toggle account email visibility"
-        revealTooltip="Click to reveal email"
-        hideTooltip="Click to hide email"
+        ariaLabel="계정 이메일 표시 전환"
+        revealTooltip="이메일 표시"
+        hideTooltip="이메일 숨기기"
       />
     </span>
-  );
-}
-
-function ProviderEnvironmentSection(props: {
-  readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
-  readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
-}) {
-  const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
-    props.environment.map(makeEnvironmentDraftRow),
-  );
-
-  const publishRows = (nextRows: ReadonlyArray<EnvironmentDraftRow>) => {
-    const published: ProviderInstanceEnvironmentVariable[] = [];
-    for (const row of nextRows) {
-      const name = row.name.trim();
-      if (!ENVIRONMENT_VARIABLE_NAME_PATTERN.test(name)) {
-        if (
-          name.length > 0 ||
-          row.value.length > 0 ||
-          row.sensitive !== true ||
-          row.valueRedacted !== undefined
-        ) {
-          return;
-        }
-        continue;
-      }
-      const { id: _id, ...rest } = row;
-      published.push({ ...rest, name });
-    }
-    props.onChange(published);
-  };
-
-  const updateVariable = (id: string, patch: Partial<Omit<EnvironmentDraftRow, "id">>) => {
-    const nextRows = rows.map((row) =>
-      row.id === id
-        ? {
-            ...row,
-            ...patch,
-            ...(patch.value !== undefined ? { valueRedacted: false } : {}),
-          }
-        : row,
-    );
-    setRows(nextRows);
-    publishRows(nextRows);
-  };
-
-  const removeVariable = (id: string) => {
-    const nextRows = rows.filter((row) => row.id !== id);
-    setRows(nextRows);
-    publishRows(nextRows);
-  };
-
-  return (
-    <div className="grid gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-medium text-foreground">Environment variables</span>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-7 gap-1.5 px-2 text-xs"
-          onClick={() =>
-            setRows([
-              ...rows,
-              {
-                id: nextEnvironmentVariableDraftId(),
-                name: "",
-                value: "",
-                sensitive: true,
-              },
-            ])
-          }
-        >
-          <PlusIcon className="size-3" />
-          Add
-        </Button>
-      </div>
-      {rows.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          Add variables to pass API keys, base URLs, or other per-instance CLI settings.
-        </p>
-      ) : (
-        <div className="overflow-hidden rounded-md border border-border/70">
-          <Table>
-            <TableHeader className="bg-muted/25 text-[11px] text-muted-foreground">
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Variable</TableHead>
-                <TableHead>Value</TableHead>
-                <TableHead className="w-20">Sensitive</TableHead>
-                <TableHead className="w-12 text-right">
-                  <span className="sr-only">Options</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((variable, index) => (
-                <TableRow
-                  key={variable.id}
-                  className="border-border/60 odd:bg-muted/20 even:bg-background/20"
-                >
-                  <TableCell>
-                    <DraftInput
-                      value={variable.name}
-                      onCommit={(name) => updateVariable(variable.id, { name: name.trim() })}
-                      placeholder="VARIABLE_NAME"
-                      spellCheck={false}
-                      aria-label={`Environment variable name ${index + 1}`}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <DraftInput
-                      value={variable.valueRedacted ? "" : variable.value}
-                      onCommit={(value) => updateVariable(variable.id, { value })}
-                      type={variable.sensitive ? "password" : undefined}
-                      autoComplete="off"
-                      placeholder={
-                        variable.valueRedacted
-                          ? "Stored secret - enter a new value to replace"
-                          : "Value"
-                      }
-                      spellCheck={false}
-                      aria-label={`Environment variable value ${index + 1}`}
-                    />
-                  </TableCell>
-                  <TableCell className="w-20">
-                    <div className="flex h-8 items-center justify-center">
-                      <Checkbox
-                        checked={variable.sensitive}
-                        onCheckedChange={(checked) => {
-                          const sensitive = Boolean(checked);
-                          updateVariable(variable.id, {
-                            sensitive,
-                            ...(sensitive && variable.valueRedacted === undefined
-                              ? {}
-                              : { valueRedacted: sensitive ? variable.valueRedacted : false }),
-                          });
-                        }}
-                        aria-label={`Mark environment variable ${variable.name || index + 1} as sensitive`}
-                      />
-                    </div>
-                  </TableCell>
-                  <TableCell className="w-12">
-                    <div className="flex justify-end">
-                      <Button
-                        type="button"
-                        size="icon-sm"
-                        variant="ghost"
-                        className="size-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => removeVariable(variable.id)}
-                        aria-label={`Remove environment variable ${variable.name || index + 1}`}
-                      >
-                        <XIcon className="size-3.5" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-      <span className="text-xs text-muted-foreground">
-        Sensitive values are stored separately and are not returned to the app after saving.
-      </span>
-    </div>
   );
 }
 
@@ -420,16 +227,16 @@ export function ProviderInstanceCard({
     onCopy: ({ providerName }) => {
       toastManager.add({
         type: "success",
-        title: `${providerName} update command copied`,
-        description: "Run it in a terminal when you are ready to update.",
+        title: `${providerName} 업데이트 명령을 복사했습니다`,
+        description: "업데이트할 준비가 되면 터미널에서 실행하세요.",
       });
     },
     onError: (error, { providerName }) => {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: `Could not copy ${providerName} update command`,
-          description: error.message,
+          title: `${providerName} 업데이트 명령을 복사하지 못했습니다`,
+          description: "클립보드에 복사하는 중 오류가 발생했습니다.",
         }),
       );
     },
@@ -564,13 +371,13 @@ export function ProviderInstanceCard({
                   variant="ghost"
                   className="size-5 rounded-sm p-0 text-muted-foreground hover:text-destructive"
                   onClick={onDelete}
-                  aria-label={`Delete provider instance ${instanceId}`}
+                  aria-label={`${instanceId} CLI 계정 삭제`}
                 >
                   <Trash2Icon className="size-3" />
                 </Button>
               }
             />
-            <TooltipPopup side="top">Delete instance</TooltipPopup>
+            <TooltipPopup side="top">계정 삭제</TooltipPopup>
           </Tooltip>
         </span>
       ) : null}
@@ -581,14 +388,14 @@ export function ProviderInstanceCard({
     <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-[13px] leading-[1.45] text-muted-foreground/80">
       {hasAuthenticatedEmail ? (
         <>
-          <span>Authenticated as</span>
+          <span>인증 계정</span>
           <ProviderAuthEmail email={authEmail} />
           {authenticatedDetail ? <span>· {authenticatedDetail}</span> : null}
         </>
       ) : (
         <>
           <span>{summary.headline}</span>
-          <ProviderAuthEmail email={authEmail} separator prefix="Email" />
+          <ProviderAuthEmail email={authEmail} separator prefix="이메일" />
         </>
       )}
       {summary.detail ? <span>- {summary.detail}</span> : null}
@@ -621,7 +428,7 @@ export function ProviderInstanceCard({
                             ? "text-warning hover:text-warning"
                             : "text-update hover:text-update",
                         )}
-                        aria-label="Update available — view details"
+                        aria-label="업데이트 가능 - 자세히 보기"
                       >
                         <ArrowUpCircleIcon className="size-3.5 [animation:bounce_2.4s_ease-in-out_infinite] motion-reduce:animate-none" />
                       </Button>
@@ -635,7 +442,7 @@ export function ProviderInstanceCard({
                     <div className="grid min-w-0 gap-3">
                       <div className="grid gap-0.5">
                         <p className="text-[13px] font-semibold leading-tight text-foreground">
-                          Update available
+                          업데이트 가능
                         </p>
                         <p
                           className={cn(
@@ -658,13 +465,13 @@ export function ProviderInstanceCard({
                           onClick={onRunUpdate}
                         >
                           {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
-                          {isUpdating ? "Updating" : "Update now"}
+                          {isUpdating ? "업데이트 중" : "지금 업데이트"}
                         </Button>
                       ) : null}
                       {onRunUpdate && updateCommand ? (
                         <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                           <span aria-hidden className="h-px flex-1 bg-border" />
-                          or, update manually using
+                          또는 다음 명령으로 직접 업데이트
                           <span aria-hidden className="h-px flex-1 bg-border" />
                         </div>
                       ) : null}
@@ -688,13 +495,13 @@ export function ProviderInstanceCard({
                                       providerName: displayName,
                                     })
                                   }
-                                  aria-label="Copy update command"
+                                  aria-label="업데이트 명령 복사"
                                 >
                                   <CopyIcon className="size-3" />
                                 </Button>
                               }
                             />
-                            <TooltipPopup side="top">Copy command</TooltipPopup>
+                            <TooltipPopup side="top">명령 복사</TooltipPopup>
                           </Tooltip>
                         </div>
                       ) : null}
@@ -712,7 +519,7 @@ export function ProviderInstanceCard({
               variant="ghost"
               className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
               onClick={() => onExpandedChange(!isExpanded)}
-              aria-label={`Toggle ${displayName} details`}
+              aria-label={`${displayName} 상세 설정 열기/닫기`}
             >
               <ChevronDownIcon
                 className={cn("size-3.5 transition-transform", isExpanded && "rotate-180")}
@@ -721,10 +528,14 @@ export function ProviderInstanceCard({
             <Switch
               checked={enabled}
               onCheckedChange={(checked) => updateEnabled(Boolean(checked))}
-              aria-label={`Enable ${displayName}`}
+              aria-label={`${displayName} 사용 여부`}
             />
           </div>
         </div>
+      </div>
+
+      <div className="px-3 pb-3 sm:px-4">
+        <ProviderAccountUsage usage={liveProvider?.usage} />
       </div>
 
       <Collapsible open={isExpanded} onOpenChange={onExpandedChange}>
@@ -732,17 +543,17 @@ export function ProviderInstanceCard({
           <div className="space-y-5 px-3 pb-4 pt-2 sm:px-4">
             <div>
               <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
-                <span className="text-xs font-medium text-foreground">Display name</span>
+                <span className="text-xs font-medium text-foreground">표시 이름</span>
                 <DraftInput
                   id={`provider-instance-${instanceId}-display-name`}
                   className="mt-1.5"
                   value={instance.displayName ?? ""}
                   onCommit={updateDisplayName}
-                  placeholder={driverOption?.label ?? "Instance label"}
+                  placeholder={driverOption?.label ?? "계정 이름"}
                   spellCheck={false}
                 />
                 <span className="mt-1 block text-xs text-muted-foreground">
-                  Optional label shown in the provider list.
+                  CLI 계정 목록에 표시할 이름입니다. 입력하지 않아도 됩니다.
                 </span>
               </label>
             </div>
@@ -753,7 +564,7 @@ export function ProviderInstanceCard({
                 value={accentColor}
                 onCommit={updateAccentColor}
                 commitDelayMs={120}
-                description="Used to distinguish this instance in picker rails and model lists."
+                description="계정 선택 목록과 모델 목록에서 이 계정을 구분하는 데 사용합니다."
               />
             </div>
 
@@ -791,10 +602,9 @@ export function ProviderInstanceCard({
             ) : (
               <div>
                 <p className="text-xs text-muted-foreground">
-                  This instance uses a driver (
-                  <code className="text-foreground">{String(instance.driver)}</code>) that is not
-                  shipped with the current build. Configuration values are preserved but cannot be
-                  edited from this surface.
+                  이 계정은 현재 빌드에 포함되지 않은 CLI 드라이버(
+                  <code className="text-foreground">{String(instance.driver)}</code>)를 사용합니다.
+                  설정값은 유지되지만 이 화면에서는 수정할 수 없습니다.
                 </p>
               </div>
             )}

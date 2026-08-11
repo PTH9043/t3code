@@ -143,7 +143,7 @@ function WorkspaceImagePreview(props: {
   if (assetUrl._tag === "Failure" || (assetUrl._tag === "Success" && failedUrl === assetUrl.url)) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
-        Unable to load workspace image.
+        작업 공간 이미지를 불러오지 못했습니다.
       </div>
     );
   }
@@ -844,11 +844,12 @@ export default function FilePreviewPanel({
         return;
       }
       const error = squashAtomCommandFailure(result);
+      console.error("Unable to open file in browser", error);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to open file in browser",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "브라우저에서 파일을 열 수 없음",
+          description: "브라우저에서 파일을 열지 못했습니다. 다시 시도하세요.",
         }),
       );
     })();
@@ -915,7 +916,7 @@ export default function FilePreviewPanel({
                           : null,
                       );
                     }}
-                    aria-label={renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
+                    aria-label={renderMarkdown ? "마크다운 원문 보기" : "렌더링된 마크다운 보기"}
                     variant="ghost"
                     size="sm"
                   >
@@ -924,7 +925,7 @@ export default function FilePreviewPanel({
                 }
               />
               <TooltipPopup>
-                {renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
+                {renderMarkdown ? "마크다운 원문 보기" : "렌더링된 마크다운 보기"}
               </TooltipPopup>
             </Tooltip>
           ) : null}
@@ -936,7 +937,7 @@ export default function FilePreviewPanel({
                     className="shrink-0"
                     pressed={false}
                     onPressedChange={handleOpenInBrowser}
-                    aria-label="Open file in preview browser"
+                    aria-label="미리보기 브라우저에서 파일 열기"
                     variant="ghost"
                     size="sm"
                   >
@@ -944,7 +945,7 @@ export default function FilePreviewPanel({
                   </Toggle>
                 }
               />
-              <TooltipPopup>Open file in preview browser</TooltipPopup>
+              <TooltipPopup>미리보기 브라우저에서 파일 열기</TooltipPopup>
             </Tooltip>
           ) : null}
           <Tooltip>
@@ -954,7 +955,7 @@ export default function FilePreviewPanel({
                   className="shrink-0"
                   pressed={explorerOpen}
                   onPressedChange={toggleExplorer}
-                  aria-label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
+                  aria-label={explorerOpen ? "파일 탐색기 숨기기" : "파일 탐색기 보기"}
                   variant="ghost"
                   size="sm"
                 >
@@ -962,15 +963,13 @@ export default function FilePreviewPanel({
                 </Toggle>
               }
             />
-            <TooltipPopup>
-              {explorerOpen ? "Hide file explorer" : "Show file explorer"}
-            </TooltipPopup>
+            <TooltipPopup>{explorerOpen ? "파일 탐색기 숨기기" : "파일 탐색기 보기"}</TooltipPopup>
           </Tooltip>
         </div>
       ) : null}
       {relativePath && file.data?.truncated ? (
         <div className="shrink-0 border-b border-warning/20 bg-warning-surface px-3 py-1.5 text-[11px] text-warning-foreground">
-          Preview limited to the first 1 MB of a {file.data.byteLength.toLocaleString()} byte file.
+          {file.data.byteLength.toLocaleString()}바이트 파일의 처음 1MB만 미리 봅니다.
         </div>
       ) : null}
       <div className="flex min-h-0 flex-1 overflow-hidden">

@@ -129,13 +129,13 @@ function ExpandableHeaderSearch({
                 variant="ghost"
                 className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                 onClick={() => onOpenChange(true)}
-                aria-label="Search keybindings"
+                aria-label="단축키 검색"
               >
                 <SearchIcon className="size-3" />
               </Button>
             }
           />
-          <TooltipPopup side="top">Search keybindings</TooltipPopup>
+          <TooltipPopup side="top">단축키 검색</TooltipPopup>
         </Tooltip>
       </>
     );
@@ -160,8 +160,8 @@ function ExpandableHeaderSearch({
             onOpenChange(false);
           }
         }}
-        placeholder="Search keybindings"
-        aria-label="Search keybindings"
+        placeholder="단축키 검색"
+        aria-label="단축키 검색"
         className="h-6 w-44 rounded-md border border-input bg-background pl-7 pr-2 text-[11px] text-foreground outline-none placeholder:text-muted-foreground/72 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
       />
     </div>
@@ -241,8 +241,8 @@ function UnknownWhenVariableWarning({
   if (identifiers.length === 0) return null;
   const label =
     identifiers.length === 1
-      ? `Unknown condition: ${identifiers[0]}`
-      : `Unknown conditions: ${identifiers.join(", ")}`;
+      ? `알 수 없는 조건: ${identifiers[0]}`
+      : `알 수 없는 조건: ${identifiers.join(", ")}`;
 
   return (
     <Tooltip>
@@ -258,8 +258,8 @@ function UnknownWhenVariableWarning({
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        T3 Code does not recognize this condition yet. It can still be saved, but it may not match
-        unless the runtime provides it.
+        T3 Code가 아직 이 조건을 인식하지 못합니다. 저장할 수는 있지만 실행 환경에서 이 조건을
+        제공하지 않으면 적용되지 않을 수 있습니다.
       </TooltipPopup>
     </Tooltip>
   );
@@ -269,8 +269,8 @@ function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }
   if (labels.length === 0) return null;
   const description =
     labels.length === 1
-      ? `Conflicts with ${labels[0]}.`
-      : `Conflicts with ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", and more" : ""}.`;
+      ? `${labels[0]} 단축키와 충돌합니다.`
+      : `${labels.slice(0, 3).join(", ")}${labels.length > 3 ? " 외 항목" : ""}과 충돌합니다.`;
 
   return (
     <Tooltip>
@@ -286,7 +286,7 @@ function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        {description} The most recent matching binding wins when both conditions can apply.
+        {description} 두 조건이 모두 적용될 때는 가장 최근에 설정한 단축키가 우선합니다.
       </TooltipPopup>
     </Tooltip>
   );
@@ -313,7 +313,7 @@ function WhenVariableSelect({
         size="xs"
         className="h-7 min-h-7 min-w-0 flex-1 rounded-md font-mono text-xs sm:h-7"
       >
-        <SelectValue placeholder="Condition" className="leading-7" />
+        <SelectValue placeholder="조건" className="leading-7" />
         {unknownIdentifiers && unknownIdentifiers.length > 0 ? (
           <UnknownWhenVariableWarning identifiers={unknownIdentifiers} focusable={false} />
         ) : null}
@@ -363,12 +363,12 @@ function WhenExpressionNodeEditor({
         <Toggle
           pressed={condition.negated}
           onPressedChange={(pressed) => onChange(setConditionNegated(node, pressed))}
-          aria-label={`Negate ${condition.identifier}`}
+          aria-label={`${condition.identifier} 조건 반전`}
           variant="outline"
           size="xs"
           className="h-7 min-w-10 px-2 text-[11px] sm:h-7"
         >
-          Not
+          아님
         </Toggle>
         <WhenVariableSelect
           value={condition.identifier}
@@ -382,7 +382,7 @@ function WhenExpressionNodeEditor({
             variant="ghost"
             size="icon-sm"
             className="size-7 sm:size-7"
-            aria-label="Remove condition"
+            aria-label="조건 제거"
             onClick={onRemove}
           >
             <MinusIcon className="size-3.5" />
@@ -404,12 +404,12 @@ function WhenExpressionNodeEditor({
           <Toggle
             pressed
             onPressedChange={(pressed) => onChange(pressed ? node : node.node)}
-            aria-label="Negate group"
+            aria-label="그룹 조건 반전"
             variant="outline"
             size="xs"
             className="h-7 min-w-10 px-2 text-[11px] sm:h-7"
           >
-            Not
+            아님
           </Toggle>
           {onRemove ? (
             <Button
@@ -417,7 +417,7 @@ function WhenExpressionNodeEditor({
               variant="ghost"
               size="icon-sm"
               className="ml-auto size-7 sm:size-7"
-              aria-label="Remove negated group"
+              aria-label="반전 그룹 제거"
               onClick={onRemove}
             >
               <MinusIcon className="size-3.5" />
@@ -519,10 +519,10 @@ function WhenExpressionNodeEditor({
             className="w-fit min-w-24"
           >
             <SelectItem value="and" className="min-h-7 py-1 font-mono text-[12px]">
-              and
+              그리고
             </SelectItem>
             <SelectItem value="or" className="min-h-7 py-1 font-mono text-[12px]">
-              or
+              또는
             </SelectItem>
           </SelectContent>
         </Select>
@@ -534,11 +534,11 @@ function WhenExpressionNodeEditor({
           onClick={addCondition}
         >
           <PlusIcon className="size-3.5" />
-          Condition
+          조건
         </Button>
         <Button type="button" variant="outline" size="xs" className="h-7 sm:h-7" onClick={addGroup}>
           <PlusIcon className="size-3.5" />
-          Group
+          그룹
         </Button>
         {onRemove ? (
           <Button
@@ -546,7 +546,7 @@ function WhenExpressionNodeEditor({
             variant="ghost"
             size="icon-sm"
             className="ml-auto size-7 sm:size-7"
-            aria-label="Remove group"
+            aria-label="그룹 제거"
             onClick={onRemove}
           >
             <MinusIcon className="size-3.5" />
@@ -637,7 +637,7 @@ function WhenExpressionBuilder({
     <div className="w-[min(34rem,calc(100vw-2rem))] space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-foreground">When</div>
+          <div className="text-sm font-medium text-foreground">적용 조건</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
@@ -648,7 +648,7 @@ function WhenExpressionBuilder({
             onClick={addRootCondition}
           >
             <PlusIcon className="size-3.5" />
-            Condition
+            조건
           </Button>
           <Button
             type="button"
@@ -658,7 +658,7 @@ function WhenExpressionBuilder({
             onClick={addRootGroup}
           >
             <PlusIcon className="size-3.5" />
-            Group
+            그룹
           </Button>
         </div>
       </div>
@@ -668,9 +668,9 @@ function WhenExpressionBuilder({
           <Input
             value={expressionDraft}
             onChange={(event) => updateExpressionDraft(event.currentTarget.value)}
-            placeholder="Always"
+            placeholder="항상"
             aria-invalid={Boolean(parseError)}
-            aria-label="When expression"
+            aria-label="단축키 적용 조건식"
             className={cn(
               "h-7 rounded-md font-mono text-[12px] leading-7 sm:h-7 sm:leading-7",
               unknownIdentifiers.length > 0 && "pr-9",
@@ -704,7 +704,7 @@ function WhenExpressionBuilder({
             <div className="flex flex-wrap gap-2">
               <Button type="button" size="xs" className="h-7 sm:h-7" onClick={addRootCondition}>
                 <PlusIcon className="size-3.5" />
-                Condition
+                조건
               </Button>
               <Button
                 type="button"
@@ -714,14 +714,14 @@ function WhenExpressionBuilder({
                 onClick={addRootGroup}
               >
                 <PlusIcon className="size-3.5" />
-                Group
+                그룹
               </Button>
             </div>
           </div>
         )}
         {parseError ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-destructive/30 bg-background/75 p-4 text-center text-xs text-destructive backdrop-blur-[1px]">
-            Fix the expression above to continue editing visually.
+            위 조건식을 수정하면 시각적 편집을 계속할 수 있습니다.
           </div>
         ) : null}
       </div>
@@ -837,21 +837,21 @@ function KeybindingTableRow({
           <button
             type="button"
             onClick={() => setDraft({ isRecording: true })}
-            aria-label={`Edit shortcut for ${commandLabel(row.command)}`}
+            aria-label={`${commandLabel(row.command)} 단축키 편집`}
             className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-transparent px-1.5 outline-none transition-colors hover:border-border/70 hover:bg-background focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
           >
             <KeybindingPill value={row.key} />
             <span className="text-[10px] uppercase tracking-[0.08em] text-muted-foreground/0 transition-opacity group-hover:text-muted-foreground/70 group-focus-visible:text-muted-foreground/70">
-              Edit
+              편집
             </span>
           </button>
         ) : (
           <Input
             data-keybinding-capture=""
             autoFocus={isRecording}
-            aria-label={`Keybinding for ${commandLabel(row.command)}`}
+            aria-label={`${commandLabel(row.command)} 단축키`}
             value={isRecording ? "" : keyDraft}
-            placeholder={isRecording ? "Press shortcut" : "Unassigned"}
+            placeholder={isRecording ? "단축키를 누르세요" : "할당되지 않음"}
             className={cn(
               "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",
               isRecording && "border-primary/70 bg-primary/5",
@@ -869,7 +869,7 @@ function KeybindingTableRow({
             disabled={isSaving || keyDraft.trim().length === 0 || !isWhenDraftValid}
             onClick={save}
           >
-            {isSaving ? "Saving" : "Save"}
+            {isSaving ? "저장 중" : "저장"}
           </Button>
         ) : null}
       </div>
@@ -880,9 +880,9 @@ function KeybindingTableRow({
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
-            aria-label={`Edit when clause for ${commandLabel(row.command)}`}
+            aria-label={`${commandLabel(row.command)} 적용 조건 편집`}
           >
-            <span className="truncate">{whenDraftExpression || "Always"}</span>
+            <span className="truncate">{whenDraftExpression || "항상"}</span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -907,7 +907,7 @@ function KeybindingTableRow({
                   size="icon-sm"
                   className="size-7 text-muted-foreground hover:text-foreground sm:size-7"
                   disabled={isSaving}
-                  aria-label={`Actions for ${commandLabel(row.command)}`}
+                  aria-label={`${commandLabel(row.command)} 작업`}
                 />
               }
             >
@@ -916,12 +916,12 @@ function KeybindingTableRow({
             <MenuPopup align="end" className="min-w-36">
               {canReset ? (
                 <MenuItem disabled={isSaving} onClick={() => onReset(row)}>
-                  Reset to default
+                  기본값으로 복원
                 </MenuItem>
               ) : null}
               {canRemove ? (
                 <MenuItem variant="destructive" disabled={isSaving} onClick={() => onRemove(row)}>
-                  Remove
+                  제거
                 </MenuItem>
               ) : null}
             </MenuPopup>
@@ -962,7 +962,7 @@ function NewKeybindingTableRow({
     key: keyDraft,
     when: whenDraftExpression,
   });
-  const commandLabelText = commandDraft ? commandLabel(commandDraft) : "new keybinding";
+  const commandLabelText = commandDraft ? commandLabel(commandDraft) : "새 단축키";
 
   const save = () => {
     if (!commandDraft) return;
@@ -996,7 +996,7 @@ function NewKeybindingTableRow({
             size="xs"
             className="h-7 min-h-7 w-full max-w-60 rounded-md text-xs sm:h-7"
           >
-            <SelectValue placeholder="Command" />
+            <SelectValue placeholder="명령" />
           </SelectTrigger>
           <SelectContent
             alignItemWithTrigger={false}
@@ -1014,9 +1014,9 @@ function NewKeybindingTableRow({
       <div className="flex min-w-0 items-center gap-2 pr-4">
         <Input
           data-keybinding-capture=""
-          aria-label={`Keybinding for ${commandLabelText}`}
+          aria-label={`${commandLabelText} 단축키`}
           value={isRecording ? "" : keyDraft}
-          placeholder={isRecording ? "Press shortcut" : "Unassigned"}
+          placeholder={isRecording ? "단축키를 누르세요" : "할당되지 않음"}
           className={cn(
             "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",
             isRecording && "border-primary/70 bg-primary/5",
@@ -1032,7 +1032,7 @@ function NewKeybindingTableRow({
           disabled={isSaving || !commandDraft || keyDraft.trim().length === 0 || !isWhenDraftValid}
           onClick={save}
         >
-          {isSaving ? "Saving" : "Save"}
+          {isSaving ? "저장 중" : "저장"}
         </Button>
       </div>
       <div className="pr-4">
@@ -1042,9 +1042,9 @@ function NewKeybindingTableRow({
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
-            aria-label={`Edit when clause for ${commandLabelText}`}
+            aria-label={`${commandLabelText} 적용 조건 편집`}
           >
-            <span className="truncate">{whenDraftExpression || "Always"}</span>
+            <span className="truncate">{whenDraftExpression || "항상"}</span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -1068,14 +1068,14 @@ function NewKeybindingTableRow({
                 size="icon-sm"
                 className="size-7 text-muted-foreground hover:text-foreground sm:size-7"
                 disabled={isSaving}
-                aria-label="Cancel new keybinding"
+                aria-label="새 단축키 추가 취소"
                 onClick={onCancel}
               />
             }
           >
             <XIcon className="size-3.5" />
           </TooltipTrigger>
-          <TooltipPopup side="top">Cancel</TooltipPopup>
+          <TooltipPopup side="top">취소</TooltipPopup>
         </Tooltip>
       </div>
     </div>
@@ -1140,9 +1140,8 @@ export function KeybindingsSettingsPanel() {
       }
       const error = squashAtomCommandFailure(result);
       toastManager.add({
-        title: "Unable to open keybindings file",
-        description:
-          error instanceof Error ? error.message : "The keybindings file was not opened.",
+        title: "단축키 파일을 열지 못했습니다",
+        description: "선호하는 편집기 설정과 파일 경로를 확인해 주세요.",
         type: "error",
       });
     })();
@@ -1171,8 +1170,8 @@ export function KeybindingsSettingsPanel() {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add({
-            title: "Unable to save keybinding",
-            description: error instanceof Error ? error.message : "The keybinding was not saved.",
+            title: "단축키를 저장하지 못했습니다",
+            description: "입력한 단축키와 적용 조건을 확인해 주세요.",
             type: "error",
           });
         }
@@ -1194,8 +1193,8 @@ export function KeybindingsSettingsPanel() {
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add({
-            title: "Unable to remove keybinding",
-            description: error instanceof Error ? error.message : "The keybinding was not removed.",
+            title: "단축키를 제거하지 못했습니다",
+            description: "잠시 후 다시 시도해 주세요.",
             type: "error",
           });
         }
@@ -1223,8 +1222,7 @@ export function KeybindingsSettingsPanel() {
 
   const bindingsCount = (
     <span className="text-[11px] text-muted-foreground">
-      {rows.length + (isAddingBinding ? 1 : 0)}{" "}
-      {rows.length + (isAddingBinding ? 1 : 0) === 1 ? "binding" : "bindings"}
+      {rows.length + (isAddingBinding ? 1 : 0)} 단축키
     </span>
   );
 
@@ -1251,13 +1249,13 @@ export function KeybindingsSettingsPanel() {
                     variant="ghost"
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     onClick={() => setIsAddingBinding(true)}
-                    aria-label="Add keybinding"
+                    aria-label="단축키 추가"
                   >
                     <PlusIcon className="size-3" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Add keybinding</TooltipPopup>
+              <TooltipPopup side="top">단축키 추가</TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -1269,13 +1267,13 @@ export function KeybindingsSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={!keybindingsConfigPath}
                     onClick={openKeybindingsFile}
-                    aria-label="Open keybindings.json"
+                    aria-label="keybindings.json 열기"
                   >
                     <FileJsonIcon className="size-3" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Open keybindings.json</TooltipPopup>
+              <TooltipPopup side="top">keybindings.json 열기</TooltipPopup>
             </Tooltip>
           </div>
         }
@@ -1284,8 +1282,8 @@ export function KeybindingsSettingsPanel() {
           <div className="flex items-start gap-2 border-b border-warning/20 bg-warning/5 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground sm:px-4">
             <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
             <p>
-              Some shortcuts may be claimed by the browser before T3 Code sees them. Use the desktop
-              app for better keybinding support.
+              일부 단축키는 T3 Code보다 브라우저가 먼저 사용할 수 있습니다. 단축키를 안정적으로
+              사용하려면 데스크톱 앱을 이용하세요.
             </p>
           </div>
         ) : null}
@@ -1297,10 +1295,10 @@ export function KeybindingsSettingsPanel() {
           className="w-full max-w-full rounded-none"
         >
           <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-border/70 bg-muted/25 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
-            <div>Command</div>
-            <div>Keybinding</div>
-            <div>When</div>
-            <div>Status</div>
+            <div>명령</div>
+            <div>단축키</div>
+            <div>적용 조건</div>
+            <div>작업</div>
           </div>
           <div className="min-w-[680px] divide-y divide-border/60">
             {isAddingBinding ? (
@@ -1327,7 +1325,7 @@ export function KeybindingsSettingsPanel() {
             ))}
             {rows.length === 0 && !isAddingBinding ? (
               <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-                No keybindings match your search.
+                검색과 일치하는 단축키가 없습니다.
               </div>
             ) : null}
           </div>

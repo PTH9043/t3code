@@ -19,6 +19,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { faviconUrlForOrigin } from "~/lib/favicon";
+import { formatTerminalNameForDisplay } from "~/lib/terminalContext";
 import { useTheme } from "~/hooks/useTheme";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
@@ -52,9 +53,9 @@ interface RightPanelTabsProps {
 }
 
 const SURFACE_DISABLED_REASONS = {
-  browser: "Browser previews are only available in the T3 Code desktop app.",
-  files: "Files are only available when a project is open.",
-  diff: "Diff is only available for server threads in Git repositories.",
+  browser: "브라우저 미리보기는 T3 Code 데스크톱 앱에서만 사용할 수 있습니다.",
+  files: "프로젝트가 열려 있을 때만 파일을 사용할 수 있습니다.",
+  diff: "Git 저장소의 서버 대화에서만 차이를 확인할 수 있습니다.",
 } as const;
 
 type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
@@ -99,40 +100,40 @@ function RightPanelEmptyState(props: {
 }) {
   const actions = [
     {
-      label: "Browser",
-      description: "Open a local app or URL.",
+      label: "브라우저",
+      description: "로컬 앱이나 URL을 엽니다.",
       icon: Globe2,
       available: props.browserAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.browser,
       onClick: props.onAddBrowser,
     },
     {
-      label: "Terminal",
-      description: "Start a shell in this workspace.",
+      label: "터미널",
+      description: "이 작업 공간에서 셸을 시작합니다.",
       icon: TerminalSquare,
       available: true,
       disabledReason: null,
       onClick: props.onAddTerminal,
     },
     {
-      label: "Files",
-      description: "Browse and read workspace files.",
+      label: "파일",
+      description: "작업 공간 파일을 탐색하고 읽습니다.",
       icon: Files,
       available: props.filesAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.files,
       onClick: props.onAddFiles,
     },
     {
-      label: "Diff",
-      description: "Review changes in this thread.",
+      label: "차이",
+      description: "이 대화의 변경 사항을 검토합니다.",
       icon: FileDiff,
       available: props.diffAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.diff,
       onClick: props.onAddDiff,
     },
     {
-      label: "Agents",
-      description: "Watch subagents and workflows run.",
+      label: "에이전트",
+      description: "하위 에이전트와 워크플로 실행을 확인합니다.",
       icon: Bot,
       available: true,
       disabledReason: null,
@@ -144,9 +145,9 @@ function RightPanelEmptyState(props: {
     <div className="flex min-h-0 flex-1 items-center justify-center p-6">
       <div className="w-full max-w-xl">
         <div className="mb-5 text-center">
-          <h3 className="text-sm font-medium text-foreground">Open a surface</h3>
+          <h3 className="text-sm font-medium text-foreground">화면 열기</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Choose what to show in the right panel.
+            오른쪽 패널에 표시할 항목을 선택하세요.
           </p>
         </div>
         <div className="grid grid-cols-2 gap-2">
@@ -203,26 +204,26 @@ function surfaceTitle(
 ): string {
   switch (surface.kind) {
     case "diff":
-      return "Diff";
+      return "차이";
     case "files":
-      return "Files";
+      return "파일";
     case "file":
       return surface.relativePath.slice(surface.relativePath.lastIndexOf("/") + 1);
     case "terminal":
-      return (
+      return formatTerminalNameForDisplay(
         terminalLabelsById.get(surface.activeTerminalId) ??
-        getTerminalLabel(surface.activeTerminalId)
+          getTerminalLabel(surface.activeTerminalId),
       );
     case "agents":
-      return "Agents";
+      return "에이전트";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
-      if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
+      if (!snapshot || snapshot.navStatus._tag === "Idle") return "브라우저";
       if (snapshot.navStatus.title.trim().length > 0) return snapshot.navStatus.title;
       try {
-        return new URL(snapshot.navStatus.url).host || "Browser";
+        return new URL(snapshot.navStatus.url).host || "브라우저";
       } catch {
-        return "Browser";
+        return "브라우저";
       }
     }
   }
@@ -297,23 +298,23 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
 
       const items: ContextMenuItem<TabContextMenuAction>[] = [];
       if (surface.kind === "file") {
-        items.push({ id: "copy-path", label: "Copy path" });
+        items.push({ id: "copy-path", label: "경로 복사" });
       }
       items.push(
-        { id: "close", label: "Close" },
+        { id: "close", label: "닫기" },
         {
           id: "close-others",
-          label: "Close others",
+          label: "다른 탭 닫기",
           disabled: props.surfaces.length <= 1,
         },
         {
           id: "close-to-right",
-          label: "Close to the right",
+          label: "오른쪽 탭 닫기",
           disabled: surfaceIndex >= props.surfaces.length - 1,
         },
         {
           id: "close-all",
-          label: "Close all",
+          label: "모두 닫기",
           disabled: props.surfaces.length === 0,
         },
       );
@@ -443,7 +444,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
               <Menu>
                 <MenuTrigger
                   className="relative inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-                  aria-label="Add panel surface"
+                  aria-label="패널 화면 추가"
                 >
                   <Plus className="size-3.5" />
                 </MenuTrigger>
@@ -454,11 +455,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     onClick={props.onAddBrowser}
                   >
                     <Globe2 />
-                    Browser
+                    브라우저
                   </SurfaceMenuItem>
                   <SurfaceMenuItem available onClick={props.onAddTerminal}>
                     <TerminalSquare />
-                    Terminal
+                    터미널
                   </SurfaceMenuItem>
                   <SurfaceMenuItem
                     available={props.filesAvailable}
@@ -466,7 +467,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     onClick={props.onAddFiles}
                   >
                     <Files />
-                    Files
+                    파일
                   </SurfaceMenuItem>
                   <SurfaceMenuItem
                     available={props.diffAvailable}
@@ -474,11 +475,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     onClick={props.onAddDiff}
                   >
                     <FileDiff />
-                    Diff
+                    차이
                   </SurfaceMenuItem>
                   <SurfaceMenuItem available onClick={props.onAddAgents}>
                     <Bot />
-                    Agents
+                    에이전트
                   </SurfaceMenuItem>
                 </MenuPopup>
               </Menu>

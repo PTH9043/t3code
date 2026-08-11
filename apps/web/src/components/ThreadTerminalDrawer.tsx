@@ -13,6 +13,7 @@ import {
   XIcon,
 } from "lucide-react";
 import {
+  type ProjectId,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   type ThreadId,
@@ -33,7 +34,7 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
-import { type TerminalContextSelection } from "~/lib/terminalContext";
+import { formatTerminalNameForDisplay, type TerminalContextSelection } from "~/lib/terminalContext";
 import {
   GhosttyTerminalSurface,
   type GhosttyTerminalSurfaceOptions,
@@ -267,6 +268,7 @@ export function shouldHandleTerminalExit(
 interface TerminalViewportProps {
   advancedTypography: boolean;
   threadRef: ScopedThreadRef;
+  projectId: ProjectId;
   threadId: ThreadId;
   terminalId: string;
   terminalLabel: string;
@@ -291,6 +293,7 @@ interface TerminalLaunchLocation {
 export function TerminalViewport({
   advancedTypography,
   threadRef,
+  projectId,
   threadId,
   terminalId,
   terminalLabel,
@@ -331,6 +334,7 @@ export function TerminalViewport({
   const selectionActionTimerRef = useRef<number | null>(null);
   const keybindingsRef = useRef(keybindings);
   const runtimeEnvKey = useMemo(() => runtimeEnvSignature(runtimeEnv), [runtimeEnv]);
+  const [controlMode, setControlMode] = useState<"auto" | "control">("auto");
   const handleSessionExited = useEffectEvent(() => {
     onSessionExited();
   });
@@ -357,8 +361,10 @@ export function TerminalViewport({
     environmentId,
     terminal: {
       threadId,
+      projectId,
       terminalId,
       cwd,
+      controlMode,
       ...(worktreePath !== undefined ? { worktreePath } : {}),
       ...(runtimeEnv ? { env: runtimeEnv } : {}),
     },
@@ -366,18 +372,21 @@ export function TerminalViewport({
   const writeTerminal = useEffectEvent((data: string) =>
     runTerminalWrite({
       environmentId,
-      input: { threadId, terminalId, data },
+      input: { threadId, projectId, terminalId, data },
     }),
   );
   const resizeTerminal = useEffectEvent((cols: number, rows: number) =>
     runTerminalResize({
       environmentId,
-      input: { threadId, terminalId, cols, rows },
+      input: { threadId, projectId, terminalId, cols, rows },
     }),
   );
   const terminalBuffer = terminalSession.buffer;
   const terminalError = terminalSession.error;
   const terminalStatus = terminalSession.status;
+  const terminalAccess = terminalSession.access;
+  const terminalAccessRef = useRef(terminalAccess);
+  terminalAccessRef.current = terminalAccess;
   const synchronizedStatusRef = useRef<TerminalSessionState["status"]>("closed");
   const synchronizeTerminalStatus = useEffectEvent(
     (terminal: GhosttyTerminalSurface, status: TerminalSessionState["status"]) => {
@@ -386,7 +395,10 @@ export function TerminalViewport({
         hasHandledExitRef.current = false;
       } else if (shouldHandleTerminalExit(status, synchronized, hasHandledExitRef.current)) {
         hasHandledExitRef.current = true;
-        writeSystemMessage(terminal, status === "closed" ? "Terminal closed" : "Process exited");
+        writeSystemMessage(
+          terminal,
+          status === "closed" ? "터미널이 닫혔습니다" : "프로세스가 종료되었습니다",
+        );
         window.setTimeout(() => {
           if (hasHandledExitRef.current) {
             handleSessionExited();
@@ -438,7 +450,11 @@ export function TerminalViewport({
         theme: terminalThemeFromApp(mount),
         font: terminalFontOptions(setupFont.family, setupFont.size),
         onData: (data) => handleData(data),
-        onResize: (cols, rows) => void resizeTerminal(cols, rows),
+        onResize: (cols, rows) => {
+          if (terminalAccessRef.current === "controller") {
+            void resizeTerminal(cols, rows);
+          }
+        },
         onSelectionChange: () => handleSelectionChange(),
         onCopy: (text) => handleCopy(text),
         beforeKey: (event) => handleBeforeKey(event),
@@ -536,8 +552,8 @@ export function TerminalViewport({
         const clicked = await localApi.contextMenu
           .show(
             [
-              { id: "add-to-chat", label: "Add to chat" },
-              { id: "copy", label: "Copy" },
+              { id: "add-to-chat", label: "대화에 추가" },
+              { id: "copy", label: "복사" },
             ],
             nextAction.position,
           )
@@ -555,17 +571,15 @@ export function TerminalViewport({
             return;
           case "copy":
             try {
-              await writeTextToClipboard(nextAction.clipboardText, "terminal selection");
+              await writeTextToClipboard(nextAction.clipboardText, "터미널 선택 영역");
             } catch (error) {
+              console.error("Unable to copy terminal selection", error);
               if (requestId !== selectionActionRequestIdRef.current) {
                 return;
               }
               const activeTerminal = terminalRef.current;
               if (activeTerminal) {
-                writeSystemMessage(
-                  activeTerminal,
-                  error instanceof Error ? error.message : "Unable to copy terminal selection",
-                );
+                writeSystemMessage(activeTerminal, "터미널 선택 영역을 복사하지 못했습니다");
               }
             }
             if (requestId === selectionActionRequestIdRef.current) {
@@ -581,10 +595,8 @@ export function TerminalViewport({
         const result = await writeTerminal(data);
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
-          writeSystemMessage(
-            activeTerminal,
-            error instanceof Error ? error.message : fallbackError,
-          );
+          console.error("Terminal input failed", error);
+          writeSystemMessage(activeTerminal, fallbackError);
         }
       };
 
@@ -608,7 +620,7 @@ export function TerminalViewport({
         if (navigationData !== null) {
           event.preventDefault();
           event.stopPropagation();
-          void sendTerminalInput(navigationData, "Failed to move cursor");
+          void sendTerminalInput(navigationData, "커서를 이동하지 못했습니다");
           return false;
         }
 
@@ -616,14 +628,14 @@ export function TerminalViewport({
         if (deleteData !== null) {
           event.preventDefault();
           event.stopPropagation();
-          void sendTerminalInput(deleteData, "Failed to delete terminal input");
+          void sendTerminalInput(deleteData, "터미널 입력을 삭제하지 못했습니다");
           return false;
         }
 
         if (!isTerminalClearShortcut(event)) return true;
         event.preventDefault();
         event.stopPropagation();
-        void sendTerminalInput("\u000c", "Failed to clear terminal");
+        void sendTerminalInput("\u000c", "터미널을 지우지 못했습니다");
         return false;
       }
 
@@ -633,15 +645,13 @@ export function TerminalViewport({
         if (!latestTerminal) return;
         if (/^https?:\/\//u.test(text)) {
           if (!localApi) {
-            writeSystemMessage(latestTerminal, "Opening links is unavailable in this browser.");
+            writeSystemMessage(latestTerminal, "이 브라우저에서는 링크를 열 수 없습니다.");
             return;
           }
           const fallbackToBrowser = () => {
             void localApi.shell.openExternal(text).catch((error: unknown) => {
-              writeSystemMessage(
-                latestTerminal,
-                error instanceof Error ? error.message : "Unable to open link",
-              );
+              console.error("Unable to open terminal link", error);
+              writeSystemMessage(latestTerminal, "링크를 열지 못했습니다");
             });
           };
           void openTerminalLinkInPreview({
@@ -661,33 +671,28 @@ export function TerminalViewport({
             return;
           }
           const error = squashAtomCommandFailure(result);
-          writeSystemMessage(
-            latestTerminal,
-            error instanceof Error ? error.message : "Unable to open path",
-          );
+          console.error("Unable to open terminal path", error);
+          writeSystemMessage(latestTerminal, "경로를 열지 못했습니다");
         })();
       }
 
       function handleCopy(text: string): void {
-        void writeTextToClipboard(text, "terminal selection").catch((error: unknown) => {
+        void writeTextToClipboard(text, "터미널 선택 영역").catch((error: unknown) => {
           const activeTerminal = terminalRef.current;
           if (!activeTerminal) return;
-          writeSystemMessage(
-            activeTerminal,
-            error instanceof Error ? error.message : "Unable to copy terminal selection",
-          );
+          console.error("Unable to copy terminal selection", error);
+          writeSystemMessage(activeTerminal, "터미널 선택 영역을 복사하지 못했습니다");
         });
       }
 
       function handleData(data: string): void {
+        if (terminalAccessRef.current !== "controller") return;
         void (async () => {
           const result = await writeTerminal(data);
           if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
           const error = squashAtomCommandFailure(result);
-          writeSystemMessage(
-            terminal,
-            error instanceof Error ? error.message : "Terminal write failed",
-          );
+          console.error("Terminal write failed", error);
+          writeSystemMessage(terminal, "터미널에 입력하지 못했습니다");
         })();
       }
 
@@ -774,9 +779,9 @@ export function TerminalViewport({
         setupTerminal?.dispose();
         setupTerminal = null;
         if (cancelled) return;
-        const message =
-          error instanceof Error ? error.message : "Unable to initialize libghostty-vt";
-        mount.textContent = `${message} — close and reopen the terminal to retry.`;
+        console.error("Unable to initialize libghostty-vt", error);
+        mount.textContent =
+          "터미널을 초기화하지 못했습니다. 터미널을 닫았다가 다시 열어 재시도하세요.";
       });
 
     return () => {
@@ -785,7 +790,7 @@ export function TerminalViewport({
     };
     // autoFocus is intentionally omitted;
     // it is only read at mount time and must not trigger terminal teardown/recreation.
-  }, [cwd, environmentId, runtimeEnvKey, terminalId, threadId, worktreePath]);
+  }, [cwd, environmentId, projectId, runtimeEnvKey, terminalId, threadId, worktreePath]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -856,17 +861,36 @@ export function TerminalViewport({
       window.cancelAnimationFrame(frame);
     };
   }, [drawerHeight, environmentId, resizeEpoch, terminalId, threadId]);
+  const isObserver = terminalAccess === "observer";
   return (
-    <div
-      ref={containerRef}
-      className="relative h-full w-full overflow-hidden rounded-[4px] bg-background"
-    />
+    <div className="relative h-full w-full overflow-hidden rounded-[4px] bg-background">
+      <div ref={containerRef} className="h-full w-full" />
+      {isObserver ? (
+        <div className="absolute inset-x-2 top-2 z-10 flex items-center justify-between gap-2 rounded-md border border-amber-400/30 bg-background/95 px-2.5 py-1.5 text-[11px] text-foreground shadow-sm backdrop-blur-sm">
+          <span>
+            {terminalSession.controllerAttached
+              ? "읽기 전용 관찰 중 · 다른 화면에서 입력하고 있습니다"
+              : "읽기 전용 관찰 중 · 현재 입력권이 비어 있습니다"}
+          </span>
+          {!terminalSession.controllerAttached ? (
+            <button
+              type="button"
+              className="shrink-0 rounded border border-border bg-muted/60 px-2 py-0.5 font-medium hover:bg-accent"
+              onClick={() => setControlMode("control")}
+            >
+              입력권 가져오기
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 interface ThreadTerminalDrawerProps {
   mode?: "drawer" | "panel";
   threadRef: ScopedThreadRef;
+  projectId: ProjectId;
   threadId: ThreadId;
   cwd: string;
   worktreePath?: string | null;
@@ -928,6 +952,7 @@ function TerminalActionButton({ label, className, onClick, children }: TerminalA
 export default function ThreadTerminalDrawer({
   mode = "drawer",
   threadRef,
+  projectId,
   threadId,
   cwd,
   worktreePath,
@@ -1112,7 +1137,12 @@ export default function ThreadTerminalDrawer({
   const terminalLabelById = useMemo(() => {
     const next = new Map<string, string>();
     for (const terminalId of normalizedTerminalIds) {
-      next.set(terminalId, terminalLabelsById?.get(terminalId) ?? getTerminalLabel(terminalId));
+      next.set(
+        terminalId,
+        formatTerminalNameForDisplay(
+          terminalLabelsById?.get(terminalId) ?? getTerminalLabel(terminalId),
+        ),
+      );
     }
     return next;
   }, [normalizedTerminalIds, terminalLabelsById]);
@@ -1129,21 +1159,19 @@ export default function ThreadTerminalDrawer({
     [cwd, runtimeEnv, terminalLaunchLocationsById, worktreePath],
   );
   const splitTerminalActionLabel = hasReachedSplitLimit
-    ? `Split Terminal Horizontally (max ${MAX_TERMINALS_PER_GROUP} per group)`
+    ? `터미널 가로 분할 (그룹당 최대 ${MAX_TERMINALS_PER_GROUP}개)`
     : splitShortcutLabel
-      ? `Split Terminal Horizontally (${splitShortcutLabel})`
-      : "Split Terminal Horizontally";
+      ? `터미널 가로 분할 (${splitShortcutLabel})`
+      : "터미널 가로 분할";
   const splitTerminalVerticalActionLabel = hasReachedSplitLimit
-    ? `Split Terminal Vertically (max ${MAX_TERMINALS_PER_GROUP} per group)`
+    ? `터미널 세로 분할 (그룹당 최대 ${MAX_TERMINALS_PER_GROUP}개)`
     : splitVerticalShortcutLabel
-      ? `Split Terminal Vertically (${splitVerticalShortcutLabel})`
-      : "Split Terminal Vertically";
-  const newTerminalActionLabel = newShortcutLabel
-    ? `New Terminal (${newShortcutLabel})`
-    : "New Terminal";
+      ? `터미널 세로 분할 (${splitVerticalShortcutLabel})`
+      : "터미널 세로 분할";
+  const newTerminalActionLabel = newShortcutLabel ? `새 터미널 (${newShortcutLabel})` : "새 터미널";
   const closeTerminalActionLabel = closeShortcutLabel
-    ? `Close Terminal (${closeShortcutLabel})`
-    : "Close Terminal";
+    ? `터미널 닫기 (${closeShortcutLabel})`
+    : "터미널 닫기";
   const onSplitTerminalAction = useCallback(() => {
     if (hasReachedSplitLimit) return;
     onSplitTerminal();
@@ -1278,7 +1306,7 @@ export default function ThreadTerminalDrawer({
           />
         ) : null}
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 py-6 text-center text-sm text-muted-foreground">
-          <p>No terminal sessions for this thread yet.</p>
+          <p>이 대화에는 아직 터미널 세션이 없습니다.</p>
           <button
             type="button"
             className="rounded-md border border-border/80 bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
@@ -1398,6 +1426,7 @@ export default function ThreadTerminalDrawer({
                         <TerminalViewport
                           advancedTypography={advancedTypography}
                           threadRef={threadRef}
+                          projectId={projectId}
                           threadId={threadId}
                           terminalId={terminalId}
                           terminalLabel={terminalLabelById.get(terminalId) ?? "Terminal"}
@@ -1427,6 +1456,7 @@ export default function ThreadTerminalDrawer({
                   advancedTypography={advancedTypography}
                   key={resolvedActiveTerminalId}
                   threadRef={threadRef}
+                  projectId={projectId}
                   threadId={threadId}
                   terminalId={resolvedActiveTerminalId}
                   terminalLabel={terminalLabelById.get(resolvedActiveTerminalId) ?? "Terminal"}
@@ -1512,7 +1542,7 @@ export default function ThreadTerminalDrawer({
                           }`}
                           onClick={() => onActiveTerminalChange(groupActiveTerminalId)}
                         >
-                          Group {groupIndex + 1}
+                          그룹 {groupIndex + 1}
                         </button>
                       )}
 
@@ -1521,9 +1551,9 @@ export default function ThreadTerminalDrawer({
                       >
                         {terminalGroup.terminalIds.map((terminalId) => {
                           const isActive = terminalId === resolvedActiveTerminalId;
-                          const closeTerminalLabel = `Close ${
-                            terminalLabelById.get(terminalId) ?? "terminal"
-                          }${isActive && closeShortcutLabel ? ` (${closeShortcutLabel})` : ""}`;
+                          const closeTerminalLabel = `${
+                            terminalLabelById.get(terminalId) ?? "터미널"
+                          } 닫기${isActive && closeShortcutLabel ? ` (${closeShortcutLabel})` : ""}`;
                           return (
                             <div
                               key={terminalId}
@@ -1543,7 +1573,7 @@ export default function ThreadTerminalDrawer({
                               >
                                 <TerminalSquare className="size-3 shrink-0" />
                                 <span className="truncate">
-                                  {terminalLabelById.get(terminalId) ?? "Terminal"}
+                                  {terminalLabelById.get(terminalId) ?? "터미널"}
                                 </span>
                               </button>
                               {normalizedTerminalIds.length > 1 && (

@@ -32,15 +32,16 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
 
   const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   const isUnauthenticated = status.status === "error" && status.auth.status === "unauthenticated";
-  const title = isUnauthenticated
-    ? `${providerName} is unauthenticated`
-    : `${providerName} provider status`;
+  const title = isUnauthenticated ? `${providerName} 인증 필요` : `${providerName} 제공자 상태`;
+  const suppliedMessage = status.message?.trim();
   const message = isUnauthenticated
-    ? "Sign in via the CLI to authenticate again."
-    : (status.message ??
-      (status.status === "error"
-        ? `${providerName} provider is unavailable.`
-        : `${providerName} provider has limited availability.`));
+    ? "CLI에서 다시 로그인해 인증하세요."
+    : suppliedMessage && /[가-힣]/.test(suppliedMessage)
+      ? suppliedMessage
+      : status.status === "error"
+        ? `${providerName} 제공자를 사용할 수 없습니다.`
+        : `${providerName} 제공자의 일부 기능을 사용할 수 없습니다.`;
+  const severityLabel = status.status === "warning" ? "경고" : "오류";
 
   return (
     <div className="pointer-events-auto mx-auto w-fit max-w-[calc(100%-2rem)] pt-3">
@@ -68,7 +69,7 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         </div>
         <button
           type="button"
-          aria-label={`Dismiss ${providerName} provider ${status.status}`}
+          aria-label={`${providerName} 제공자 ${severityLabel} 닫기`}
           className="absolute top-2 right-2 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-foreground/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           onClick={onDismiss}
         >

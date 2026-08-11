@@ -56,7 +56,7 @@ export function useOpenPrLink() {
     if (!api) {
       toastManager.add({
         type: "error",
-        title: "Link opening is unavailable.",
+        title: "링크를 열 수 없습니다",
       });
       return;
     }
@@ -66,8 +66,8 @@ export function useOpenPrLink() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to open pull request link",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "풀 리퀘스트 링크를 열지 못했습니다",
+          description: "잠시 후 다시 시도하세요.",
         }),
       );
     });

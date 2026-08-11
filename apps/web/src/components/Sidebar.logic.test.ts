@@ -163,7 +163,7 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
       }),
     ).toEqual({
       id: "regenerate-title",
-      label: "Regenerate titles (3)",
+      label: "제목 다시 만들기 (3)",
     });
   });
 
@@ -175,7 +175,7 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
       }),
     ).toEqual({
       id: "regenerate-title",
-      label: "Regenerating… (2)",
+      label: "제목 다시 만드는 중… (2)",
       disabled: true,
     });
   });
@@ -194,13 +194,13 @@ describe("buildMultiSelectThreadContextMenuItems", () => {
   it("offers bulk archive with the selected count", () => {
     expect(
       buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
-    ).toContainEqual({ id: "archive", label: "Archive (3)", disabled: false });
+    ).toContainEqual({ id: "archive", label: "보관 (3)", disabled: false });
   });
 
   it("disables bulk archive when a selected thread is running", () => {
     expect(
       buildMultiSelectThreadContextMenuItems({ count: 2, hasRunningThread: true }),
-    ).toContainEqual({ id: "archive", label: "Archive (2)", disabled: true });
+    ).toContainEqual({ id: "archive", label: "보관 (2)", disabled: true });
   });
 });
 
@@ -996,15 +996,15 @@ describe("resolveWorkingStartedAt", () => {
 
 describe("formatWorkingDurationLabel", () => {
   it("formats seconds, minutes, and hours", () => {
-    expect(formatWorkingDurationLabel(0)).toBe("0s");
-    expect(formatWorkingDurationLabel(42_000)).toBe("42s");
-    expect(formatWorkingDurationLabel(5 * 60_000)).toBe("5m");
-    expect(formatWorkingDurationLabel(90 * 60_000)).toBe("1h 30m");
+    expect(formatWorkingDurationLabel(0)).toBe("0초");
+    expect(formatWorkingDurationLabel(42_000)).toBe("42초");
+    expect(formatWorkingDurationLabel(5 * 60_000)).toBe("5분");
+    expect(formatWorkingDurationLabel(90 * 60_000)).toBe("1시간 30분");
   });
 
   it("clamps negative and non-finite elapsed values to zero", () => {
-    expect(formatWorkingDurationLabel(-5_000)).toBe("0s");
-    expect(formatWorkingDurationLabel(Number.NaN)).toBe("0s");
+    expect(formatWorkingDurationLabel(-5_000)).toBe("0초");
+    expect(formatWorkingDurationLabel(Number.NaN)).toBe("0초");
   });
 });
 
@@ -1037,7 +1037,7 @@ describe("resolveThreadStatusPill", () => {
           hasPendingUserInput: true,
         },
       }),
-    ).toMatchObject({ label: "Pending Approval", pulse: false });
+    ).toMatchObject({ label: "승인 필요", pulse: false });
   });
 
   it("shows awaiting input when plan mode is blocked on user answers", () => {
@@ -1048,7 +1048,7 @@ describe("resolveThreadStatusPill", () => {
           hasPendingUserInput: true,
         },
       }),
-    ).toMatchObject({ label: "Awaiting Input", pulse: false });
+    ).toMatchObject({ label: "입력 대기", pulse: false });
   });
 
   it("falls back to working when the thread is actively running without blockers", () => {
@@ -1056,7 +1056,7 @@ describe("resolveThreadStatusPill", () => {
       resolveThreadStatusPill({
         thread: baseThread,
       }),
-    ).toMatchObject({ label: "Working", pulse: true });
+    ).toMatchObject({ label: "작업 중", pulse: true });
   });
 
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {
@@ -1073,7 +1073,7 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({ label: "Plan Ready", pulse: false });
+    ).toMatchObject({ label: "계획 준비됨", pulse: false });
   });
 
   it("does not manufacture completed state without a client visit marker", () => {
@@ -1107,7 +1107,7 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({ label: "Completed", pulse: false });
+    ).toMatchObject({ label: "완료", pulse: false });
   });
 });
 
@@ -1142,44 +1142,44 @@ describe("resolveProjectStatusIndicator", () => {
     expect(
       resolveProjectStatusIndicator([
         {
-          label: "Completed",
+          label: "완료",
           colorClass: "text-emerald-600",
           dotClass: "bg-emerald-500",
           pulse: false,
         },
         {
-          label: "Pending Approval",
+          label: "승인 필요",
           colorClass: "text-amber-600",
           dotClass: "bg-amber-500",
           pulse: false,
         },
         {
-          label: "Working",
+          label: "작업 중",
           colorClass: "text-sky-600",
           dotClass: "bg-sky-500",
           pulse: true,
         },
       ]),
-    ).toMatchObject({ label: "Pending Approval", dotClass: "bg-amber-500" });
+    ).toMatchObject({ label: "승인 필요", dotClass: "bg-amber-500" });
   });
 
   it("prefers plan-ready over completed when no stronger action is needed", () => {
     expect(
       resolveProjectStatusIndicator([
         {
-          label: "Completed",
+          label: "완료",
           colorClass: "text-emerald-600",
           dotClass: "bg-emerald-500",
           pulse: false,
         },
         {
-          label: "Plan Ready",
+          label: "계획 준비됨",
           colorClass: "text-violet-600",
           dotClass: "bg-violet-500",
           pulse: false,
         },
       ]),
-    ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
+    ).toMatchObject({ label: "계획 준비됨", dotClass: "bg-violet-500" });
   });
 });
 

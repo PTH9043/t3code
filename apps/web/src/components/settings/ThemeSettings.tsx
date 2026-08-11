@@ -115,7 +115,7 @@ function ThemeLibraryCard({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <button
-                    aria-label={`Use ${theme.label} theme${isActive ? ", currently active" : ""}`}
+                    aria-label={`${theme.label} 테마 사용${isActive ? ", 현재 사용 중" : ""}`}
                     aria-pressed={isActive}
                     className="min-w-0 cursor-pointer truncate rounded-sm text-left text-sm font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
                     type="button"
@@ -135,7 +135,7 @@ function ThemeLibraryCard({
                       <TooltipTrigger
                         render={
                           <Button
-                            aria-label={`Duplicate ${theme.label}`}
+                            aria-label={`${theme.label} 복제`}
                             size="icon-xs"
                             variant="ghost"
                             onClick={(event) => {
@@ -147,7 +147,7 @@ function ThemeLibraryCard({
                           </Button>
                         }
                       />
-                      <TooltipPopup>Duplicate theme</TooltipPopup>
+                      <TooltipPopup>테마 복제</TooltipPopup>
                     </Tooltip>
                   ) : null}
                   {onEdit ? (
@@ -155,7 +155,7 @@ function ThemeLibraryCard({
                       <TooltipTrigger
                         render={
                           <Button
-                            aria-label={`Edit ${theme.label}`}
+                            aria-label={`${theme.label} 편집`}
                             size="icon-xs"
                             variant="ghost"
                             onClick={(event) => {
@@ -167,7 +167,7 @@ function ThemeLibraryCard({
                           </Button>
                         }
                       />
-                      <TooltipPopup>Edit theme</TooltipPopup>
+                      <TooltipPopup>테마 편집</TooltipPopup>
                     </Tooltip>
                   ) : null}
                   {onDownload ? (
@@ -175,7 +175,7 @@ function ThemeLibraryCard({
                       <TooltipTrigger
                         render={
                           <Button
-                            aria-label={`Export ${theme.label}`}
+                            aria-label={`${theme.label} 내보내기`}
                             size="icon-xs"
                             variant="ghost"
                             onClick={(event) => {
@@ -187,7 +187,7 @@ function ThemeLibraryCard({
                           </Button>
                         }
                       />
-                      <TooltipPopup>Export theme file</TooltipPopup>
+                      <TooltipPopup>테마 파일 내보내기</TooltipPopup>
                     </Tooltip>
                   ) : null}
                   {onRemove ? (
@@ -195,7 +195,7 @@ function ThemeLibraryCard({
                       <TooltipTrigger
                         render={
                           <Button
-                            aria-label={`Remove ${theme.label}`}
+                            aria-label={`${theme.label} 제거`}
                             size="icon-xs"
                             variant="ghost"
                             className="text-muted-foreground hover:text-destructive"
@@ -208,7 +208,7 @@ function ThemeLibraryCard({
                           </Button>
                         }
                       />
-                      <TooltipPopup>Remove theme</TooltipPopup>
+                      <TooltipPopup>테마 제거</TooltipPopup>
                     </Tooltip>
                   ) : null}
                 </div>
@@ -218,7 +218,9 @@ function ThemeLibraryCard({
         }
       />
       <TooltipPopup>
-        {cardModes.length > 1 ? "Use for both light and dark" : `Use for ${cardModes[0]} mode only`}
+        {cardModes.length > 1
+          ? "밝은 모드와 어두운 모드 모두에 사용"
+          : `${cardModes[0] === "light" ? "밝은" : "어두운"} 모드에만 사용`}
       </TooltipPopup>
     </Tooltip>
   );
@@ -263,8 +265,8 @@ export function ThemeLibrary({
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: "Couldn’t save theme selection",
-        description: "Try again.",
+        title: "테마 선택을 저장하지 못했습니다",
+        description: "다시 시도해 주세요.",
       }),
     );
   }, []);
@@ -273,8 +275,8 @@ export function ThemeLibrary({
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: "Couldn’t remove theme",
-        description: "Try again.",
+        title: "테마를 제거하지 못했습니다",
+        description: "다시 시도해 주세요.",
       }),
     );
   }, []);
@@ -424,7 +426,7 @@ export function ThemeLibrary({
 
   const renderModeTiles = () => (
     <div
-      aria-label="Appearance mode"
+      aria-label="화면 모드"
       className="mx-auto grid w-full max-w-[56rem] grid-cols-3 gap-3 px-3 sm:px-4"
       role="group"
     >
@@ -432,7 +434,11 @@ export function ThemeLibrary({
         const isActive = appearanceMode === mode;
         return (
           <button
-            aria-label={mode === "system" ? "Follow the system appearance" : `Use ${mode} mode`}
+            aria-label={
+              mode === "system"
+                ? "시스템 화면 설정 따르기"
+                : `${mode === "light" ? "밝은" : "어두운"} 모드 사용`
+            }
             aria-pressed={isActive}
             className={cn(
               "flex cursor-pointer flex-col items-stretch gap-1.5 rounded-xl border p-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
@@ -452,7 +458,7 @@ export function ThemeLibrary({
                 isActive ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              {mode === "system" ? "System" : mode === "light" ? "Light" : "Dark"}
+              {mode === "system" ? "시스템" : mode === "light" ? "밝게" : "어둡게"}
             </span>
           </button>
         );
@@ -491,7 +497,7 @@ export function ThemeLibrary({
                 openThemeEditor({
                   editingThemeId: null,
                   seedThemeId: maintainerTheme.id,
-                  seedName: `${maintainerTheme.label} copy`,
+                  seedName: `${maintainerTheme.label} 복사본`,
                   initialAppearance,
                 })
               }
@@ -512,7 +518,7 @@ export function ThemeLibrary({
                 openThemeEditor({
                   editingThemeId: null,
                   seedThemeId: customTheme.id,
-                  seedName: `${customTheme.label} copy`,
+                  seedName: `${customTheme.label} 복사본`,
                   initialAppearance,
                 })
               }
@@ -545,14 +551,14 @@ export function ThemeLibrary({
   return (
     <div className="space-y-3">
       <p className="px-3 text-[13px] leading-[1.45] text-muted-foreground/80 sm:px-4">
-        Choose how T3 Code looks. Use a built-in theme or make your own.
+        T3 Code의 화면 스타일을 선택하세요. 기본 테마를 사용하거나 직접 만들 수 있습니다.
       </p>
       <h3 className="px-3 text-sm font-medium tracking-[-0.005em] text-foreground sm:px-4">
-        Color scheme
+        색상 모드
       </h3>
       {renderModeTiles()}
       <div className="flex min-h-8 flex-wrap items-center justify-between gap-3 px-3 pt-2 sm:px-4">
-        <h3 className="text-sm font-medium tracking-[-0.005em] text-foreground">Themes</h3>
+        <h3 className="text-sm font-medium tracking-[-0.005em] text-foreground">테마</h3>
         <div className="flex flex-wrap items-center justify-end gap-3">
           <Button
             className="h-7 rounded-md border border-border/70 bg-muted/30 px-2 text-xs font-medium text-foreground shadow-none hover:bg-accent/40"
@@ -568,11 +574,11 @@ export function ThemeLibrary({
             }
           >
             <PlusIcon />
-            Create theme
+            테마 만들기
           </Button>
           <Button size="xs" variant="ghost" onClick={() => onImportOpenChange(true)}>
             <UploadIcon />
-            Import theme
+            테마 가져오기
           </Button>
         </div>
       </div>
@@ -592,14 +598,14 @@ export function ThemeLibrary({
           ) {
             refreshTheme();
           }
-          const verb = updated ? "updated" : "added";
+          const verb = updated ? "업데이트됨" : "추가됨";
           toastManager.add(
             stackedThreadToast({
               type: "success",
               title:
                 importedThemes.length === 1
                   ? `${importedThemes[0]!.label} ${verb}`
-                  : `${importedThemes.length} themes ${verb}`,
+                  : `테마 ${importedThemes.length}개 ${verb}`,
               description: importedThemes.map((imported) => imported.label).join(", "),
             }),
           );
@@ -613,8 +619,8 @@ export function ThemeLibrary({
             toastManager.add(
               stackedThreadToast({
                 type: "success",
-                title: `${importedTheme.label} added`,
-                description: `It’s now your ${modes[0]!} theme.`,
+                title: `${importedTheme.label} 추가됨`,
+                description: `${modes[0] === "light" ? "밝은" : "어두운"} 모드 테마로 설정했습니다.`,
               }),
             );
             return true;
@@ -623,8 +629,8 @@ export function ThemeLibrary({
           toastManager.add(
             stackedThreadToast({
               type: "success",
-              title: `${importedTheme.label} added`,
-              description: "It’s now active.",
+              title: `${importedTheme.label} 추가됨`,
+              description: "현재 테마로 설정했습니다.",
             }),
           );
           return true;
@@ -640,15 +646,15 @@ export function ThemeLibrary({
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove “{removeDialogTheme?.label}”?</AlertDialogTitle>
+            <AlertDialogTitle>“{removeDialogTheme?.label}” 테마를 제거할까요?</AlertDialogTitle>
             <AlertDialogDescription>
-              You can bring it back anytime by importing its JSON file.
+              JSON 파일을 다시 가져오면 언제든 복원할 수 있습니다.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>취소</AlertDialogClose>
             <Button variant="destructive" onClick={handleConfirmRemoveTheme}>
-              Remove theme
+              테마 제거
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

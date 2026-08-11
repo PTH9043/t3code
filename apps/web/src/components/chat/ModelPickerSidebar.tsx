@@ -14,15 +14,18 @@ import { isProviderInstancePickerReady, type ProviderInstanceEntry } from "../..
 function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   const label = entry.displayName;
   if (!entry.enabled || entry.status === "disabled") {
-    return `${label} — Disabled in settings.`;
+    return `${label} — 설정에서 비활성화됨.`;
   }
   if (entry.status === "ready" && entry.isAvailable) {
     return label;
   }
   const kind =
-    entry.status === "error" ? "Unavailable" : entry.status === "warning" ? "Limited" : "Not ready";
-  const msg = entry.snapshot.message?.trim();
-  return msg ? `${label} — ${kind}. ${msg}` : `${label} — ${kind}.`;
+    entry.status === "error"
+      ? "사용할 수 없음"
+      : entry.status === "warning"
+        ? "제한됨"
+        : "준비되지 않음";
+  return `${label} — ${kind}.`;
 }
 
 const SELECTED_INDICATOR_CLASS =
@@ -115,7 +118,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                         )}
                         onClick={() => handleSelect("favorites")}
                         type="button"
-                        aria-label="Favorites"
+                        aria-label="즐겨찾기"
                       >
                         <StarIcon className="size-5 fill-current shrink-0" aria-hidden />
                       </button>
@@ -127,7 +130,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     align="center"
                     className={PICKER_TOOLTIP_CLASS}
                   >
-                    Favorites
+                    즐겨찾기
                   </TooltipPopup>
                 </Tooltip>
               </div>

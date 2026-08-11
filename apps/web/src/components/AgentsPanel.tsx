@@ -36,16 +36,16 @@ import { ScrollArea } from "~/components/ui/scroll-area";
  * user problem). Only settled states differentiate.
  */
 const STATUS_VISUALS: Record<RuntimeSubagent["status"], { dotClass: string; label: string }> = {
-  pending: { dotClass: "bg-info", label: "Working" },
-  running: { dotClass: "bg-info", label: "Working" },
-  waiting: { dotClass: "bg-info", label: "Working" },
+  pending: { dotClass: "bg-info", label: "작업 중" },
+  running: { dotClass: "bg-info", label: "작업 중" },
+  waiting: { dotClass: "bg-info", label: "작업 중" },
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed — live-test: sky idle dots read as stuck in-progress.
-  idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
-  completed: { dotClass: "bg-success", label: "Completed" },
-  failed: { dotClass: "bg-destructive", label: "Failed" },
-  cancelled: { dotClass: "bg-muted-foreground/60", label: "Stopped" },
-  interrupted: { dotClass: "bg-muted-foreground/60", label: "Stopped" },
+  idle: { dotClass: "bg-muted-foreground/50", label: "대기 · 재개 가능" },
+  completed: { dotClass: "bg-success", label: "완료" },
+  failed: { dotClass: "bg-destructive", label: "실패" },
+  cancelled: { dotClass: "bg-muted-foreground/60", label: "중지됨" },
+  interrupted: { dotClass: "bg-muted-foreground/60", label: "중지됨" },
 };
 
 function StatusDot({ status }: { status: RuntimeSubagent["status"] }) {
@@ -61,13 +61,13 @@ function formatElapsedSeconds(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(seconds / 60);
   if (minutes === 0) {
-    return `${seconds}s`;
+    return `${seconds}초`;
   }
   const hours = Math.floor(minutes / 60);
   if (hours === 0) {
-    return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+    return `${minutes}분 ${String(seconds % 60).padStart(2, "0")}초`;
   }
-  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  return `${hours}시간 ${String(minutes % 60).padStart(2, "0")}분`;
 }
 
 function elapsedBetween(startedAt: string, endIso: string | null): string {
@@ -147,9 +147,9 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
       : agent.role;
   const metadata = [
     modelLabel,
-    agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
-    agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
-    agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
+    agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} 토큰` : "— 토큰",
+    agent.usage?.toolUses !== undefined ? `도구 ${agent.usage.toolUses}회` : null,
+    agent.activationCount > 1 ? `실행 ${agent.activationCount}회` : null,
   ].filter((value): value is string => value !== null);
 
   return (
@@ -285,7 +285,7 @@ function WorkflowScriptView({
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close script"
+          aria-label="스크립트 닫기"
           className="ml-auto text-muted-foreground hover:text-foreground"
         >
           <X aria-hidden className="size-3" />
@@ -295,12 +295,12 @@ function WorkflowScriptView({
         {result._tag === "Success" ? (
           <pre className="whitespace-pre-wrap break-words font-mono text-[.7rem] leading-relaxed text-foreground/90">
             {result.value.contents}
-            {result.value.truncated ? "\n… (truncated)" : ""}
+            {result.value.truncated ? "\n… (일부만 표시)" : ""}
           </pre>
         ) : result._tag === "Failure" ? (
-          <p className="text-xs text-destructive-foreground">Could not load the script.</p>
+          <p className="text-xs text-destructive-foreground">스크립트를 불러오지 못했습니다.</p>
         ) : (
-          <p className="text-xs text-muted-foreground">Loading…</p>
+          <p className="text-xs text-muted-foreground">불러오는 중…</p>
         )}
       </div>
     </div>
@@ -353,10 +353,10 @@ function PhaseSection({
         <span>{phase.title}</span>
         <span className="font-normal normal-case text-muted-foreground/70">
           {phase.state === "pending" && phase.members.length === 0
-            ? "pending"
+            ? "대기 중"
             : phase.state === "done"
-              ? `${phase.settledCount} done`
-              : `${phase.activeCount} active · ${phase.settledCount} done`}
+              ? `${phase.settledCount}개 완료`
+              : `${phase.activeCount}개 활성 · ${phase.settledCount}개 완료`}
         </span>
         {!open && phase.members.length > 0 ? (
           <span className="ml-auto flex items-center gap-0.5">
@@ -411,16 +411,16 @@ function ExpandedWorkflowSection({
             )}
             aria-expanded={scriptOpen}
           >
-            {"{}"} script
+            {"{}"} 스크립트
           </button>
         ) : null}
         <span className="ml-auto font-mono normal-case text-muted-foreground/80">
-          {settled}/{members.length} settled
+          {settled}/{members.length} 완료
         </span>
         <button
           type="button"
           onClick={onCollapse}
-          aria-label="Collapse workflow"
+          aria-label="워크플로 접기"
           className="text-muted-foreground hover:text-foreground"
         >
           <ChevronDown aria-hidden className="size-3" />
@@ -484,9 +484,9 @@ function CollapsedWorkflowSection({
           {group.workflow.workflowName ?? group.workflow.title}
         </span>
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[.7rem] text-muted-foreground/80">
-          {failed > 0 ? <span className="text-destructive-foreground">{failed} failed</span> : null}
-          <span>{members.length} agents</span>
-          <span className="tabular-nums">· {formatSubagentTokenCount(totalTokens)} tok</span>
+          {failed > 0 ? <span className="text-destructive-foreground">실패 {failed}개</span> : null}
+          <span>에이전트 {members.length}개</span>
+          <span className="tabular-nums">· {formatSubagentTokenCount(totalTokens)} 토큰</span>
           {elapsed ? <span className="tabular-nums">· {elapsed}</span> : null}
           <ChevronRight aria-hidden className="size-3" />
         </span>
@@ -531,10 +531,10 @@ export function AgentsPanel({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
         <Bot aria-hidden className="size-6 text-muted-foreground/60" />
-        <p className="text-sm font-medium">No agents yet</p>
+        <p className="text-sm font-medium">아직 에이전트가 없습니다</p>
         <p className="max-w-56 text-xs text-muted-foreground">
-          When this thread spawns subagents or runs a workflow, they show up here with live status,
-          activity, and token usage.
+          이 대화에서 하위 에이전트나 워크플로를 실행하면 실시간 상태, 활동 및 토큰 사용량이 여기에
+          표시됩니다.
         </p>
       </div>
     );
@@ -555,7 +555,7 @@ export function AgentsPanel({
           {model.directAgents.length > 0 ? (
             <section>
               <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-                Direct spawns
+                직접 실행
               </div>
               {model.directAgents.map((agent) => (
                 <AgentRow key={agent.id} agent={agent} />
@@ -568,13 +568,13 @@ export function AgentsPanel({
         <span className="flex items-center gap-2">
           {model.runningCount + model.waitingCount > 0 ? (
             <span className="text-info-foreground">
-              ● {model.runningCount + model.waitingCount} working
+              ● {model.runningCount + model.waitingCount}개 작업 중
             </span>
           ) : null}
-          {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}
-          {model.settledCount > 0 ? <span>{model.settledCount} settled</span> : null}
+          {model.idleCount > 0 ? <span>{model.idleCount}개 대기</span> : null}
+          {model.settledCount > 0 ? <span>{model.settledCount}개 완료</span> : null}
         </span>
-        <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} tok</span>
+        <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} 토큰</span>
       </footer>
     </div>
   );

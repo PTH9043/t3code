@@ -25,18 +25,18 @@ import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayo
 const MODE_OPTIONS: Record<SourceControlWritingStyleMode, { label: string; description: string }> =
   {
     repo_conventions: {
-      label: "Repository conventions",
-      description: "In each project, matches recent change descriptions and change request titles.",
+      label: "저장소 작성 관례",
+      description: "각 프로젝트의 최근 변경 설명과 변경 요청 제목의 스타일을 따릅니다.",
     },
     conventional_commits: {
-      label: "Conventional Commits",
+      label: "Conventional Commits 규칙",
       description:
-        "Uses Conventional Commit prefixes for change descriptions; change request titles and descriptions stay concise.",
+        "변경 설명에는 Conventional Commits 접두사를 사용하고, 변경 요청 제목과 설명은 간결하게 작성합니다.",
     },
     custom: {
-      label: "Custom instructions",
+      label: "사용자 지정 지침",
       description:
-        "Applies your instructions to change descriptions and change request titles and descriptions in every project.",
+        "모든 프로젝트의 변경 설명과 변경 요청 제목 및 설명에 사용자가 작성한 지침을 적용합니다.",
     },
   };
 
@@ -71,14 +71,14 @@ export function SourceControlWritingSettingsSection() {
   );
 
   return (
-    <SettingsSection title="Text generation">
+    <SettingsSection title="텍스트 생성">
       <SettingsRow
-        title="Source control writing style"
+        title="소스 제어 작성 스타일"
         description={MODE_OPTIONS[style.mode].description}
         resetAction={
           isSourceControlWritingStyleDirty ? (
             <SettingResetButton
-              label="source control writing style"
+              label="소스 제어 작성 스타일"
               onClick={() =>
                 updateSettings({
                   sourceControlWritingStyle: {
@@ -103,7 +103,7 @@ export function SourceControlWritingSettingsSection() {
               });
             }}
           >
-            <SelectTrigger className="w-full sm:w-56" aria-label="Source control writing style">
+            <SelectTrigger className="w-full sm:w-56" aria-label="소스 제어 작성 스타일">
               <SelectValue>{MODE_OPTIONS[style.mode].label}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -129,20 +129,20 @@ export function SourceControlWritingSettingsSection() {
                 }
               }}
               rows={4}
-              placeholder="Keep titles concise. Use short bullet points in descriptions."
-              aria-label="Custom source control writing instructions"
+              placeholder="제목은 간결하게 작성하고 설명에는 짧은 글머리표를 사용하세요."
+              aria-label="사용자 지정 소스 제어 작성 지침"
             />
           </div>
         ) : null}
       </SettingsRow>
 
       <SettingsRow
-        title="Follow change request templates"
-        description="Structures change request descriptions using the current repository's template when one is available."
+        title="변경 요청 템플릿 따르기"
+        description="현재 저장소에 템플릿이 있으면 그 구조에 맞춰 변경 요청 설명을 작성합니다."
         resetAction={
           style.followChangeRequestTemplates !== defaults.followChangeRequestTemplates ? (
             <SettingResetButton
-              label="change request templates"
+              label="변경 요청 템플릿"
               onClick={() =>
                 updateSettings({
                   sourceControlWritingStyle: {
@@ -163,14 +163,14 @@ export function SourceControlWritingSettingsSection() {
                 },
               })
             }
-            aria-label="Follow change request templates"
+            aria-label="변경 요청 템플릿 따르기"
           />
         }
       />
 
       <SettingsRow
-        title="Source control writer model"
-        description="Optional model override for change descriptions, change request titles and descriptions, and branch or bookmark names. Off uses the global text generation model."
+        title="소스 제어 작성 모델"
+        description="변경 설명, 변경 요청 제목과 설명, 브랜치 또는 북마크 이름 생성에 별도 모델을 사용할 수 있습니다. 끄면 전역 텍스트 생성 모델을 사용합니다."
         control={
           <div className="flex flex-wrap items-center justify-end gap-2">
             {usesDedicatedModel ? (
@@ -182,7 +182,7 @@ export function SourceControlWritingSettingsSection() {
                 modelOptionsByInstance={modelOptionsByInstance}
                 triggerVariant="outline"
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
-                triggerAriaLabel="Source control writer model"
+                triggerAriaLabel="소스 제어 작성 모델"
                 onInstanceModelChange={(instanceId, model) => {
                   updateSettings({
                     sourceControlWriterModelSelection: createModelSelection(instanceId, model),
@@ -203,7 +203,7 @@ export function SourceControlWritingSettingsSection() {
                     : null,
                 })
               }
-              aria-label="Use a separate source control writer model"
+              aria-label="별도의 소스 제어 작성 모델 사용"
             />
           </div>
         }

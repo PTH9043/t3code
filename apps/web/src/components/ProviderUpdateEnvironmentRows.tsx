@@ -65,7 +65,7 @@ function toProviderUpdateOutcome(input: {
     const error = squashAtomCommandFailure(input.result);
     return {
       status: "rejected",
-      reason: error instanceof Error ? error : new Error("Provider update failed."),
+      reason: error instanceof Error ? error : new Error("제공자 업데이트에 실패했습니다."),
     };
   }
 
@@ -127,14 +127,14 @@ function EnvironmentUpdateRow({
     case "unchanged":
       trailing = (
         <Button size="xs" variant="outline" onClick={onUpdate}>
-          Retry
+          다시 시도
         </Button>
       );
       break;
     default:
       trailing = (
         <Button size="xs" onClick={onUpdate}>
-          Update
+          업데이트
         </Button>
       );
       break;
@@ -261,7 +261,7 @@ export function ProviderUpdateEnvironmentRows({
         inFlightEnvironmentsRef.current.delete(environmentId);
         clearPending(environmentId);
         setErrorByEnvironment((previous) =>
-          new Map(previous).set(environmentId, "Update timed out — try again."),
+          new Map(previous).set(environmentId, "업데이트 시간이 초과되었습니다. 다시 시도하세요."),
         );
       }, PENDING_EXPIRY_MS);
       try {
@@ -283,7 +283,8 @@ export function ProviderUpdateEnvironmentRows({
             } catch (error) {
               return {
                 status: "rejected",
-                reason: error instanceof Error ? error : new Error("Provider update failed."),
+                reason:
+                  error instanceof Error ? error : new Error("제공자 업데이트에 실패했습니다."),
               };
             }
           }),
@@ -308,7 +309,7 @@ export function ProviderUpdateEnvironmentRows({
           setErrorByEnvironment((previous) =>
             new Map(previous).set(
               environmentId,
-              "This environment isn’t connected — try again once it reconnects.",
+              "이 환경에 연결되어 있지 않습니다. 다시 연결된 뒤 시도하세요.",
             ),
           );
           return;
@@ -336,13 +337,10 @@ export function ProviderUpdateEnvironmentRows({
         if (isTerminalProviderUpdatePhase(view.phase)) {
           setResultByEnvironment((previous) => new Map(previous).set(environmentId, view));
         }
-      } catch (error) {
+      } catch {
         if (isCurrentRequest()) {
           setErrorByEnvironment((previous) =>
-            new Map(previous).set(
-              environmentId,
-              error instanceof Error ? error.message : "Provider update failed.",
-            ),
+            new Map(previous).set(environmentId, "제공자 업데이트에 실패했습니다."),
           );
         }
       } finally {

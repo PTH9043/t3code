@@ -291,14 +291,14 @@ export function filterCommandPaletteGroups(input: {
     if (input.projectSearchItems.length > 0) {
       searchableGroups.push({
         value: "projects-search",
-        label: "Projects",
+        label: "프로젝트",
         items: input.projectSearchItems,
       });
     }
     if (input.threadSearchItems.length > 0) {
       searchableGroups.push({
         value: "threads-search",
-        label: "Threads",
+        label: "대화",
         items: input.threadSearchItems,
       });
     }
@@ -367,7 +367,7 @@ export function buildBrowseGroups(input: {
     });
   }
 
-  return [{ value: "directories", label: "Directories", items }];
+  return [{ value: "directories", label: "디렉터리", items }];
 }
 
 export function getCommandPaletteMode(input: {
@@ -386,12 +386,12 @@ export function buildRootGroups(input: {
 }): CommandPaletteGroup[] {
   const groups: CommandPaletteGroup[] = [];
   if (input.actionItems.length > 0) {
-    groups.push({ value: "actions", label: "Actions", items: input.actionItems });
+    groups.push({ value: "actions", label: "작업", items: input.actionItems });
   }
   if (input.recentThreadItems.length > 0) {
     groups.push({
       value: "recent-threads",
-      label: "Recent Threads",
+      label: "최근 대화",
       items: input.recentThreadItems,
     });
   }
@@ -401,12 +401,12 @@ export function buildRootGroups(input: {
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {
   switch (mode) {
     case "root":
-      return "Search commands, projects, and threads...";
+      return "명령, 프로젝트 및 대화 검색...";
     case "root-browse":
-      return "Enter project path (e.g. ~/projects/my-app)";
+      return "프로젝트 경로 입력 (예: ~/projects/my-app)";
     case "submenu":
-      return "Search...";
+      return "검색...";
     case "submenu-browse":
-      return "Enter path (e.g. ~/projects/my-app)";
+      return "경로 입력 (예: ~/projects/my-app)";
   }
 }

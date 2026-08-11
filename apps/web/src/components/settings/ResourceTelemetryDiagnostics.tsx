@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type {
   BackgroundBooleanState,
+  HostPowerThermalState,
   ResourceAttributionEntry,
   ResourceTelemetryAggregate,
   ResourceTelemetryHistoryBucket,
@@ -55,10 +56,10 @@ import {
 import { SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 
 const HISTORY_WINDOWS = [
-  { label: "5m", windowMs: 5 * 60_000, bucketMs: 15_000 },
-  { label: "15m", windowMs: 15 * 60_000, bucketMs: 30_000 },
-  { label: "30m", windowMs: 30 * 60_000, bucketMs: 60_000 },
-  { label: "1h", windowMs: 60 * 60_000, bucketMs: 2 * 60_000 },
+  { label: "5분", windowMs: 5 * 60_000, bucketMs: 15_000 },
+  { label: "15분", windowMs: 15 * 60_000, bucketMs: 30_000 },
+  { label: "30분", windowMs: 30 * 60_000, bucketMs: 60_000 },
+  { label: "1시간", windowMs: 60 * 60_000, bucketMs: 2 * 60_000 },
 ] as const;
 
 function formatBytes(value: number): string {
@@ -74,29 +75,27 @@ function formatBytes(value: number): string {
 }
 
 function formatRate(value: number): string {
-  return `${formatBytes(value)}/s`;
+  return `${formatBytes(value)}/초`;
 }
 
 function formatCpuTime(valueMs: number): string {
   const seconds = valueMs / 1_000;
-  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}초`;
   const minutes = seconds / 60;
-  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}m`;
-  return `${(minutes / 60).toFixed(2)}h`;
+  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}분`;
+  return `${(minutes / 60).toFixed(2)}시간`;
 }
 
 function formatDurationMicros(value: number): string {
   if (value < 1_000) return `${Math.round(value)} µs`;
   if (value < 1_000_000) return `${(value / 1_000).toFixed(2)} ms`;
-  return `${(value / 1_000_000).toFixed(2)} s`;
+  return `${(value / 1_000_000).toFixed(2)}초`;
 }
 
 function formatSampleInterval(valueMs: number): string {
   if (valueMs < 1_000) return `${Math.max(0, Math.round(valueMs))} ms`;
   const seconds = valueMs / 1_000;
-  return `${seconds.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${
-    seconds === 1 ? "second" : "seconds"
-  }`;
+  return `${seconds.toLocaleString(undefined, { maximumFractionDigits: 1 })}초`;
 }
 
 function processIdentityKey(process: ResourceTelemetryProcess): string {
@@ -117,25 +116,25 @@ function formatProcessName(process: Pick<ResourceTelemetryProcess, "command" | "
 function categoryLabel(category: ResourceTelemetryProcessCategory): string {
   switch (category) {
     case "server":
-      return "Server";
+      return "서버";
     case "server-child":
-      return "Backend child";
+      return "백엔드 하위 프로세스";
     case "provider-root":
-      return "Provider";
+      return "제공자";
     case "terminal-root":
-      return "Terminal";
+      return "터미널";
     case "electron-main":
-      return "Electron main";
+      return "Electron 메인";
     case "electron-renderer":
-      return "Renderer";
+      return "렌더러";
     case "electron-gpu":
       return "GPU";
     case "electron-utility":
-      return "Electron utility";
+      return "Electron 유틸리티";
     case "resource-monitor":
-      return "Monitor";
+      return "모니터";
     case "unknown-t3":
-      return "T3 process";
+      return "T3 프로세스";
   }
 }
 
@@ -149,13 +148,13 @@ function categoryDotClass(category: ResourceTelemetryProcessCategory): string {
 function ioSemanticsLabel(semantics: ResourceTelemetryIoSemantics): string {
   switch (semantics) {
     case "storage":
-      return "Storage bytes";
+      return "저장 장치 바이트";
     case "logical":
-      return "Logical bytes";
+      return "논리 바이트";
     case "all-io":
-      return "All I/O bytes";
+      return "전체 I/O 바이트";
     case "unavailable":
-      return "Unavailable";
+      return "사용할 수 없음";
   }
 }
 
@@ -165,7 +164,37 @@ function booleanStateLabel(
 ): string {
   if (value === "true") return labels.true;
   if (value === "false") return labels.false;
-  return "Unknown";
+  return "알 수 없음";
+}
+
+function sourceStatusLabel(status: ResourceTelemetrySourceStatus): string {
+  switch (status) {
+    case "starting":
+      return "시작 중";
+    case "healthy":
+      return "정상";
+    case "degraded":
+      return "성능 저하";
+    case "unavailable":
+      return "사용할 수 없음";
+    case "stopped":
+      return "중지됨";
+  }
+}
+
+function thermalStateLabel(state: HostPowerThermalState): string {
+  switch (state) {
+    case "unknown":
+      return "알 수 없음";
+    case "nominal":
+      return "정상";
+    case "fair":
+      return "주의";
+    case "serious":
+      return "심각";
+    case "critical":
+      return "위험";
+  }
 }
 
 function sourceStatusTone(status: ResourceTelemetrySourceStatus): "default" | "warning" | "danger" {
@@ -210,7 +239,7 @@ function SourceStatusBadge({
           tone === "danger" && "bg-destructive",
         )}
       />
-      {label} {presentation?.label ?? status}
+      {label} {presentation?.label ?? sourceStatusLabel(status)}
     </span>
   );
 }
@@ -218,15 +247,15 @@ function SourceStatusBadge({
 function LastSampleLabel({ sampledAt }: { sampledAt: DateTime.Utc | null }) {
   useRelativeTimeTick();
   if (!sampledAt) {
-    return <span className="text-[11px] text-muted-foreground/55">Waiting for sample</span>;
+    return <span className="text-[11px] text-muted-foreground/55">샘플 대기 중</span>;
   }
   const relative = formatRelativeTime(DateTime.formatIso(sampledAt));
   if (!relative) {
-    return <span className="text-[11px] text-muted-foreground/55">Waiting for sample</span>;
+    return <span className="text-[11px] text-muted-foreground/55">샘플 대기 중</span>;
   }
   return (
     <span className="text-[11px] text-muted-foreground/60">
-      Updated <span className="font-mono tabular-nums">{relative.value}</span>
+      업데이트: <span className="font-mono tabular-nums">{relative.value}</span>
       {relative.suffix ? ` ${relative.suffix}` : ""}
     </span>
   );
@@ -286,14 +315,14 @@ function AggregateCard({
           {label}
         </div>
         <div className="rounded-md bg-muted/55 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-muted-foreground/70">
-          {aggregate.processCount} {aggregate.processCount === 1 ? "process" : "processes"}
+          프로세스 {aggregate.processCount}개
         </div>
       </div>
       <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5">
         <MetricPair label="CPU" value={`${aggregate.currentCpuPercent.toFixed(1)}%`} />
-        <MetricPair label="Memory" value={formatBytes(aggregate.currentRssBytes)} />
-        <MetricPair label="Read" value={formatRate(aggregate.ioReadBytesPerSecond)} />
-        <MetricPair label="Write" value={formatRate(aggregate.ioWriteBytesPerSecond)} />
+        <MetricPair label="메모리" value={formatBytes(aggregate.currentRssBytes)} />
+        <MetricPair label="읽기" value={formatRate(aggregate.ioReadBytesPerSecond)} />
+        <MetricPair label="쓰기" value={formatRate(aggregate.ioWriteBytesPerSecond)} />
       </div>
     </div>
   );
@@ -322,9 +351,9 @@ function HealthSource({ label, health }: { label: string; health: ResourceTeleme
         <div className="text-[13px] font-medium text-foreground">{label}</div>
         <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground/65">
           {expectedInBrowser
-            ? "Available when this page runs inside the desktop app."
+            ? "데스크톱 앱에서 이 화면을 열면 사용할 수 있습니다."
             : Option.match(health.lastError, {
-                onNone: () => "No reported errors",
+                onNone: () => "보고된 오류 없음",
                 onSome: (error) => error,
               })}
         </div>
@@ -335,7 +364,7 @@ function HealthSource({ label, health }: { label: string; health: ResourceTeleme
         presentation={
           expectedInBrowser
             ? {
-                label: "Desktop only",
+                label: "데스크톱 전용",
                 tone: "neutral",
               }
             : undefined
@@ -407,13 +436,13 @@ function ResourceHistoryChart({
     <div className="border-t border-border/60 px-4 py-4 sm:px-5">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground/65">
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-1.5 w-3 rounded-full bg-foreground/70" /> CPU average
+          <span className="h-1.5 w-3 rounded-full bg-foreground/70" /> CPU 평균
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-1.5 w-3 rounded-full bg-sky-500/70" /> I/O reads
+          <span className="h-1.5 w-3 rounded-full bg-sky-500/70" /> I/O 읽기
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-1.5 w-3 rounded-full bg-amber-500/80" /> I/O writes
+          <span className="h-1.5 w-3 rounded-full bg-amber-500/80" /> I/O 쓰기
         </span>
       </div>
       <div className="flex h-32 items-end gap-1 overflow-hidden rounded-lg border border-border/40 bg-muted/8 px-2 pt-3 pb-2">
@@ -454,10 +483,10 @@ function ResourceHistoryChart({
                 }
               />
               <TooltipPopup side="top" className="space-y-0.5 text-left">
-                <div>CPU avg {bucket.avgCpuPercent.toFixed(1)}%</div>
-                <div>CPU peak {bucket.maxCpuPercent.toFixed(1)}%</div>
-                <div>Read {formatBytes(bucket.ioReadBytes)}</div>
-                <div>Write {formatBytes(bucket.ioWriteBytes)}</div>
+                <div>CPU 평균 {bucket.avgCpuPercent.toFixed(1)}%</div>
+                <div>CPU 최대 {bucket.maxCpuPercent.toFixed(1)}%</div>
+                <div>읽기 {formatBytes(bucket.ioReadBytes)}</div>
+                <div>쓰기 {formatBytes(bucket.ioWriteBytes)}</div>
               </TooltipPopup>
             </Tooltip>
           );
@@ -489,7 +518,7 @@ function ProcessTreeName({
           type="button"
           className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => onToggle(process)}
-          aria-label={collapsed ? `Expand ${name}` : `Collapse ${name}`}
+          aria-label={collapsed ? `${name} 펼치기` : `${name} 접기`}
         >
           <ChevronIcon className="size-3.5" />
         </button>
@@ -605,24 +634,24 @@ function ProcessTable({
         </colgroup>
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[10px] uppercase tracking-[0.08em] text-muted-foreground/65">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">Process</th>
-            <th className="px-3 py-2 font-semibold">Category</th>
+            <th className="px-4 py-2 font-semibold sm:pl-5">프로세스</th>
+            <th className="px-3 py-2 font-semibold">분류</th>
             <th className="px-3 py-2 text-right font-semibold">CPU</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU Time</th>
-            <th className="px-3 py-2 text-right font-semibold">Memory</th>
-            <th className="px-3 py-2 text-right font-semibold">Read/s</th>
-            <th className="px-3 py-2 text-right font-semibold">Write/s</th>
-            <th className="px-3 py-2 text-right font-semibold">Read Total</th>
-            <th className="px-3 py-2 text-right font-semibold">Write Total</th>
+            <th className="px-3 py-2 text-right font-semibold">CPU 시간</th>
+            <th className="px-3 py-2 text-right font-semibold">메모리</th>
+            <th className="px-3 py-2 text-right font-semibold">초당 읽기</th>
+            <th className="px-3 py-2 text-right font-semibold">초당 쓰기</th>
+            <th className="px-3 py-2 text-right font-semibold">총 읽기</th>
+            <th className="px-3 py-2 text-right font-semibold">총 쓰기</th>
             <th className="px-3 py-2 text-right font-semibold">PID</th>
-            <th className="px-2 py-2 text-right font-semibold sm:pr-4">Kill</th>
+            <th className="px-2 py-2 text-right font-semibold sm:pr-4">종료</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
           {visible.length === 0 ? (
             <tr>
               <td colSpan={11} className="px-4 py-5 text-xs text-muted-foreground sm:px-5">
-                Waiting for the native process monitor.
+                네이티브 프로세스 모니터를 기다리는 중입니다.
               </td>
             </tr>
           ) : null}
@@ -706,14 +735,14 @@ function HistoryProcessTable({
         </colgroup>
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[10px] uppercase tracking-[0.08em] text-muted-foreground/65">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">Process</th>
-            <th className="px-3 py-2 font-semibold">Category</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU Time</th>
-            <th className="px-3 py-2 text-right font-semibold">Peak CPU</th>
-            <th className="px-3 py-2 text-right font-semibold">Peak Mem</th>
-            <th className="px-3 py-2 text-right font-semibold">Read</th>
-            <th className="px-3 py-2 text-right font-semibold">Write</th>
-            <th className="px-3 py-2 text-right font-semibold">Samples</th>
+            <th className="px-4 py-2 font-semibold sm:pl-5">프로세스</th>
+            <th className="px-3 py-2 font-semibold">분류</th>
+            <th className="px-3 py-2 text-right font-semibold">CPU 시간</th>
+            <th className="px-3 py-2 text-right font-semibold">최대 CPU</th>
+            <th className="px-3 py-2 text-right font-semibold">최대 메모리</th>
+            <th className="px-3 py-2 text-right font-semibold">읽기</th>
+            <th className="px-3 py-2 text-right font-semibold">쓰기</th>
+            <th className="px-3 py-2 text-right font-semibold">샘플</th>
             <th className="px-3 py-2 text-right font-semibold sm:pr-5">PID</th>
           </tr>
         </thead>
@@ -721,7 +750,7 @@ function HistoryProcessTable({
           {processes.length === 0 ? (
             <tr>
               <td colSpan={9} className="px-4 py-5 text-xs text-muted-foreground sm:px-5">
-                No retained process samples in this window.
+                이 기간에 보관된 프로세스 샘플이 없습니다.
               </td>
             </tr>
           ) : null}
@@ -790,19 +819,19 @@ function AttributionTable({ entries }: { entries: ReadonlyArray<ResourceAttribut
         </colgroup>
         <thead className="border-b border-border/60 text-[10px] uppercase tracking-[0.08em] text-muted-foreground/65">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">Component</th>
-            <th className="px-3 py-2 font-semibold">Operation</th>
-            <th className="px-3 py-2 text-right font-semibold">Logical Read</th>
-            <th className="px-3 py-2 text-right font-semibold">Logical Write</th>
-            <th className="px-3 py-2 text-right font-semibold">Count</th>
-            <th className="px-3 py-2 text-right font-semibold sm:pr-5">Time</th>
+            <th className="px-4 py-2 font-semibold sm:pl-5">구성 요소</th>
+            <th className="px-3 py-2 font-semibold">작업</th>
+            <th className="px-3 py-2 text-right font-semibold">논리 읽기</th>
+            <th className="px-3 py-2 text-right font-semibold">논리 쓰기</th>
+            <th className="px-3 py-2 text-right font-semibold">횟수</th>
+            <th className="px-3 py-2 text-right font-semibold sm:pr-5">시간</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
           {entries.length === 0 ? (
             <tr>
               <td colSpan={6} className="px-4 py-5 text-xs text-muted-foreground sm:px-5">
-                No instrumented application I/O has been recorded yet.
+                기록된 애플리케이션 I/O가 아직 없습니다.
               </td>
             </tr>
           ) : null}
@@ -820,7 +849,7 @@ function AttributionTable({ entries }: { entries: ReadonlyArray<ResourceAttribut
               </td>
               <td className="px-3 py-2 text-right font-mono tabular-nums">{entry.count}</td>
               <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground sm:pr-5">
-                {(entry.durationMs / 1_000).toFixed(2)}s
+                {(entry.durationMs / 1_000).toFixed(2)}초
               </td>
             </tr>
           ))}
@@ -854,7 +883,7 @@ export function ResourceTelemetryDiagnostics() {
       if (
         signal === "SIGKILL" &&
         !window.confirm(
-          `Send SIGKILL to process ${process.identity.pid}? This cannot be handled by the process.`,
+          `프로세스 ${process.identity.pid}에 SIGKILL을 보낼까요? 프로세스가 이를 처리할 수 없습니다.`,
         )
       ) {
         return;
@@ -881,18 +910,18 @@ export function ResourceTelemetryDiagnostics() {
           if (result.value.signaled) return;
           toastManager.add({
             type: "error",
-            title: `Could not send ${signal}`,
+            title: `${signal}을 보내지 못했습니다`,
             description: Option.getOrElse(
               result.value.message,
-              () => `Failed to send ${signal} to process ${process.identity.pid}.`,
+              () => `프로세스 ${process.identity.pid}에 ${signal}을 보내지 못했습니다.`,
             ),
           });
         })
         .catch((error: unknown) => {
           toastManager.add({
             type: "error",
-            title: `Could not send ${signal}`,
-            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+            title: `${signal}을 보내지 못했습니다`,
+            description: error instanceof Error ? error.message : `${signal} 전송에 실패했습니다.`,
           });
         })
         .finally(() => {
@@ -913,9 +942,9 @@ export function ResourceTelemetryDiagnostics() {
       .catch((error: unknown) => {
         toastManager.add({
           type: "error",
-          title: "Could not restart resource monitor",
+          title: "리소스 모니터를 다시 시작하지 못했습니다",
           description:
-            error instanceof Error ? error.message : "The resource monitor retry failed.",
+            error instanceof Error ? error.message : "리소스 모니터 재시도에 실패했습니다.",
         });
       })
       .finally(() => {
@@ -939,12 +968,12 @@ export function ResourceTelemetryDiagnostics() {
   return (
     <>
       <SettingsSection
-        title="Resource monitor"
+        title="리소스 모니터"
         icon={<ActivityIcon className="size-4 text-muted-foreground" />}
         headerAction={
           <div className="flex items-center gap-2">
             {snapshot ? (
-              <SourceStatusBadge label="Native" status={snapshot.health.native.status} />
+              <SourceStatusBadge label="네이티브" status={snapshot.health.native.status} />
             ) : null}
             <LastSampleLabel sampledAt={snapshot?.readAt ?? null} />
             <Tooltip>
@@ -956,7 +985,7 @@ export function ResourceTelemetryDiagnostics() {
                     className="size-5 rounded-sm p-0"
                     disabled={telemetry.isPending}
                     onClick={telemetry.refresh}
-                    aria-label="Refresh resource telemetry"
+                    aria-label="리소스 사용량 새로고침"
                   >
                     <RefreshCwIcon
                       className={cn("size-3", telemetry.isPending && "animate-spin")}
@@ -964,7 +993,7 @@ export function ResourceTelemetryDiagnostics() {
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Refresh telemetry snapshot</TooltipPopup>
+              <TooltipPopup side="top">리소스 사용량 스냅샷 새로고침</TooltipPopup>
             </Tooltip>
           </div>
         }
@@ -973,52 +1002,50 @@ export function ResourceTelemetryDiagnostics() {
           <div className="flex flex-col gap-3 border-b border-border/60 bg-linear-to-r from-muted/45 via-muted/20 to-transparent px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">
-                T3 system footprint
+                T3 시스템 사용량
               </div>
               <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted-foreground">
-                Live native counters for the server, providers, terminals, desktop processes, and
-                the monitor itself.
+                서버, 제공자, 터미널, 데스크톱 프로세스와 모니터 자체의 네이티브 수치를 실시간으로
+                보여 줍니다.
               </p>
             </div>
             <div className="flex items-center gap-2 text-[10px] text-muted-foreground/65">
               <span className="size-1.5 rounded-full bg-emerald-500" />
-              Sampling every {snapshot ? formatSampleInterval(snapshot.sampleIntervalMs) : "..."}
+              {snapshot ? formatSampleInterval(snapshot.sampleIntervalMs) : "..."}마다 수집
             </div>
           </div>
           <div className="grid grid-cols-2 divide-x divide-y divide-border/55 md:grid-cols-3">
             <IconStat
               icon={<CpuIcon className="size-3.5" />}
-              label="Current CPU"
+              label="현재 CPU"
               value={allT3 ? `${allT3.currentCpuPercent.toFixed(1)}%` : "..."}
-              detail={allT3 ? `${formatCpuTime(allT3.cpuTimeMs)} observed CPU time` : undefined}
+              detail={allT3 ? `관측된 CPU 시간 ${formatCpuTime(allT3.cpuTimeMs)}` : undefined}
             />
             <IconStat
               icon={<MemoryStickIcon className="size-3.5" />}
-              label="Resident memory"
+              label="상주 메모리"
               value={allT3 ? formatBytes(allT3.currentRssBytes) : "..."}
-              detail={
-                allT3 ? `${formatBytes(allT3.peakRssBytes)} combined process peaks` : undefined
-              }
+              detail={allT3 ? `프로세스 최대값 합계 ${formatBytes(allT3.peakRssBytes)}` : undefined}
             />
             <IconStat
               icon={<ActivityIcon className="size-3.5" />}
-              label="Process count"
+              label="프로세스 수"
               value={allT3 ? String(allT3.processCount) : "..."}
               detail={
-                allT3 ? `${allT3.processStarts} starts · ${allT3.processExits} exits` : undefined
+                allT3 ? `시작 ${allT3.processStarts}회 · 종료 ${allT3.processExits}회` : undefined
               }
             />
             <IconStat
               icon={<HardDriveIcon className="size-3.5" />}
-              label="Read throughput"
+              label="읽기 처리량"
               value={allT3 ? formatRate(allT3.ioReadBytesPerSecond) : "..."}
-              detail={allT3 ? `${formatBytes(allT3.ioReadBytes)} observed` : undefined}
+              detail={allT3 ? `관측값 ${formatBytes(allT3.ioReadBytes)}` : undefined}
             />
             <IconStat
               icon={<DatabaseIcon className="size-3.5" />}
-              label="Write throughput"
+              label="쓰기 처리량"
               value={allT3 ? formatRate(allT3.ioWriteBytesPerSecond) : "..."}
-              detail={allT3 ? `${formatBytes(allT3.ioWriteBytes)} observed` : undefined}
+              detail={allT3 ? `관측값 ${formatBytes(allT3.ioWriteBytes)}` : undefined}
               tone={
                 allT3 && allT3.ioWriteBytesPerSecond >= 10 * 1_024 * 1_024
                   ? "danger"
@@ -1029,11 +1056,17 @@ export function ResourceTelemetryDiagnostics() {
             />
             <IconStat
               icon={<GaugeIcon className="size-3.5" />}
-              label="CPU speed limit"
+              label="CPU 속도 제한"
               value={
-                snapshot ? (speedLimit === null ? "Unknown" : `${speedLimit.toFixed(0)}%`) : "..."
+                snapshot
+                  ? speedLimit === null
+                    ? "알 수 없음"
+                    : `${speedLimit.toFixed(0)}%`
+                  : "..."
               }
-              detail={snapshot ? `${snapshot.power.thermalState} thermal state` : undefined}
+              detail={
+                snapshot ? `열 상태: ${thermalStateLabel(snapshot.power.thermalState)}` : undefined
+              }
               tone={speedLimit !== null && speedLimit < 80 ? "warning" : "default"}
             />
           </div>
@@ -1046,17 +1079,17 @@ export function ResourceTelemetryDiagnostics() {
           {snapshot ? (
             <div className="grid border-t border-border/60 bg-muted/10 md:grid-cols-3">
               <AggregateCard
-                label="Backend + agents"
+                label="백엔드 및 에이전트"
                 accentClass="bg-emerald-500/80"
                 aggregate={snapshot.groups.backend}
               />
               <AggregateCard
-                label="Desktop"
+                label="데스크톱"
                 accentClass="bg-sky-500/80"
                 aggregate={snapshot.groups.electron}
               />
               <AggregateCard
-                label="Monitor overhead"
+                label="모니터 부하"
                 accentClass="bg-amber-500/80"
                 aggregate={snapshot.groups.monitor}
               />
@@ -1066,13 +1099,13 @@ export function ResourceTelemetryDiagnostics() {
       </SettingsSection>
 
       <SettingsSection
-        title="Host & collection"
+        title="호스트 및 수집 상태"
         icon={<GaugeIcon className="size-4 text-muted-foreground" />}
         headerAction={
           collectorNeedsRetry ? (
             <Button size="xs" variant="outline" disabled={isRetrying} onClick={retryCollector}>
               <RotateCcwIcon className={cn("size-3", isRetrying && "animate-spin")} />
-              Retry monitor
+              모니터 재시도
             </Button>
           ) : null
         }
@@ -1083,49 +1116,49 @@ export function ResourceTelemetryDiagnostics() {
               <span className="flex size-6 items-center justify-center rounded-md bg-muted/60">
                 <BatteryIcon className="size-3.5" />
               </span>
-              Host state
+              호스트 상태
             </div>
             {hasHostPowerSignal && snapshot ? (
               <>
                 <DetailRow
-                  label="Power source"
+                  label="전원"
                   value={booleanStateLabel(snapshot.power.onBattery, {
-                    true: "Battery",
-                    false: "External power",
+                    true: "배터리",
+                    false: "외부 전원",
                   })}
                 />
                 <DetailRow
-                  label="Low power mode"
+                  label="저전력 모드"
                   value={booleanStateLabel(snapshot.power.lowPowerMode, {
-                    true: "Enabled",
-                    false: "Disabled",
+                    true: "켜짐",
+                    false: "꺼짐",
                   })}
                 />
                 <DetailRow
-                  label="Idle"
+                  label="유휴 상태"
                   value={`${booleanStateLabel(snapshot.power.idle, {
-                    true: "Idle",
-                    false: "Active",
+                    true: "유휴",
+                    false: "활성",
                   })}${
                     snapshot.power.idleSeconds === null
                       ? ""
-                      : ` · ${Math.round(snapshot.power.idleSeconds)}s`
+                      : ` · ${Math.round(snapshot.power.idleSeconds)}초`
                   }`}
                 />
                 <DetailRow
-                  label="Session"
+                  label="세션"
                   value={
                     snapshot.power.suspended
-                      ? "Suspended"
+                      ? "일시 중단됨"
                       : booleanStateLabel(snapshot.power.locked, {
-                          true: "Locked",
-                          false: "Unlocked",
+                          true: "잠김",
+                          false: "잠금 해제",
                         })
                   }
                 />
                 <DetailRow
-                  label="Thermal"
-                  value={snapshot.power.thermalState}
+                  label="열 상태"
+                  value={thermalStateLabel(snapshot.power.thermalState)}
                   valueClassName={
                     snapshot.power.thermalState === "serious" ||
                     snapshot.power.thermalState === "critical"
@@ -1137,11 +1170,11 @@ export function ResourceTelemetryDiagnostics() {
             ) : (
               <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-5">
                 <div className="text-[13px] font-medium text-foreground">
-                  Desktop host signals not connected
+                  데스크톱 호스트 신호가 연결되지 않음
                 </div>
                 <p className="mt-1.5 max-w-sm text-[11px] leading-relaxed text-muted-foreground/70">
-                  Power, idle, lock, and thermal state are supplied by the desktop host. Process
-                  telemetry remains fully active in this browser session.
+                  전원, 유휴, 잠금, 열 상태는 데스크톱 호스트가 제공합니다. 현재 브라우저 세션에서도
+                  프로세스 사용량 수집은 계속 작동합니다.
                 </p>
               </div>
             )}
@@ -1151,22 +1184,22 @@ export function ResourceTelemetryDiagnostics() {
               <span className="flex size-6 items-center justify-center rounded-md bg-muted/60">
                 <GaugeIcon className="size-3.5" />
               </span>
-              Collection health
+              수집 상태
             </div>
             {snapshot ? (
               <>
-                <HealthSource label="Native process monitor" health={snapshot.health.native} />
-                <HealthSource label="Electron main process" health={snapshot.health.desktop} />
+                <HealthSource label="네이티브 프로세스 모니터" health={snapshot.health.native} />
+                <HealthSource label="Electron 메인 프로세스" health={snapshot.health.desktop} />
                 <DetailRow
-                  label="Collection time"
+                  label="수집 시간"
                   value={formatDurationMicros(snapshot.health.collectionDurationMicros)}
                 />
                 <DetailRow
-                  label="Process scan"
-                  value={`${snapshot.health.retainedProcessCount}/${snapshot.health.scannedProcessCount} retained`}
+                  label="프로세스 검사"
+                  value={`${snapshot.health.retainedProcessCount}/${snapshot.health.scannedProcessCount}개 유지`}
                 />
                 <DetailRow
-                  label="Inaccessible"
+                  label="접근 불가"
                   value={String(snapshot.health.inaccessibleProcessCount)}
                   valueClassName={
                     snapshot.health.inaccessibleProcessCount > 0
@@ -1175,9 +1208,9 @@ export function ResourceTelemetryDiagnostics() {
                   }
                 />
                 <DetailRow
-                  label="Sidecar"
+                  label="사이드카"
                   value={Option.match(snapshot.health.sidecarVersion, {
-                    onNone: () => "Unavailable",
+                    onNone: () => "사용할 수 없음",
                     onSome: (version) =>
                       `${version}${Option.match(snapshot.health.sidecarPid, {
                         onNone: () => "",
@@ -1185,11 +1218,11 @@ export function ResourceTelemetryDiagnostics() {
                       })}`,
                   })}
                 />
-                <DetailRow label="Restarts" value={String(snapshot.health.restartCount)} />
+                <DetailRow label="재시작" value={String(snapshot.health.restartCount)} />
               </>
             ) : (
               <div className="py-4 text-xs text-muted-foreground">
-                Waiting for collector health.
+                수집기 상태를 기다리는 중입니다.
               </div>
             )}
           </div>
@@ -1197,7 +1230,7 @@ export function ResourceTelemetryDiagnostics() {
       </SettingsSection>
 
       <SettingsSection
-        title="Resource timeline"
+        title="리소스 타임라인"
         icon={<HardDriveIcon className="size-4 text-muted-foreground" />}
         headerAction={
           <div className="flex items-center gap-2">
@@ -1208,7 +1241,7 @@ export function ResourceTelemetryDiagnostics() {
               className="size-5 rounded-sm p-0"
               disabled={history.isPending}
               onClick={history.refresh}
-              aria-label="Refresh resource history"
+              aria-label="리소스 기록 새로고침"
             >
               <RefreshCwIcon className={cn("size-3", history.isPending && "animate-spin")} />
             </Button>
@@ -1228,12 +1261,12 @@ export function ResourceTelemetryDiagnostics() {
       </SettingsSection>
 
       <SettingsSection
-        title="Live process tree"
+        title="실시간 프로세스 트리"
         icon={<CpuIcon className="size-4 text-muted-foreground" />}
         headerAction={
           snapshot ? (
             <span className="text-[10px] text-muted-foreground/55">
-              Identity: <span className="font-mono">PID + start time</span>
+              식별 기준: <span className="font-mono">PID + 시작 시각</span>
             </span>
           ) : null
         }
@@ -1248,17 +1281,17 @@ export function ResourceTelemetryDiagnostics() {
       </SettingsSection>
 
       <SettingsSection
-        title="Instrumented application I/O"
+        title="계측된 애플리케이션 I/O"
         icon={<DatabaseIcon className="size-4 text-muted-foreground" />}
         headerAction={
-          <span className="text-[10px] text-muted-foreground/55">Logical bytes by operation</span>
+          <span className="text-[10px] text-muted-foreground/55">작업별 논리 바이트</span>
         }
       >
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-[0_1px_1px_rgb(0_0_0/0.03)]">
           <div className="bg-muted/15 px-4 py-3 text-[11px] leading-relaxed text-muted-foreground sm:px-5">
-            Native counters identify which process is reading or writing. These application-level
-            counters identify known T3 operations so process spikes can be correlated with specific
-            persistence and logging paths.
+            네이티브 수치는 어떤 프로세스가 읽거나 쓰는지 보여 줍니다. 애플리케이션 수준 수치는
+            알려진 T3 작업을 구분해, 프로세스 사용량 급증을 특정 저장 및 로그 경로와 연결해 확인할
+            수 있게 합니다.
           </div>
           <AttributionTable entries={snapshot?.attribution.entries ?? []} />
         </div>

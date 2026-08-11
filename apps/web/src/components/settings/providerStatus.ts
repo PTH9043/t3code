@@ -21,6 +21,10 @@ export const PROVIDER_STATUS_STYLES = {
 
 export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
 
+function koreanDetail(message: string | undefined, fallback: string | null): string | null {
+  return message && /[가-힣]/.test(message) ? message : fallback;
+}
+
 /**
  * Derive the headline + detail copy shown under a provider's name in the
  * settings page. Prefers `provider.message` for server-supplied detail and
@@ -31,52 +35,65 @@ export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
 export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider) {
     return {
-      headline: "Checking provider status",
-      detail: "Waiting for the server to report installation and authentication details.",
+      headline: "CLI 상태 확인 중",
+      detail: "서버에서 설치 및 인증 상태를 확인하고 있습니다.",
     };
   }
   if (!provider.enabled) {
     return {
-      headline: "Disabled",
-      detail:
-        provider.message ?? "This provider is installed but disabled for new sessions in T3 Code.",
+      headline: "사용 안 함",
+      detail: koreanDetail(
+        provider.message,
+        "이 CLI 계정은 새 세션에서 사용하지 않도록 설정되어 있습니다.",
+      ),
     };
   }
   if (!provider.installed) {
     return {
-      headline: "Not found",
-      detail: provider.message ?? "CLI not detected on PATH.",
+      headline: "CLI를 찾을 수 없음",
+      detail: koreanDetail(
+        provider.message,
+        "CLI 실행 파일이 설치되어 있고 PATH에 등록되어 있는지 확인하세요.",
+      ),
     };
   }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
     return {
-      headline: authLabel ? `Authenticated · ${authLabel}` : "Authenticated",
-      detail: provider.message ?? null,
+      headline: authLabel ? `인증됨 · ${authLabel}` : "인증됨",
+      detail: koreanDetail(provider.message, null),
     };
   }
   if (provider.auth.status === "unauthenticated") {
     return {
-      headline: "Not authenticated",
-      detail: provider.message ?? null,
+      headline: "인증 필요",
+      detail: koreanDetail(
+        provider.message,
+        "해당 CLI의 로그인 명령을 실행한 뒤 상태를 새로고침하세요.",
+      ),
     };
   }
   if (provider.status === "warning") {
     return {
-      headline: "Needs attention",
-      detail:
-        provider.message ?? "The provider is installed, but the server could not fully verify it.",
+      headline: "확인 필요",
+      detail: koreanDetail(
+        provider.message,
+        "CLI는 설치되어 있지만 서버에서 상태를 완전히 확인하지 못했습니다.",
+      ),
     };
   }
   if (provider.status === "error") {
     return {
-      headline: "Unavailable",
-      detail: provider.message ?? "The provider failed its startup checks.",
+      headline: "사용할 수 없음",
+      detail: koreanDetail(
+        provider.message,
+        "CLI 시작 상태를 확인하지 못했습니다. 서버 로그를 확인하세요.",
+      ),
     };
   }
   return {
-    headline: "Available",
-    detail: provider.message ?? "Installed and ready, but authentication could not be verified.",
+    headline: "사용 가능",
+    detail: koreanDetail(provider.message, "CLI는 준비되었지만 인증 상태를 확인하지 못했습니다."),
   };
 }
 
@@ -101,16 +118,14 @@ export function getProviderVersionAdvisoryPresentation(
     return null;
   }
 
-  const label = "Update available";
+  const label = "업데이트 가능";
   const version = advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
 
   return {
-    detail:
-      advisory.message ??
-      (versionLabel
-        ? `${label}: install ${versionLabel}.`
-        : `${label}: install the latest provider version.`),
+    detail: versionLabel
+      ? `${label}: ${versionLabel} 버전을 설치할 수 있습니다.`
+      : `${label}: 최신 CLI 버전을 설치할 수 있습니다.`,
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
   };

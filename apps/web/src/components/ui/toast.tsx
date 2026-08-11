@@ -118,7 +118,7 @@ function handleToastDismissClick(
 
 function CopyErrorButton({ text }: { text: string }) {
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "error-message" });
-  const label = isCopied ? "Copied error" : "Copy error";
+  const label = isCopied ? "오류 복사됨" : "오류 복사";
 
   return (
     <Tooltip>
@@ -662,7 +662,7 @@ function Toasts({ position }: { position: ToastPosition }) {
               />
               <div className={toastCornerDismissClass}>
                 <button
-                  aria-label="Dismiss notification"
+                  aria-label="알림 닫기"
                   className={toastCornerOrbClass}
                   data-slot="toast-close"
                   onClick={() =>
@@ -753,7 +753,7 @@ function AnchoredToasts() {
                     <>
                       <div className={toastCornerDismissClass}>
                         <button
-                          aria-label="Dismiss notification"
+                          aria-label="알림 닫기"
                           className={toastCornerOrbClass}
                           data-slot="toast-close"
                           onClick={() =>

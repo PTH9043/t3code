@@ -82,17 +82,17 @@ const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
 }> = [
   {
     id: "main",
-    title: "Main colors",
+    title: "주요 색상",
     roles: THEME_EDITOR_PRIMARY_ROLES,
   },
   {
     id: "status",
-    title: "Status colors",
+    title: "상태 색상",
     roles: THEME_EDITOR_STATUS_ROLES,
   },
   {
     id: "additional",
-    title: "Other colors",
+    title: "기타 색상",
     roles: THEME_EDITOR_ADVANCED_ROLES,
   },
 ];
@@ -112,6 +112,10 @@ function getThemeEditorColorsByAppearance(): ThemeEditorColorsByAppearance {
     light: getThemeEditorDefaults("light"),
     dark: getThemeEditorDefaults("dark"),
   };
+}
+
+function themeAppearanceLabel(appearance: ThemeAppearance): string {
+  return appearance === "light" ? "밝은" : "어두운";
 }
 
 function isThemeEditorColor(value: string): boolean {
@@ -306,10 +310,10 @@ export function ThemeEditorPanel({
   // had it (adding one is a create-with-same-name away).
   const appearanceLockReason = (appearance: ThemeAppearance): string | null => {
     if (editableAppearances && !editableAppearances.includes(appearance)) {
-      return `“${editingTheme?.label}” has no ${appearance} palette. Create a theme with the same name to add one.`;
+      return `“${editingTheme?.label}”에는 ${themeAppearanceLabel(appearance)} 팔레트가 없습니다. 같은 이름으로 테마를 만들어 추가하세요.`;
     }
     if (!isEditing && takenAppearances.includes(appearance)) {
-      return `“${mergeTarget?.label}” already has a ${appearance} palette.`;
+      return `“${mergeTarget?.label}”에는 이미 ${themeAppearanceLabel(appearance)} 팔레트가 있습니다.`;
     }
     return null;
   };
@@ -630,7 +634,7 @@ export function ThemeEditorPanel({
 
   const handleSubmit = useCallback(() => {
     if (!name.trim()) {
-      setError("Name your theme first.");
+      setError("먼저 테마 이름을 입력하세요.");
       return;
     }
 
@@ -659,7 +663,9 @@ export function ThemeEditorPanel({
         const editedModes = getThemeModes(editingTheme);
         const collision = editedModes.find((mode) => takenAppearances.includes(mode));
         if (collision) {
-          setError(`“${mergeTarget.label}” already has a ${collision} palette. Pick another name.`);
+          setError(
+            `“${mergeTarget.label}”에는 이미 ${themeAppearanceLabel(collision)} 팔레트가 있습니다. 다른 이름을 선택하세요.`,
+          );
           return;
         }
         mergedAppearance = editedModes[0] ?? null;
@@ -712,7 +718,7 @@ export function ThemeEditorPanel({
       } else if (mergeTarget) {
         if (takenAppearances.includes(activeAppearance)) {
           setError(
-            `“${mergeTarget.label}” already has light and dark palettes. Pick another name.`,
+            `“${mergeTarget.label}”에는 이미 밝은 팔레트와 어두운 팔레트가 모두 있습니다. 다른 이름을 선택하세요.`,
           );
           return;
         }
@@ -771,18 +777,12 @@ export function ThemeEditorPanel({
             // Storage is failing wholesale; the error below covers it.
           }
         }
-        setError("Theme saved, but it could not be made active. Try again.");
+        setError("테마는 저장했지만 적용하지 못했습니다. 다시 시도해 주세요.");
         return;
       }
       onOpenChange(false);
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : isEditing
-            ? "Could not save the theme."
-            : "Could not create the theme.",
-      );
+      setError(isEditing ? "테마를 저장하지 못했습니다." : "테마를 만들지 못했습니다.");
     }
   }, [
     activeAppearance,
@@ -801,7 +801,7 @@ export function ThemeEditorPanel({
 
   const renderNameField = () => (
     <label className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-center gap-3">
-      <span className="text-sm font-medium">Theme name</span>
+      <span className="text-sm font-medium">테마 이름</span>
       <Input
         autoFocus
         onChange={(event) => {
@@ -810,7 +810,7 @@ export function ThemeEditorPanel({
           // the stale message goes with the old name.
           setError(null);
         }}
-        placeholder={isEditing ? "Theme name" : "e.g. Aurora"}
+        placeholder={isEditing ? "테마 이름" : "예: 오로라"}
         value={name}
       />
     </label>
@@ -832,7 +832,7 @@ export function ThemeEditorPanel({
           if (lockReason === null) setActiveAppearance(appearance);
         }}
       >
-        {appearance === "light" ? "Light" : "Dark"}
+        {appearance === "light" ? "밝게" : "어둡게"}
       </Button>
     );
     if (lockReason === null) return button;
@@ -846,8 +846,8 @@ export function ThemeEditorPanel({
 
   const renderAppearanceButtons = () => (
     <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-center gap-3">
-      <span className="text-sm font-medium">Appearance</span>
-      <div aria-label="Theme appearance" className="grid grid-cols-2 gap-2" role="group">
+      <span className="text-sm font-medium">화면 모드</span>
+      <div aria-label="테마 화면 모드" className="grid grid-cols-2 gap-2" role="group">
         {renderAppearanceButton("light")}
         {renderAppearanceButton("dark")}
       </div>
@@ -856,11 +856,11 @@ export function ThemeEditorPanel({
 
   const renderSidebarArtworkToggle = () => (
     <label className="grid cursor-pointer grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-center gap-3">
-      <span className="text-sm font-medium">Sidebar artwork</span>
+      <span className="text-sm font-medium">사이드바 배경 그림</span>
       <span className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span>Show T3 Code environment artwork</span>
+        <span>T3 Code 실행 환경 그림 표시</span>
         <Switch
-          aria-label="Allow sidebar artwork with this theme"
+          aria-label="이 테마에서 사이드바 배경 그림 허용"
           checked={sidebarArtwork}
           onCheckedChange={(checked) => setSidebarArtwork(Boolean(checked))}
         />
@@ -871,26 +871,26 @@ export function ThemeEditorPanel({
   const renderColorsHeader = () => (
     <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-start gap-3">
       <div>
-        <h3 className="text-sm font-medium">Colors</h3>
+        <h3 className="text-sm font-medium">색상</h3>
         {isAdvanced ? null : (
-          <p className="text-xs text-muted-foreground">Two colors, rest derived</p>
+          <p className="text-xs text-muted-foreground">두 색상으로 나머지 자동 생성</p>
         )}
       </div>
       <div className="flex min-w-0 items-start gap-3">
         {isAdvanced ? (
           <Input
-            aria-label="Filter colors"
+            aria-label="색상 필터"
             className="min-w-0 flex-1"
             onChange={(event) => setRoleQuery(event.currentTarget.value)}
-            placeholder="Filter colors"
+            placeholder="색상 검색"
             size="sm"
             value={roleQuery}
           />
         ) : null}
         <label className="ml-auto flex shrink-0 cursor-pointer items-center gap-2 pt-0.5 text-sm font-medium">
-          <span>Advanced</span>
+          <span>고급</span>
           <Switch
-            aria-label="Use advanced theme colors"
+            aria-label="고급 테마 색상 사용"
             checked={isAdvanced}
             onCheckedChange={(checked) => handleAdvancedChange(Boolean(checked))}
           />
@@ -934,7 +934,9 @@ export function ThemeEditorPanel({
             {renderRoleFields(group.roles, "grid gap-1")}
           </section>
         ))}
-        {groups.length === 0 ? <p className="text-xs text-muted-foreground">No matches.</p> : null}
+        {groups.length === 0 ? (
+          <p className="text-xs text-muted-foreground">일치하는 색상이 없습니다.</p>
+        ) : null}
       </div>
     ) : (
       <div className="grid gap-1">
@@ -945,7 +947,7 @@ export function ThemeEditorPanel({
             onSelect={selectThemeRole}
             onToggleSelected={toggleThemeRole}
             role={role}
-            label={role === "canvas" ? "Background" : "Accent"}
+            label={role === "canvas" ? "배경" : "강조 색상"}
             selected={selectedRole === role}
             value={colorsByAppearance[activeAppearance][role]}
           />
@@ -1031,7 +1033,7 @@ export function ThemeEditorPanel({
 
   return (
     <div
-      aria-label={isEditing ? "Edit theme" : "Create theme"}
+      aria-label={isEditing ? "테마 편집" : "테마 만들기"}
       className={cn(
         "dialog-glass fixed z-[110] flex max-h-[min(42rem,calc(100dvh-6rem))] w-[min(26rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-xl border text-popover-foreground",
         position === null && "bottom-4 right-4",
@@ -1057,15 +1059,15 @@ export function ThemeEditorPanel({
       >
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2 className="shrink-0 truncate text-sm font-medium">
-            {isEditing ? "Edit theme" : "Create theme"}
+            {isEditing ? "테마 편집" : "테마 만들기"}
           </h2>
           {isMinimized ? null : (
             <p className="truncate text-xs text-muted-foreground">
               {isInspecting
-                ? "Select an element · Esc to cancel"
+                ? "화면 요소를 선택하세요 · Esc로 취소"
                 : selectedRole
-                  ? `${getThemeRoleLabel(selectedRole)} · ${usageCount ?? 0} ${usageCount === 1 ? "use" : "uses"}`
-                  : "Select a color below"}
+                  ? `${getThemeRoleLabel(selectedRole)} · 사용 위치 ${usageCount ?? 0}곳`
+                  : "아래에서 색상을 선택하세요"}
             </p>
           )}
         </div>
@@ -1073,7 +1075,7 @@ export function ThemeEditorPanel({
           <TooltipTrigger
             render={
               <Button
-                aria-label={isInspecting ? "Cancel inspecting app colors" : "Inspect app colors"}
+                aria-label={isInspecting ? "화면 색상 찾기 취소" : "화면 색상 찾기"}
                 aria-pressed={isInspecting}
                 size="xs"
                 variant={isInspecting ? "secondary" : "ghost"}
@@ -1086,16 +1088,16 @@ export function ThemeEditorPanel({
                 }}
               >
                 <MousePointer2Icon />
-                {isInspecting ? "Cancel" : "Inspect"}
+                {isInspecting ? "취소" : "화면에서 찾기"}
               </Button>
             }
           />
           <TooltipPopup data-theme-editor-panel="">
-            {isInspecting ? "Cancel and clear the selection" : "Pick a color from the app"}
+            {isInspecting ? "취소하고 선택 지우기" : "화면에서 사용 중인 색상 선택"}
           </TooltipPopup>
         </Tooltip>
         <Button
-          aria-label={isMinimized ? "Expand the theme editor" : "Minimize the theme editor"}
+          aria-label={isMinimized ? "테마 편집기 펼치기" : "테마 편집기 최소화"}
           size="icon-xs"
           variant="ghost"
           onClick={() => setIsMinimized(!isMinimized)}
@@ -1103,7 +1105,7 @@ export function ThemeEditorPanel({
           {isMinimized ? <ChevronUpIcon /> : <ChevronDownIcon />}
         </Button>
         <Button
-          aria-label="Close the theme editor"
+          aria-label="테마 편집기 닫기"
           size="icon-xs"
           variant="ghost"
           onClick={() => onOpenChange(false)}
@@ -1132,24 +1134,24 @@ export function ThemeEditorPanel({
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-border/70 px-3 py-2">
             <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
-              Cancel
+              취소
             </Button>
             <Button disabled={!name.trim()} size="sm" onClick={handleSubmit}>
               {isEditing ? (
                 mergeTarget ? (
-                  `Merge into “${mergeTarget.label}”`
+                  `“${mergeTarget.label}”에 병합`
                 ) : (
-                  "Save changes"
+                  "변경 사항 저장"
                 )
               ) : mergeTarget ? (
                 <>
                   <PlusIcon />
-                  {`Add ${activeAppearance} palette`}
+                  {`${themeAppearanceLabel(activeAppearance)} 팔레트 추가`}
                 </>
               ) : (
                 <>
                   <PlusIcon />
-                  Create theme
+                  테마 만들기
                 </>
               )}
             </Button>

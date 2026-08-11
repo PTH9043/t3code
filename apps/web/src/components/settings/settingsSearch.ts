@@ -5,6 +5,7 @@ export type SettingsPath =
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/permissions"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -19,13 +20,14 @@ export interface SettingsSearchItem {
  * subtitles both render from this record, so each label exists once.
  */
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
-  "/settings/general": "General",
-  "/settings/appearance": "Appearance",
-  "/settings/keybindings": "Keybindings",
-  "/settings/providers": "Providers",
-  "/settings/source-control": "Source Control",
-  "/settings/connections": "Connections",
-  "/settings/archived": "Archive",
+  "/settings/general": "일반",
+  "/settings/appearance": "화면 및 테마",
+  "/settings/keybindings": "단축키",
+  "/settings/providers": "AI 제공자 및 CLI 계정",
+  "/settings/source-control": "소스 제어",
+  "/settings/connections": "연결",
+  "/settings/permissions": "권한",
+  "/settings/archived": "보관함",
 };
 
 /**
@@ -37,14 +39,14 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
 export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "color-scheme",
-    title: "Color scheme",
+    title: "색상 모드",
     to: "/settings/appearance",
     // The scheme tiles sit at the top of the Appearance section.
     targetId: "appearance",
   },
   {
     id: "theme",
-    title: "Themes",
+    title: "테마",
     to: "/settings/appearance",
     // Theme cards live directly under the scheme tiles; the section is the
     // stable scroll destination for both.
@@ -53,145 +55,180 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     // Prefixed because the slider control already owns the `glass-opacity` id.
     id: "setting-glass-opacity",
-    title: "Glass opacity",
+    title: "유리 효과 투명도",
     to: "/settings/appearance",
   },
   {
     id: "environment-identification",
-    title: "Environment identification",
+    title: "실행 환경 표시",
     to: "/settings/appearance",
     // The setting is stage-dependent, so its parent section is the stable destination.
     targetId: "appearance",
   },
   {
     id: "interface-font",
-    title: "Interface font",
+    title: "인터페이스 글꼴",
     to: "/settings/appearance",
   },
   {
     id: "prompt-font",
-    title: "Prompt font",
+    title: "프롬프트 글꼴",
     to: "/settings/appearance",
   },
   {
     id: "code-font",
-    title: "Code font",
+    title: "코드 글꼴",
     to: "/settings/appearance",
   },
   {
     id: "terminal-font",
-    title: "Terminal font",
+    title: "터미널 글꼴",
     to: "/settings/appearance",
   },
   {
     id: "font-smoothing",
-    title: "Font smoothing",
+    title: "글꼴 다듬기",
     to: "/settings/appearance",
   },
   {
     id: "word-wrap",
-    title: "Word wrap",
+    title: "자동 줄 바꿈",
     to: "/settings/appearance",
   },
   {
     id: "project-grouping",
-    title: "Project grouping",
+    title: "프로젝트 그룹화",
     to: "/settings/general",
   },
   {
     id: "auto-settle-inactive-threads",
-    title: "Auto-settle inactive threads",
+    title: "비활성 대화 자동 정리",
     to: "/settings/general",
   },
   {
     id: "time-format",
-    title: "Time format",
+    title: "시간 형식",
     to: "/settings/general",
   },
   {
     id: "hide-whitespace-changes",
-    title: "Hide whitespace changes",
+    title: "공백 변경 숨기기",
     to: "/settings/general",
   },
   {
     id: "provider-update-checks",
-    title: "Provider update checks",
+    title: "AI 제공자 업데이트 확인",
     to: "/settings/general",
   },
   {
     id: "new-threads",
-    title: "New threads",
+    title: "새 대화",
     to: "/settings/general",
   },
   {
     id: "start-from-origin",
-    title: "Start from origin",
+    title: "원본 상태에서 시작",
     to: "/settings/general",
     targetId: "new-threads",
   },
   {
     id: "add-project-starts-in",
-    title: "Add project starts in",
+    title: "프로젝트 추가 시작 위치",
     to: "/settings/general",
   },
   {
     id: "archive-confirmation",
-    title: "Archive confirmation",
+    title: "보관 전 확인",
     to: "/settings/general",
   },
   {
     id: "delete-confirmation",
-    title: "Delete confirmation",
+    title: "삭제 전 확인",
     to: "/settings/general",
   },
   {
     id: "text-generation-model",
-    title: "Text generation model",
+    title: "텍스트 생성 모델",
     to: "/settings/general",
   },
   {
     id: "diagnostics",
-    title: "Diagnostics",
+    title: "진단",
     to: "/settings/general",
   },
   {
     id: "legacy-plan-mode",
-    title: "Plan mode (legacy)",
+    title: "계획 모드 (이전 방식)",
     to: "/settings/general",
   },
   {
     id: "legacy-token-streaming",
-    title: "Stream token by token (legacy)",
+    title: "토큰 단위 스트리밍 (이전 방식)",
     to: "/settings/general",
   },
   {
     id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
+    title: "사이드바 (이전 방식)",
     to: "/settings/general",
   },
   {
     id: "keybindings",
-    title: "Keybindings",
+    title: "단축키",
     to: "/settings/keybindings",
   },
   {
     id: "providers",
-    title: "Providers",
+    title: "AI 제공자 및 CLI 계정",
     to: "/settings/providers",
   },
   {
     id: "source-control",
-    title: "Source control",
+    title: "소스 제어",
     to: "/settings/source-control",
   },
   {
     id: "remote-environments",
-    title: "Remote environments",
+    title: "원격 실행 환경",
     to: "/settings/connections",
   },
   {
+    id: "automatic-update-download",
+    title: "자동 다운로드",
+    to: "/settings/permissions",
+  },
+  {
+    id: "automatic-update-install",
+    title: "자동 설치 및 재시작",
+    to: "/settings/permissions",
+  },
+  {
+    id: "workspace-program-manual-control",
+    title: "프로그램 수동 제어",
+    to: "/settings/permissions",
+  },
+  {
+    id: "workspace-program-log-collection",
+    title: "프로그램 로그 수집",
+    to: "/settings/permissions",
+  },
+  {
+    id: "workspace-program-auto-start",
+    title: "프로그램 자동 시작",
+    to: "/settings/permissions",
+  },
+  {
+    id: "workspace-program-auto-diagnosis",
+    title: "프로그램 오류 자동 진단",
+    to: "/settings/permissions",
+  },
+  {
+    id: "workspace-program-auto-restart-after-repair",
+    title: "수정 검증 후 자동 재시작",
+    to: "/settings/permissions",
+  },
+  {
     id: "archive",
-    title: "Archived threads",
+    title: "보관된 대화",
     to: "/settings/archived",
   },
 ] as const satisfies ReadonlyArray<SettingsSearchItem>;

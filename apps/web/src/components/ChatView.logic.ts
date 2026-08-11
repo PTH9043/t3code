@@ -87,7 +87,7 @@ export function buildLocalDraftThread(
     id: threadId,
     environmentId: draftThread.environmentId,
     projectId: draftThread.projectId,
-    title: "New thread",
+    title: "새 대화",
     modelSelection: fallbackModelSelection,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
@@ -241,10 +241,10 @@ export function readFileAsDataUrl(file: File): Promise<string> {
         resolve(reader.result);
         return;
       }
-      reject(new Error("Could not read image data."));
+      reject(new Error("이미지 데이터를 읽지 못했습니다."));
     });
     reader.addEventListener("error", () => {
-      reject(reader.error ?? new Error("Failed to read image."));
+      reject(reader.error ?? new Error("이미지를 읽지 못했습니다."));
     });
     reader.readAsDataURL(file);
   });
@@ -311,16 +311,16 @@ export function buildExpiredTerminalContextToastCopy(
   variant: "omitted" | "empty",
 ): { title: string; description: string } {
   const count = Math.max(1, Math.floor(expiredTerminalContextCount));
-  const noun = count === 1 ? "Expired terminal context" : "Expired terminal contexts";
+  const subject = count === 1 ? "만료된 터미널 컨텍스트는" : `만료된 터미널 컨텍스트 ${count}개는`;
   if (variant === "empty") {
     return {
-      title: `${noun} won't be sent`,
-      description: "Remove it or re-add it to include terminal output.",
+      title: `${subject} 전송되지 않습니다`,
+      description: "삭제하거나 다시 추가하면 터미널 출력을 포함할 수 있습니다.",
     };
   }
   return {
-    title: `${noun} omitted from message`,
-    description: "Re-add it if you want that terminal output included.",
+    title: `${subject} 메시지에서 제외되었습니다`,
+    description: "터미널 출력을 포함하려면 다시 추가하세요.",
   };
 }
 
@@ -438,8 +438,8 @@ export function getStartedThreadModelChangeBlockReason(input: {
     return null;
   }
   return {
-    title: "Start a new chat to change models",
-    description: "This provider does not allow switching models after a conversation has started.",
+    title: "모델을 바꾸려면 새 대화를 시작하세요",
+    description: "이 제공자는 대화를 시작한 뒤 모델을 변경할 수 없습니다.",
   };
 }
 

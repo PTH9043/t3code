@@ -44,13 +44,13 @@ const MAX_HIGHLIGHTED_JSON_LENGTH = 20_000;
 function formatByteSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
+  return `${bytes}바이트`;
 }
 
 /** Returns the error to show for a file too large to be a theme, else null. */
 export function describeOversizedThemeFile(bytes: number): string | null {
   if (bytes <= MAX_THEME_FILE_BYTES) return null;
-  return `That file is ${formatByteSize(bytes)}. Theme files are only a few KB, so this one was not read (limit ${formatByteSize(MAX_THEME_FILE_BYTES)}).`;
+  return `파일 크기가 ${formatByteSize(bytes)}입니다. 테마 파일로 보기에는 너무 커서 읽지 않았습니다(제한 ${formatByteSize(MAX_THEME_FILE_BYTES)}).`;
 }
 
 function escapeJsonHtml(value: string): string {
@@ -128,7 +128,7 @@ function ThemeJsonEditor({
         </pre>
       )}
       <textarea
-        aria-label="Theme JSON"
+        aria-label="테마 JSON"
         className={cn(
           "relative z-10 block min-h-72 w-full resize-y overflow-auto bg-transparent p-3 font-mono text-[12px] leading-5 caret-foreground outline-none placeholder:text-muted-foreground selection:bg-accent/30",
           isPlainText ? "text-foreground" : "text-transparent selection:text-transparent",
@@ -204,7 +204,7 @@ export function ThemeImportDialog({
       setError(null);
     } catch {
       if (requestId !== importRequestRef.current) return;
-      setError("Could not read that file. Paste the JSON below instead.");
+      setError("파일을 읽지 못했습니다. 아래에 JSON 내용을 직접 붙여 넣어 주세요.");
     } finally {
       if (requestId === importRequestRef.current) setIsReading(false);
     }
@@ -223,7 +223,7 @@ export function ThemeImportDialog({
         for (const file of files) {
           const oversized = describeOversizedThemeFile(file.size);
           if (oversized) {
-            failures.push(`${file.name}: too large`);
+            failures.push(`${file.name}: 파일이 너무 큽니다`);
             continue;
           }
           try {
@@ -233,9 +233,7 @@ export function ThemeImportDialog({
               theme: isVsCodeThemeFile(value) ? parseVsCodeThemeFile(value) : parseThemeFile(value),
             });
           } catch (cause) {
-            failures.push(
-              `${file.name}: ${cause instanceof Error ? cause.message : "not a theme file"}`,
-            );
+            failures.push(`${file.name}: 올바른 테마 파일이 아닙니다`);
           }
         }
         if (requestId !== importRequestRef.current) return;
@@ -249,9 +247,7 @@ export function ThemeImportDialog({
           try {
             installed.push(installCustomTheme(theme));
           } catch (cause) {
-            failures.push(
-              `${theme.label}: ${cause instanceof Error ? cause.message : "could not install"}`,
-            );
+            failures.push(`${theme.label}: 설치하지 못했습니다`);
           }
         }
         if (installed.length > 0) onImportedMany(installed, { updated: false });
@@ -346,7 +342,7 @@ export function ThemeImportDialog({
       if (getCustomThemes().some((existing) => existing.id === candidate.id)) continue;
       return candidate;
     }
-    throw new Error(`Too many copies of "${theme.label}".`);
+    throw new Error(`“${theme.label}” 테마의 복사본이 너무 많습니다.`);
   };
 
   const resolveConflicts = useCallback(
@@ -366,7 +362,7 @@ export function ThemeImportDialog({
               : installCustomTheme(versionedCopy(theme, preferredName)),
           );
         } catch (cause) {
-          failures.push(`${theme.label}: ${cause instanceof Error ? cause.message : "failed"}`);
+          failures.push(`${theme.label}: 처리하지 못했습니다`);
         }
       }
       if (resolved.length > 0) onImportedMany(resolved, { updated: mode === "update" });
@@ -405,12 +401,12 @@ export function ThemeImportDialog({
         } catch {
           // Storage is failing wholesale; the error below covers it.
         }
-        setError("Theme added, but it could not be selected. Try again.");
+        setError("테마는 추가했지만 선택하지 못했습니다. 다시 시도해 주세요.");
         return;
       }
       onOpenChange(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "That theme file is invalid.");
+      setError("테마 파일 형식이 올바르지 않습니다.");
     }
   }, [json, onImported, onOpenChange]);
 
@@ -424,7 +420,7 @@ export function ThemeImportDialog({
     >
       <DialogPopup className="max-w-3xl overflow-hidden">
         <DialogHeader>
-          <DialogTitle>Add a theme</DialogTitle>
+          <DialogTitle>테마 추가</DialogTitle>
         </DialogHeader>
         <DialogPanel className="space-y-4">
           {(() => {
@@ -454,17 +450,17 @@ export function ThemeImportDialog({
                 type="file"
               />
             );
-            const chooseButton = (label = "Choose files") => (
+            const chooseButton = (label = "파일 선택") => (
               <Button disabled={isReading} size="sm" variant="outline" onClick={openFilePicker}>
                 <UploadIcon />
-                {isReading ? "Reading…" : label}
+                {isReading ? "읽는 중…" : label}
               </Button>
             );
             const editorSection = () => (
               <div className="space-y-2">
                 <div className="flex items-baseline justify-between gap-3">
                   <label className="text-sm font-medium" htmlFor="theme-json-editor">
-                    Theme JSON
+                    테마 JSON
                   </label>
                 </div>
                 <ThemeJsonEditor id="theme-json-editor" onChange={setJson} value={json} />
@@ -474,20 +470,20 @@ export function ThemeImportDialog({
               return (
                 <div className="space-y-3">
                   <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
-                    <p className="text-sm font-medium">Already installed</p>
+                    <p className="text-sm font-medium">이미 설치됨</p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {conflicts.map((theme) => theme.label).join(", ")}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button size="sm" onClick={() => resolveConflicts("update")}>
-                      Update existing
+                      기존 테마 업데이트
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => resolveConflicts("copy")}>
-                      Keep both
+                      둘 다 유지
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => setConflicts(null)}>
-                      Back
+                      뒤로
                     </Button>
                   </div>
                 </div>
@@ -503,9 +499,9 @@ export function ThemeImportDialog({
                   {...dropHandlers}
                 >
                   <div className="min-w-0">
-                    <p className="text-sm font-medium">Theme file</p>
+                    <p className="text-sm font-medium">테마 파일</p>
                     <p className="truncate text-xs text-muted-foreground">
-                      {fileName ?? "Drop T3 Code or VS Code .json files"}
+                      {fileName ?? "T3 Code 또는 VS Code .json 파일을 놓으세요"}
                     </p>
                   </div>
                   {chooseButton()}
@@ -524,11 +520,11 @@ export function ThemeImportDialog({
         </DialogPanel>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
+            취소
           </Button>
           <Button disabled={!json.trim() || isReading} onClick={handleSubmit}>
             <PlusIcon />
-            Add theme
+            테마 추가
           </Button>
         </DialogFooter>
       </DialogPopup>

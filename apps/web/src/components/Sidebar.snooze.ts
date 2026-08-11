@@ -1,13 +1,13 @@
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   resolveSnoozePresets as resolveSharedSnoozePresets,
-  snoozeWakeLabel,
+  snoozeWakeLabel as sharedSnoozeWakeLabel,
   type SnoozePreset,
 } from "@t3tools/client-runtime/state/thread-settled";
 
 import { formatShortTimestamp, parseTimestampDate } from "../timestampFormat";
 
-export { snoozeWakeLabel, type SnoozePreset };
+export type { SnoozePreset };
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
@@ -25,9 +25,17 @@ export function resolveSnoozePresets(
     const time = timeOfDayLabel(wake, timestampFormat);
     return {
       ...preset,
+      label:
+        preset.id === "hour"
+          ? "1시간 후"
+          : preset.id === "evening"
+            ? "오늘 저녁"
+            : preset.id === "tomorrow"
+              ? "내일"
+              : "다음 주",
       whenLabel:
         preset.id === "next-week"
-          ? `${wake.toLocaleDateString(undefined, { weekday: "short" })} ${time}`
+          ? `${wake.toLocaleDateString("ko-KR", { weekday: "short" })} ${time}`
           : time,
     };
   });
@@ -49,9 +57,18 @@ export function snoozeWakeDescription(
   startOfToday.setHours(0, 0, 0, 0);
   const dayDelta = Math.floor((wake.getTime() - startOfToday.getTime()) / DAY_MS);
   if (dayDelta === 0) return time;
-  if (dayDelta === 1) return `tomorrow ${time}`;
-  const weekday = wake.toLocaleDateString(undefined, { weekday: "short" });
+  if (dayDelta === 1) return `내일 ${time}`;
+  const weekday = wake.toLocaleDateString("ko-KR", { weekday: "short" });
   if (dayDelta < 7) return `${weekday} ${time}`;
-  const date = wake.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return `${date}, ${time}`;
+  const date = wake.toLocaleDateString("ko-KR", { month: "short", day: "numeric" });
+  return `${date} ${time}`;
+}
+
+export function snoozeWakeLabel(snoozedUntil: string, options: { readonly now: string }): string {
+  const label = sharedSnoozeWakeLabel(snoozedUntil, options);
+  if (label === "now") return "지금";
+  if (label.endsWith("m")) return `${label.slice(0, -1)}분`;
+  if (label.endsWith("h")) return `${label.slice(0, -1)}시간`;
+  if (label.endsWith("d")) return `${label.slice(0, -1)}일`;
+  return label;
 }

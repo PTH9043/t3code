@@ -92,6 +92,7 @@ import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   deriveDisplayedUserMessageState,
+  formatTerminalContextHeaderForDisplay,
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
 import {
@@ -180,7 +181,7 @@ function TimelineLoadEarlierHeader({
           disabled={loading}
           className="w-full py-1.5 text-xs text-muted-foreground/60 hover:text-foreground disabled:cursor-default"
         >
-          {loading ? "Loading earlier turns…" : "Load earlier turns"}
+          {loading ? "이전 작업 불러오는 중…" : "이전 작업 불러오기"}
         </button>
       </div>
     </div>
@@ -563,7 +564,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
     return (
       <div className="flex h-full items-center justify-center">
-        <p className="text-placeholder text-sm">Send a message to start the conversation.</p>
+        <p className="text-placeholder text-sm">메시지를 보내 대화를 시작하세요.</p>
       </div>
     );
   }
@@ -795,7 +796,7 @@ function TimelineMinimap({
     >
       <div className="relative h-full w-full select-none">
         <button
-          aria-label={`Jump to message: ${activeItem?.userText ?? "User message"}`}
+          aria-label={`메시지로 이동: ${activeItem?.userText ?? "사용자 메시지"}`}
           className={cn(
             "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
             // The strip is width-capped to the side gutter so it never overlays
@@ -893,7 +894,7 @@ function TimelineMinimap({
             >
               <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
                 <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
-                  {activeItem.userText ?? "User message"}
+                  {activeItem.userText ?? "사용자 메시지"}
                 </span>
                 {activeItem.assistantText ? (
                   <span
@@ -1076,13 +1077,13 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
             variant="ghost"
             disabled={activity.isRevertingCheckpoint || activity.isWorking}
             onClick={() => ctx.onRevertUserMessage(messageId)}
-            aria-label="Revert to this message"
+            aria-label="이 메시지 시점으로 되돌리기"
           />
         }
       >
         <Undo2Icon className="size-3" />
       </TooltipTrigger>
-      <TooltipPopup side="top">Revert to this message</TooltipPopup>
+      <TooltipPopup side="top">이 메시지 시점으로 되돌리기</TooltipPopup>
     </Tooltip>
   );
 }
@@ -1109,7 +1110,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const messageText = row.message.text || (row.message.streaming ? "" : "(빈 응답)");
 
   return (
     <>
@@ -1203,7 +1204,7 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
     steps.find((step) => step.status === "inProgress")?.step ??
     steps.find((step) => step.status === "pending")?.step ??
     steps.at(-1)?.step ??
-    "Plan";
+    "계획";
   const Chevron = expanded ? ChevronDownIcon : ChevronRightIcon;
 
   return (
@@ -1296,10 +1297,10 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
         <span className="shrink-0">
           {row.createdAt ? (
             <>
-              Working for <WorkingTimer createdAt={row.createdAt} />
+              작업 시간 <WorkingTimer createdAt={row.createdAt} />
             </>
           ) : (
-            "Working..."
+            "작업 중..."
           )}
         </span>
         {workingStepLabel ? (
@@ -1357,9 +1358,9 @@ const WorkGroupSection = memo(function WorkGroupSection({
   const onlyToolEntries = nonEmptyEntries.every((entry) => workLogEntryIsToolLike(entry));
   const groupLabel = onlyToolEntries
     ? nonEmptyEntries.length === 1
-      ? "1 tool call"
-      : `${nonEmptyEntries.length} tool calls`
-    : "Work Log";
+      ? "도구 호출 1회"
+      : `도구 호출 ${nonEmptyEntries.length}회`
+    : "작업 기록";
 
   if (nonEmptyEntries.length === 0) return null;
 
@@ -1387,13 +1388,7 @@ function WorkGroupToggleTimelineRow({
   row: Extract<TimelineRow, { kind: "work-toggle" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  const labelNoun = row.onlyToolEntries
-    ? row.hiddenCount === 1
-      ? "tool call"
-      : "tool calls"
-    : row.hiddenCount === 1
-      ? "log entry"
-      : "log entries";
+  const labelNoun = row.onlyToolEntries ? "도구 호출" : "기록";
 
   return (
     <button
@@ -1412,11 +1407,11 @@ function WorkGroupToggleTimelineRow({
       </span>
       {row.expanded ? (
         <span className="font-medium text-foreground">
-          Show fewer {row.onlyToolEntries ? "tool calls" : "log entries"}
+          {row.onlyToolEntries ? "도구 호출 적게 보기" : "기록 적게 보기"}
         </span>
       ) : (
         <span className="font-medium text-foreground">
-          +{row.hiddenCount} previous {labelNoun}
+          이전 {labelNoun} {row.hiddenCount}개 더 보기
         </span>
       )}
     </button>
@@ -1501,12 +1496,11 @@ function AssistantChangedFilesSectionInner({
 
 const UserMessageTerminalContextInlineLabel = memo(
   function UserMessageTerminalContextInlineLabel(props: { context: ParsedTerminalContextEntry }) {
+    const displayHeader = formatTerminalContextHeaderForDisplay(props.context.header);
     const tooltipText =
-      props.context.body.length > 0
-        ? `${props.context.header}\n${props.context.body}`
-        : props.context.header;
+      props.context.body.length > 0 ? `${displayHeader}\n${props.context.body}` : displayHeader;
 
-    return <TerminalContextInlineChip label={props.context.header} tooltipText={tooltipText} />;
+    return <TerminalContextInlineChip label={displayHeader} tooltipText={tooltipText} />;
   },
 );
 
@@ -1544,7 +1538,7 @@ function UserMessagePreviewAnnotationCard(props: {
         <button
           type="button"
           className="size-14 shrink-0 cursor-zoom-in overflow-hidden border-r border-border/70 bg-muted"
-          aria-label={`Preview ${props.image.name}`}
+          aria-label={`${props.image.name} 미리보기`}
           onClick={() => {
             if (!props.image) return;
             const preview = buildExpandedImagePreview([props.image], props.image.id);
@@ -1553,7 +1547,7 @@ function UserMessagePreviewAnnotationCard(props: {
         >
           <img
             src={props.image.previewUrl}
-            alt="Annotated preview crop"
+            alt="주석이 있는 미리보기 영역"
             className="size-full object-cover"
           />
         </button>
@@ -1657,7 +1651,7 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
               onClick={() => setExpanded((value) => !value)}
               className="-ml-1 h-6 rounded-md px-1.5 text-secondary-label text-xs hover:bg-muted/55 hover:text-message-foreground"
             >
-              {expanded ? "Show less" : "Show full message"}
+              {expanded ? "간단히 보기" : "전체 메시지 보기"}
             </Button>
           ) : null}
           {props.footer ? (
@@ -1921,7 +1915,7 @@ function formatWorkingTimer(startIso: string, endIso: string): string | null {
 
   const elapsedSeconds = Math.max(0, Math.floor((endedAtMs - startedAtMs) / 1000));
   if (elapsedSeconds < 60) {
-    return `${elapsedSeconds}s`;
+    return `${elapsedSeconds}초`;
   }
 
   const hours = Math.floor(elapsedSeconds / 3600);
@@ -1929,14 +1923,14 @@ function formatWorkingTimer(startIso: string, endIso: string): string | null {
   const seconds = elapsedSeconds % 60;
 
   if (hours > 0) {
-    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+    return minutes > 0 ? `${hours}시간 ${minutes}분` : `${hours}시간`;
   }
 
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
 }
 
 function formatWorkingTimerNow(startIso: string): string {
-  return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0s";
+  return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0초";
 }
 
 type WorkEntryIconName =
@@ -2022,7 +2016,7 @@ function workEntryPreview(
   const displayPath = formatWorkspaceRelativePath(firstPath, workspaceRoot);
   return workEntry.changedFiles!.length === 1
     ? displayPath
-    : `${displayPath} +${workEntry.changedFiles!.length - 1} more`;
+    : `${displayPath} 외 ${workEntry.changedFiles!.length - 1}개`;
 }
 
 function workEntryRawCommand(
@@ -2041,7 +2035,7 @@ function buildToolCallExpandedBody(
 ): string | null {
   const blocks: string[] = [];
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
-    blocks.push(`MCP call\n${JSON.stringify(workEntry.toolData, null, 2)}`);
+    blocks.push(`MCP 호출\n${JSON.stringify(workEntry.toolData, null, 2)}`);
   }
   const raw = workEntryRawCommand(workEntry);
   if (raw?.trim()) {
@@ -2108,11 +2102,37 @@ function capitalizePhrase(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
+const WORK_ENTRY_LABELS_KO: Readonly<Record<string, string>> = {
+  "Assistant message": "어시스턴트 메시지",
+  "User message": "사용자 메시지",
+  Reasoning: "추론",
+  Plan: "계획",
+  "Ran command": "명령 실행",
+  "Command run": "명령 실행",
+  "File change": "파일 변경",
+  "Changed files": "파일 변경",
+  "Read file": "파일 읽기",
+  "Searched files": "파일 검색",
+  "MCP tool call": "MCP 도구 호출",
+  "Tool call": "도구 호출",
+  "Web search": "웹 검색",
+  "Image view": "이미지 보기",
+  "Subagent task": "하위 에이전트 작업",
+  "Context compacted": "문맥 압축 완료",
+  Error: "오류",
+  Item: "항목",
+};
+
+function localizeWorkEntryLabel(value: string): string {
+  const normalized = normalizeCompactToolLabel(value);
+  return WORK_ENTRY_LABELS_KO[normalized] ?? capitalizePhrase(normalized);
+}
+
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   if (!workEntry.toolTitle) {
-    return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
+    return localizeWorkEntryLabel(workEntry.label);
   }
-  return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
+  return localizeWorkEntryLabel(workEntry.toolTitle);
 }
 
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -2175,18 +2195,16 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   // stalled agents read as working; only settled states differentiate.
   const working = running + waiting;
   const dotClass = live ? "bg-info" : failed > 0 ? "bg-destructive" : "bg-success";
-  const lead = live
-    ? `Kicked off ${agentCount} subagent${agentCount === 1 ? "" : "s"}`
-    : `Ran ${agentCount} subagent${agentCount === 1 ? "" : "s"}`;
+  const lead = live ? `하위 에이전트 ${agentCount}개 시작` : `하위 에이전트 ${agentCount}개 실행`;
   const status = live
     ? livePhase
-      ? `${livePhase.title} · ${livePhase.activeCount} working`
+      ? `${livePhase.title} · ${livePhase.activeCount}개 작업 중`
       : working > 0
-        ? `${working} working`
-        : "working"
+        ? `${working}개 작업 중`
+        : "작업 중"
     : failed > 0
-      ? `${failed} failed`
-      : "✓ completed";
+      ? `${failed}개 실패`
+      : "✓ 완료";
 
   return (
     <button
@@ -2205,7 +2223,7 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
         {totalTokens > 0 ? (
           <span className="tabular-nums">Σ {formatSubagentTokenCount(totalTokens)}</span>
         ) : null}
-        <span className="text-info-foreground">{live ? "Open Agents ▸" : "View ▸"}</span>
+        <span className="text-info-foreground">{live ? "에이전트 열기 ▸" : "보기 ▸"}</span>
       </span>
     </button>
   );
@@ -2330,13 +2348,13 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
                     render={
                       <span
                         className="flex size-4 items-center justify-center"
-                        aria-label="Tool call failed"
+                        aria-label="도구 호출 실패"
                       />
                     }
                   >
                     <XIcon className="block size-3 shrink-0 text-destructive" aria-hidden />
                   </TooltipTrigger>
-                  <TooltipPopup>Failed</TooltipPopup>
+                  <TooltipPopup>실패</TooltipPopup>
                 </Tooltip>
               ) : showSuccessIndicator ? (
                 <Tooltip>
@@ -2351,7 +2369,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
                       />
                     </span>
                   </TooltipTrigger>
-                  <TooltipPopup>Completed</TooltipPopup>
+                  <TooltipPopup>완료</TooltipPopup>
                 </Tooltip>
               ) : showNeutralIndicator ? (
                 <Tooltip>
@@ -2360,7 +2378,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
                   >
                     <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
                   </TooltipTrigger>
-                  <TooltipPopup>Empty</TooltipPopup>
+                  <TooltipPopup>비어 있음</TooltipPopup>
                 </Tooltip>
               ) : null}
             </span>

@@ -249,8 +249,8 @@ function Sidebar({
             }
           >
             <SheetHeader className="sr-only">
-              <SheetTitle>Sidebar</SheetTitle>
-              <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+              <SheetTitle>사이드바</SheetTitle>
+              <SheetDescription>모바일 사이드바를 표시합니다.</SheetDescription>
             </SheetHeader>
             <div
               className={cn(
@@ -338,7 +338,7 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
       {...props}
     >
       {isOpen ? <PanelLeftCloseIcon /> : <PanelLeftIcon />}
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">사이드바 전환</span>
     </Button>
   );
 }
@@ -376,8 +376,8 @@ function SidebarRail({
   } | null>(null);
   const resolvedResizable = sidebarInstance?.resizable ?? null;
   const canResize = resolvedResizable !== null && open;
-  const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
-  const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
+  const railLabel = canResize ? "사이드바 크기 조절" : "사이드바 전환";
+  const railTitle = canResize ? "드래그하여 사이드바 크기 조절" : "사이드바 전환";
 
   const stopResize = React.useCallback(
     (pointerId: number) => {

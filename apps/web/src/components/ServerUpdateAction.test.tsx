@@ -63,8 +63,8 @@ describe("ServerUpdateAction", () => {
     });
     expect(testState.toast).toHaveBeenCalledWith({
       type: "success",
-      title: "Test server updated",
-      description: "Reconnected on t3@0.0.31.",
+      title: "Test server 업데이트 완료",
+      description: "t3@0.0.31 버전으로 다시 연결했습니다.",
     });
   });
 
@@ -113,7 +113,7 @@ describe("ServerUpdateProgress", () => {
       />,
     );
 
-    expect(markup).toContain("Restarting…");
+    expect(markup).toContain("다시 시작 중…");
     // The wait state is monochrome and calm: no versions, no step rail, no
     // success/warning colors, one duty-cycled pulse on the dot.
     expect(markup).not.toContain("0.0.30");
@@ -136,7 +136,7 @@ describe("ServerUpdateProgress", () => {
       />,
     );
 
-    expect(markup).toContain("Downloading…");
+    expect(markup).toContain("다운로드 중…");
     expect(markup).not.toContain("Install");
   });
 
@@ -154,7 +154,7 @@ describe("ServerUpdateProgress", () => {
     );
 
     expect(markup).toContain('role="alert"');
-    expect(markup).toContain("The package could not be verified.");
+    expect(markup).toContain("서버 업데이트에 실패했습니다.");
     expect(markup).not.toContain("animate-status-pulse");
   });
 });

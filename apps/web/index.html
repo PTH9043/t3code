@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -11,8 +11,19 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       (() => {
+        try {
+          const rawScale = Number(window.localStorage.getItem("newautousage:ui-scale"));
+          const scale =
+            Number.isFinite(rawScale) && rawScale > 0
+              ? Math.min(150, Math.max(80, Math.round(rawScale / 10) * 10))
+              : 100;
+          document.documentElement.style.fontSize = `${scale}%`;
+          document.documentElement.dataset.uiScale = String(scale);
+        } catch {
+          // The default browser size remains usable when storage is unavailable.
+        }
         const LIGHT_BACKGROUND = "#ffffff";
-        const DARK_BACKGROUND = "#0a0a0a";
+        const DARK_BACKGROUND = "#1b1f27";
         const CUSTOM_THEMES_STORAGE_KEY = "t3code:themes:v1";
         const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "t3code:theme-follow-system";
         const THEME_APPEARANCE_MODE_STORAGE_KEY = "t3code:theme-appearance-mode";
@@ -249,7 +260,7 @@
               : storedFollowSystem === "false"
                 ? preferenceMode
                 : theme === "system"
-                  ? "system"
+                  ? "dark"
                   : preferenceMode;
           // A valid mix half for the wanted appearance takes over: it decides
           // light vs dark even when the base theme cannot render that mode.
@@ -367,13 +378,8 @@
           }
           setThemeColor(chromeColor);
         } catch {
-          // Mirror the runtime's storage-failure fallback: follow the OS.
-          let prefersDark = true;
-          try {
-            prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-          } catch {
-            // Keep the dark default when even matchMedia is unavailable.
-          }
+          // Keep the initial surface on the balanced charcoal default when persistence fails.
+          const prefersDark = true;
           delete document.documentElement.dataset.themeId;
           delete document.documentElement.dataset.themeSelected;
           document.documentElement.classList.toggle("dark", prefersDark);
@@ -435,13 +441,13 @@
         object-fit: contain;
       }
     </style>
-    <title>T3 Code (Alpha)</title>
+    <title>NewAutoUsage AI 제어센터</title>
   </head>
   <body>
     <div id="root">
       <div id="boot-shell">
-        <div id="boot-shell-card" aria-label="T3 Code splash screen">
-          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="T3 Code" />
+        <div id="boot-shell-card" aria-label="NewAutoUsage AI 제어센터 시작 화면">
+          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="NewAutoUsage AI 제어센터" />
         </div>
       </div>
     </div>

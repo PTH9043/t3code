@@ -37,10 +37,10 @@ function ConnectCliAuthMessage({
 }
 
 const invalidLinkMessage = {
-  eyebrow: "Authorization request",
-  title: "This connect link is incomplete",
+  eyebrow: "승인 요청",
+  title: "연결 링크가 완전하지 않습니다",
   description:
-    "The link is missing its authorization request. Re-run `t3 connect` in your terminal and open the freshly printed URL.",
+    "링크에 승인 요청 정보가 없습니다. 터미널에서 `t3 connect`를 다시 실행한 뒤 새로 표시된 URL을 여세요.",
 } as const;
 
 /**
@@ -85,12 +85,12 @@ export function ConnectCliAuthorizeSurface() {
   return (
     <AuthSurfaceShell>
       <ConnectCliAuthMessage
-        eyebrow="Step 1 of 2 · Browser authorization"
-        title="Connecting your terminal"
+        eyebrow="1/2단계 · 브라우저 승인"
+        title="터미널 연결 중"
         description={
           isSignedIn
-            ? "Redirecting to authorize T3 Connect for your CLI…"
-            : "Sign in to continue authorizing T3 Connect for your CLI."
+            ? "CLI의 T3 Connect 승인을 위해 이동하고 있습니다…"
+            : "CLI에서 T3 Connect를 계속 승인하려면 로그인하세요."
         }
       />
       {isLoaded && !isSignedIn ? (
@@ -101,7 +101,7 @@ export function ConnectCliAuthorizeSurface() {
               clerk.openSignIn(resolveClerkSignInProps(window.location.href, isElectron))
             }
           >
-            Sign in
+            로그인
           </Button>
         </div>
       ) : null}
@@ -117,15 +117,15 @@ export function ConnectCliCallbackSurface() {
   const [result] = useState(readConnectCliCallbackResult);
   const [expectedState] = useState(readConnectCliAuthState);
   const { user } = useUser();
-  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "authentication code" });
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "승인 코드" });
 
   if (!result) {
     return (
       <AuthSurfaceShell>
         <ConnectCliAuthMessage
-          eyebrow="Step 2 of 2 · Terminal handoff"
-          title="Authorization did not complete"
-          description="No authorization code was returned. Re-run `t3 connect` in your terminal and try again."
+          eyebrow="2/2단계 · 터미널 전달"
+          title="승인이 완료되지 않았습니다"
+          description="승인 코드가 반환되지 않았습니다. 터미널에서 `t3 connect`를 다시 실행한 뒤 다시 시도하세요."
         />
       </AuthSurfaceShell>
     );
@@ -139,9 +139,9 @@ export function ConnectCliCallbackSurface() {
     return (
       <AuthSurfaceShell>
         <ConnectCliAuthMessage
-          eyebrow="Step 2 of 2 · Terminal handoff"
-          title="This code belongs to a different request"
-          description="This authorization response does not match a connect request started in this browser. Re-run `t3 connect` in your terminal and open the freshly printed URL in this browser."
+          eyebrow="2/2단계 · 터미널 전달"
+          title="다른 요청에 속한 코드입니다"
+          description="이 승인 응답은 이 브라우저에서 시작한 연결 요청과 일치하지 않습니다. 터미널에서 `t3 connect`를 다시 실행하고 새로 표시된 URL을 이 브라우저에서 여세요."
         />
       </AuthSurfaceShell>
     );
@@ -153,21 +153,21 @@ export function ConnectCliCallbackSurface() {
   return (
     <AuthSurfaceShell>
       <ConnectCliAuthMessage
-        eyebrow="Step 2 of 2 · Terminal handoff"
-        title="Almost connected"
+        eyebrow="2/2단계 · 터미널 전달"
+        title="연결이 거의 완료되었습니다"
         description={
           accountLabel
-            ? `Enter this code in your waiting terminal to connect it as ${accountLabel}.`
-            : "Enter this code in your waiting terminal to finish connecting."
+            ? `대기 중인 터미널에 이 코드를 입력해 ${accountLabel} 계정으로 연결하세요.`
+            : "연결을 마치려면 대기 중인 터미널에 이 코드를 입력하세요."
         }
       />
 
       <div className="mt-6 overflow-hidden rounded-xl border border-border/80 bg-background/65">
         <div className="flex items-center justify-between border-b border-border/70 px-4 py-2.5">
           <span className="text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-            One-time authorization code
+            일회용 승인 코드
           </span>
-          <span className="font-mono text-[10px] text-muted-foreground">expires shortly</span>
+          <span className="font-mono text-[10px] text-muted-foreground">곧 만료됨</span>
         </div>
         <code
           className="block p-4 font-mono text-sm leading-relaxed break-all select-all"
@@ -179,13 +179,13 @@ export function ConnectCliCallbackSurface() {
 
       <div className="mt-4 flex items-center gap-3">
         <Button type="button" onClick={() => copyToClipboard(authCode)}>
-          {isCopied ? "Copied!" : "Copy authorization code"}
+          {isCopied ? "복사됨" : "승인 코드 복사"}
         </Button>
       </div>
 
       <p className="mt-6 text-xs leading-relaxed text-muted-foreground">
-        Only enter this code in a terminal session you started yourself. Anyone holding it can link
-        their machine to your T3 Connect account while it is valid.
+        직접 시작한 터미널 세션에만 이 코드를 입력하세요. 코드가 유효한 동안 이를 가진 사람은 자신의
+        컴퓨터를 사용자의 T3 Connect 계정에 연결할 수 있습니다.
       </p>
     </AuthSurfaceShell>
   );

@@ -200,10 +200,10 @@ function ConfiguredConnectOnboardingDialog() {
     if (!ok) return;
     toastManager.add({
       type: "success",
-      title: "T3 Connect enabled",
+      title: "T3 Connect를 설정했습니다",
       description: exposeEnvironment
-        ? "This environment is available to your other devices through T3 Connect."
-        : "This environment publishes agent activity to your mobile clients.",
+        ? "이 실행 환경을 다른 기기에서 T3 Connect로 사용할 수 있습니다."
+        : "이 실행 환경의 에이전트 활동을 모바일 클라이언트로 전송합니다.",
     });
     setStep("devices");
   };
@@ -219,10 +219,9 @@ function ConfiguredConnectOnboardingDialog() {
     >
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Set up T3 Connect</DialogTitle>
+          <DialogTitle>T3 Connect 설정</DialogTitle>
           <DialogDescription>
-            Mesh your devices together — publish this environment and connect the rest, all in one
-            place.
+            이 실행 환경을 공개하고 다른 기기를 연결해 한곳에서 관리하세요.
           </DialogDescription>
           {steps.length > 1 ? (
             <OnboardingStepper
@@ -253,13 +252,13 @@ function ConfiguredConnectOnboardingDialog() {
               checked={dontShowAgain}
               onCheckedChange={(checked) => setDontShowAgain(checked === true)}
             />
-            Don&apos;t show this again
+            다시 표시하지 않기
           </label>
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
             {step === "publish" ? (
               <>
                 <Button variant="ghost" disabled={isApplying} onClick={() => setStep("devices")}>
-                  Not now
+                  나중에
                 </Button>
                 <Button
                   disabled={
@@ -267,12 +266,12 @@ function ConfiguredConnectOnboardingDialog() {
                   }
                   onClick={() => void applyPublishSelection()}
                 >
-                  {isApplying ? "Enabling…" : "Continue"}
+                  {isApplying ? "설정 중…" : "계속"}
                 </Button>
               </>
             ) : (
               <Button disabled={isApplying} onClick={complete}>
-                Done
+                완료
               </Button>
             )}
           </div>
@@ -283,8 +282,8 @@ function ConfiguredConnectOnboardingDialog() {
 }
 
 const STEP_LABELS: Record<OnboardingStep, string> = {
-  publish: "Publish",
-  devices: "Connect devices",
+  publish: "실행 환경 공개",
+  devices: "기기 연결",
 };
 
 function OnboardingStepper({
@@ -330,7 +329,7 @@ function OnboardingStepper({
             {index < currentIndex ? <CheckIcon className="size-3" /> : null}
           </span>
           <span className="text-[10px] font-medium uppercase text-muted-foreground">
-            Step {index + 1}
+            {index + 1}단계
           </span>
           <span className="truncate text-xs font-semibold text-foreground">
             {STEP_LABELS[step]}
@@ -360,21 +359,23 @@ function PublishStep({
     <div className="space-y-3">
       <div className="rounded-lg border">
         <OnboardingToggleRow
-          title="Publish this environment"
-          description="Make this environment available to your other devices through T3 Connect."
+          title="이 실행 환경 공개"
+          description="다른 기기에서 T3 Connect를 통해 이 실행 환경을 사용할 수 있게 합니다."
           checked={exposeEnvironment}
           disabled={disabled}
           onCheckedChange={onExposeEnvironmentChange}
         />
         <OnboardingToggleRow
-          title="Publish agent activity"
-          description="Send activity from this environment to your mobile clients for push notifications and Live Activities."
+          title="에이전트 활동 공개"
+          description="이 실행 환경의 활동을 모바일 클라이언트로 보내 푸시 알림과 실시간 현황에 표시합니다."
           checked={publishAgentActivity}
           disabled={disabled}
           onCheckedChange={onPublishAgentActivityChange}
         />
       </div>
-      {operationError ? <p className="text-xs text-destructive">{operationError}</p> : null}
+      {operationError ? (
+        <p className="text-xs text-destructive">T3 Connect 설정을 적용하지 못했습니다.</p>
+      ) : null}
     </div>
   );
 }
@@ -423,8 +424,8 @@ function DevicesStep() {
         showSavedEnvironments
         empty={
           <p className="px-4 py-6 text-center text-sm text-muted-foreground">
-            No other environments are published to your account yet. Publish one from another device
-            and it will show up here.
+            계정에 공개된 다른 실행 환경이 아직 없습니다. 다른 기기에서 실행 환경을 공개하면 여기에
+            표시됩니다.
           </p>
         }
       />

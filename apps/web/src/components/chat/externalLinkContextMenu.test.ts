@@ -30,9 +30,9 @@ describe("external chat link context menu", () => {
 
     expect(harness.showContextMenu).toHaveBeenCalledWith(
       [
-        { id: "open-in-preview", label: "Open in integrated browser" },
-        { id: "open-external", label: "Open in system browser" },
-        { id: "copy-link", label: "Copy Link" },
+        { id: "open-in-preview", label: "내장 브라우저에서 열기" },
+        { id: "open-external", label: "시스템 브라우저에서 열기" },
+        { id: "copy-link", label: "링크 복사" },
       ],
       { x: 12, y: 24 },
     );

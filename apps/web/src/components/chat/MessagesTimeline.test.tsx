@@ -294,9 +294,9 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("whitespace-nowrap");
     expect(markup).toContain("!size-[22px]");
     expect(markup).toContain("size-3");
-    expect(markup).toContain('aria-label="Collapse all folders"');
-    expect(markup).toContain('aria-label="Open diff"');
-    expect(markup).toContain("1 changed file");
+    expect(markup).toContain('aria-label="모든 폴더 접기"');
+    expect(markup).toContain('aria-label="차이 열기"');
+    expect(markup).toContain("변경된 파일 1개");
   });
 
   it("treats only the strict list end as the live edge", async () => {
@@ -440,7 +440,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Show full message");
+    expect(markup).toContain("전체 메시지 보기");
     expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
     expect(markup).toContain('data-maintain-scroll-at-end-animated="false"');
     expect(markup).toContain('data-maintain-scroll-at-end-data-change="true"');
@@ -459,7 +459,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).not.toContain("Show full message");
+    expect(markup).not.toContain("전체 메시지 보기");
     expect(markup).toContain('data-user-message-collapsible="false"');
     expect(markup).toContain("rounded-2xl bg-message p-3");
   });
@@ -484,11 +484,11 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Terminal 1 lines 1-5");
+    expect(markup).toContain("터미널 1 · 1~5줄");
     expect(markup).toContain("lucide-terminal");
     expect(markup).toContain("yoo what&#x27;s</p>");
     expect(markup).toContain('<span aria-hidden="true"> </span>');
-    expect(markup).toContain("Show full message");
+    expect(markup).toContain("전체 메시지 보기");
   }, 20_000);
 
   it("renders chips for standalone element-pick context messages", () => {
@@ -525,7 +525,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Copy link"');
+    expect(markup).toContain('aria-label="클립보드에 복사"');
     expect(markup).toContain('data-user-message-collapsed="true"');
     expect(markup).toContain('data-user-message-footer="true"');
   });
@@ -550,8 +550,8 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Context compacted");
-    expect(markup).toContain("Work Log");
+    expect(markup).toContain("문맥 압축 완료");
+    expect(markup).toContain("작업 기록");
   });
 
   it("formats changed file paths from the workspace root", () => {
@@ -680,6 +680,6 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain("lucide-x");
-    expect(markup).toContain('aria-label="Tool call failed"');
+    expect(markup).toContain('aria-label="도구 호출 실패"');
   });
 });

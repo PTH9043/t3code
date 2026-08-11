@@ -48,7 +48,7 @@ describe("ProjectScriptsControl compact controls", () => {
   it("keeps the primary Run control compact and expands it with its label", () => {
     const html = renderControl([PRIMARY_SCRIPT]);
 
-    expectResponsiveXsControl(buttonTag(html, "Run Dev"));
+    expectResponsiveXsControl(buttonTag(html, "Dev 실행"));
     expect(html).toContain(
       'class="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5"',
     );
@@ -57,7 +57,7 @@ describe("ProjectScriptsControl compact controls", () => {
   it("keeps the standalone Add control compact and expands it with its label", () => {
     const html = renderControl([]);
 
-    expectResponsiveXsControl(buttonTag(html, "Add action"));
+    expectResponsiveXsControl(buttonTag(html, "작업 추가"));
     expect(html).toContain(
       'class="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5"',
     );

@@ -88,7 +88,10 @@ import { randomUUID } from "~/lib/utils";
 import { resolvePathLinkTarget } from "~/terminal-links";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { readLocalApi } from "~/localApi";
-import { getSourceControlPresentation } from "~/sourceControlPresentation";
+import {
+  getSourceControlPresentation,
+  type ChangeRequestTerminology,
+} from "~/sourceControlPresentation";
 import { openPullRequestLink } from "~/lib/openPullRequestLink";
 
 interface GitActionsControlProps {
@@ -220,18 +223,19 @@ function getPublishProviderReadiness(input: {
   if (!discovered) {
     return {
       ready: false,
-      hint: "Provider status unavailable. Open Settings -> Source Control and rescan.",
+      hint: "제공자 상태를 확인할 수 없습니다. 설정 > 소스 제어에서 다시 검색하세요.",
     };
   }
   if (discovered.status !== "available") {
-    return { ready: false, hint: discovered.installHint };
+    return {
+      ready: false,
+      hint: `${discovered.label} CLI를 사용할 수 없습니다. 설정 > 소스 제어에서 설치 상태를 확인하세요.`,
+    };
   }
   if (discovered.auth.status === "unauthenticated") {
     return {
       ready: false,
-      hint:
-        Option.getOrNull(discovered.auth.detail) ??
-        `${discovered.label} is not authenticated. Open Settings -> Source Control for setup guidance.`,
+      hint: `${discovered.label}에 로그인되지 않았습니다. 설정 > 소스 제어에서 계정을 연결하세요.`,
     };
   }
   return { ready: true, hint: null };
@@ -243,11 +247,11 @@ function formatElapsedDescription(startedAtMs: number | null): string | undefine
   }
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
   if (elapsedSeconds < 60) {
-    return `Running for ${elapsedSeconds}s`;
+    return `${elapsedSeconds}초 동안 실행 중`;
   }
   const minutes = Math.floor(elapsedSeconds / 60);
   const seconds = elapsedSeconds % 60;
-  return `Running for ${minutes}m ${seconds}s`;
+  return `${minutes}분 ${seconds}초 동안 실행 중`;
 }
 
 function resolveProgressDescription(progress: ActiveGitActionProgress): string | undefined {
@@ -255,6 +259,20 @@ function resolveProgressDescription(progress: ActiveGitActionProgress): string |
     return progress.lastOutputLine;
   }
   return formatElapsedDescription(progress.hookStartedAtMs ?? progress.phaseStartedAtMs);
+}
+
+function localizeGitProgressLabel(
+  event: Extract<GitActionProgressEvent, { kind: "phase_started" }>,
+  terminology: ChangeRequestTerminology,
+): string {
+  if (event.phase === "branch") return "기능 브랜치 준비 중...";
+  if (event.phase === "push") return "푸시 중...";
+  if (event.phase === "commit") {
+    return event.label.includes("Generating") ? "커밋 메시지 생성 중..." : "커밋 중...";
+  }
+  if (event.label.includes("Generating")) return `${terminology.shortLabel} 내용 생성 중...`;
+  if (event.label.includes("Creating")) return `${terminology.shortLabel} 만드는 중...`;
+  return `${terminology.shortLabel} 준비 중...`;
 }
 
 function getMenuActionDisabledReason({
@@ -269,8 +287,8 @@ function getMenuActionDisabledReason({
   hasPrimaryRemote: boolean;
 }): string | null {
   if (!item.disabled) return null;
-  if (isBusy) return "Git action in progress.";
-  if (!gitStatus) return "Git status is unavailable.";
+  if (isBusy) return "Git 작업을 진행 중입니다.";
+  if (!gitStatus) return "Git 상태를 확인할 수 없습니다.";
 
   const hasBranch = gitStatus.refName !== null;
   const hasChanges = gitStatus.hasWorkingTreeChanges;
@@ -281,54 +299,54 @@ function getMenuActionDisabledReason({
 
   if (item.id === "commit") {
     if (!hasChanges) {
-      return "Worktree is clean. Make changes before committing.";
+      return "작업 트리에 변경 사항이 없습니다. 변경한 뒤 커밋하세요.";
     }
-    return "Commit is currently unavailable.";
+    return "현재 커밋할 수 없습니다.";
   }
 
   if (item.id === "push") {
     if (!hasBranch) {
-      return "Detached HEAD: checkout a refName before pushing.";
+      return "분리된 HEAD 상태입니다. 푸시하기 전에 브랜치를 체크아웃하세요.";
     }
     if (hasChanges) {
-      return "Commit or stash local changes before pushing.";
+      return "푸시하기 전에 로컬 변경 사항을 커밋하거나 스태시하세요.";
     }
     if (isBehind) {
-      return "Branch is behind upstream. Pull/rebase before pushing.";
+      return "브랜치가 업스트림보다 뒤처져 있습니다. 푸시하기 전에 풀하거나 리베이스하세요.";
     }
     if (!gitStatus.hasUpstream && !hasPrimaryRemote) {
-      return 'Add an "origin" remote before pushing.';
+      return '푸시하기 전에 "origin" 원격 저장소를 추가하세요.';
     }
     if (!isAhead) {
-      return "No local commits to push.";
+      return "푸시할 로컬 커밋이 없습니다.";
     }
-    return "Push is currently unavailable.";
+    return "현재 푸시할 수 없습니다.";
   }
 
   if (hasOpenPr) {
-    return `View ${terminology.singular} is currently unavailable.`;
+    return `현재 ${terminology.shortLabel}을 열 수 없습니다.`;
   }
   if (!hasBranch) {
-    return `Detached HEAD: checkout a refName before creating a ${terminology.singular}.`;
+    return `분리된 HEAD 상태입니다. ${terminology.shortLabel}을 만들기 전에 브랜치를 체크아웃하세요.`;
   }
   if (hasChanges) {
-    return `Commit local changes before creating a ${terminology.singular}.`;
+    return `${terminology.shortLabel}을 만들기 전에 로컬 변경 사항을 커밋하세요.`;
   }
   if (!gitStatus.hasUpstream && !hasPrimaryRemote) {
-    return `Add an "origin" remote before creating a ${terminology.singular}.`;
+    return `${terminology.shortLabel}을 만들기 전에 "origin" 원격 저장소를 추가하세요.`;
   }
   if (!isAhead) {
-    return `No local commits to include in a ${terminology.singular}.`;
+    return `${terminology.shortLabel}에 포함할 로컬 커밋이 없습니다.`;
   }
   if (isBehind) {
-    return `Branch is behind upstream. Pull/rebase before creating a ${terminology.singular}.`;
+    return `브랜치가 업스트림보다 뒤처져 있습니다. ${terminology.shortLabel}을 만들기 전에 풀하거나 리베이스하세요.`;
   }
-  return `Create ${terminology.singular} is currently unavailable.`;
+  return `현재 ${terminology.shortLabel}을 만들 수 없습니다.`;
 }
 
-const COMMIT_DIALOG_TITLE = "Commit changes";
+const COMMIT_DIALOG_TITLE = "변경 사항 커밋";
 const COMMIT_DIALOG_DESCRIPTION =
-  "Review and confirm your commit. Leave the message blank to auto-generate one.";
+  "커밋할 내용을 확인하세요. 메시지를 비워 두면 자동으로 생성합니다.";
 
 function GitActionItemIcon({
   icon,
@@ -360,7 +378,7 @@ function GitQuickActionIcon({
     }
     return <SourceControlIcon className={iconClassName} />;
   }
-  if (quickAction.label === "Commit") return <GitCommitIcon className={iconClassName} />;
+  if (quickAction.label === "커밋") return <GitCommitIcon className={iconClassName} />;
   return <InfoIcon className={iconClassName} />;
 }
 
@@ -460,7 +478,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   const publishHost = currentPublishProvider.host;
   const publishPathPlaceholder = currentPublishProvider.pathPlaceholder;
   const publishProviderLabel = currentPublishProvider.label;
-  const publishWizardSteps = ["Provider", "Repository", "Summary"] as const;
+  const publishWizardSteps = ["제공자", "저장소", "요약"] as const;
   const publishWizardStepSummaries = [
     publishProviderLabel,
     publishResult?.repository.nameWithOwner ?? null,
@@ -496,7 +514,8 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
-          setPublishError(error instanceof Error ? error.message : "An error occurred.");
+          console.error(error);
+          setPublishError("저장소를 게시하지 못했습니다. 다시 시도하세요.");
         }
         return;
       }
@@ -547,10 +566,8 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
       <DialogPopup className="max-w-xl overflow-hidden">
         <div className="flex min-h-0 flex-col overflow-hidden border-foreground/10 bg-transparent">
           <DialogHeader className="border-b border-border/70 bg-foreground/[0.025] dark:border-transparent dark:bg-transparent">
-            <DialogTitle>Publish repository</DialogTitle>
-            <DialogDescription>
-              Pick where to host it, then point us at a repo to push to.
-            </DialogDescription>
+            <DialogTitle>저장소 게시</DialogTitle>
+            <DialogDescription>호스팅할 제공자와 푸시할 저장소를 선택하세요.</DialogDescription>
             <div className="grid grid-cols-3 gap-2">
               {publishWizardSteps.map((label, index) => {
                 const isComplete = index < publishWizardStep;
@@ -588,7 +605,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                       {isComplete ? <CheckIcon className="size-3" /> : null}
                     </span>
                     <span className="text-[10px] font-medium uppercase text-muted-foreground">
-                      Step {index + 1}
+                      {index + 1}단계
                     </span>
                     <span className="truncate text-xs font-semibold text-foreground">
                       {label}
@@ -609,7 +626,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                   id="publish-provider-cards-label"
                   className="text-xs font-medium text-foreground"
                 >
-                  Provider
+                  제공자
                 </span>
                 <RadioGroup
                   value={publishProvider}
@@ -649,13 +666,12 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                                     openSourceControlSettings();
                                   }}
                                 >
-                                  Setup Required
+                                  설정 필요
                                 </Button>
                               }
                             />
                             <TooltipPopup side="top" align="end" className="max-w-72">
-                              {readiness.hint ??
-                                "Open Settings -> Source Control to configure this provider."}
+                              {readiness.hint ?? "설정 > 소스 제어에서 이 제공자를 구성하세요."}
                             </TooltipPopup>
                           </Tooltip>
                         </div>
@@ -690,7 +706,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     htmlFor="publish-repository-path"
                     className="text-xs font-medium text-foreground"
                   >
-                    Repository
+                    저장소
                   </label>
                   <div className="flex items-stretch overflow-hidden rounded-md border border-input bg-background focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-ring">
                     <span className="flex shrink-0 items-center gap-1.5 border-r border-input bg-muted/50 px-2.5 font-mono text-xs text-muted-foreground">
@@ -722,7 +738,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     id="publish-visibility-cards-label"
                     className="text-xs font-medium text-foreground"
                   >
-                    Visibility
+                    공개 범위
                   </span>
                   <RadioGroup
                     value={publishVisibility}
@@ -736,14 +752,14 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     {[
                       {
                         value: "private" as const,
-                        label: "Private",
-                        description: "Only invited people",
+                        label: "비공개",
+                        description: "초대받은 사용자만",
                         Icon: LockIcon,
                       },
                       {
                         value: "public" as const,
-                        label: "Public",
-                        description: "Anyone on the web",
+                        label: "공개",
+                        description: "웹의 모든 사용자",
                         Icon: GlobeIcon,
                       },
                     ].map((option) => {
@@ -791,12 +807,12 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                         publishAdvancedOpen ? "" : "-rotate-90",
                       )}
                     />
-                    Advanced
+                    고급 설정
                   </button>
                   {publishAdvancedOpen ? (
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
                       <label className="space-y-1.5" htmlFor="publish-remote-name">
-                        <span className="text-xs font-medium text-foreground">Remote</span>
+                        <span className="text-xs font-medium text-foreground">원격 저장소</span>
                         <Input
                           id="publish-remote-name"
                           value={publishRemoteName}
@@ -810,7 +826,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                           id="publish-protocol-label"
                           className="text-xs font-medium text-foreground"
                         >
-                          Protocol
+                          프로토콜
                         </span>
                         <RadioGroup
                           value={publishProtocol}
@@ -852,7 +868,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     className="flex items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]"
                   >
                     <Spinner className="size-3.5" aria-hidden />
-                    Publishing repository to {publishProviderLabel}...
+                    {publishProviderLabel}에 저장소 게시 중...
                   </div>
                 ) : null}
                 {publishError && !publishRepositoryAction.isPending ? (
@@ -860,7 +876,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     role="alert"
                     className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
                   >
-                    <p className="font-medium">Publish failed</p>
+                    <p className="font-medium">게시 실패</p>
                     <p className="mt-0.5 text-destructive/90">{publishError}</p>
                   </div>
                 ) : null}
@@ -875,13 +891,13 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                       </span>
                       <h3 className="text-sm font-semibold text-foreground">
                         {publishResult.status === "pushed"
-                          ? "Repository published"
-                          : "Repository created"}
+                          ? "저장소를 게시했습니다"
+                          : "저장소를 만들었습니다"}
                       </h3>
                       <p className="max-w-xs text-pretty text-xs text-muted-foreground">
                         {publishResult.status === "pushed"
-                          ? `${publishResult.branch} is now live on ${publishProviderLabel}.`
-                          : `Remote "${publishResult.remoteName}" is set up. Make a commit and push it to share your code.`}
+                          ? `${publishResult.branch} 브랜치를 ${publishProviderLabel}에 게시했습니다.`
+                          : `원격 저장소 "${publishResult.remoteName}"을 설정했습니다. 코드를 공유하려면 커밋한 뒤 푸시하세요.`}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 rounded-lg border border-input bg-muted/40 px-3 py-2 dark:border-transparent dark:bg-white/[0.035]">
@@ -901,12 +917,12 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                       }}
                     >
                       <ExternalLinkIcon className="size-3.5" aria-hidden />
-                      Open on {publishProviderLabel}
+                      {publishProviderLabel}에서 열기
                     </Button>
                   </>
                 ) : (
                   <div className="rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]">
-                    Publish result unavailable.
+                    게시 결과를 확인할 수 없습니다.
                   </div>
                 )}
               </div>
@@ -916,7 +932,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
           <DialogFooter className="dark:border-transparent dark:bg-transparent">
             {publishWizardStep === 2 ? (
               <Button size="sm" onClick={() => handleOpenChange(false)}>
-                Done
+                완료
               </Button>
             ) : (
               <>
@@ -932,7 +948,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     setPublishWizardStep((step) => Math.max(0, step - 1));
                   }}
                 >
-                  {publishWizardStep === 0 ? "Cancel" : "Back"}
+                  {publishWizardStep === 0 ? "취소" : "이전"}
                 </Button>
                 {publishWizardStep < 1 ? (
                   <Button
@@ -940,7 +956,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     disabled={!hasReadyPublishProvider || !selectedPublishProviderReadiness.ready}
                     onClick={() => setPublishWizardStep((step) => Math.min(1, step + 1))}
                   >
-                    Next
+                    다음
                   </Button>
                 ) : (
                   <Button
@@ -951,10 +967,10 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                     {publishRepositoryAction.isPending ? (
                       <>
                         <Spinner className="size-3.5" aria-hidden />
-                        Publishing...
+                        게시 중...
                       </>
                     ) : (
-                      "Publish"
+                      "게시"
                     )}
                   </Button>
                 )}
@@ -1155,7 +1171,7 @@ export default function GitActionsControl({
     [gitStatusForActions, hasPrimaryRemote, isDefaultRef, isGitActionRunning],
   );
   const quickActionDisabledReason = quickAction.disabled
-    ? (quickAction.hint ?? "This action is currently unavailable.")
+    ? (quickAction.hint ?? "현재 이 작업을 사용할 수 없습니다.")
     : null;
   const pendingDefaultBranchActionCopy = pendingDefaultBranchAction
     ? resolveDefaultBranchActionDialogCopy({
@@ -1217,7 +1233,7 @@ export default function GitActionsControl({
     if (!api) {
       toastManager.add({
         type: "error",
-        title: "Link opening is unavailable.",
+        title: "링크 열기 기능을 사용할 수 없습니다.",
         data: threadToastData,
       });
       return;
@@ -1226,7 +1242,7 @@ export default function GitActionsControl({
     if (!prUrl) {
       toastManager.add({
         type: "error",
-        title: "No open pull request found.",
+        title: "열린 PR을 찾지 못했습니다.",
         data: threadToastData,
       });
       return;
@@ -1236,8 +1252,8 @@ export default function GitActionsControl({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to open pull request link",
-          description: err instanceof Error ? err.message : "An error occurred.",
+          title: "PR 링크를 열지 못했습니다",
+          description: "잠시 후 다시 시도하세요.",
           ...(threadToastData !== undefined ? { data: threadToastData } : {}),
         }),
       );
@@ -1304,8 +1320,8 @@ export default function GitActionsControl({
         progressToastId ??
         toastManager.add({
           type: "loading",
-          title: progressStages[0] ?? "Running git action...",
-          description: "Waiting for Git...",
+          title: progressStages[0] ?? "Git 작업 실행 중...",
+          description: "Git 응답 대기 중...",
           timeout: 0,
           data: scopedToastData,
         });
@@ -1314,19 +1330,19 @@ export default function GitActionsControl({
         toastId: resolvedProgressToastId,
         toastData: scopedToastData,
         actionId,
-        title: progressStages[0] ?? "Running git action...",
+        title: progressStages[0] ?? "Git 작업 실행 중...",
         phaseStartedAtMs: null,
         hookStartedAtMs: null,
         hookName: null,
         lastOutputLine: null,
-        currentPhaseLabel: progressStages[0] ?? "Running git action...",
+        currentPhaseLabel: progressStages[0] ?? "Git 작업 실행 중...",
       };
 
       if (progressToastId) {
         toastManager.update(progressToastId, {
           type: "loading",
-          title: progressStages[0] ?? "Running git action...",
-          description: "Waiting for Git...",
+          title: progressStages[0] ?? "Git 작업 실행 중...",
+          description: "Git 응답 대기 중...",
           timeout: 0,
           data: scopedToastData,
         });
@@ -1353,15 +1369,15 @@ export default function GitActionsControl({
             progress.lastOutputLine = null;
             break;
           case "phase_started":
-            progress.title = event.label;
-            progress.currentPhaseLabel = event.label;
+            progress.title = localizeGitProgressLabel(event, changeRequestTerminology);
+            progress.currentPhaseLabel = progress.title;
             progress.phaseStartedAtMs = now;
             progress.hookStartedAtMs = null;
             progress.hookName = null;
             progress.lastOutputLine = null;
             break;
           case "hook_started":
-            progress.title = `Running ${event.hookName}...`;
+            progress.title = `${event.hookName} 훅 실행 중...`;
             progress.hookName = event.hookName;
             progress.hookStartedAtMs = now;
             progress.lastOutputLine = null;
@@ -1370,7 +1386,7 @@ export default function GitActionsControl({
             progress.lastOutputLine = event.text;
             break;
           case "hook_finished":
-            progress.title = progress.currentPhaseLabel ?? "Committing...";
+            progress.title = progress.currentPhaseLabel ?? "커밋 중...";
             progress.hookName = null;
             progress.hookStartedAtMs = null;
             progress.lastOutputLine = null;
@@ -1405,12 +1421,13 @@ export default function GitActionsControl({
         }
 
         const error = squashAtomCommandFailure(result);
+        console.error(error);
         toastManager.update(
           resolvedProgressToastId,
           stackedThreadToast({
             type: "error",
-            title: "Action failed",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "작업 실패",
+            description: "Git 작업을 완료하지 못했습니다. 다시 시도하세요.",
             ...(scopedToastData !== undefined ? { data: scopedToastData } : {}),
           }),
         );
@@ -1419,6 +1436,17 @@ export default function GitActionsControl({
 
       const actionResult = result.value;
       syncThreadBranchAfterGitAction(actionResult);
+      const shortCommitSha = actionResult.commit.commitSha?.slice(0, 7) ?? null;
+      const successTitle =
+        actionResult.pr.status === "created" || actionResult.pr.status === "opened_existing"
+          ? `${changeRequestTerminology.shortLabel}${actionResult.pr.number ? ` #${actionResult.pr.number}` : ""} ${actionResult.pr.status === "created" ? "생성 완료" : "열기 완료"}`
+          : actionResult.push.status === "pushed"
+            ? `${shortCommitSha ? `${shortCommitSha} ` : ""}푸시 완료${(actionResult.push.upstreamBranch ?? actionResult.push.branch) ? ` · ${actionResult.push.upstreamBranch ?? actionResult.push.branch}` : ""}`
+            : actionResult.commit.status === "created"
+              ? shortCommitSha
+                ? `${shortCommitSha} 커밋 완료`
+                : "변경 사항 커밋 완료"
+              : "완료";
       const closeResultToast = () => {
         toastManager.close(resolvedProgressToastId);
       };
@@ -1430,7 +1458,7 @@ export default function GitActionsControl({
       } | null = null;
       if (toastCta.kind === "run_action") {
         toastActionProps = {
-          children: toastCta.label,
+          children: toastCta.action.kind === "push" ? "푸시" : "작업 실행",
           onClick: () => {
             closeResultToast();
             void runGitActionWithToast({
@@ -1440,7 +1468,7 @@ export default function GitActionsControl({
         };
       } else if (toastCta.kind === "open_pr") {
         toastActionProps = {
-          children: toastCta.label,
+          children: `${changeRequestTerminology.shortLabel} 보기`,
           onClick: () => {
             const api = readLocalApi();
             if (!api) return;
@@ -1460,7 +1488,7 @@ export default function GitActionsControl({
           resolvedProgressToastId,
           stackedThreadToast({
             type: "success",
-            title: actionResult.toast.title,
+            title: successTitle,
             description: actionResult.toast.description,
             timeout: 0,
             actionProps: toastActionProps,
@@ -1470,7 +1498,7 @@ export default function GitActionsControl({
       } else {
         toastManager.update(resolvedProgressToastId, {
           type: "success",
-          title: actionResult.toast.title,
+          title: successTitle,
           description: actionResult.toast.description,
           timeout: 0,
           data: successToastData,
@@ -1536,7 +1564,7 @@ export default function GitActionsControl({
     if (quickAction.kind === "run_pull") {
       const toastId = toastManager.add({
         type: "loading",
-        title: "Pulling...",
+        title: "가져오는 중...",
         timeout: 0,
         data: threadToastData,
       });
@@ -1548,12 +1576,13 @@ export default function GitActionsControl({
             return;
           }
           const error = squashAtomCommandFailure(result);
+          console.error(error);
           toastManager.update(
             toastId,
             stackedThreadToast({
               type: "error",
-              title: "Pull failed",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "가져오기 실패",
+              description: "원격 변경 사항을 가져오지 못했습니다. 다시 시도하세요.",
               ...(threadToastData !== undefined ? { data: threadToastData } : {}),
             }),
           );
@@ -1563,11 +1592,11 @@ export default function GitActionsControl({
         const pullResult = result.value;
         toastManager.update(toastId, {
           type: "success",
-          title: pullResult.status === "pulled" ? "Pulled" : "Already up to date",
+          title: pullResult.status === "pulled" ? "가져오기 완료" : "이미 최신 상태입니다",
           description:
             pullResult.status === "pulled"
-              ? `Updated ${pullResult.refName} from ${pullResult.upstreamRef ?? "upstream"}`
-              : `${pullResult.refName} is already synchronized.`,
+              ? `${pullResult.upstreamRef ?? "업스트림"}의 변경 사항을 ${pullResult.refName}에 반영했습니다.`
+              : `${pullResult.refName} 브랜치가 이미 동기화되어 있습니다.`,
           data: threadToastData,
         });
       })();
@@ -1625,7 +1654,7 @@ export default function GitActionsControl({
       if (!gitCwd) {
         toastManager.add({
           type: "error",
-          title: "Editor opening is unavailable.",
+          title: "편집기 열기 기능을 사용할 수 없습니다.",
           data: threadToastData,
         });
         return;
@@ -1637,11 +1666,12 @@ export default function GitActionsControl({
           return;
         }
         const error = squashAtomCommandFailure(result);
+        console.error(error);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Unable to open file",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "파일을 열지 못했습니다",
+            description: "선호 편집기 설정을 확인한 뒤 다시 시도하세요.",
             ...(threadToastData !== undefined ? { data: threadToastData } : {}),
           }),
         );
@@ -1668,11 +1698,12 @@ export default function GitActionsControl({
                 return;
               }
               const error = squashAtomCommandFailure(result);
+              console.error(error);
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Git initialization failed",
-                  description: error instanceof Error ? error.message : "An error occurred.",
+                  title: "Git 저장소 초기화 실패",
+                  description: "Git 저장소를 초기화하지 못했습니다. 다시 시도하세요.",
                   ...(threadToastData !== undefined ? { data: threadToastData } : {}),
                 }),
               );
@@ -1680,12 +1711,10 @@ export default function GitActionsControl({
           }}
         >
           <GitBranchPlusIcon className="size-3.5" aria-hidden />
-          <span className="ml-0.5">
-            {initAction.isPending ? "Initializing..." : "Initialize Git"}
-          </span>
+          <span className="ml-0.5">{initAction.isPending ? "초기화 중..." : "Git 초기화"}</span>
         </Button>
       ) : (
-        <Group aria-label="Git actions" className="shrink-0">
+        <Group aria-label="Git 작업" className="shrink-0">
           {quickActionDisabledReason ? (
             <Popover>
               <PopoverTrigger
@@ -1734,7 +1763,7 @@ export default function GitActionsControl({
             }}
           >
             <MenuTrigger
-              render={<Button aria-label="Git action options" size="icon-xs" variant="outline" />}
+              render={<Button aria-label="Git 작업 옵션" size="icon-xs" variant="outline" />}
               disabled={isGitActionRunning}
             >
               <ChevronDownIcon aria-hidden="true" className="size-4" />
@@ -1791,13 +1820,13 @@ export default function GitActionsControl({
                   }}
                 >
                   <CloudUploadIcon />
-                  Publish repository...
+                  저장소 게시...
                 </MenuItem>
               ) : null}
               {gitStatusForActions?.refName === null && (
                 <p className="px-2 py-1.5 text-xs text-warning">
-                  Detached HEAD: create and checkout a refName to enable push and pull request
-                  actions.
+                  분리된 HEAD 상태입니다. 푸시와 PR 작업을 사용하려면 브랜치를 만들고
+                  체크아웃하세요.
                 </p>
               )}
               {gitStatusForActions &&
@@ -1806,11 +1835,13 @@ export default function GitActionsControl({
                 gitStatusForActions.behindCount > 0 &&
                 gitStatusForActions.aheadCount === 0 && (
                   <p className="px-2 py-1.5 text-xs text-warning">
-                    Behind upstream. Pull/rebase first.
+                    업스트림보다 뒤처져 있습니다. 먼저 풀하거나 리베이스하세요.
                   </p>
                 )}
               {gitStatusError && (
-                <p className="px-2 py-1.5 text-xs text-destructive">{gitStatusError}</p>
+                <p className="px-2 py-1.5 text-xs text-destructive">
+                  Git 상태를 새로 고치지 못했습니다.
+                </p>
               )}
             </MenuPopup>
           </Menu>
@@ -1836,13 +1867,13 @@ export default function GitActionsControl({
           <DialogPanel className="space-y-4">
             <div className="space-y-3 rounded-xl bg-zinc-25 p-3 text-sm ring-1 ring-black/5 dark:bg-white/[0.035] dark:ring-white/5">
               <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1">
-                <span className="text-muted-foreground">Branch</span>
+                <span className="text-muted-foreground">브랜치</span>
                 <span className="flex items-center justify-between gap-2">
                   <span className="font-medium">
-                    {gitStatusForActions?.refName ?? "(detached HEAD)"}
+                    {gitStatusForActions?.refName ?? "(분리된 HEAD)"}
                   </span>
                   {isDefaultRef && (
-                    <span className="text-right text-warning">Warning: default refName</span>
+                    <span className="text-right text-warning">주의: 기본 브랜치</span>
                   )}
                 </span>
               </div>
@@ -1860,10 +1891,10 @@ export default function GitActionsControl({
                         }}
                       />
                     )}
-                    <span className="text-muted-foreground">Files</span>
+                    <span className="text-muted-foreground">파일</span>
                     {!allSelected && !isEditingFiles && (
                       <span className="text-muted-foreground">
-                        ({selectedFiles.length} of {allFiles.length})
+                        ({allFiles.length}개 중 {selectedFiles.length}개)
                       </span>
                     )}
                   </div>
@@ -1873,12 +1904,12 @@ export default function GitActionsControl({
                       size="xs"
                       onClick={() => setIsEditingFiles((prev) => !prev)}
                     >
-                      {isEditingFiles ? "Done" : "Edit"}
+                      {isEditingFiles ? "완료" : "편집"}
                     </Button>
                   )}
                 </div>
                 {!gitStatusForActions || allFiles.length === 0 ? (
-                  <p className="font-medium">none</p>
+                  <p className="font-medium">없음</p>
                 ) : (
                   <div className="space-y-2">
                     <ScrollArea className="h-44 rounded-lg bg-card ring-1 ring-black/5 dark:bg-white/[0.025] dark:ring-white/5">
@@ -1918,7 +1949,7 @@ export default function GitActionsControl({
                                 </span>
                                 <span className="shrink-0">
                                   {isExcluded ? (
-                                    <span className="text-muted-foreground">Excluded</span>
+                                    <span className="text-muted-foreground">제외됨</span>
                                   ) : (
                                     <>
                                       <span className="text-success">+{file.insertions}</span>
@@ -1947,11 +1978,11 @@ export default function GitActionsControl({
               </div>
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">Commit message (optional)</p>
+              <p className="text-sm font-medium">커밋 메시지 (선택 사항)</p>
               <Textarea
                 value={dialogCommitMessage}
                 onChange={(event) => setDialogCommitMessage(event.target.value)}
-                placeholder="Leave empty to auto-generate"
+                placeholder="비워 두면 자동으로 생성합니다"
                 size="sm"
               />
             </div>
@@ -1967,7 +1998,7 @@ export default function GitActionsControl({
                 setIsEditingFiles(false);
               }}
             >
-              Cancel
+              취소
             </Button>
             <Button
               variant="outline"
@@ -1975,10 +2006,10 @@ export default function GitActionsControl({
               disabled={noneSelected}
               onClick={runDialogActionOnNewBranch}
             >
-              Commit on new refName
+              새 브랜치에 커밋
             </Button>
             <Button size="sm" disabled={noneSelected} onClick={runDialogAction}>
-              Commit
+              커밋
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -2002,7 +2033,7 @@ export default function GitActionsControl({
         <DialogPopup className="max-w-xl">
           <DialogHeader>
             <DialogTitle>
-              {pendingDefaultBranchActionCopy?.title ?? "Run action on default refName?"}
+              {pendingDefaultBranchActionCopy?.title ?? "기본 브랜치에서 작업할까요?"}
             </DialogTitle>
             <DialogDescription>{pendingDefaultBranchActionCopy?.description}</DialogDescription>
           </DialogHeader>
@@ -2013,7 +2044,7 @@ export default function GitActionsControl({
               size="sm"
               onClick={() => setPendingDefaultBranchAction(null)}
             >
-              Abort
+              중단
             </Button>
             <Button
               className="min-h-8 w-full max-w-full whitespace-normal py-1.5 leading-snug sm:min-h-7 sm:w-auto"
@@ -2021,14 +2052,14 @@ export default function GitActionsControl({
               size="sm"
               onClick={continuePendingDefaultBranchAction}
             >
-              {pendingDefaultBranchActionCopy?.continueLabel ?? "Continue"}
+              {pendingDefaultBranchActionCopy?.continueLabel ?? "계속"}
             </Button>
             <Button
               className="min-h-8 w-full max-w-full whitespace-normal py-1.5 leading-snug sm:min-h-7 sm:w-auto"
               size="sm"
               onClick={checkoutFeatureBranchAndContinuePendingAction}
             >
-              Checkout feature branch & continue
+              기능 브랜치를 체크아웃하고 계속
             </Button>
           </DialogFooter>
         </DialogPopup>

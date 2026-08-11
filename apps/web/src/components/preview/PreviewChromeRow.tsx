@@ -110,7 +110,7 @@ export function PreviewChromeRow({
   return (
     <div className="relative">
       <form onSubmit={submit} className="surface-subheader gap-1 px-2" data-surface-subheader>
-        <div className="flex items-center gap-0.5" role="group" aria-label="Navigation">
+        <div className="flex items-center gap-0.5" role="group" aria-label="탐색">
           <Tooltip>
             <TooltipTrigger
               render={
@@ -119,14 +119,14 @@ export function PreviewChromeRow({
                   size="icon-xs"
                   onClick={canGoBack ? onBack : NOOP}
                   disabled={!canGoBack}
-                  aria-label="Back"
+                  aria-label="뒤로"
                   type="button"
                 />
               }
             >
               <ArrowLeft />
             </TooltipTrigger>
-            <TooltipPopup>Back</TooltipPopup>
+            <TooltipPopup>뒤로</TooltipPopup>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger
@@ -136,14 +136,14 @@ export function PreviewChromeRow({
                   size="icon-xs"
                   onClick={canGoForward ? onForward : NOOP}
                   disabled={!canGoForward}
-                  aria-label="Forward"
+                  aria-label="앞으로"
                   type="button"
                 />
               }
             >
               <ArrowRight />
             </TooltipTrigger>
-            <TooltipPopup>Forward</TooltipPopup>
+            <TooltipPopup>앞으로</TooltipPopup>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger
@@ -153,14 +153,14 @@ export function PreviewChromeRow({
                   size="icon-xs"
                   onClick={refreshDisabled ? NOOP : onRefresh}
                   disabled={refreshDisabled}
-                  aria-label={loading ? "Stop" : "Refresh"}
+                  aria-label={loading ? "중지" : "새로 고침"}
                   type="button"
                 />
               }
             >
               <RotateCw className={cn(loading && "animate-spin")} />
             </TooltipTrigger>
-            <TooltipPopup>{loading ? "Loading…" : "Refresh"}</TooltipPopup>
+            <TooltipPopup>{loading ? "불러오는 중…" : "새로 고침"}</TooltipPopup>
           </Tooltip>
         </div>
 
@@ -193,7 +193,7 @@ export function PreviewChromeRow({
                       inputRef.current?.blur();
                     }
                   }}
-                  placeholder="Search or enter URL"
+                  placeholder="검색어 또는 URL 입력"
                   spellCheck={false}
                   disabled={inputDisabled}
                   data-preview-url-input
@@ -214,14 +214,14 @@ export function PreviewChromeRow({
                       variant="ghost"
                       size="icon-xs"
                       onClick={onOpenInBrowser}
-                      aria-label="Open in system browser"
+                      aria-label="시스템 브라우저에서 열기"
                       type="button"
                     />
                   }
                 >
                   <ExternalLink />
                 </TooltipTrigger>
-                <TooltipPopup>Open in system browser</TooltipPopup>
+                <TooltipPopup>시스템 브라우저에서 열기</TooltipPopup>
               </Tooltip>
             </InputGroupAddon>
           ) : null}
@@ -236,7 +236,7 @@ export function PreviewChromeRow({
                   size="icon-xs"
                   onClick={onPickElement}
                   disabled={pickDisabled}
-                  aria-label={pickActive ? "Cancel annotation" : "Annotate preview"}
+                  aria-label={pickActive ? "주석 취소" : "미리보기에 주석 추가"}
                   aria-pressed={pickActive ? "true" : "false"}
                   type="button"
                 />
@@ -248,8 +248,8 @@ export function PreviewChromeRow({
               {pickDisabled && pickDisabledReason
                 ? pickDisabledReason
                 : pickActive
-                  ? "Cancel annotation (Esc)"
-                  : "Annotate elements, regions, and drawings"}
+                  ? "주석 취소 (Esc)"
+                  : "요소, 영역 및 그림에 주석 추가"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -261,7 +261,7 @@ export function PreviewChromeRow({
                   variant={recording ? "secondary" : "ghost"}
                   size="icon-xs"
                   onClick={(event) => onCapture(event.shiftKey)}
-                  aria-label={recording ? "Stop recording" : "Capture screenshot"}
+                  aria-label={recording ? "녹화 중지" : "스크린샷 캡처"}
                   type="button"
                   className="relative"
                   disabled={captureDisabled}
@@ -274,7 +274,7 @@ export function PreviewChromeRow({
               ) : null}
             </TooltipTrigger>
             <TooltipPopup>
-              {recording ? "Stop recording" : "Screenshot · Shift-click to record"}
+              {recording ? "녹화 중지" : "스크린샷 · Shift-클릭으로 녹화"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -287,7 +287,7 @@ export function PreviewChromeRow({
                   size="icon-xs"
                   onClick={onPictureInPicture}
                   aria-label={
-                    pictureInPicture ? "Close floating preview" : "Float preview over chat"
+                    pictureInPicture ? "플로팅 미리보기 닫기" : "대화 위에 미리보기 띄우기"
                   }
                   aria-pressed={pictureInPicture ? "true" : "false"}
                   type="button"
@@ -298,7 +298,7 @@ export function PreviewChromeRow({
               <PictureInPicture2 className={cn(pictureInPicture && "text-primary")} />
             </TooltipTrigger>
             <TooltipPopup>
-              {pictureInPicture ? "Close floating preview" : "Float preview over chat"}
+              {pictureInPicture ? "플로팅 미리보기 닫기" : "대화 위에 미리보기 띄우기"}
             </TooltipPopup>
           </Tooltip>
         ) : null}

@@ -168,8 +168,8 @@ const resolveOptions = (platform: string, availableEditors: ReadonlyArray<Editor
       label: isMacPlatform(platform)
         ? "Finder"
         : isWindowsPlatform(platform)
-          ? "Explorer"
-          : "Files",
+          ? "파일 탐색기"
+          : "파일 관리자",
       Icon: FolderClosedIcon,
       value: "file-manager",
       kind: "generic",
@@ -198,7 +198,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact?: boolean;
   enableShortcut?: boolean;
 }) {
-  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
+  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "편집기에서 열기");
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
   const options = useMemo(
     () => resolveOptions(navigator.platform, availableEditors),
@@ -257,9 +257,9 @@ export const OpenInPicker = memo(function OpenInPicker({
   ]);
 
   return (
-    <Group aria-label="Open in editor">
+    <Group aria-label="편집기에서 열기">
       <Button
-        aria-label={compact ? "Open file in preferred editor" : undefined}
+        aria-label={compact ? "선호 편집기에서 파일 열기" : undefined}
         className="ps-[8.5px]"
         size="xs"
         variant="outline"
@@ -279,24 +279,16 @@ export const OpenInPicker = memo(function OpenInPicker({
               : "sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5"
           }
         >
-          Open
+          열기
         </span>
       </Button>
       <GroupSeparator {...(!compact ? { className: "hidden @3xl/header-actions:block" } : {})} />
       <Menu>
-        <MenuTrigger
-          render={
-            <Button
-              aria-label={compact ? "Choose editor" : "Copy options"}
-              size="icon-xs"
-              variant="outline"
-            />
-          }
-        >
+        <MenuTrigger render={<Button aria-label="편집기 선택" size="icon-xs" variant="outline" />}>
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
         <MenuPopup align="end">
-          {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
+          {options.length === 0 && <MenuItem disabled>설치된 편집기를 찾지 못했습니다</MenuItem>}
           {options.map(({ label, Icon, value, kind }) => (
             <MenuItem key={value} onClick={() => openInEditor(value)}>
               <Icon aria-hidden="true" className={getOpenInIconClass(kind)} />

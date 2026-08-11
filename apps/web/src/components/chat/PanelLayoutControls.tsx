@@ -37,7 +37,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
               className="shrink-0 [-webkit-app-region:no-drag]"
               pressed={terminalOpen}
               onPressedChange={onToggleTerminal}
-              aria-label="Toggle terminal drawer"
+              aria-label="터미널 서랍 전환"
               variant="ghost"
               size="sm"
               disabled={!terminalAvailable}
@@ -48,8 +48,8 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
         />
         <TooltipPopup side="bottom">
           {terminalAvailable
-            ? `Toggle terminal drawer${terminalShortcutLabel ? ` (${terminalShortcutLabel})` : ""}`
-            : "Terminal drawer is unavailable"}
+            ? `터미널 서랍 전환${terminalShortcutLabel ? ` (${terminalShortcutLabel})` : ""}`
+            : "터미널 서랍을 사용할 수 없음"}
         </TooltipPopup>
       </Tooltip>
       <Tooltip>
@@ -59,7 +59,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
               className="shrink-0 [-webkit-app-region:no-drag]"
               pressed={rightPanelOpen}
               onPressedChange={onToggleRightPanel}
-              aria-label="Toggle right panel"
+              aria-label="오른쪽 패널 전환"
               variant="ghost"
               size="sm"
               disabled={!rightPanelAvailable}
@@ -70,8 +70,8 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
         />
         <TooltipPopup side="bottom">
           {rightPanelAvailable
-            ? `Toggle right panel${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}`
-            : "Right panel is unavailable"}
+            ? `오른쪽 패널 전환${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}`
+            : "오른쪽 패널을 사용할 수 없음"}
         </TooltipPopup>
       </Tooltip>
     </div>
@@ -85,7 +85,7 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
   maximized: boolean;
   onToggle: () => void;
 }) {
-  const label = maximized ? "Restore panel size" : "Maximize panel";
+  const label = maximized ? "패널 크기 복원" : "패널 최대화";
   return (
     <Tooltip>
       <TooltipTrigger

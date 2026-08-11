@@ -77,16 +77,16 @@ function SearchOptionButton(props: {
 function EmptyContentSearchDialog() {
   return (
     <CommandPaletteContent
-      aria-label="Search project contents"
-      escapeLabel="Back"
-      footerActionLabel="Open file"
-      inputProps={{ disabled: true, placeholder: "Search project contents…" }}
+      aria-label="프로젝트 내용 검색"
+      escapeLabel="뒤로"
+      footerActionLabel="파일 열기"
+      inputProps={{ disabled: true, placeholder: "프로젝트 내용 검색…" }}
       mode="none"
       panelClassName="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground"
       testId="project-content-search"
       value=""
     >
-      Open a project to search its files.
+      파일을 검색하려면 프로젝트를 여세요.
     </CommandPaletteContent>
   );
 }
@@ -155,28 +155,28 @@ function OpenContentSearchDialog(props: {
 
   return (
     <CommandPaletteContent
-      aria-label={`Search file contents in ${target.projectName}`}
-      escapeLabel="Back"
-      footerActionLabel="Open file"
+      aria-label={`${target.projectName} 파일 내용 검색`}
+      escapeLabel="뒤로"
+      footerActionLabel="파일 열기"
       inputAccessory={
         <div className="absolute inset-e-2.5 top-1/2 flex shrink-0 -translate-y-1/2 items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
           <SearchOptionButton
             active={caseSensitive}
-            label="Match case"
+            label="대/소문자 구분"
             onClick={() => setCaseSensitive((current) => !current)}
           >
             Aa
           </SearchOptionButton>
           <SearchOptionButton
             active={wholeWord}
-            label="Match whole word"
+            label="단어 단위로 검색"
             onClick={() => setWholeWord((current) => !current)}
           >
             <span className="underline decoration-2 underline-offset-2">ab</span>
           </SearchOptionButton>
           <SearchOptionButton
             active={useRegex}
-            label="Use regular expression"
+            label="정규식 사용"
             onClick={() => setUseRegex((current) => !current)}
           >
             .*
@@ -185,7 +185,7 @@ function OpenContentSearchDialog(props: {
       }
       inputProps={{
         className: "pe-30",
-        placeholder: `Search in ${target.projectName}`,
+        placeholder: `${target.projectName}에서 검색`,
         onKeyDown: (event) => {
           if (event.key === "ArrowDown" && matches.length > 0) {
             event.preventDefault();
@@ -219,14 +219,14 @@ function OpenContentSearchDialog(props: {
         <div className="flex h-9 shrink-0 items-center border-b px-3 text-xs text-muted-foreground">
           {search.isPending ? (
             <span className="flex items-center gap-2">
-              <LoaderCircle className="size-3.5 animate-spin" /> Searching…
+              <LoaderCircle className="size-3.5 animate-spin" /> 검색 중…
             </span>
           ) : search.error ? (
-            <span className="text-destructive">{search.error}</span>
+            <span className="text-destructive">프로젝트 내용을 검색하지 못했습니다.</span>
           ) : search.invalidRegex ? (
-            <span className="text-destructive">Invalid regular expression</span>
+            <span className="text-destructive">올바르지 않은 정규식입니다</span>
           ) : (
-            `${matches.length.toLocaleString()}${search.truncated ? "+" : ""} results in ${fileCount.toLocaleString()} files`
+            `파일 ${fileCount.toLocaleString()}개에서 결과 ${matches.length.toLocaleString()}${search.truncated ? "+" : ""}개`
           )}
         </div>
       ) : null}
@@ -234,8 +234,8 @@ function OpenContentSearchDialog(props: {
       {matches.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
           {search.hasQuery && !search.isPending && !search.error
-            ? "No results found."
-            : "Type to search across your project."}
+            ? "검색 결과가 없습니다."
+            : "프로젝트 전체를 검색할 내용을 입력하세요."}
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1" scrollFade>

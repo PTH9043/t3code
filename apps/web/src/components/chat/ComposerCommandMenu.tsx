@@ -84,7 +84,7 @@ function groupCommandItems(
   groupSlashCommandSections: boolean,
 ): ComposerCommandGroup[] {
   if (triggerKind === "skill") {
-    return items.length > 0 ? [{ id: "skills", label: "Skills", items }] : [];
+    return items.length > 0 ? [{ id: "skills", label: "스킬", items }] : [];
   }
   if (triggerKind !== "slash-command" || !groupSlashCommandSections) {
     return [{ id: "default", label: null, items }];
@@ -95,10 +95,10 @@ function groupCommandItems(
 
   const groups: ComposerCommandGroup[] = [];
   if (builtInItems.length > 0) {
-    groups.push({ id: "built-in", label: "Built-in", items: builtInItems });
+    groups.push({ id: "built-in", label: "기본 제공", items: builtInItems });
   }
   if (providerItems.length > 0) {
-    groups.push({ id: "provider", label: "Provider", items: providerItems });
+    groups.push({ id: "provider", label: "제공자", items: providerItems });
   }
   return groups;
 }
@@ -173,23 +173,23 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
             {props.triggerKind === "skill" ? (
               <CommandGroup>
                 <CommandGroupLabel className="px-0 pt-0 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-secondary-label">
-                  Skills
+                  스킬
                 </CommandGroupLabel>
                 <p className="text-secondary-label text-xs">
                   {props.isLoading
-                    ? "Searching workspace skills..."
+                    ? "작업공간 스킬 검색 중..."
                     : (props.emptyStateText ??
-                      "No skills found. Try / to browse provider commands.")}
+                      "스킬을 찾지 못했습니다. /를 입력해 제공자 명령을 살펴보세요.")}
                 </p>
               </CommandGroup>
             ) : (
               <p className="text-secondary-label text-xs">
                 {props.isLoading
-                  ? "Searching workspace files..."
+                  ? "작업공간 파일 검색 중..."
                   : (props.emptyStateText ??
                     (props.triggerKind === "path"
-                      ? "No matching files or folders."
-                      : "No matching command."))}
+                      ? "일치하는 파일이나 폴더가 없습니다."
+                      : "일치하는 명령이 없습니다."))}
               </p>
             )}
           </div>

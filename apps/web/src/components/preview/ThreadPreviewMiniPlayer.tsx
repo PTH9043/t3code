@@ -72,10 +72,11 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
       ? previewBridge.pictureInPicture.close
       : previewBridge.pictureInPicture.open;
     void operation(runtimeTabId).catch((error) => {
+      console.error("Unable to update popped-out preview", error);
       toastManager.add({
         type: "error",
-        title: "Unable to update popped-out preview",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        title: "별도 미리보기를 업데이트할 수 없음",
+        description: "별도 미리보기를 업데이트하지 못했습니다. 다시 시도하세요.",
       });
     });
   };
@@ -215,7 +216,7 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
   return (
     <section
       ref={rootRef}
-      aria-label="Floating browser preview"
+      aria-label="플로팅 브라우저 미리보기"
       data-preview-mini-player={tabId}
       className="pointer-events-none absolute select-none"
       style={
@@ -244,8 +245,8 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label="Open preview in right panel"
-            title="Open in right panel"
+            aria-label="오른쪽 패널에서 미리보기 열기"
+            title="오른쪽 패널에서 열기"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={openInPanel}
           >
@@ -256,14 +257,10 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
             size="icon-xs"
             aria-label={
               desktopOverlay?.pictureInPicture
-                ? "Close popped-out preview"
-                : "Pop preview into separate window"
+                ? "별도 미리보기 닫기"
+                : "미리보기를 별도 창으로 열기"
             }
-            title={
-              desktopOverlay?.pictureInPicture
-                ? "Close separate window"
-                : "Pop into separate window"
-            }
+            title={desktopOverlay?.pictureInPicture ? "별도 창 닫기" : "별도 창으로 열기"}
             disabled={!desktopOverlay?.hasWebContents}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={toggleNativePictureInPicture}
@@ -273,8 +270,8 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label="Close floating preview"
-            title="Close floating preview"
+            aria-label="플로팅 미리보기 닫기"
+            title="플로팅 미리보기 닫기"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={close}
           >
@@ -296,13 +293,13 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
         <div className="pointer-events-none absolute inset-0 z-[31] rounded-xl ring-1 ring-inset ring-border/80" />
         {!desktopOverlay?.hasWebContents ? (
           <div className="pointer-events-none absolute inset-0 z-[32] flex items-center justify-center rounded-xl bg-muted text-xs text-muted-foreground">
-            Reconnecting preview…
+            미리보기 다시 연결 중…
           </div>
         ) : null}
         <button
           type="button"
-          aria-label="Resize floating preview"
-          title="Resize floating preview"
+          aria-label="플로팅 미리보기 크기 조절"
+          title="플로팅 미리보기 크기 조절"
           className="pointer-events-auto absolute bottom-0 right-0 z-[33] size-5 cursor-nwse-resize rounded-br-xl after:absolute after:bottom-1 after:right-1 after:size-2 after:border-b after:border-r after:border-foreground/45"
           onPointerDown={handleResizePointerDown}
           onPointerMove={handleResizePointerMove}

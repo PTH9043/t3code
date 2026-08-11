@@ -70,21 +70,25 @@ function ensureRelayClientAvailable(
     const registry = yield* EnvironmentRegistry;
     const status = yield* registry
       .run(environmentId, request(WS_METHODS.cloudGetRelayClientStatus, {}))
-      .pipe(Effect.mapError(relayClientRpcError("Could not check relay client availability.")));
+      .pipe(
+        Effect.mapError(
+          relayClientRpcError("릴레이 클라이언트 사용 가능 여부를 확인하지 못했습니다."),
+        ),
+      );
     if (status.status === "available") return;
     if (status.status === "unsupported") {
       return yield* new CloudEnvironmentLinkError({
-        message: `T3 Code cannot install the relay client automatically on ${status.platform}-${status.arch}.`,
+        message: `${status.platform}-${status.arch}에서는 T3 Code가 릴레이 클라이언트를 자동으로 설치할 수 없습니다.`,
       });
     }
 
     const confirmed = yield* Effect.tryPromise({
       try: () => requestRelayClientInstallConfirmation(status.version),
-      catch: relayClientRpcError("Could not confirm relay client installation."),
+      catch: relayClientRpcError("릴레이 클라이언트 설치 확인을 처리하지 못했습니다."),
     });
     if (!confirmed) {
       return yield* new CloudEnvironmentLinkError({
-        message: "Relay client installation was cancelled.",
+        message: "릴레이 클라이언트 설치가 취소되었습니다.",
       });
     }
 
@@ -97,12 +101,12 @@ function ensureRelayClientAvailable(
       )
       .pipe(
         Stream.runLast,
-        Effect.mapError(relayClientRpcError("Could not install the relay client.")),
+        Effect.mapError(relayClientRpcError("릴레이 클라이언트를 설치하지 못했습니다.")),
         Effect.ensuring(Effect.sync(finishRelayClientInstall)),
       );
     if (Option.isNone(installed) || installed.value.type !== "complete") {
       return yield* new CloudEnvironmentLinkError({
-        message: "The relay client install completed without a final status.",
+        message: "릴레이 클라이언트 설치가 완료되었지만 최종 상태를 확인하지 못했습니다.",
       });
     }
     const installedStatus = installed.value.status;
@@ -110,8 +114,8 @@ function ensureRelayClientAvailable(
       return yield* new CloudEnvironmentLinkError({
         message:
           installedStatus.status === "unsupported"
-            ? `T3 Code cannot install the relay client automatically on ${installedStatus.platform}-${installedStatus.arch}.`
-            : "The relay client is still unavailable after installation.",
+            ? `${installedStatus.platform}-${installedStatus.arch}에서는 T3 Code가 릴레이 클라이언트를 자동으로 설치할 수 없습니다.`
+            : "설치 후에도 릴레이 클라이언트를 사용할 수 없습니다.",
       });
     }
   });
@@ -134,41 +138,41 @@ function relayProtectedErrorMessage(error: RelayProtectedErrorType): string {
       switch (error.reason) {
         case "missing_bearer":
         case "invalid_bearer":
-          return "Relay rejected the cloud session token.";
+          return "릴레이가 클라우드 세션 토큰을 거부했습니다.";
         case "invalid_dpop":
-          return "Relay rejected the DPoP proof.";
+          return "릴레이가 DPoP 증명을 거부했습니다.";
         case "not_authorized":
-          return "Relay rejected the authenticated request.";
+          return "릴레이가 인증된 요청을 거부했습니다.";
       }
     case "RelayEnvironmentLinkProofExpiredError":
-      return "Relay rejected an expired environment link proof.";
+      return "릴레이가 만료된 환경 연결 증명을 거부했습니다.";
     case "RelayEnvironmentLinkProofInvalidError":
-      return `Relay rejected the environment link proof (${error.reason}).`;
+      return `릴레이가 환경 연결 증명을 거부했습니다(${error.reason}).`;
     case "RelayEnvironmentConnectNotAuthorizedError":
       // "Not authorized" covers non-auth causes too; surface the reason so a
       // missing link doesn't read as a credential problem.
       if (error.reason === "environment_link_not_found") {
-        return "Relay has no active link for this environment. The environment server may not have re-established its link yet.";
+        return "릴레이에 이 환경의 활성 연결이 없습니다. 환경 서버가 아직 연결을 다시 설정하지 못했을 수 있습니다.";
       }
       return error.reason
-        ? `Relay rejected the environment connection request (${error.reason}).`
-        : "Relay rejected the environment connection request.";
+        ? `릴레이가 환경 연결 요청을 거부했습니다(${error.reason}).`
+        : "릴레이가 환경 연결 요청을 거부했습니다.";
     case "RelayEnvironmentEndpointUnavailableError":
-      return `Relay could not reach the environment endpoint (${error.reason}).`;
+      return `릴레이가 환경 엔드포인트에 연결하지 못했습니다(${error.reason}).`;
     case "RelayEnvironmentEndpointTimedOutError":
-      return "Relay timed out while contacting the environment endpoint.";
+      return "릴레이가 환경 엔드포인트에 연결하는 동안 시간이 초과되었습니다.";
     case "RelayEnvironmentLinkFailedError":
-      return `Relay could not link the environment (${error.reason}).`;
+      return `릴레이가 환경을 연결하지 못했습니다(${error.reason}).`;
     case "RelayEnvironmentLinkUnavailableError":
-      return `Relay cannot provision the managed endpoint (${error.reason}).`;
+      return `릴레이가 관리형 엔드포인트를 준비할 수 없습니다(${error.reason}).`;
     case "RelayEnvironmentLinkLimitExceededError":
-      return `Relay refused the link: this account already has its maximum of ${error.maxTunnels} managed tunnels. Unlink an environment to free one up.`;
+      return `이 계정은 관리형 터널 최대 ${error.maxTunnels}개를 이미 사용 중이어서 릴레이가 연결을 거부했습니다. 기존 환경 연결 하나를 해제하세요.`;
     case "RelayAgentActivityPublishProofExpiredError":
-      return "Relay rejected an expired agent activity publish proof.";
+      return "릴레이가 만료된 에이전트 활동 게시 증명을 거부했습니다.";
     case "RelayAgentActivityPublishProofInvalidError":
-      return `Relay rejected the agent activity publish proof (${error.reason}).`;
+      return `릴레이가 에이전트 활동 게시 증명을 거부했습니다(${error.reason}).`;
     case "RelayInternalError":
-      return `Relay encountered an internal error (${error.reason}).`;
+      return `릴레이 내부 오류가 발생했습니다(${error.reason}).`;
   }
 }
 
@@ -224,12 +228,12 @@ function ensureLinkedEnvironmentMatches(input: {
 }): Effect.Effect<void, CloudEnvironmentLinkError> {
   if (input.link.environmentId !== input.expectedEnvironmentId) {
     return new CloudEnvironmentLinkError({
-      message: "Relay returned credentials for a different environment.",
+      message: "릴레이가 다른 환경의 자격 증명을 반환했습니다.",
     });
   }
   if (input.link.endpoint.providerKind !== input.expectedProviderKind) {
     return new CloudEnvironmentLinkError({
-      message: "Relay returned credentials for a different endpoint provider.",
+      message: "릴레이가 다른 엔드포인트 제공자의 자격 증명을 반환했습니다.",
     });
   }
   return Effect.void;
@@ -285,7 +289,7 @@ export function listManagedCloudEnvironments(input: {
     const configuredRelayUrl = relayUrl();
     if (!configuredRelayUrl) {
       return yield* new CloudEnvironmentLinkError({
-        message: "T3CODE_RELAY_URL is not configured.",
+        message: "T3CODE_RELAY_URL이 설정되지 않았습니다.",
       });
     }
     const relayClient = yield* ManagedRelay.ManagedRelayClient;
@@ -297,7 +301,7 @@ export function listManagedCloudEnvironments(input: {
         Effect.mapError(
           (cause) =>
             new CloudEnvironmentLinkError({
-              message: "Could not list relay-managed environments.",
+              message: "릴레이에서 관리하는 환경 목록을 불러오지 못했습니다.",
               cause,
             }),
         ),
@@ -315,7 +319,7 @@ export function listCloudDevices(input: {
   return Effect.gen(function* () {
     if (!relayUrl()) {
       return yield* new CloudEnvironmentLinkError({
-        message: "T3CODE_RELAY_URL is not configured.",
+        message: "T3CODE_RELAY_URL이 설정되지 않았습니다.",
       });
     }
     const relayClient = yield* ManagedRelay.ManagedRelayClient;
@@ -323,7 +327,7 @@ export function listCloudDevices(input: {
       Effect.mapError(
         (cause) =>
           new CloudEnvironmentLinkError({
-            message: "Could not list cloud devices.",
+            message: "클라우드 기기 목록을 불러오지 못했습니다.",
             cause,
           }),
       ),
@@ -338,7 +342,7 @@ export function readPrimaryCloudLinkState(input: {
     const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
     return yield* client.connect
       .linkState({ headers: {} })
-      .pipe(Effect.mapError(environmentApiError("Could not read environment cloud link state.")));
+      .pipe(Effect.mapError(environmentApiError("환경의 클라우드 연결 상태를 읽지 못했습니다.")));
   }).pipe(Effect.provide(primaryEnvironmentHttpLayer));
 }
 
@@ -354,7 +358,7 @@ export function updatePrimaryCloudPreferences(input: {
         payload: input,
       })
       .pipe(
-        Effect.mapError(environmentApiError("Could not update environment cloud preferences.")),
+        Effect.mapError(environmentApiError("환경의 클라우드 설정을 업데이트하지 못했습니다.")),
       );
   }).pipe(Effect.provide(primaryEnvironmentHttpLayer));
 }
@@ -371,7 +375,7 @@ export function unlinkPrimaryEnvironmentFromCloud(input: {
     const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
     yield* client.connect
       .unlink({ headers: {} })
-      .pipe(Effect.mapError(environmentApiError("Could not unlink the environment from cloud.")));
+      .pipe(Effect.mapError(environmentApiError("클라우드에서 환경 연결을 해제하지 못했습니다.")));
 
     const configuredRelayUrl = relayUrl();
     if (configuredRelayUrl && input.clerkToken) {
@@ -412,7 +416,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
     const configuredRelayUrl = relayUrl();
     if (!configuredRelayUrl) {
       return yield* new CloudEnvironmentLinkError({
-        message: "T3CODE_RELAY_URL is not configured.",
+        message: "T3CODE_RELAY_URL이 설정되지 않았습니다.",
       });
     }
     const managedTunnelsEnabled = (input.mode ?? "managed") === "managed";
@@ -437,7 +441,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
       .pipe(
         Effect.mapError(
           decodedRelayClientError(
-            `${configuredRelayUrl}/v1/client/environment-link-challenges failed`,
+            `${configuredRelayUrl}/v1/client/environment-link-challenges 요청 실패`,
           ),
         ),
       );
@@ -455,7 +459,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
           origin: endpointOrigin(input.target.httpBaseUrl),
         },
       })
-      .pipe(Effect.mapError(environmentApiError("Could not obtain environment link proof.")));
+      .pipe(Effect.mapError(environmentApiError("환경 연결 증명을 가져오지 못했습니다.")));
     const link = yield* relayClient
       .linkEnvironment({
         clerkToken: input.clerkToken,
@@ -468,7 +472,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
       })
       .pipe(
         Effect.mapError(
-          decodedRelayClientError(`${configuredRelayUrl}/v1/client/environment-links failed`),
+          decodedRelayClientError(`${configuredRelayUrl}/v1/client/environment-links 요청 실패`),
         ),
       );
     yield* ensureLinkedEnvironmentMatches({
@@ -489,6 +493,6 @@ export function linkPrimaryEnvironmentToCloud(input: {
           endpointRuntime: link.endpointRuntime,
         },
       })
-      .pipe(Effect.mapError(environmentApiError("Could not configure environment relay access.")));
+      .pipe(Effect.mapError(environmentApiError("환경의 릴레이 접근을 설정하지 못했습니다.")));
   }).pipe(Effect.provide(primaryEnvironmentHttpLayer));
 }

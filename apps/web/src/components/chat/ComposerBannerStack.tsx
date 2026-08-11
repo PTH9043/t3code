@@ -210,7 +210,7 @@ function ComposerBannerStackAlert({
             <Button
               size="icon-xs"
               variant="ghost"
-              aria-label={item.dismissLabel ?? "Dismiss warning"}
+              aria-label={item.dismissLabel ?? "경고 닫기"}
               disabled={exiting}
               onClick={onDismissRequest}
             >

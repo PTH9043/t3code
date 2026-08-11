@@ -21,9 +21,9 @@ describe("LocalCommentAnnotation", () => {
     expect(markup).not.toContain("font-mono");
     expect(markup).not.toContain("Local comment");
     expect(markup).not.toContain("on +78");
-    expect(markup).toContain("⌘/Ctrl Enter to send");
-    expect(markup).toContain("Add a comment…");
-    expect(markup).toContain(">Comment</button>");
+    expect(markup).toContain("⌘/Ctrl Enter로 전송");
+    expect(markup).toContain("댓글 추가…");
+    expect(markup).toContain(">댓글 작성</button>");
     expect(markup).toContain("autofocus");
     const textareaControl = markup.match(/<span[^>]*data-slot="textarea-control"[^>]*>/)?.[0];
     expect(textareaControl).toBeDefined();
@@ -45,7 +45,7 @@ describe("LocalCommentAnnotation", () => {
     expect(markup).not.toContain("chat-composer-glass");
     expect(markup).not.toContain("on +78");
     expect(markup).toContain("Please keep this branch explicit.");
-    expect(markup).toContain('aria-label="Delete comment"');
+    expect(markup).toContain('aria-label="댓글 삭제"');
     expect(markup).toContain("border-s-2");
     expect(markup).toContain("bg-primary/[0.045]");
     expect(markup).toContain("lucide-message-circle");

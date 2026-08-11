@@ -40,7 +40,9 @@ describe("ProviderStatusBanner", () => {
     );
 
     expect(markup).toContain('role="alert"');
-    expect(markup).toContain('aria-label="Dismiss Codex provider warning"');
+    expect(markup).toContain('aria-label="Codex 제공자 경고 닫기"');
+    expect(markup).toContain("Codex 제공자의 일부 기능을 사용할 수 없습니다.");
+    expect(markup).not.toContain("Provider is temporarily degraded.");
     expect(markup).toContain("absolute top-2 right-2");
   });
 
@@ -61,6 +63,6 @@ describe("ProviderStatusBanner", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Dismiss Codex provider error"');
+    expect(markup).toContain('aria-label="Codex 제공자 오류 닫기"');
   });
 });

@@ -20,7 +20,7 @@ function stashEntrySnippet(entry: PromptStashEntry): string {
     return trimmed.length > SNIPPET_MAX_CHARS ? `${trimmed.slice(0, SNIPPET_MAX_CHARS)}…` : trimmed;
   }
   const imageCount = entry.attachments.length + entry.droppedImageNames.length;
-  return imageCount > 0 ? `(${imageCount} image${imageCount === 1 ? "" : "s"})` : "(empty)";
+  return imageCount > 0 ? `(이미지 ${imageCount}개)` : "(비어 있음)";
 }
 
 /**
@@ -96,11 +96,11 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
           <CommandGroup>
             <CommandGroupLabel className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-secondary-label">
               <BookmarkIcon className="size-3" aria-hidden="true" />
-              Stashed prompts
+              보관한 프롬프트
             </CommandGroupLabel>
             {entries.length === 0 ? (
               <p className="px-3 pb-3 pt-1 text-secondary-label text-xs">
-                Nothing stashed yet. Press ⌘S with a prompt in the composer to stash it.
+                아직 보관한 프롬프트가 없습니다. 작성창에 프롬프트가 있을 때 ⌘S를 누르면 보관됩니다.
               </p>
             ) : (
               entries.map((entry) => (
@@ -141,13 +141,11 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
                   </span>
                   {entry.pendingImageCount ? (
                     <span className="shrink-0 text-[10px] text-secondary-label">
-                      saving {entry.pendingImageCount} image
-                      {entry.pendingImageCount === 1 ? "" : "s"}…
+                      이미지 {entry.pendingImageCount}개 저장 중…
                     </span>
                   ) : missingImageCount(entry) > 0 ? (
                     <span className="shrink-0 text-[10px] text-warning-foreground">
-                      {missingImageCount(entry)} image
-                      {missingImageCount(entry) === 1 ? "" : "s"} dropped
+                      이미지 {missingImageCount(entry)}개 누락
                     </span>
                   ) : null}
                   <span className="shrink-0 text-secondary-label text-xs">
@@ -157,7 +155,7 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
                     variant="ghost"
                     size="icon-xs"
                     className="shrink-0 opacity-0 transition-opacity group-hover/stash:opacity-100"
-                    aria-label="Delete stashed prompt"
+                    aria-label="보관한 프롬프트 삭제"
                     onClick={(event) => {
                       event.stopPropagation();
                       onDelete(entry);

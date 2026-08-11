@@ -32,9 +32,7 @@ describe("mobile client presentation", () => {
     const client = device();
 
     expect(mobileClientPlatformLabel(client)).toBe("iOS 18 · T3 Code 1.2.3");
-    expect(mobileClientNotificationDetail(client)).toBe(
-      "Alerts enabled for approvals, completions.",
-    );
+    expect(mobileClientNotificationDetail(client)).toBe("승인 요청, 완료 알림을 받습니다.");
   });
 
   it("distinguishes disabled notifications from an empty event selection", () => {
@@ -42,7 +40,7 @@ describe("mobile client presentation", () => {
       mobileClientNotificationDetail(
         device({ notifications: { ...device().notifications, enabled: false } }),
       ),
-    ).toBe("Push notifications are disabled on this device.");
+    ).toBe("이 기기에서 푸시 알림이 꺼져 있습니다.");
     expect(
       mobileClientNotificationDetail(
         device({
@@ -55,11 +53,11 @@ describe("mobile client presentation", () => {
           },
         }),
       ),
-    ).toBe("Push notifications are enabled, but no alert types are selected.");
+    ).toBe("푸시 알림은 켜져 있지만 선택된 알림 유형이 없습니다.");
   });
 
   it("handles missing app versions and invalid update timestamps", () => {
     expect(mobileClientPlatformLabel(device({ appVersion: null }))).toBe("iOS 18");
-    expect(mobileClientUpdatedAtLabel("not-a-date")).toBe("Update time unavailable");
+    expect(mobileClientUpdatedAtLabel("not-a-date")).toBe("업데이트 시각 없음");
   });
 });

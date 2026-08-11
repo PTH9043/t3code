@@ -37,9 +37,9 @@ const STORAGE_KEY = "t3code:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
   theme: "system",
-  systemDark: false,
-  followSystem: true,
-  appearanceMode: "system",
+  systemDark: true,
+  followSystem: false,
+  appearanceMode: "dark",
   themeHalves: null,
 };
 
@@ -114,18 +114,18 @@ function getSystemDark() {
   );
 }
 
-function readStoredFollowSystem(theme: Theme): boolean {
-  if (typeof window === "undefined") return theme === "system";
+function readStoredFollowSystem(_theme: Theme): boolean {
+  if (typeof window === "undefined") return false;
 
   try {
     const raw = window.localStorage.getItem(THEME_FOLLOW_SYSTEM_STORAGE_KEY);
     if (raw === "true") return true;
     if (raw === "false") return false;
   } catch {
-    // Fall back to the legacy theme value when the separate preference is unavailable.
+    // Missing legacy state uses NewAutoUsage's light-first default.
   }
 
-  return theme === "system";
+  return false;
 }
 
 function isThemePreferenceMode(value: string | null): value is ThemePreferenceMode {
@@ -143,7 +143,7 @@ export function readAppearanceModePreference(theme: Theme): ThemePreferenceMode 
   }
 
   if (readStoredFollowSystem(theme)) return "system";
-  return getThemePreferenceMode(theme) ?? "light";
+  return getThemePreferenceMode(theme) ?? "dark";
 }
 
 function writeAppearanceModePreference(appearanceMode: ThemePreferenceMode): void {
@@ -543,7 +543,7 @@ export function useTheme() {
       const nextMode = nextFollowSystem
         ? "system"
         : currentMode === "system"
-          ? (getThemePreferenceMode(theme) ?? "light")
+          ? (getThemePreferenceMode(theme) ?? "dark")
           : currentMode;
       return setAppearanceMode(nextMode);
     },

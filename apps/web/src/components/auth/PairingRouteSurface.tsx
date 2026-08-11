@@ -28,10 +28,10 @@ export function PairingPendingSurface() {
           {APP_DISPLAY_NAME}
         </p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Pairing with this environment
+          이 환경과 페어링하는 중
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Validating the pairing link and preparing your session.
+          페어링 링크를 확인하고 세션을 준비하고 있습니다.
         </p>
       </section>
     </div>
@@ -49,7 +49,9 @@ export function PairingRouteSurface({
 }) {
   const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
   const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
-  const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
+  const [errorMessage, setErrorMessage] = useState(
+    initialErrorMessage ? "인증에 실패했습니다. 페어링 정보를 확인하세요." : "",
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const autoSubmitAttemptedRef = useRef(false);
 
@@ -108,9 +110,7 @@ export function PairingRouteSurface({
         <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
           {APP_DISPLAY_NAME}
         </p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Pair with this environment
-        </h1>
+        <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">이 환경과 페어링</h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           {describeAuthGate(auth.bootstrapMethods)}
         </p>
@@ -118,7 +118,7 @@ export function PairingRouteSurface({
         <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
           <div className="space-y-2">
             <label className="text-sm font-medium" htmlFor="pairing-token">
-              Pairing token
+              페어링 토큰
             </label>
             <Input
               id="pairing-token"
@@ -128,7 +128,7 @@ export function PairingRouteSurface({
               disabled={isSubmitting}
               nativeInput
               onChange={(event) => setCredential(event.currentTarget.value)}
-              placeholder="Paste a one-time token or pairing secret"
+              placeholder="일회용 토큰 또는 페어링 비밀키 붙여넣기"
               spellCheck={false}
               value={credential}
             />
@@ -142,7 +142,7 @@ export function PairingRouteSurface({
 
           <div className="flex flex-wrap gap-2">
             <Button disabled={isSubmitting} size="sm" type="submit">
-              {isSubmitting ? "Pairing..." : "Continue"}
+              {isSubmitting ? "페어링 중..." : "계속"}
             </Button>
             <Button
               disabled={isSubmitting}
@@ -150,7 +150,7 @@ export function PairingRouteSurface({
               size="sm"
               variant="outline"
             >
-              Reload app
+              앱 새로고침
             </Button>
           </div>
         </form>
@@ -173,8 +173,8 @@ export function HostedPairingRouteSurface() {
   );
   const [message, setMessage] = useState(() =>
     hostedPairingRequestRef.current
-      ? "Connecting to this backend."
-      : "This pairing link is missing its backend host or token.",
+      ? "이 백엔드에 연결하는 중입니다."
+      : "페어링 링크에 백엔드 호스트 또는 토큰이 없습니다.",
   );
   const [canRetry, setCanRetry] = useState(false);
   const submitAttemptedRef = useRef(false);
@@ -185,20 +185,20 @@ export function HostedPairingRouteSurface() {
 
     if (!request) {
       setStatus("error");
-      setMessage("This pairing link is missing its backend host or token.");
+      setMessage("페어링 링크에 백엔드 호스트 또는 토큰이 없습니다.");
       setCanRetry(false);
       return;
     }
 
     if (tokenSubmittedRef.current) {
       setStatus("error");
-      setMessage("This one-time pairing token was already submitted. Request a new pairing link.");
+      setMessage("이 일회용 페어링 토큰은 이미 제출되었습니다. 새 페어링 링크를 요청하세요.");
       setCanRetry(false);
       return;
     }
 
     setStatus("pairing");
-    setMessage("Connecting to this backend.");
+    setMessage("이 백엔드에 연결하는 중입니다.");
     setCanRetry(false);
     tokenSubmittedRef.current = true;
 
@@ -208,7 +208,7 @@ export function HostedPairingRouteSurface() {
     });
     if (result._tag === "Success") {
       setStatus("paired");
-      setMessage(`${request.label || "The environment"} is saved in this browser.`);
+      setMessage(`${request.label || "환경"}이(가) 이 브라우저에 저장되었습니다.`);
       return;
     }
 
@@ -216,7 +216,7 @@ export function HostedPairingRouteSurface() {
     setStatus("error");
     setCanRetry(true);
     setMessage(
-      `${errorMessageFromUnknown(squashAtomCommandFailure(result))} If the backend accepted this one-time token, request a new pairing link before retrying.`,
+      `${errorMessageFromUnknown(squashAtomCommandFailure(result))} 백엔드가 일회용 토큰을 이미 수락했다면 다시 시도하기 전에 새 페어링 링크를 요청하세요.`,
     );
   }, [connectPairingEnvironment]);
 
@@ -246,39 +246,39 @@ export function HostedPairingRouteSurface() {
         </p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           {status === "paired"
-            ? "Backend paired"
+            ? "백엔드 페어링 완료"
             : status === "error"
-              ? "Pairing failed"
-              : "Pairing backend"}
+              ? "페어링 실패"
+              : "백엔드 페어링 중"}
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
         {request ? (
           <div className="mt-5 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-            Host: <span className="font-mono text-foreground/80">{request.host}</span>
+            호스트: <span className="font-mono text-foreground/80">{request.host}</span>
           </div>
         ) : null}
 
         {status === "error" ? (
           <div className="mt-5 rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
-            Verify the backend is reachable from this browser, supports CORS for hosted clients, and
-            is served over HTTPS when opening this page from HTTPS.
+            이 브라우저에서 백엔드에 연결할 수 있는지, 호스팅 클라이언트의 CORS를 허용하는지, HTTPS
+            페이지에서 열었다면 백엔드도 HTTPS로 제공되는지 확인하세요.
           </div>
         ) : null}
 
         <div className="mt-6 flex flex-wrap gap-2">
           {status === "pairing" ? (
             <Button disabled size="sm">
-              Pairing...
+              페어링 중...
             </Button>
           ) : canRetry ? (
             <Button size="sm" onClick={() => void submitHostedPairingRequest()}>
-              Try again
+              다시 시도
             </Button>
           ) : null}
           {status === "paired" ? (
             <Button size="sm" variant="outline" onClick={() => (window.location.href = "/")}>
-              Open app
+              앱 열기
             </Button>
           ) : null}
         </div>
@@ -288,23 +288,16 @@ export function HostedPairingRouteSurface() {
 }
 
 function errorMessageFromUnknown(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error;
-  }
-
-  return "Authentication failed.";
+  console.error("Pairing authentication failed", error);
+  return "인증에 실패했습니다.";
 }
 
 function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {
   if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "This environment expects a trusted pairing credential before the app can connect.";
+    return "앱이 연결되려면 이 환경의 신뢰할 수 있는 페어링 자격 증명이 필요합니다.";
   }
 
-  return "Enter a pairing token to start a session with this environment.";
+  return "이 환경에서 세션을 시작하려면 페어링 토큰을 입력하세요.";
 }
 
 function describeSupportedMethods(bootstrapMethods: ReadonlyArray<string>): string {
@@ -312,12 +305,12 @@ function describeSupportedMethods(bootstrapMethods: ReadonlyArray<string>): stri
     bootstrapMethods.includes("desktop-bootstrap") &&
     bootstrapMethods.includes("one-time-token")
   ) {
-    return "Desktop-managed pairing and one-time pairing tokens are both accepted for this environment.";
+    return "이 환경은 데스크톱 관리 페어링과 일회용 페어링 토큰을 모두 허용합니다.";
   }
 
   if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "This environment is desktop-managed. Open it from the desktop app or paste a bootstrap credential if one was issued explicitly.";
+    return "이 환경은 데스크톱에서 관리됩니다. 데스크톱 앱에서 열거나 발급받은 부트스트랩 자격 증명을 붙여넣으세요.";
   }
 
-  return "This environment accepts one-time pairing tokens. Pairing links can open this page directly, or you can paste the token here.";
+  return "이 환경은 일회용 페어링 토큰을 허용합니다. 페어링 링크로 이 페이지를 직접 열거나 토큰을 여기에 붙여넣으세요.";
 }

@@ -128,12 +128,13 @@ function sshPreparationError(cause: unknown) {
   if (message.toLowerCase().includes("cancel")) {
     return new ConnectionBlockedError({
       reason: "authentication",
-      detail: message,
+      detail: "SSH 환경 준비가 취소되었습니다.",
     });
   }
+  console.error("Failed to prepare SSH environment", cause);
   return new ConnectionTransientError({
     reason: "remote-unavailable",
-    detail: `Could not prepare the SSH environment: ${message}`,
+    detail: "SSH 환경을 준비하지 못했습니다.",
   });
 }
 
@@ -151,7 +152,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   if (pairingToken === null) {
     return yield* new ConnectionBlockedError({
       reason: "authentication",
-      detail: "The SSH environment did not issue a pairing credential.",
+      detail: "SSH 환경에서 페어링 자격 증명을 발급하지 않았습니다.",
     });
   }
   const descriptor = yield* Effect.tryPromise({
@@ -182,22 +183,22 @@ const capabilitiesLayer = Layer.effectContext(
         if (session === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
-            detail: "Sign in to T3 Connect to connect this environment.",
+            detail: "이 환경에 연결하려면 T3 Connect에 로그인하세요.",
           });
         }
         const token = yield* session.readClerkToken().pipe(
           Effect.mapError(
-            (error) =>
+            () =>
               new ConnectionTransientError({
                 reason: "network",
-                detail: error.message,
+                detail: "T3 Connect 인증 토큰을 읽지 못했습니다.",
               }),
           ),
         );
         if (token === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
-            detail: "The T3 Connect session is unavailable.",
+            detail: "T3 Connect 세션을 사용할 수 없습니다.",
           });
         }
         return token;
@@ -209,10 +210,10 @@ const capabilitiesLayer = Layer.effectContext(
     const primaryAuth = PrimaryEnvironmentAuth.of({
       bearerToken: Effect.tryPromise({
         try: readDesktopPrimaryBearerToken,
-        catch: (cause) =>
+        catch: () =>
           new ConnectionTransientError({
             reason: "remote-unavailable",
-            detail: `Could not load the desktop primary credential: ${String(cause)}`,
+            detail: "데스크톱 기본 자격 증명을 불러오지 못했습니다.",
           }),
       }).pipe(Effect.map(Option.fromNullishOr)),
     });
@@ -222,7 +223,7 @@ const capabilitiesLayer = Layer.effectContext(
         if (bridge === undefined) {
           return yield* new ConnectionBlockedError({
             reason: "unsupported",
-            detail: "SSH environments are only available in the desktop app.",
+            detail: "SSH 환경은 데스크톱 앱에서만 사용할 수 있습니다.",
           });
         }
         return yield* provisionDesktopSshEnvironment(bridge, target);
@@ -232,7 +233,7 @@ const capabilitiesLayer = Layer.effectContext(
         if (bridge === undefined) {
           return yield* new ConnectionBlockedError({
             reason: "unsupported",
-            detail: "SSH environments are only available in the desktop app.",
+            detail: "SSH 환경은 데스크톱 앱에서만 사용할 수 있습니다.",
           });
         }
         const bootstrap = yield* Effect.tryPromise({
@@ -245,7 +246,7 @@ const capabilitiesLayer = Layer.effectContext(
         if (bootstrap.pairingToken === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
-            detail: "The SSH environment did not issue a pairing credential.",
+            detail: "SSH 환경에서 페어링 자격 증명을 발급하지 않았습니다.",
           });
         }
         const access = yield* Effect.tryPromise({

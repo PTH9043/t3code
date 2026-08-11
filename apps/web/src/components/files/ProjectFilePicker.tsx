@@ -44,25 +44,25 @@ function HighlightedFuzzyText(props: {
 }
 
 function getEmptyStateMessage(query: string, error: string | null, isPending: boolean): string {
-  if (error) return error;
+  if (error) return "작업 공간 파일을 검색하지 못했습니다.";
   const isSearching = query.trim().length > 0;
-  if (isPending) return isSearching ? "Searching workspace files…" : "Indexing workspace files…";
-  return isSearching ? "No matching files." : "No files found.";
+  if (isPending) return isSearching ? "작업 공간 파일 검색 중…" : "작업 공간 파일 색인 중…";
+  return isSearching ? "일치하는 파일이 없습니다." : "파일을 찾을 수 없습니다.";
 }
 
 function EmptyProjectFilePicker() {
   return (
     <CommandPaletteContent
-      aria-label="File picker"
-      escapeLabel="Back"
-      footerActionLabel="Open file"
-      inputProps={{ disabled: true, placeholder: "Search files…" }}
+      aria-label="파일 선택기"
+      escapeLabel="뒤로"
+      footerActionLabel="파일 열기"
+      inputProps={{ disabled: true, placeholder: "파일 검색…" }}
       mode="none"
       testId="project-file-picker"
       value=""
     >
       <div className="py-10 text-center text-sm text-muted-foreground">
-        Open a project to search its files.
+        파일을 검색하려면 프로젝트를 여세요.
       </div>
     </CommandPaletteContent>
   );
@@ -117,11 +117,11 @@ function OpenProjectFilePicker(props: ProjectFilePickerProps & { target: ActiveP
 
   return (
     <CommandPaletteContent
-      aria-label="File picker"
+      aria-label="파일 선택기"
       autoHighlight="always"
-      escapeLabel="Back"
-      footerActionLabel="Open file"
-      inputProps={{ placeholder: "Search files…" }}
+      escapeLabel="뒤로"
+      footerActionLabel="파일 열기"
+      inputProps={{ placeholder: "파일 검색…" }}
       mode="none"
       onItemHighlighted={(value) => {
         setHighlightedItemValue(typeof value === "string" ? value : null);

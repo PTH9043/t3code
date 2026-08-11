@@ -298,12 +298,12 @@ describe("deriveComposerSendState", () => {
 describe("buildExpiredTerminalContextToastCopy", () => {
   it("formats empty and omission guidance", () => {
     expect(buildExpiredTerminalContextToastCopy(1, "empty")).toEqual({
-      title: "Expired terminal context won't be sent",
-      description: "Remove it or re-add it to include terminal output.",
+      title: "만료된 터미널 컨텍스트는 전송되지 않습니다",
+      description: "삭제하거나 다시 추가하면 터미널 출력을 포함할 수 있습니다.",
     });
     expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
-      title: "Expired terminal contexts omitted from message",
-      description: "Re-add it if you want that terminal output included.",
+      title: "만료된 터미널 컨텍스트 2개는 메시지에서 제외되었습니다",
+      description: "터미널 출력을 포함하려면 다시 추가하세요.",
     });
   });
 });
@@ -368,9 +368,8 @@ describe("getStartedThreadModelChangeBlockReason", () => {
         },
       }),
     ).toEqual({
-      title: "Start a new chat to change models",
-      description:
-        "This provider does not allow switching models after a conversation has started.",
+      title: "모델을 바꾸려면 새 대화를 시작하세요",
+      description: "이 제공자는 대화를 시작한 뒤 모델을 변경할 수 없습니다.",
     });
   });
 });

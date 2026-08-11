@@ -17,12 +17,13 @@ const onCopy = (ref: React.RefObject<HTMLButtonElement | null>) => {
         anchor: ref.current,
       },
       timeout: ANCHORED_TOAST_TIMEOUT_MS,
-      title: "Copied!",
+      title: "복사됨",
     });
   }
 };
 
 const onCopyError = (ref: React.RefObject<HTMLButtonElement | null>, error: Error) => {
+  console.error("Failed to copy message", error);
   if (ref.current) {
     anchoredToastManager.add({
       data: {
@@ -32,8 +33,8 @@ const onCopyError = (ref: React.RefObject<HTMLButtonElement | null>, error: Erro
         anchor: ref.current,
       },
       timeout: ANCHORED_TOAST_TIMEOUT_MS,
-      title: "Failed to copy",
-      description: error.message,
+      title: "복사 실패",
+      description: "메시지를 복사하지 못했습니다. 다시 시도하세요.",
     });
   }
 };
@@ -61,7 +62,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
       <TooltipTrigger
         render={
           <Button
-            aria-label="Copy link"
+            aria-label="클립보드에 복사"
             disabled={isCopied}
             onClick={() => copyToClipboard(text)}
             ref={ref}
@@ -75,7 +76,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
         {isCopied ? <CheckIcon className="size-3 text-primary" /> : <CopyIcon className="size-3" />}
       </TooltipTrigger>
       <TooltipPopup>
-        <p>Copy to clipboard</p>
+        <p>클립보드에 복사</p>
       </TooltipPopup>
     </Tooltip>
   );

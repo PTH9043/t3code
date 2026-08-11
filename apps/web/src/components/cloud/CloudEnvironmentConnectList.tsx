@@ -99,8 +99,8 @@ export function CloudEnvironmentConnectRows({
     if (result._tag === "Success") {
       toastManager.add({
         type: "success",
-        title: "Environment added",
-        description: `Connecting to ${environment.label} through T3 Connect.`,
+        title: "실행 환경을 추가했습니다",
+        description: `T3 Connect를 통해 ${environment.label}에 연결하고 있습니다.`,
       });
       return;
     }
@@ -109,17 +109,17 @@ export function CloudEnvironmentConnectRows({
     }
     const cause = squashAtomCommandFailure(result);
     const message =
-      cause instanceof Error ? cause.message : "Could not connect the T3 Connect environment.";
+      cause instanceof Error ? cause.message : "T3 Connect 실행 환경에 연결하지 못했습니다.";
     const traceId = findErrorTraceId(cause);
     console.error("[t3-connect] Could not connect environment", { message, traceId, cause });
     toastManager.add({
       type: "error",
-      title: "Could not connect environment",
-      description: message,
+      title: "실행 환경에 연결하지 못했습니다",
+      description: "T3 Connect 연결을 확인한 뒤 다시 시도해 주세요.",
       data: traceId
         ? {
             secondaryActionProps: {
-              children: "Copy trace ID",
+              children: "추적 ID 복사",
               onClick: () => void navigator.clipboard?.writeText(traceId),
             },
           }
@@ -148,13 +148,15 @@ export function CloudEnvironmentConnectRows({
     // A failed or offline discovery is not "no environments" — misreporting it
     // as empty would read as the user's devices having disappeared.
     const discoveryProblem = environmentsState.offline
-      ? "You appear to be offline."
-      : (Option.getOrNull(environmentsState.error)?.message ?? null);
+      ? "현재 오프라인 상태입니다."
+      : Option.isSome(environmentsState.error)
+        ? "T3 Connect 환경 정보를 불러오지 못했습니다."
+        : null;
     if (discoveryProblem !== null && !environmentsState.refreshing) {
       return (
         <div className={ITEM_ROW_CLASSNAME}>
           <p className="text-sm font-medium text-destructive">
-            Could not load T3 Connect environments
+            T3 Connect 실행 환경을 불러오지 못했습니다
           </p>
           <p className="mt-1 text-xs text-muted-foreground">{discoveryProblem}</p>
           <Button
@@ -163,7 +165,7 @@ export function CloudEnvironmentConnectRows({
             className="mt-3"
             onClick={() => void refreshRelayEnvironments()}
           >
-            Try again
+            다시 시도
           </Button>
         </div>
       );
@@ -171,7 +173,7 @@ export function CloudEnvironmentConnectRows({
     return empty;
   }
 
-  return visibleEnvironments.map(({ environment, availability, error }) => {
+  return visibleEnvironments.map(({ environment, availability }) => {
     const savedEnvironment = savedById.get(environment.environmentId);
     const savedConnection = savedEnvironment
       ? presentSavedCloudEnvironmentConnection(savedEnvironment.connection)
@@ -194,12 +196,12 @@ export function CloudEnvironmentConnectRows({
     const statusText = savedConnection
       ? savedConnection.statusText
       : availability === "online"
-        ? "Available · Relay online"
+        ? "사용 가능 · 릴레이 온라인"
         : availability === "offline"
-          ? "Available · Relay offline"
+          ? "사용 가능 · 릴레이 오프라인"
           : availability === "checking"
-            ? "Available · Checking relay status…"
-            : (Option.getOrNull(error)?.message ?? "Available · Relay status unavailable");
+            ? "사용 가능 · 릴레이 상태 확인 중…"
+            : "사용 가능 · 릴레이 상태를 확인할 수 없음";
     return (
       <div key={environment.environmentId} className={ITEM_ROW_CLASSNAME}>
         <div className={ITEM_ROW_INNER_CLASSNAME}>
@@ -217,12 +219,12 @@ export function CloudEnvironmentConnectRows({
                   savedConnection
                     ? savedConnection.statusText
                     : availability === "online"
-                      ? "Relay online"
+                      ? "릴레이 온라인"
                       : availability === "offline"
-                        ? "Relay offline"
+                        ? "릴레이 오프라인"
                         : availability === "checking"
-                          ? "Checking relay status"
-                          : (Option.getOrNull(error)?.message ?? "Relay status unavailable")
+                          ? "릴레이 상태 확인 중"
+                          : "릴레이 상태를 확인할 수 없음"
                 }
               />
               <p className="truncate text-sm font-medium">{environment.label}</p>
@@ -250,7 +252,7 @@ export function CloudEnvironmentConnectRows({
               disabled={connectingEnvironmentId !== null}
               onClick={() => void connectEnvironment(environment)}
             >
-              {connectingEnvironmentId === environment.environmentId ? "Connecting…" : "Connect"}
+              {connectingEnvironmentId === environment.environmentId ? "연결 중…" : "연결"}
             </Button>
           )}
         </div>

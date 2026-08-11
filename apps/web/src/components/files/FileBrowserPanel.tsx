@@ -58,14 +58,14 @@ function RefreshFilesButton(props: { isPending: boolean; onRefresh: () => void }
             type="button"
             variant="ghost"
             size="icon-xs"
-            aria-label="Refresh workspace files"
+            aria-label="작업 공간 파일 새로 고침"
             onClick={props.onRefresh}
           />
         }
       >
         <RotateCw className={cn(props.isPending && "animate-spin")} />
       </TooltipTrigger>
-      <TooltipPopup>{props.isPending ? "Refreshing…" : "Refresh files"}</TooltipPopup>
+      <TooltipPopup>{props.isPending ? "새로 고치는 중…" : "파일 새로 고침"}</TooltipPopup>
     </Tooltip>
   );
 }
@@ -85,7 +85,7 @@ function FileSearchField(props: {
         size="sm"
         value={props.value}
         aria-label={props.ariaLabel}
-        placeholder="Search files"
+        placeholder="파일 검색"
         spellCheck={false}
         onChange={(event) => props.onValueChange(event.target.value)}
         onKeyDown={(event) => {
@@ -153,20 +153,21 @@ export default function FileBrowserPanel({
     try {
       const clicked = await api.contextMenu.show(
         [
-          { id: "copy-mention", label: "Copy mention" },
-          { id: "add-to-chat", label: "Add to chat" },
+          { id: "copy-mention", label: "멘션 복사" },
+          { id: "add-to-chat", label: "대화에 추가" },
         ],
         position,
       );
       if (clicked === "copy-mention") {
         try {
           await writeTextToClipboard(mention);
-          toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
+          toastManager.add({ type: "success", title: "멘션 복사됨", description: relativePath });
         } catch (error) {
+          console.error("Failed to copy file mention", error);
           toastManager.add({
             type: "error",
-            title: "Failed to copy mention",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "멘션 복사 실패",
+            description: "멘션을 복사하지 못했습니다. 다시 시도하세요.",
           });
         }
         return;
@@ -176,8 +177,8 @@ export default function FileBrowserPanel({
         if (!composer) {
           toastManager.add({
             type: "error",
-            title: "Unable to add to chat",
-            description: "Open a chat for this project and try again.",
+            title: "대화에 추가할 수 없음",
+            description: "이 프로젝트의 대화를 연 뒤 다시 시도하세요.",
           });
           return;
         }
@@ -185,8 +186,8 @@ export default function FileBrowserPanel({
         if (!inserted) {
           toastManager.add({
             type: "error",
-            title: "Unable to add to chat",
-            description: "The chat isn't ready to accept input right now.",
+            title: "대화에 추가할 수 없음",
+            description: "지금은 대화 입력을 받을 준비가 되지 않았습니다.",
           });
         }
       }

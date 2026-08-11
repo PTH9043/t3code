@@ -23,6 +23,6 @@ describe("ComposerPendingTerminalContextChip", () => {
 
     expect(markup).toContain('data-terminal-context-expired="true"');
     expect(markup).toContain("border-destructive/35");
-    expect(markup).toContain("Terminal 1 lines 2-4");
+    expect(markup).toContain("터미널 1 · 2~4줄");
   });
 });

@@ -65,23 +65,42 @@ describe("searchSettings", () => {
   });
 
   it("serves anchor props to panels from the catalog", () => {
-    expect(searchableSetting("word-wrap")).toEqual({ id: "word-wrap", title: "Word wrap" });
-    expect(searchableSetting("archive")).toEqual({ id: "archive", title: "Archived threads" });
+    expect(searchableSetting("word-wrap")).toEqual({ id: "word-wrap", title: "자동 줄 바꿈" });
+    expect(searchableSetting("archive")).toEqual({ id: "archive", title: "보관된 대화" });
   });
 
   it("routes appearance settings to their current section", () => {
-    expect(searchSettings("theme")[0]).toMatchObject({
+    expect(searchSettings("테마")[0]).toMatchObject({
       id: "theme",
       to: "/settings/appearance",
     });
-    expect(searchSettings("word wrap")[0]).toMatchObject({
+    expect(searchSettings("자동 줄 바꿈")[0]).toMatchObject({
       id: "word-wrap",
       to: "/settings/appearance",
     });
-    expect(searchSettings("environment identification")[0]).toMatchObject({
+    expect(searchSettings("실행 환경 표시")[0]).toMatchObject({
       id: "environment-identification",
       to: "/settings/appearance",
       targetId: "appearance",
+    });
+  });
+
+  it("routes automatic update permissions to the permissions tab", () => {
+    expect(searchSettings("자동 다운로드")[0]).toMatchObject({
+      id: "automatic-update-download",
+      to: "/settings/permissions",
+    });
+    expect(searchSettings("자동 설치")[0]).toMatchObject({
+      id: "automatic-update-install",
+      to: "/settings/permissions",
+    });
+    expect(searchSettings("프로그램 자동 시작")[0]).toMatchObject({
+      id: "workspace-program-auto-start",
+      to: "/settings/permissions",
+    });
+    expect(searchSettings("수정 검증 후 자동 재시작")[0]).toMatchObject({
+      id: "workspace-program-auto-restart-after-repair",
+      to: "/settings/permissions",
     });
   });
 });

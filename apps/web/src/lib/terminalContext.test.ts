@@ -11,6 +11,8 @@ import {
   extractTrailingTerminalContexts,
   filterTerminalContextsWithText,
   formatInlineTerminalContextLabel,
+  formatTerminalContextDisplayLabel,
+  formatTerminalContextHeaderForDisplay,
   formatTerminalContextLabel,
   hasTerminalContextText,
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
@@ -47,6 +49,12 @@ describe("terminalContext", () => {
         }),
       ),
     ).toBe("Terminal 1 line 9");
+  });
+
+  it("formats terminal labels for Korean UI without changing the prompt protocol", () => {
+    expect(formatTerminalContextDisplayLabel(makeContext())).toBe("터미널 1 · 12~13줄");
+    expect(formatTerminalContextHeaderForDisplay("Terminal 1 line 9")).toBe("터미널 1 · 9줄");
+    expect(formatTerminalContextHeaderForDisplay("Server lines 4-6")).toBe("Server · 4~6줄");
   });
 
   it("builds a numbered terminal context block", () => {

@@ -47,14 +47,14 @@ function display(descriptors: ReadonlyArray<ProviderOptionDescriptor>) {
 describe("buildTraitsTriggerDisplay", () => {
   it("omits fast mode from the label entirely when it is off", () => {
     expect(display([EFFORT, fastModeDescriptor(false), CONTEXT_WINDOW])).toEqual({
-      label: "High · 1M",
+      label: "높음 · 1M",
       showFastModeIcon: false,
     });
   });
 
   it("shows the bolt instead of a text label when fast mode is on", () => {
     expect(display([EFFORT, fastModeDescriptor(true), CONTEXT_WINDOW])).toEqual({
-      label: "High · 1M",
+      label: "높음 · 1M",
       showFastModeIcon: true,
     });
   });
@@ -70,11 +70,11 @@ describe("buildTraitsTriggerDisplay", () => {
     );
 
     expect(display([EFFORT, serviceTier])).toEqual({
-      label: "High",
+      label: "높음",
       showFastModeIcon: false,
     });
     expect(display([EFFORT, { ...serviceTier, currentValue: "priority" }])).toEqual({
-      label: "High",
+      label: "높음",
       showFastModeIcon: true,
     });
   });
@@ -87,18 +87,18 @@ describe("buildTraitsTriggerDisplay", () => {
       currentValue: true,
     };
     expect(display([EFFORT, thinking])).toEqual({
-      label: "High · Thinking On",
+      label: "높음 · 사고 모드 켜짐",
       showFastModeIcon: false,
     });
   });
 
   it("falls back to a text label when fast mode is the only trait", () => {
     expect(display([fastModeDescriptor(true)])).toEqual({
-      label: "Fast",
+      label: "빠름",
       showFastModeIcon: false,
     });
     expect(display([fastModeDescriptor(false)])).toEqual({
-      label: "Normal",
+      label: "일반",
       showFastModeIcon: false,
     });
   });
@@ -127,6 +127,6 @@ describe("buildTraitsTriggerDisplay", () => {
         primarySelectDescriptorId: "reasoningEffort",
         ultrathinkPromptControlled: true,
       }),
-    ).toEqual({ label: "Ultrathink", showFastModeIcon: true });
+    ).toEqual({ label: "울트라싱크", showFastModeIcon: true });
   });
 });

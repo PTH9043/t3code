@@ -1,9 +1,6 @@
 import type { EnvironmentId, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import type { ServerUpdateStage, ServerUpdateState } from "@t3tools/client-runtime/state/server";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { serverEnvironment } from "~/state/server";
@@ -16,9 +13,9 @@ import { toastManager } from "./ui/toast";
 // folds it into the download phase; everything after the handoff is the
 // restart the user is actually waiting through.
 const UPDATE_STAGE_LABELS: Record<ServerUpdateStage, string> = {
-  downloading: "Downloading…",
-  installing: "Downloading…",
-  resuming: "Restarting…",
+  downloading: "다운로드 중…",
+  installing: "다운로드 중…",
+  resuming: "다시 시작 중…",
 };
 const pendingUpdateEnvironmentIds = new Set<EnvironmentId>();
 
@@ -26,8 +23,8 @@ export function serverUpdateStageLabel(stage: ServerUpdateStage): string {
   return UPDATE_STAGE_LABELS[stage];
 }
 
-function updateFailureMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Server update failed.";
+function updateFailureMessage(): string {
+  return "서버 업데이트에 실패했습니다.";
 }
 
 /**
@@ -45,8 +42,8 @@ export function ServerUpdateProgress({
     return (
       <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-destructive" role="alert">
         <span className="size-1.5 shrink-0 rounded-full bg-destructive" aria-hidden="true" />
-        <span className="min-w-0 truncate" title={state.message}>
-          {state.message}
+        <span className="min-w-0 truncate" title="서버 업데이트에 실패했습니다.">
+          서버 업데이트에 실패했습니다.
         </span>
       </div>
     );
@@ -72,7 +69,7 @@ export function ServerUpdateAction({
   serverLabel,
   selfUpdate,
   targetVersion,
-  label = "Update",
+  label = "업데이트",
 }: {
   readonly environmentId: EnvironmentId;
   readonly serverLabel: string;
@@ -84,19 +81,19 @@ export function ServerUpdateAction({
     reportFailure: false,
   });
   const { copyToClipboard } = useCopyToClipboard<{ command: string }>({
-    target: "update command",
+    target: "업데이트 명령",
     onCopy: ({ command }) => {
       toastManager.add({
         type: "success",
-        title: "Update command copied",
-        description: `Run \`${command}\` on ${serverLabel} to update it.`,
+        title: "업데이트 명령을 복사했습니다",
+        description: `${serverLabel}에서 \`${command}\` 명령을 실행해 업데이트하세요.`,
       });
     },
-    onError: (error) => {
+    onError: () => {
       toastManager.add({
         type: "error",
-        title: "Could not copy update command",
-        description: error.message,
+        title: "업데이트 명령을 복사하지 못했습니다",
+        description: "클립보드 접근 권한을 확인한 뒤 다시 시도하세요.",
       });
     },
   });
@@ -117,15 +114,15 @@ export function ServerUpdateAction({
         }
         toastManager.add({
           type: "error",
-          title: "Server update failed",
-          description: updateFailureMessage(squashAtomCommandFailure(result)),
+          title: "서버 업데이트 실패",
+          description: updateFailureMessage(),
         });
         return;
       }
       toastManager.add({
         type: "success",
-        title: `${serverLabel} updated`,
-        description: `Reconnected on t3@${result.value.targetVersion}.`,
+        title: `${serverLabel} 업데이트 완료`,
+        description: `t3@${result.value.targetVersion} 버전으로 다시 연결했습니다.`,
       });
     } finally {
       pendingUpdateEnvironmentIds.delete(environmentId);
@@ -135,7 +132,7 @@ export function ServerUpdateAction({
   if (selfUpdate === "desktop-managed") {
     return (
       <span className="text-muted-foreground text-xs">
-        Update the desktop app on that machine to update this server.
+        이 서버를 업데이트하려면 해당 컴퓨터의 데스크톱 앱을 업데이트하세요.
       </span>
     );
   }
@@ -144,7 +141,7 @@ export function ServerUpdateAction({
     const command = manualServerUpdateCommand(targetVersion);
     return (
       <Button size="xs" variant="outline" onClick={() => copyToClipboard(command, { command })}>
-        Copy update command
+        업데이트 명령 복사
       </Button>
     );
   }

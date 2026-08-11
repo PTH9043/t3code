@@ -155,7 +155,7 @@ describe("EnvironmentProviderSettings routing", () => {
     const panel = renderPanel();
     const refreshButton = visitElements(
       panel,
-      (element) => element.props["aria-label"] === "Refresh provider status",
+      (element) => element.props["aria-label"] === "CLI 상태 새로고침",
     );
     expect(refreshButton).not.toBeNull();
     (refreshButton?.props.onClick as (() => void) | undefined)?.();
@@ -187,14 +187,14 @@ describe("EnvironmentProviderSettings routing", () => {
     const providerCard = visitElements(panel, (element) => element.props.instanceId === codexId);
     expect(providerCard).not.toBeNull();
 
-    const notice = visitElements(panel, (element) => element.props.title === "Limited permissions");
+    const notice = visitElements(panel, (element) => element.props.title === "제한된 권한");
     expect(notice).not.toBeNull();
 
     expect(
-      visitElements(panel, (element) => element.props["aria-label"] === "Add provider instance"),
+      visitElements(panel, (element) => element.props["aria-label"] === "CLI 계정 추가"),
     ).toBeNull();
     expect(
-      visitElements(panel, (element) => element.props["aria-label"] === "Refresh provider status"),
+      visitElements(panel, (element) => element.props["aria-label"] === "CLI 상태 새로고침"),
     ).toBeNull();
   });
 
@@ -202,9 +202,7 @@ describe("EnvironmentProviderSettings routing", () => {
     atoms.providers = [provider()];
     const panel = renderPanel();
     expect(visitElements(panel, (element) => element.props.inert === true)).toBeNull();
-    expect(
-      visitElements(panel, (element) => element.props.title === "Limited permissions"),
-    ).toBeNull();
+    expect(visitElements(panel, (element) => element.props.title === "제한된 권한")).toBeNull();
   });
 
   it("deletes and resets provider configuration without erasing shared preferences", () => {

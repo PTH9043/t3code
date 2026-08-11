@@ -55,7 +55,7 @@ describe("desktop update button state", () => {
     };
     expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
-    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("눌러서 다시 시도하세요");
   });
 
   it("keeps install action available after an install error", () => {
@@ -70,7 +70,7 @@ describe("desktop update button state", () => {
     };
     expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
-    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("눌러서 다시 시도하세요");
   });
 
   it("prefers install when a downloaded version already exists", () => {
@@ -122,7 +122,7 @@ describe("getDesktopUpdateActionError", () => {
         canRetry: true,
       },
     };
-    expect(getDesktopUpdateActionError(result)).toBe("checksum mismatch");
+    expect(getDesktopUpdateActionError(result)).toBe("업데이트 작업을 완료하지 못했습니다.");
   });
 
   it("ignores messages for non-accepted attempts", () => {
@@ -210,7 +210,7 @@ describe("desktop update UI helpers", () => {
 
     expect(shouldShowArm64IntelBuildWarning(state)).toBe(true);
     expect(getArm64IntelBuildWarningDescription(state)).toContain("Apple Silicon");
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Intel build");
+    expect(getArm64IntelBuildWarningDescription(state)).toContain("Intel 빌드");
   });
 
   it("changes the warning copy when a native build update is ready to download", () => {
@@ -223,7 +223,7 @@ describe("desktop update UI helpers", () => {
       availableVersion: "1.1.0",
     };
 
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Download the available update");
+    expect(getArm64IntelBuildWarningDescription(state)).toContain("업데이트를 다운로드하면");
   });
 
   it("includes the downloaded version in the install confirmation copy", () => {
@@ -232,7 +232,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.1",
       }),
-    ).toContain("Install update 1.1.1 and restart T3 Code?");
+    ).toContain("업데이트 1.1.1을 설치하고 T3 Code를 다시 시작할까요?");
   });
 
   it("falls back to generic install confirmation copy when no version is available", () => {
@@ -241,7 +241,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: null,
         downloadedVersion: null,
       }),
-    ).toContain("Install update and restart T3 Code?");
+    ).toContain("업데이트를 설치하고 T3 Code를 다시 시작할까요?");
   });
 
   it("warns Windows users that a silent installation can take several minutes", () => {
@@ -253,9 +253,9 @@ describe("desktop update UI helpers", () => {
       "Win32",
     );
 
-    expect(message).toContain("may remain closed for several minutes");
-    expect(message).toContain("no installer window may appear");
-    expect(message).toContain("will reopen automatically");
+    expect(message).toContain("몇 분 동안 닫혀 있을 수 있으며");
+    expect(message).toContain("설치 창이 표시되지 않을 수도 있습니다");
+    expect(message).toContain("자동으로 다시 열립니다");
   });
 
   it("keeps the additional silent installation warning Windows-specific", () => {
@@ -267,7 +267,7 @@ describe("desktop update UI helpers", () => {
       "MacIntel",
     );
 
-    expect(message).not.toContain("may remain closed for several minutes");
+    expect(message).not.toContain("몇 분 동안 닫혀 있을 수 있으며");
   });
 });
 
@@ -329,9 +329,7 @@ describe("canCheckForUpdate", () => {
 
 describe("getDesktopUpdateButtonTooltip", () => {
   it("returns 'Up to date' for non-actionable states", () => {
-    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe("Up to date");
-    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe(
-      "Up to date",
-    );
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe("최신 버전");
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe("최신 버전");
   });
 });

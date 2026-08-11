@@ -653,6 +653,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
+  const projectId = serverThread?.projectId ?? draftThread?.projectId ?? null;
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
     : draftThread
@@ -808,7 +809,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   );
 
   const splitTerminal = useCallback(() => {
-    if (!cwd) {
+    if (!cwd || projectId === null) {
       return;
     }
     const terminalId = nextTerminalId(allocatableTerminalIds);
@@ -818,6 +819,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       environmentId: threadRef.environmentId,
       input: {
         threadId,
+        projectId,
         terminalId,
         cwd,
         ...(effectiveWorktreePath != null ? { worktreePath: effectiveWorktreePath } : {}),
@@ -834,9 +836,10 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     threadId,
     threadRef,
     openTerminal,
+    projectId,
   ]);
   const splitTerminalVertical = useCallback(() => {
-    if (!cwd) {
+    if (!cwd || projectId === null) {
       return;
     }
     const terminalId = nextTerminalId(allocatableTerminalIds);
@@ -846,6 +849,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       environmentId: threadRef.environmentId,
       input: {
         threadId,
+        projectId,
         terminalId,
         cwd,
         ...(effectiveWorktreePath != null ? { worktreePath: effectiveWorktreePath } : {}),
@@ -858,6 +862,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     cwd,
     effectiveWorktreePath,
     openTerminal,
+    projectId,
     runtimeEnv,
     storeSplitTerminalVertical,
     threadId,
@@ -865,7 +870,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   ]);
 
   const createNewTerminal = useCallback(() => {
-    if (!cwd) {
+    if (!cwd || projectId === null) {
       return;
     }
     const terminalId = nextTerminalId(allocatableTerminalIds);
@@ -875,6 +880,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       environmentId: threadRef.environmentId,
       input: {
         threadId,
+        projectId,
         terminalId,
         cwd,
         ...(effectiveWorktreePath != null ? { worktreePath: effectiveWorktreePath } : {}),
@@ -891,6 +897,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     threadId,
     threadRef,
     openTerminal,
+    projectId,
   ]);
 
   const activateTerminal = useCallback(
@@ -903,10 +910,11 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
 
   const closeTerminal = useCallback(
     (terminalId: string) => {
+      if (projectId === null) return;
       const fallbackExitWrite = () =>
         writeTerminal({
           environmentId: threadRef.environmentId,
-          input: { threadId, terminalId, data: "exit\n" },
+          input: { threadId, projectId, terminalId, data: "exit\n" },
         });
 
       void (async () => {
@@ -914,6 +922,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
           environmentId: threadRef.environmentId,
           input: {
             threadId,
+            projectId,
             terminalId,
             deleteHistory: true,
           },
@@ -932,6 +941,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       threadId,
       threadRef,
       closeTerminalMutation,
+      projectId,
       writeTerminal,
     ],
   );
@@ -946,7 +956,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     [onAddTerminalContext, visible],
   );
 
-  if (!project || !terminalUiState.terminalOpen || !cwd) {
+  if (!project || projectId === null || !terminalUiState.terminalOpen || !cwd) {
     return null;
   }
 
@@ -954,6 +964,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     <div className={visible ? undefined : "hidden"}>
       <ThreadTerminalDrawer
         threadRef={threadRef}
+        projectId={projectId}
         threadId={threadId}
         cwd={cwd}
         worktreePath={effectiveWorktreePath}
@@ -1022,6 +1033,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
 }: PersistentThreadTerminalPanelProps) {
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
+  const projectId = serverThread?.projectId ?? draftThread?.projectId ?? null;
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
     : draftThread
@@ -1114,12 +1126,13 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     threadWorktreePath,
   ]);
 
-  if (!project || !cwd) return null;
+  if (!project || projectId === null || !cwd) return null;
 
   return (
     <ThreadTerminalDrawer
       mode="panel"
       threadRef={threadRef}
+      projectId={projectId}
       threadId={threadRef.threadId}
       cwd={cwd}
       worktreePath={worktreePath}
@@ -1162,8 +1175,8 @@ type LocalThreadErrorEntry = {
   readonly at: number;
 };
 
-function chatActionErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An error occurred.";
+function chatActionErrorMessage(_error: unknown): string {
+  return "작업 중 오류가 발생했습니다.";
 }
 
 function ChatViewContent(props: ChatViewProps) {
@@ -1773,8 +1786,8 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not reconnect environment",
-            description: error instanceof Error ? error.message : "Failed to reconnect.",
+            title: "실행 환경에 다시 연결하지 못했습니다",
+            description: "연결 상태를 확인한 뒤 다시 시도하세요.",
           }),
         );
       }
@@ -1843,7 +1856,7 @@ function ChatViewContent(props: ChatViewProps) {
   const openOrReuseProjectDraftThread = useCallback(
     async (input: { branch: string; worktreePath: string | null; envMode: DraftThreadEnvMode }) => {
       if (!activeProject) {
-        throw new Error("No active project is available for this pull request.");
+        throw new Error("이 PR에 사용할 활성 프로젝트가 없습니다.");
       }
       const activeProjectRef = scopeProjectRef(activeProject.environmentId, activeProject.id);
       const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
@@ -1959,8 +1972,8 @@ function ChatViewContent(props: ChatViewProps) {
   const hasMultipleRegisteredEnvironments = environments.length > 1;
   const versionMismatchServerLabel =
     hasMultipleRegisteredEnvironments && activeThread
-      ? `${environmentById.get(activeThread.environmentId)?.label ?? serverConfig?.environment.label ?? activeThread.environmentId} server`
-      : "server";
+      ? `${environmentById.get(activeThread.environmentId)?.label ?? serverConfig?.environment.label ?? activeThread.environmentId} 서버`
+      : "서버";
   const serverUpdateEnvironmentId = activeThread?.environmentId ?? null;
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
   const serverUpdateState = useAtomValue(
@@ -2001,8 +2014,8 @@ function ChatViewContent(props: ChatViewProps) {
               aria-hidden="true"
             />
           ),
-          title: `${unavailableConnection.phase === "connecting" ? "Connecting" : "Reconnecting"} to ${activeEnvironmentUnavailableState.label}`,
-          description: "It may be finishing an update. One moment.",
+          title: `${activeEnvironmentUnavailableState.label}에 ${unavailableConnection.phase === "connecting" ? "연결 중" : "다시 연결 중"}`,
+          description: "업데이트를 마무리하는 중일 수 있습니다. 잠시만 기다려 주세요.",
         });
       } else {
         items.push({
@@ -2010,9 +2023,7 @@ function ChatViewContent(props: ChatViewProps) {
           variant: unavailableConnection.phase === "error" ? "error" : "warning",
           icon: <WifiOffIcon />,
           title: `${activeEnvironmentUnavailableState.label}: ${connectionStatusTitle(unavailableConnection)}`,
-          description:
-            unavailableConnection.error ??
-            "Reconnect this environment before sending messages or running actions.",
+          description: "메시지를 보내거나 작업을 실행하기 전에 이 실행 환경에 다시 연결하세요.",
           actions: (
             <>
               <Button
@@ -2024,14 +2035,14 @@ function ChatViewContent(props: ChatViewProps) {
                   )
                 }
               >
-                {environmentReconnecting ? "Reconnecting..." : "Reconnect"}
+                {environmentReconnecting ? "다시 연결 중..." : "다시 연결"}
               </Button>
               <Button
                 size="xs"
                 variant="outline"
                 onClick={() => void navigate({ to: "/settings/connections" })}
               >
-                Connections
+                연결
               </Button>
             </>
           ),
@@ -2063,13 +2074,13 @@ function ChatViewContent(props: ChatViewProps) {
           ),
         title:
           updateInProgress || updateFailed ? (
-            `${updateFailed ? "Could not update" : "Updating"} ${versionMismatchServerLabel}`
+            `${versionMismatchServerLabel} ${updateFailed ? "업데이트 실패" : "업데이트 중"}`
           ) : versionMismatch ? (
             <Tooltip>
               <TooltipTrigger
                 render={
                   <button type="button" className="cursor-help rounded-sm text-left">
-                    Server update available
+                    서버 업데이트 사용 가능
                   </button>
                 }
               />
@@ -2079,7 +2090,7 @@ function ChatViewContent(props: ChatViewProps) {
               </TooltipPopup>
             </Tooltip>
           ) : (
-            "Server update available"
+            "서버 업데이트 사용 가능"
           ),
         description:
           updateInProgress || updateFailed ? (
@@ -2098,13 +2109,13 @@ function ChatViewContent(props: ChatViewProps) {
               serverLabel={versionMismatchServerLabel}
               selfUpdate={versionMismatchSelfUpdate}
               targetVersion={versionMismatch.clientVersion}
-              label={updateFailed ? "Retry" : "Update"}
+              label={updateFailed ? "다시 시도" : "업데이트"}
             />
           ),
         ...(updateInProgress || updateFailed || !versionMismatchDismissKey
           ? {}
           : {
-              dismissLabel: "Dismiss update notice",
+              dismissLabel: "업데이트 알림 닫기",
               onDismiss: () => {
                 dismissVersionMismatch(versionMismatchDismissKey);
                 setDismissedVersionMismatchKey(versionMismatchDismissKey);
@@ -2396,7 +2407,7 @@ function ChatViewContent(props: ChatViewProps) {
               imageInstances.push(image);
               const handleLoad = () => resolve();
               const handleError = () =>
-                reject(new Error(`Failed to load server preview for ${messageId}.`));
+                reject(new Error(`${messageId} 서버 미리보기를 불러오지 못했습니다.`));
               image.addEventListener("load", handleLoad, { once: true });
               image.addEventListener("error", handleError, { once: true });
               image.src = previewUrl;
@@ -2976,10 +2987,8 @@ function ChatViewContent(props: ChatViewProps) {
       if (openResult._tag === "Failure") {
         if (!isAtomCommandInterrupted(openResult)) {
           const error = squashAtomCommandFailure(openResult);
-          setThreadError(
-            activeThreadId,
-            error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
-          );
+          console.error(error);
+          setThreadError(activeThreadId, `스크립트 "${script.name}"을 실행하지 못했습니다.`);
         }
         return;
       }
@@ -2994,10 +3003,8 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (writeResult._tag === "Failure" && !isAtomCommandInterrupted(writeResult)) {
         const error = squashAtomCommandFailure(writeResult);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
-        );
+        console.error(error);
+        setThreadError(activeThreadId, `스크립트 "${script.name}"을 실행하지 못했습니다.`);
       }
     },
     [
@@ -3102,7 +3109,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
       const existingScript = activeProject.scripts.find((script) => script.id === scriptId);
       if (!existingScript) {
-        return AsyncResult.failure(Cause.fail(new Error("Script not found.")));
+        return AsyncResult.failure(Cause.fail(new Error("스크립트를 찾지 못했습니다.")));
       }
 
       const updatedScript = buildProjectScript(existingScript.id, input);
@@ -3145,15 +3152,15 @@ function ChatViewContent(props: ChatViewProps) {
       if (result._tag === "Success") {
         toastManager.add({
           type: "success",
-          title: `Deleted action "${deletedName ?? "Unknown"}"`,
+          title: `작업 "${deletedName ?? "이름 없음"}"을 삭제했습니다`,
         });
       } else if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not delete action",
-            description: error instanceof Error ? error.message : "An unexpected error occurred.",
+            title: "작업을 삭제하지 못했습니다",
+            description: "잠시 후 다시 시도하세요.",
           }),
         );
       }
@@ -3465,8 +3472,8 @@ function ChatViewContent(props: ChatViewProps) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy path",
-          description: "Clipboard API unavailable.",
+          title: "경로를 복사하지 못했습니다",
+          description: "클립보드 기능을 사용할 수 없습니다.",
         }),
       );
       return;
@@ -3476,16 +3483,17 @@ function ChatViewContent(props: ChatViewProps) {
       () => {
         toastManager.add({
           type: "success",
-          title: "Path copied",
+          title: "경로를 복사했습니다",
           description: relativePath,
         });
       },
       (error) => {
+        console.error(error);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to copy path",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "경로를 복사하지 못했습니다",
+            description: "클립보드 권한을 확인한 뒤 다시 시도하세요.",
           }),
         );
       },
@@ -4122,11 +4130,12 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
+        console.error(error);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to un-settle thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "대화의 완료 상태를 해제하지 못했습니다",
+            description: "잠시 후 다시 시도하세요.",
           }),
         );
       }
@@ -4150,11 +4159,12 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
+        console.error(error);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to wake thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "대화를 다시 활성화하지 못했습니다",
+            description: "잠시 후 다시 시도하세요.",
           }),
         );
       }
@@ -4226,7 +4236,7 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to switch checkout",
+            title: "체크아웃을 전환하지 못했습니다",
             description: chatActionErrorMessage(squashAtomCommandFailure(checkoutResult)),
           }),
         );
@@ -4246,7 +4256,7 @@ function ChatViewContent(props: ChatViewProps) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Checkout switched, but the thread could not be updated",
+              title: "체크아웃은 전환했지만 대화를 업데이트하지 못했습니다",
               description: chatActionErrorMessage(squashAtomCommandFailure(updateResult)),
             }),
           );
@@ -4303,10 +4313,8 @@ function ChatViewContent(props: ChatViewProps) {
       setIsStoppingBackgroundWork(false);
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to stop background work.",
-        );
+        console.error(error);
+        setThreadError(activeThread.id, "백그라운드 작업을 중지하지 못했습니다.");
       }
     }
   }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
@@ -4327,9 +4335,9 @@ function ChatViewContent(props: ChatViewProps) {
       ),
       title: working
         ? liveCount > 0
-          ? `${liveCount} ${liveCount === 1 ? "agent" : "agents"} working in the background`
-          : "Background work running"
-        : "Monitoring in the background",
+          ? `에이전트 ${liveCount}개가 백그라운드에서 작업 중입니다`
+          : "백그라운드 작업 실행 중"
+        : "백그라운드에서 모니터링 중",
       actions: (
         <Button
           size="xs"
@@ -4337,7 +4345,7 @@ function ChatViewContent(props: ChatViewProps) {
           disabled={isStoppingBackgroundWork}
           onClick={() => void handleStopBackgroundWork()}
         >
-          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+          {isStoppingBackgroundWork ? "중지 중..." : "중지"}
         </Button>
       ),
     };
@@ -4359,9 +4367,9 @@ function ChatViewContent(props: ChatViewProps) {
       id: `thread-woke:${activeThread?.id ?? "unknown"}`,
       variant: "info",
       icon: <AlarmClockIcon />,
-      title: "This thread woke from snooze",
-      description: "Dismiss to clear the Woke indicator, or send a message to keep going.",
-      dismissLabel: "Dismiss Woke notification",
+      title: "이 대화의 다시 알림 시간이 되었습니다",
+      description: "표시를 지우려면 닫고, 계속하려면 메시지를 보내세요.",
+      dismissLabel: "다시 알림 닫기",
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
@@ -4381,10 +4389,10 @@ function ChatViewContent(props: ChatViewProps) {
       id: `thread-${isSnoozed ? "snoozed" : "settled"}:${activeThread?.id ?? "unknown"}`,
       variant: "info",
       icon: isSnoozed ? <AlarmClockIcon /> : <CheckCircle2Icon />,
-      title: `This thread is ${isSnoozed ? "snoozed" : "settled"}`,
+      title: `이 대화는 ${isSnoozed ? "다시 알림 대기 중" : "완료됨"} 상태입니다`,
       description: isSnoozed
-        ? "Sending a message wakes it and moves it back to Active in the sidebar."
-        : "Sending a message moves it back to Active in the sidebar.",
+        ? "메시지를 보내면 대화를 깨우고 사이드바의 활성 목록으로 옮깁니다."
+        : "메시지를 보내면 사이드바의 활성 목록으로 옮깁니다.",
       actions: (
         <Button
           size="xs"
@@ -4396,11 +4404,11 @@ function ChatViewContent(props: ChatViewProps) {
         >
           {isSnoozed
             ? isUnsnoozing
-              ? "Waking..."
-              : "Wake now"
+              ? "깨우는 중..."
+              : "지금 깨우기"
             : isUnsettling
-              ? "Un-settling..."
-              : "Un-settle"}
+              ? "완료 해제 중..."
+              : "완료 해제"}
         </Button>
       ),
     };
@@ -4449,7 +4457,9 @@ function ChatViewContent(props: ChatViewProps) {
         icon: <GitBranchIcon />,
         title: (
           <span className="flex min-w-0 items-baseline gap-1.5">
-            <span className="shrink-0 font-normal text-muted-foreground">Branch changed — was</span>
+            <span className="shrink-0 font-normal text-muted-foreground">
+              브랜치 변경됨 · 이전:
+            </span>
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -4459,8 +4469,8 @@ function ChatViewContent(props: ChatViewProps) {
                 }
               />
               <TooltipPopup side="top" className="max-w-80">
-                This thread last ran on {localCheckoutBranchMismatch.threadBranch}. Sending will
-                continue on {localCheckoutBranchMismatch.currentBranch}.
+                이 대화는 마지막으로 {localCheckoutBranchMismatch.threadBranch}에서 실행됐습니다.
+                보내기를 누르면 {localCheckoutBranchMismatch.currentBranch}에서 계속합니다.
               </TooltipPopup>
             </Tooltip>
           </span>
@@ -4473,10 +4483,10 @@ function ChatViewContent(props: ChatViewProps) {
             disabled={isRestoringThreadBranch}
             onClick={handleRestoreThreadBranch}
           >
-            {isRestoringThreadBranch ? "Restoring..." : "Restore branch"}
+            {isRestoringThreadBranch ? "복원 중..." : "브랜치 복원"}
           </Button>
         ),
-        dismissLabel: "Dismiss branch change notice",
+        dismissLabel: "브랜치 변경 알림 닫기",
         onDismiss: () => {
           dismissBranchMismatchForSession(activeBranchMismatchKey);
           setBranchMismatchDismissTick((tick) => tick + 1);
@@ -4731,19 +4741,19 @@ function ChatViewContent(props: ChatViewProps) {
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
-          `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
+          `체크포인트로 되돌리기 전에 ${activeEnvironmentUnavailableLabel}에 다시 연결하세요.`,
         );
         return;
       }
       if (phase === "running" || isSendBusy || isConnecting) {
-        setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
+        setThreadError(activeThread.id, "체크포인트로 되돌리기 전에 현재 턴을 중단하세요.");
         return;
       }
       const confirmed = await localApi.dialogs.confirm(
         [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
+          `이 대화를 체크포인트 ${turnCount}(으)로 되돌릴까요?`,
+          "이 체크포인트 이후의 메시지와 변경 내역이 삭제됩니다.",
+          "이 작업은 되돌릴 수 없습니다.",
         ].join("\n"),
       );
       if (!confirmed) {
@@ -4761,10 +4771,8 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to revert thread state.",
-        );
+        console.error(error);
+        setThreadError(activeThread.id, "대화를 체크포인트로 되돌리지 못했습니다.");
       }
       setIsRevertingCheckpoint(false);
     },
@@ -4795,8 +4803,8 @@ function ChatViewContent(props: ChatViewProps) {
       toastManager.add(
         stackedThreadToast({
           type: "info",
-          title: "Annotation attached to draft",
-          description: "Sending is unavailable right now. Finish the current action, then send.",
+          title: "주석을 임시 작성 내용에 첨부했습니다",
+          description: "지금은 보낼 수 없습니다. 현재 작업을 마친 뒤 보내세요.",
         }),
       );
     };
@@ -4814,8 +4822,8 @@ function ChatViewContent(props: ChatViewProps) {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Not connected: message not sent",
-          description: "Reconnecting to the environment. Try again once it is connected.",
+          title: "연결되지 않아 메시지를 보내지 못했습니다",
+          description: "실행 환경에 다시 연결 중입니다. 연결된 뒤 다시 시도하세요.",
         }),
       );
       return;
@@ -4932,8 +4940,8 @@ function ChatViewContent(props: ChatViewProps) {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Choose a project first",
-          description: "This draft no longer points to an available project.",
+          title: "먼저 프로젝트를 선택하세요",
+          description: "이 임시 작성 내용이 더 이상 사용 가능한 프로젝트를 가리키지 않습니다.",
         }),
       );
       return;
@@ -4950,7 +4958,10 @@ function ChatViewContent(props: ChatViewProps) {
     const shouldCreateWorktree =
       isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
     if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
+      setThreadError(
+        threadIdForSend,
+        "새 작업 트리 모드에서 보내기 전에 기준 브랜치를 선택하세요.",
+      );
       return;
     }
 
@@ -5071,13 +5082,13 @@ function ChatViewContent(props: ChatViewProps) {
     let titleSeed = trimmed;
     if (!titleSeed) {
       if (firstComposerImageName) {
-        titleSeed = `Image: ${firstComposerImageName}`;
+        titleSeed = `이미지: ${firstComposerImageName}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
       } else if (composerElementContextsSnapshot.length > 0) {
         titleSeed = formatElementContextLabel(composerElementContextsSnapshot[0]!);
       } else {
-        titleSeed = "New thread";
+        titleSeed = "새 대화";
       }
     }
     const title = truncate(titleSeed);
@@ -5220,10 +5231,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
       if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
-        setThreadError(
-          threadIdForSend,
-          error instanceof Error ? error.message : "Failed to send message.",
-        );
+        setThreadError(threadIdForSend, "메시지를 보내지 못했습니다.");
       }
     }
     sendInFlightRef.current = false;
@@ -5243,10 +5251,7 @@ function ChatViewContent(props: ChatViewProps) {
     });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
-      );
+      setThreadError(activeThread.id, "현재 턴을 중단하지 못했습니다.");
     }
   };
 
@@ -5267,10 +5272,7 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : "Failed to submit approval decision.",
-        );
+        setThreadError(activeThreadId, "승인 결정을 제출하지 못했습니다.");
       }
       setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
       return result;
@@ -5295,10 +5297,7 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : "Failed to submit user input.",
-        );
+        setThreadError(activeThreadId, "입력 내용을 제출하지 못했습니다.");
       }
       setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       return result;
@@ -5549,10 +5548,7 @@ function ChatViewContent(props: ChatViewProps) {
       );
       if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
-        setThreadError(
-          threadIdForSend,
-          error instanceof Error ? error.message : "Failed to send plan follow-up.",
-        );
+        setThreadError(threadIdForSend, "계획 후속 메시지를 보내지 못했습니다.");
       }
       sendInFlightRef.current = false;
       resetLocalDispatch();
@@ -5695,7 +5691,7 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (cleanupResult._tag === "Failure" && !isAtomCommandInterrupted(cleanupResult)) {
         console.warn(
-          "Failed to clean up implementation thread after start failure.",
+          "시작 실패 후 구현 대화를 정리하지 못했습니다.",
           squashAtomCommandFailure(cleanupResult),
         );
       }
@@ -5704,11 +5700,8 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not start implementation thread",
-            description:
-              error instanceof Error
-                ? error.message
-                : "An error occurred while creating the new thread.",
+            title: "구현 대화를 시작하지 못했습니다",
+            description: "새 대화를 만드는 중 오류가 발생했습니다.",
           }),
         );
       }
@@ -5746,7 +5739,9 @@ function ChatViewContent(props: ChatViewProps) {
         currentProviderInstanceId: activeThread.session?.providerInstanceId ?? null,
         nextModelSelection: { instanceId, model },
       });
-      return reason ? `${reason.description} Start a new thread to use this model.` : null;
+      return reason
+        ? "이 모델은 현재 대화에서 사용할 수 없습니다. 사용하려면 새 대화를 시작하세요."
+        : null;
     },
     [activeThread, providerStatuses],
   );
@@ -6126,13 +6121,13 @@ function ChatViewContent(props: ChatViewProps) {
                 >
                   <button
                     type="button"
-                    aria-label="Scroll to end"
-                    title="Scroll to end"
+                    aria-label="맨 아래로 이동"
+                    title="맨 아래로 이동"
                     onClick={() => scrollToEnd(true)}
                     className="chat-composer-glass pointer-events-auto flex items-center gap-1.5 rounded-full border border-border/60 px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors hover:border-border hover:text-foreground hover:cursor-pointer"
                   >
                     <ChevronDownIcon className="size-3.5" />
-                    Scroll to end
+                    맨 아래로 이동
                   </button>
                 </div>
               )}
@@ -6211,7 +6206,7 @@ function ChatViewContent(props: ChatViewProps) {
                             phase={phase}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
-                            sendDisabledReason={threadDetailLoading ? "Messages loading" : null}
+                            sendDisabledReason={threadDetailLoading ? "메시지 불러오는 중" : null}
                             isPreparingWorktree={isPreparingWorktree}
                             environmentUnavailable={activeEnvironmentUnavailableState}
                             activePendingApproval={activePendingApproval}
@@ -6329,19 +6324,18 @@ function ChatViewContent(props: ChatViewProps) {
               <AlertDialogPopup>
                 <AlertDialogHeader>
                   <AlertDialogTitle>
-                    Switch to{" "}
                     <code className="font-medium">
                       {localCheckoutBranchMismatch?.threadBranch ?? ""}
-                    </code>
-                    ?
+                    </code>{" "}
+                    브랜치로 전환할까요?
                   </AlertDialogTitle>
                   <AlertDialogDescription>
-                    You have uncommitted changes. They'll carry over to the other branch, or block
-                    the switch if they conflict.
+                    커밋하지 않은 변경 사항이 있습니다. 다른 브랜치로 함께 이동하며, 충돌하면 전환이
+                    중단됩니다.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+                  <AlertDialogClose render={<Button variant="outline" />}>취소</AlertDialogClose>
                   <Button
                     variant="default"
                     onClick={() => {
@@ -6349,7 +6343,7 @@ function ChatViewContent(props: ChatViewProps) {
                       void handleSwitchCheckoutToThread();
                     }}
                   >
-                    Switch branch
+                    브랜치 전환
                   </Button>
                 </AlertDialogFooter>
               </AlertDialogPopup>

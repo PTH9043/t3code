@@ -24,7 +24,7 @@ function MobileClientStatusBadge({
 }) {
   return (
     <Badge variant={enabled ? "success" : "outline"}>
-      {label}: {enabled ? "On" : "Off"}
+      {label}: {enabled ? "켜짐" : "꺼짐"}
     </Badge>
   );
 }
@@ -47,14 +47,8 @@ function MobileClientRow({ device }: { readonly device: RelayClientDeviceRecord 
             </p>
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
-            <MobileClientStatusBadge
-              enabled={device.notifications.enabled}
-              label="Push notifications"
-            />
-            <MobileClientStatusBadge
-              enabled={device.liveActivities.enabled}
-              label="Live Activities"
-            />
+            <MobileClientStatusBadge enabled={device.notifications.enabled} label="푸시 알림" />
+            <MobileClientStatusBadge enabled={device.liveActivities.enabled} label="실시간 현황" />
           </div>
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground/80">
             {mobileClientNotificationDetail(device)}
@@ -67,7 +61,7 @@ function MobileClientRow({ device }: { readonly device: RelayClientDeviceRecord 
 
 function MobileClientsSkeleton() {
   return (
-    <div aria-label="Loading mobile clients" className="space-y-3" role="status">
+    <div aria-label="모바일 클라이언트 불러오는 중" className="space-y-3" role="status">
       {MOBILE_CLIENT_SKELETON_ROWS.map((row) => (
         <div key={row} className="rounded-xl border p-4">
           <div className="flex gap-3">
@@ -94,10 +88,9 @@ function EmptyMobileClients() {
         <SmartphoneIcon />
       </EmptyMedia>
       <EmptyHeader>
-        <EmptyTitle>No mobile clients</EmptyTitle>
+        <EmptyTitle>모바일 클라이언트 없음</EmptyTitle>
         <EmptyDescription>
-          Sign in to T3 Code on your iPhone to register it for push notifications and Live
-          Activities.
+          iPhone의 T3 Code에 로그인하면 푸시 알림과 실시간 현황을 받을 기기로 등록됩니다.
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
@@ -115,9 +108,9 @@ export function MobileClientsUserProfilePage() {
     <div className="flex min-h-[30rem] w-full flex-col bg-background text-foreground">
       <header className="flex flex-col gap-4 border-b px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold tracking-[-0.01em]">Mobile clients</h2>
+          <h2 className="text-base font-semibold tracking-[-0.01em]">모바일 클라이언트</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Devices registered to receive T3 Connect activity from your environments.
+            실행 환경의 T3 Connect 활동을 받도록 등록된 기기입니다.
           </p>
         </div>
         <Button
@@ -127,7 +120,7 @@ export function MobileClientsUserProfilePage() {
           onClick={devicesState.refresh}
         >
           <RefreshCwIcon className={cn("size-3.5", devicesState.isPending && "animate-spin")} />
-          Refresh
+          새로고침
         </Button>
       </header>
 
@@ -139,12 +132,14 @@ export function MobileClientsUserProfilePage() {
           >
             <div>
               <p className="font-medium text-destructive-foreground">
-                Could not load mobile clients
+                모바일 클라이언트를 불러오지 못했습니다
               </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">{devicesState.error}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                네트워크 연결을 확인한 뒤 다시 시도해 주세요.
+              </p>
             </div>
             <Button size="xs" variant="outline" onClick={devicesState.refresh}>
-              Try again
+              다시 시도
             </Button>
           </div>
         ) : null}

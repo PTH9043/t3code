@@ -124,7 +124,7 @@ function BackgroundPolicyTooltip({ children }: { readonly children: string }) {
           <button
             type="button"
             className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-            aria-label="Background policy details"
+            aria-label="백그라운드 정책 설명"
           >
             <InfoIcon className="size-3.5" />
           </button>
@@ -156,21 +156,21 @@ function authPresentation(auth: SourceControlProviderAuth): {
   readonly badge: "warning" | null;
 } {
   if (auth.status === "authenticated") {
-    return { label: "Authenticated", badge: null };
+    return { label: "인증됨", badge: null };
   }
   if (auth.status === "unauthenticated") {
-    return { label: "Not authenticated", badge: "warning" };
+    return { label: "인증 필요", badge: "warning" };
   }
-  return { label: "Status unknown", badge: null };
+  return { label: "상태 알 수 없음", badge: null };
 }
 
 function RedactedAccount(props: { readonly account: string | null }) {
   return (
     <RedactedSensitiveText
       value={props.account}
-      ariaLabel="Toggle source control account visibility"
-      revealTooltip="Click to reveal account"
-      hideTooltip="Click to hide account"
+      ariaLabel="소스 제어 계정 정보 표시 전환"
+      revealTooltip="계정 정보 보기"
+      hideTooltip="계정 정보 숨기기"
     />
   );
 }
@@ -220,21 +220,21 @@ function itemSummary({
   readonly authAccount: string | null;
 }) {
   if (isVcsNotReady(item)) {
-    return <span>Support for {item.label} is coming soon.</span>;
+    return <span>{item.label} 지원은 곧 제공될 예정입니다.</span>;
   }
 
   if (item.status !== "available") {
-    return <span>Not available on this server: {item.installHint}</span>;
+    return <span>이 서버에서 사용할 수 없습니다. 서버 호스트에서 설치 상태를 확인하세요.</span>;
   }
 
   if (auth) {
     if (auth.status === "authenticated") {
       return (
         <>
-          <span>Authenticated</span>
+          <span>인증됨</span>
           {authAccount ? (
             <>
-              <span aria-hidden>as</span>
+              <span aria-hidden>계정</span>
               <RedactedAccount account={authAccount} />
             </>
           ) : null}
@@ -243,26 +243,26 @@ function itemSummary({
     }
 
     if (!item.executable) {
-      return <span>Available. {item.installHint}</span>;
+      return <span>사용할 수 있습니다. 서버 호스트에서 인증 설정을 완료하세요.</span>;
     }
 
     if (auth.status === "unauthenticated") {
       return (
         <span>
-          {item.label} is not authenticated on this server. Sign in or configure credentials using
-          the <code className="rounded bg-muted px-1 py-px text-[11px]">{item.executable}</code>{" "}
-          tool on the server host to enable change request features.
+          이 서버에서 {item.label} 인증이 필요합니다. 변경 요청 기능을 사용하려면 서버 호스트에서{" "}
+          <code className="rounded bg-muted px-1 py-px text-[11px]">{item.executable}</code> 도구로
+          로그인하거나 자격 증명을 설정하세요.
         </span>
       );
     }
     return (
       <span>
-        Could not verify {item.label}. {item.installHint}
+        {item.label} 상태를 확인하지 못했습니다. 서버 호스트의 설치 및 인증 상태를 확인하세요.
       </span>
     );
   }
 
-  return <span>Available</span>;
+  return <span>사용 가능</span>;
 }
 
 function DiscoveryItemRow({
@@ -300,7 +300,7 @@ function DiscoveryItemRow({
               {version ? <code className="text-xs text-muted-foreground">{version}</code> : null}
               {isVcsNotReady(item) ? (
                 <Badge variant="warning" size="sm">
-                  Coming Soon
+                  곧 제공 예정
                 </Badge>
               ) : null}
               {authStatus?.badge ? (
@@ -321,7 +321,7 @@ function DiscoveryItemRow({
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
                 onClick={() => setIsExpanded((open) => !open)}
                 aria-expanded={isExpanded}
-                aria-label={`Toggle ${item.label} details`}
+                aria-label={`${item.label} 상세 정보 전환`}
               >
                 <ChevronDownIcon
                   className={cn("size-3.5 transition-transform", isExpanded && "rotate-180")}
@@ -329,7 +329,7 @@ function DiscoveryItemRow({
               </Button>
             ) : null}
             {!isVcsNotReady(item) ? (
-              <Switch checked={enabled} disabled aria-label={`${item.label} availability`} />
+              <Switch checked={enabled} disabled aria-label={`${item.label} 사용 가능 여부`} />
             ) : null}
           </div>
         </div>
@@ -366,11 +366,11 @@ function GitFetchIntervalSettings() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-1">
-            <span className="text-xs font-medium text-foreground">Fetch interval</span>
+            <span className="text-xs font-medium text-foreground">가져오기 주기</span>
             <BackgroundPolicyTooltip>
-              This interval is configured for Git only. The shared Background activity policy still
-              decides whether Git refreshes may run when the timer fires. Custom intervals appear as
-              Advanced in General settings.
+              이 주기는 Git에만 적용됩니다. 시간이 되었을 때 Git 새로 고침을 실행할지는 공통
+              백그라운드 활동 정책이 결정합니다. 사용자 지정 주기는 일반 설정에서 고급으로
+              표시됩니다.
             </BackgroundPolicyTooltip>
             <span
               className={cn(
@@ -381,7 +381,7 @@ function GitFetchIntervalSettings() {
             >
               {canResetFetchInterval ? (
                 <SettingResetButton
-                  label="fetch interval"
+                  label="가져오기 주기"
                   onClick={() =>
                     updateSettings(
                       backgroundActivityOverrideSettings(settings.backgroundActivity, {
@@ -394,8 +394,8 @@ function GitFetchIntervalSettings() {
             </span>
           </div>
           <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-            Refresh remote branch status in the background. Set this to 0 seconds if Git credentials
-            or security keys should only be prompted by explicit Git actions.
+            백그라운드에서 원격 브랜치 상태를 새로 고칩니다. Git 자격 증명이나 보안 키 요청을
+            사용자가 직접 실행한 Git 작업에서만 표시하려면 0초로 설정하세요.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -414,12 +414,12 @@ function GitFetchIntervalSettings() {
             }
           >
             <NumberFieldGroup>
-              <NumberFieldDecrement aria-label="Decrease fetch interval" />
-              <NumberFieldInput aria-label="Automatic Git fetch interval in seconds" />
-              <NumberFieldIncrement aria-label="Increase fetch interval" />
+              <NumberFieldDecrement aria-label="가져오기 주기 줄이기" />
+              <NumberFieldInput aria-label="자동 Git 가져오기 주기(초)" />
+              <NumberFieldIncrement aria-label="가져오기 주기 늘리기" />
             </NumberFieldGroup>
           </NumberField>
-          <span className="text-xs text-muted-foreground">seconds</span>
+          <span className="text-xs text-muted-foreground">초</span>
         </div>
       </div>
     </div>
@@ -475,19 +475,19 @@ function EmptySourceControlDiscovery({
   const hasError = error !== null;
 
   return (
-    <SettingsSection id={searchableSetting("source-control").id} title="Server environment">
+    <SettingsSection id={searchableSetting("source-control").id} title="서버 실행 환경">
       <Empty className="min-h-88">
         <EmptyMedia variant="icon">
           <GitPullRequestIcon />
         </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>
-            {hasError ? "Could not scan the server environment" : "Nothing detected yet"}
+            {hasError ? "서버 실행 환경을 검색하지 못했습니다" : "아직 감지된 항목이 없습니다"}
           </EmptyTitle>
           <EmptyDescription>
             {hasError
-              ? error
-              : "Install Git on the server, add optional hosting integrations or credentials your workspace needs, then rescan."}
+              ? "서버 연결 상태를 확인한 뒤 다시 시도해 주세요."
+              : "서버에 Git을 설치하고 작업 공간에 필요한 호스팅 연동 또는 자격 증명을 설정한 뒤 다시 검색하세요."}
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
@@ -499,7 +499,7 @@ function EmptySourceControlDiscovery({
             disabled={isPending}
           >
             <RefreshCwIcon className={cn("size-3.5", isPending && "animate-spin")} />
-            Scan
+            검색
           </Button>
         </EmptyContent>
       </Empty>
@@ -534,13 +534,13 @@ export function SourceControlSettingsPanel() {
             className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
             onClick={handleScan}
             disabled={discovery.isPending}
-            aria-label="Rescan server environment"
+            aria-label="서버 실행 환경 다시 검색"
           >
             <RefreshCwIcon className={cn("size-3", discovery.isPending && "animate-spin")} />
           </Button>
         }
       />
-      <TooltipPopup side="top">Rescan Git and hosting integrations</TooltipPopup>
+      <TooltipPopup side="top">Git 및 호스팅 연동 다시 검색</TooltipPopup>
     </Tooltip>
   );
 
@@ -548,15 +548,15 @@ export function SourceControlSettingsPanel() {
     <SettingsPageContainer>
       {isInitialScanPending ? (
         <>
-          <SourceControlSectionSkeleton title="Version Control" headerAction={scanButton} />
-          <SourceControlSectionSkeleton title="Source Control Providers" />
+          <SourceControlSectionSkeleton title="버전 관리" headerAction={scanButton} />
+          <SourceControlSectionSkeleton title="소스 제어 제공자" />
         </>
       ) : hasDiscoveryItems ? (
         <>
           {hasVersionControlSystems ? (
             <SettingsSection
               id={searchableSetting("source-control").id}
-              title="Version Control"
+              title="버전 관리"
               headerAction={scanButton}
             >
               {result.versionControlSystems.map((item) => (
@@ -570,7 +570,7 @@ export function SourceControlSettingsPanel() {
           {result.sourceControlProviders.length > 0 ? (
             <SettingsSection
               id={hasVersionControlSystems ? undefined : searchableSetting("source-control").id}
-              title="Source Control Providers"
+              title="소스 제어 제공자"
               headerAction={hasVersionControlSystems ? null : scanButton}
             >
               {result.sourceControlProviders.map((item) => (

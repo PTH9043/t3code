@@ -425,11 +425,11 @@ function deriveTurnFolds(input: {
     const duration = elapsedMs !== null ? formatDuration(elapsedMs) : null;
     const label = isLatestInterruptedTurn
       ? duration
-        ? `You stopped after ${duration}`
-        : "You stopped this response"
+        ? `${duration} 작업 후 중지`
+        : "사용자가 응답을 중지함"
       : duration
-        ? `Worked for ${duration}`
-        : "Worked";
+        ? `${duration} 동안 작업함`
+        : "작업함";
 
     foldsByAnchorEntryId.set(firstEntry.id, {
       turnId,

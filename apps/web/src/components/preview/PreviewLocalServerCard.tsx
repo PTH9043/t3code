@@ -28,14 +28,14 @@ export function PreviewLocalServerCard({ server, onOpen }: Props) {
 
 function describeServer(server: PreviewableServer): string {
   if (server.processName) return server.processName;
-  if (server.listening) return "Listening";
-  if (server.source === "configured") return "Configured";
-  return "Recently seen";
+  if (server.listening) return "수신 중";
+  if (server.source === "configured") return "구성됨";
+  return "최근 확인됨";
 }
 
 function PulsingDot() {
   return (
-    <span aria-label="Listening" className="relative inline-flex size-2 shrink-0">
+    <span aria-label="수신 중" className="relative inline-flex size-2 shrink-0">
       <span className="absolute inset-0 animate-status-ping rounded-full bg-success opacity-60" />
       <span className="relative inline-flex size-2 rounded-full bg-success" />
     </span>
@@ -45,7 +45,7 @@ function PulsingDot() {
 function DimDot() {
   return (
     <span
-      aria-label="Not currently listening"
+      aria-label="현재 수신하지 않음"
       className="size-2 shrink-0 rounded-full bg-muted-foreground/40"
     />
   );

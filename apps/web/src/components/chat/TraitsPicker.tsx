@@ -48,13 +48,35 @@ type TraitsPersistence =
 
 const ULTRATHINK_PROMPT_PREFIX = "Ultrathink:\n";
 
+const TRAIT_LABELS: Readonly<Record<string, string>> = {
+  Agent: "에이전트",
+  Default: "기본값",
+  "Extra High": "매우 높음",
+  Fast: "빠름",
+  "Fast Mode": "빠른 모드",
+  High: "높음",
+  Low: "낮음",
+  Medium: "중간",
+  Minimal: "최소",
+  Normal: "일반",
+  Reasoning: "추론 강도",
+  "Service Tier": "서비스 등급",
+  Thinking: "사고 모드",
+  "Context Window": "컨텍스트 창",
+  Ultrathink: "울트라싱크",
+};
+
+function localizeTraitLabel(label: string | undefined): string | undefined {
+  return label === undefined ? undefined : (TRAIT_LABELS[label] ?? label);
+}
+
 function DefaultBadge() {
   return (
     <Badge
       variant="outline"
       className="inline-flex h-4 w-fit min-w-0 items-center justify-center gap-0 border-border/70 bg-muted/60 px-1.5 py-0 font-semibold text-[10px] text-muted-foreground leading-none sm:h-4"
     >
-      Default
+      기본값
     </Badge>
   );
 }
@@ -137,7 +159,7 @@ function getSelectedTraits(
   const contextWindow = getDescriptorStringValue(contextWindowDescriptor);
   const selectedAgent = getDescriptorStringValue(agentDescriptor);
   const selectedAgentLabel = agentDescriptor
-    ? getProviderOptionCurrentLabel(agentDescriptor)
+    ? localizeTraitLabel(getProviderOptionCurrentLabel(agentDescriptor))
     : null;
 
   return {
@@ -306,12 +328,12 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             {index > 0 ? <MenuDivider /> : null}
             <MenuGroup>
               <div className="px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs">
-                {descriptor.label}
+                {localizeTraitLabel(descriptor.label)}
               </div>
               {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
                 <div className="px-2 pb-1.5 text-muted-foreground/80 text-xs">
-                  Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this
-                  option.
+                  프롬프트 본문에 &quot;ultrathink&quot;가 있습니다. 이 옵션을 바꾸려면 해당 문구를
+                  삭제하세요.
                 </div>
               ) : null}
               <MenuRadioGroup
@@ -327,7 +349,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                   >
                     <span className="flex w-full min-w-0 items-center justify-between gap-3">
                       <span className="min-w-0 truncate">
-                        {option.label}
+                        {localizeTraitLabel(option.label)}
                         {option.isDefault ? (
                           <>
                             {" "}
@@ -351,7 +373,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             {index > 0 || selectDescriptors.length > 0 ? <MenuDivider /> : null}
             <MenuGroup>
               <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-                {descriptor.label}
+                {localizeTraitLabel(descriptor.label)}
               </div>
               <MenuRadioGroup
                 value={selectedValue}
@@ -364,7 +386,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                 {(["on", "off"] as const).map((value) => (
                   <MenuRadioItem key={value} value={value} hideIndicator>
                     <span className="flex w-full min-w-0 items-center justify-between gap-3">
-                      <span>{value === "on" ? "On" : "Off"}</span>
+                      <span>{value === "on" ? "켜짐" : "꺼짐"}</span>
                     </span>
                   </MenuRadioItem>
                 ))}
@@ -414,10 +436,10 @@ export function buildTraitsTriggerDisplay(input: {
     }
     const label =
       input.ultrathinkPromptControlled && descriptor.id === input.primarySelectDescriptorId
-        ? "Ultrathink"
+        ? "울트라싱크"
         : descriptor.type === "boolean"
-          ? `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`
-          : getProviderOptionCurrentLabel(descriptor);
+          ? `${localizeTraitLabel(descriptor.label)} ${descriptor.currentValue === true ? "켜짐" : "꺼짐"}`
+          : localizeTraitLabel(getProviderOptionCurrentLabel(descriptor));
     if (typeof label === "string" && label.length > 0) {
       labels.push(label);
     }
@@ -427,7 +449,7 @@ export function buildTraitsTriggerDisplay(input: {
   // off an empty label list alone would also catch descriptors that resolved to
   // no label at all, printing a bogus "Normal" for a model without fast mode.
   if (labels.length === 0 && hasFastMode) {
-    return { label: fastModeEnabled ? "Fast" : "Normal", showFastModeIcon: false };
+    return { label: fastModeEnabled ? "빠름" : "일반", showFastModeIcon: false };
   }
   return { label: labels.join(" · "), showFastModeIcon: fastModeEnabled };
 }
@@ -483,7 +505,7 @@ export const TraitsPicker = memo(function TraitsPicker({
           provider === "claudeAgent" ? "text-[#d97757]" : "text-foreground",
         )}
       />
-      <span className="sr-only">Fast mode on</span>
+      <span className="sr-only">빠른 모드 켜짐</span>
     </>
   ) : null;
 

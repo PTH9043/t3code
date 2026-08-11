@@ -22,10 +22,10 @@ function formatRemainingSeconds(seconds: number): string {
 }
 
 function getPromptErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : "SSH password prompt failed.";
+  const message = error instanceof Error ? error.message : "";
   return message.includes("expired") || message.includes("no longer pending")
-    ? "This SSH password prompt expired. Try connecting again."
-    : message;
+    ? "SSH 암호 요청이 만료되었습니다. 다시 연결하세요."
+    : "SSH 암호 요청을 처리하지 못했습니다. 다시 시도하세요.";
 }
 
 export function SshPasswordPromptDialog() {
@@ -101,7 +101,7 @@ function ActiveSshPasswordPrompt({
   const remainingLabel =
     remainingSeconds === null ? null : formatRemainingSeconds(remainingSeconds);
   const visibleResponseError = isExpired
-    ? "This SSH password prompt expired. Try connecting again."
+    ? "SSH 암호 요청이 만료되었습니다. 다시 연결하세요."
     : responseError;
 
   const respond = async (nextPassword: string | null) => {
@@ -111,7 +111,7 @@ function ActiveSshPasswordPrompt({
 
     const requestId = request.requestId;
     if (nextPassword !== null && isExpired) {
-      setResponseError("This SSH password prompt expired. Try connecting again.");
+      setResponseError("SSH 암호 요청이 만료되었습니다. 다시 연결하세요.");
       return;
     }
 
@@ -122,6 +122,7 @@ function ActiveSshPasswordPrompt({
       await window.desktopBridge?.resolveSshPasswordPrompt(requestId, nextPassword);
       onRemove(requestId);
     } catch (error) {
+      console.error("Failed to resolve SSH password prompt", error);
       if (nextPassword === null) {
         onRemove(requestId);
       } else {
@@ -158,10 +159,10 @@ function ActiveSshPasswordPrompt({
     >
       <DialogPopup className="max-w-md" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>SSH Password Required</DialogTitle>
+          <DialogTitle>SSH 암호가 필요합니다</DialogTitle>
           <DialogDescription>
-            T3 needs your SSH password to connect to <code>{target}</code>. The password is passed
-            to the local SSH process for this connection attempt and is not saved by T3 Code.
+            <code>{target}</code>에 연결하려면 SSH 암호가 필요합니다. 암호는 이번 연결 시도에만 로컬
+            SSH 프로세스로 전달되며 T3 Code에 저장되지 않습니다.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-3" scrollFade={false}>
@@ -175,7 +176,7 @@ function ActiveSshPasswordPrompt({
           >
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-foreground">{request.prompt}</p>
+                <p className="text-sm font-medium text-foreground">SSH 암호를 입력하세요</p>
                 {remainingLabel ? (
                   <span
                     className={
@@ -184,7 +185,7 @@ function ActiveSshPasswordPrompt({
                         : "shrink-0 text-xs text-muted-foreground"
                     }
                   >
-                    {isExpired ? "Expired" : remainingLabel}
+                    {isExpired ? "만료됨" : remainingLabel}
                   </span>
                 ) : null}
               </div>
@@ -193,6 +194,7 @@ function ActiveSshPasswordPrompt({
                 autoComplete="current-password"
                 disabled={isResponding || isExpired}
                 name="ssh-password"
+                aria-label="SSH 암호"
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
@@ -202,17 +204,17 @@ function ActiveSshPasswordPrompt({
               <p className="text-sm text-destructive">{visibleResponseError}</p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                Use SSH keys to avoid repeated password prompts on new SSH sessions.
+                SSH 키를 사용하면 새 SSH 세션마다 암호를 다시 입력하지 않아도 됩니다.
               </p>
             )}
           </form>
         </DialogPanel>
         <DialogFooter>
           <Button disabled={isResponding} type="button" variant="outline" onClick={cancelPrompt}>
-            {isExpired ? "Dismiss" : "Cancel"}
+            {isExpired ? "닫기" : "취소"}
           </Button>
           <Button disabled={isResponding || isExpired} form={formId} type="submit">
-            Continue
+            계속
           </Button>
         </DialogFooter>
       </DialogPopup>

@@ -26,7 +26,6 @@ import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
   CornerLeftUpIcon,
@@ -276,9 +275,9 @@ function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string
   if (!flow) return null;
   if (flow.step === "confirm") return null;
   if (flow.source === "url") {
-    return "Enter Git clone URL";
+    return "Git 복제 URL 입력";
   }
-  return `Enter ${remoteProjectSourceLabel(flow.source)} repository (${remoteProjectSourcePathHint(flow.source)})`;
+  return `${remoteProjectSourceLabel(flow.source)} 저장소 입력 (${remoteProjectSourcePathHint(flow.source)})`;
 }
 
 function sourceProviderKind(source: AddProjectRemoteSource): AddProjectRemoteProviderKind | null {
@@ -308,7 +307,7 @@ function buildAddProjectRemoteSourceReadiness(
 ): AddProjectRemoteSourceReadiness {
   const unavailable = {
     ready: false,
-    hint: "Provider status unavailable. Open Settings -> Source Control and rescan.",
+    hint: "제공자 상태를 확인할 수 없습니다. 설정 → 소스 제어에서 다시 검색하세요.",
   } as const;
   const defaultReadiness: AddProjectRemoteSourceReadiness = {
     url: { ready: true, hint: null },
@@ -336,15 +335,16 @@ function buildAddProjectRemoteSourceReadiness(
       continue;
     }
     if (provider.status !== "available") {
-      readiness[source] = { ready: false, hint: provider.installHint };
+      readiness[source] = {
+        ready: false,
+        hint: `${provider.label}을(를) 사용할 수 없습니다. 설정 → 소스 제어에서 상태를 확인하세요.`,
+      };
       continue;
     }
     if (provider.auth.status === "unauthenticated") {
       readiness[source] = {
         ready: false,
-        hint:
-          Option.getOrNull(provider.auth.detail) ??
-          `${provider.label} is not authenticated. Open Settings -> Source Control for setup guidance.`,
+        hint: `${provider.label} 인증이 필요합니다. 설정 → 소스 제어에서 연결하세요.`,
       };
       continue;
     }
@@ -355,10 +355,8 @@ function buildAddProjectRemoteSourceReadiness(
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-  return "An error occurred.";
+  console.error("Command palette operation failed", error);
+  return "요청을 처리하지 못했습니다. 다시 시도하세요.";
 }
 
 const OVERLAY_MODE_BY_COMMAND = {
@@ -513,10 +511,10 @@ function CommandPaletteDialog(props: {
     <CommandDialogPopup
       aria-label={
         props.mode === "files"
-          ? "File picker"
+          ? "파일 선택기"
           : props.mode === "content"
-            ? "Search project contents"
-            : "Command palette"
+            ? "프로젝트 내용 검색"
+            : "명령 팔레트"
       }
       className={cn("overflow-hidden p-0", props.mode === "content" && "h-105")}
       data-command-palette="true"
@@ -1138,8 +1136,8 @@ function OpenCommandPaletteDialog(props: {
           kind: "action",
           value: `action:add-project:${environmentId}:local`,
           searchTerms: ["local", "folder", "directory", "browse"],
-          title: "Local folder",
-          description: "Browse a folder on disk",
+          title: "로컬 폴더",
+          description: "디스크에서 폴더 찾아보기",
           icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
           keepOpen: true,
           run: async () => {
@@ -1155,11 +1153,11 @@ function OpenCommandPaletteDialog(props: {
 
       for (const source of orderedSources) {
         const label = remoteProjectSourceLabel(source);
-        const title = source === "url" ? "Git URL" : `${label} repository`;
+        const title = source === "url" ? "Git URL" : `${label} 저장소`;
         const description =
           source === "url"
-            ? "Clone from a remote URL"
-            : `Clone ${label} ${remoteProjectSourcePathHint(source)}`;
+            ? "원격 URL에서 복제"
+            : `${label} ${remoteProjectSourcePathHint(source)} 복제`;
         const readiness = readinessBySource[source];
         const disabledHint = readiness.hint;
 
@@ -1176,12 +1174,12 @@ function OpenCommandPaletteDialog(props: {
                       openSourceControlSettings();
                     }}
                   >
-                    Setup Required
+                    설정 필요
                   </Button>
                 }
               />
               <TooltipPopup align="end" side="left">
-                {disabledHint ?? "Open Settings -> Source Control to configure this provider."}
+                {disabledHint ?? "설정 → 소스 제어에서 이 제공자를 구성하세요."}
               </TooltipPopup>
             </Tooltip>
           </span>
@@ -1217,7 +1215,7 @@ function OpenCommandPaletteDialog(props: {
         });
       }
 
-      return [{ value: `sources:${environmentId}`, label: "Sources", items: sourceItems }];
+      return [{ value: `sources:${environmentId}`, label: "소스", items: sourceItems }];
     },
     [openSourceControlSettings, startAddProjectBrowse, startAddProjectClone],
   );
@@ -1231,8 +1229,8 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Environment unavailable",
-            description: `${environment?.label ?? "The selected environment"} is not connected.`,
+            title: "실행 환경을 사용할 수 없음",
+            description: `${environment?.label ?? "선택한 실행 환경"}에 연결되어 있지 않습니다.`,
           }),
         );
         return;
@@ -1266,7 +1264,7 @@ function OpenCommandPaletteDialog(props: {
       title: option.label,
       description: option.isConnected
         ? option.isPrimary
-          ? "This device"
+          ? "이 기기"
           : option.environmentId
         : option.status,
       disabled: !option.isConnected,
@@ -1282,7 +1280,7 @@ function OpenCommandPaletteDialog(props: {
     () => [
       {
         value: "environments",
-        label: "Environments",
+        label: "실행 환경",
         items: addProjectEnvironmentItems,
       },
     ],
@@ -1303,8 +1301,8 @@ function OpenCommandPaletteDialog(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to browse projects",
-          description: "No environment is available.",
+          title: "프로젝트를 탐색할 수 없음",
+          description: "사용할 수 있는 실행 환경이 없습니다.",
         }),
       );
       return;
@@ -1351,7 +1349,7 @@ function OpenCommandPaletteDialog(props: {
       groups: [
         {
           value: "projects",
-          label: "Projects",
+          label: "프로젝트",
           items: enumerateCommandPaletteItems(prioritized),
         },
       ],
@@ -1380,7 +1378,7 @@ function OpenCommandPaletteDialog(props: {
         searchTerms: ["new thread", "chat", "create", "draft"],
         title: (
           <>
-            New thread in <span className="font-semibold">{activeProjectTitle}</span>
+            <span className="font-semibold">{activeProjectTitle}</span>에서 새 대화
           </>
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
@@ -1400,10 +1398,10 @@ function OpenCommandPaletteDialog(props: {
       kind: "submenu",
       value: "action:new-thread-in",
       searchTerms: ["new thread", "project", "pick", "choose", "select"],
-      title: "New thread in...",
+      title: "새 대화 시작 위치...",
       icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
-      groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
+      groups: [{ value: "projects", label: "프로젝트", items: projectThreadItems }],
     });
   }
 
@@ -1411,7 +1409,7 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value: "action:open-file-picker",
     searchTerms: ["go to file", "open file", "file picker", "find file", "quick open"],
-    title: "Go to file",
+    title: "파일로 이동",
     icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
     shortcutCommand: "filePicker.toggle",
@@ -1424,7 +1422,7 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value: "action:search-project-contents",
     searchTerms: ["search project", "find in files", "grep", "content search", "text search"],
-    title: "Search project contents",
+    title: "프로젝트 내용 검색",
     icon: <TextSearchIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
     shortcutCommand: "projectSearch.toggle",
@@ -1454,7 +1452,7 @@ function OpenCommandPaletteDialog(props: {
       "url",
       "environment",
     ],
-    title: "Add project",
+    title: "프로젝트 추가",
     disabled: defaultAddProjectEnvironmentId === null,
     icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
@@ -1468,7 +1466,7 @@ function OpenCommandPaletteDialog(props: {
       kind: "action",
       value: "action:add-project:wsl-folder",
       searchTerms: ["add project", "open", "wsl", "linux", "folder", "directory"],
-      title: "Open WSL folder",
+      title: "WSL 폴더 열기",
       description: wslAddProjectEnvironmentOption.label,
       icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
       keepOpen: true,
@@ -1482,7 +1480,7 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value: "action:theme-editor",
     searchTerms: ["theme", "appearance", "colors", "palette", "customize"],
-    title: "Toggle theme editor",
+    title: "테마 편집기 전환",
     icon: <PaletteIcon className={ITEM_ICON_CLASS} />,
     shortcutCommand: "themeEditor.toggle",
     run: async () => {
@@ -1498,7 +1496,7 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value: "action:settings",
     searchTerms: ["settings", "preferences", "configuration", "keybindings"],
-    title: "Open settings",
+    title: "설정 열기",
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/settings" });
@@ -1540,8 +1538,8 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Environment unavailable",
-            description: `${environment?.label ?? "The selected environment"} is not connected.`,
+            title: "실행 환경을 사용할 수 없음",
+            description: `${environment?.label ?? "선택한 실행 환경"}에 연결되어 있지 않습니다.`,
           }),
         );
         return;
@@ -1552,8 +1550,8 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
-            description: "Windows-style paths are only supported on Windows.",
+            title: "프로젝트 추가 실패",
+            description: "Windows 형식 경로는 Windows에서만 지원됩니다.",
           }),
         );
         return;
@@ -1563,8 +1561,8 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
-            description: "Relative paths require an active project.",
+            title: "프로젝트 추가 실패",
+            description: "상대 경로를 사용하려면 활성 프로젝트가 필요합니다.",
           }),
         );
         return;
@@ -1596,11 +1594,12 @@ function OpenCommandPaletteDialog(props: {
           );
           if (navigationResult._tag === "Failure") {
             const error = squashAtomCommandFailure(navigationResult);
+            console.error("Failed to open project", error);
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "Failed to open project",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                title: "프로젝트 열기 실패",
+                description: "프로젝트를 열지 못했습니다. 다시 시도하세요.",
               }),
             );
             return;
@@ -1631,11 +1630,12 @@ function OpenCommandPaletteDialog(props: {
       if (createResult._tag === "Failure") {
         if (!isAtomCommandInterrupted(createResult)) {
           const error = squashAtomCommandFailure(createResult);
+          console.error("Failed to add project", error);
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to add project",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "프로젝트 추가 실패",
+              description: "프로젝트를 추가하지 못했습니다. 다시 시도하세요.",
             }),
           );
         }
@@ -1647,11 +1647,12 @@ function OpenCommandPaletteDialog(props: {
       );
       if (navigationResult._tag === "Failure") {
         const error = squashAtomCommandFailure(navigationResult);
+        console.error("Failed to open added project", error);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "프로젝트 추가 실패",
+            description: "추가한 프로젝트를 열지 못했습니다. 다시 시도하세요.",
           }),
         );
         return;
@@ -1702,8 +1703,8 @@ function OpenCommandPaletteDialog(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Environment unavailable",
-          description: `${browseEnvironment?.label ?? "The selected environment"} is not connected.`,
+          title: "실행 환경을 사용할 수 없음",
+          description: `${browseEnvironment?.label ?? "선택한 실행 환경"}에 연결되어 있지 않습니다.`,
         }),
       );
       return;
@@ -1746,7 +1747,7 @@ function OpenCommandPaletteDialog(props: {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Repository lookup failed",
+              title: "저장소 조회 실패",
               description: errorMessage(squashAtomCommandFailure(lookupResult)),
             }),
           );
@@ -1778,8 +1779,8 @@ function OpenCommandPaletteDialog(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Clone failed",
-          description: "Windows-style paths are only supported on Windows.",
+          title: "복제 실패",
+          description: "Windows 형식 경로는 Windows에서만 지원됩니다.",
         }),
       );
       return;
@@ -1789,8 +1790,8 @@ function OpenCommandPaletteDialog(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Clone failed",
-          description: "Relative paths require an active project.",
+          title: "복제 실패",
+          description: "상대 경로를 사용하려면 활성 프로젝트가 필요합니다.",
         }),
       );
       return;
@@ -1818,7 +1819,7 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Clone failed",
+            title: "복제 실패",
             description: errorMessage(squashAtomCommandFailure(cloneResult)),
           }),
         );
@@ -1881,7 +1882,7 @@ function OpenCommandPaletteDialog(props: {
   const cloneDestinationBrowseGroups = useMemo(
     () =>
       browseGroups.map((group) =>
-        group.value === "directories" ? { ...group, label: "Select where to clone" } : group,
+        group.value === "directories" ? { ...group, label: "복제할 위치 선택" } : group,
       ),
     [browseGroups],
   );
@@ -1927,16 +1928,16 @@ function OpenCommandPaletteDialog(props: {
   const isCloneDestinationStep = addProjectCloneFlow?.step === "confirm";
   const submitActionLabel = isCloneDestinationStep
     ? willCreateProjectPath
-      ? "Create & Clone"
-      : "Clone"
+      ? "만들고 복제"
+      : "복제"
     : willCreateProjectPath
-      ? "Create & Add"
-      : "Add";
+      ? "만들고 추가"
+      : "추가";
   const addShortcutLabel = hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter";
   const remoteProjectButtonLabel = addProjectCloneFlow
     ? addProjectCloneFlow.source === "url"
-      ? "Continue"
-      : "Lookup"
+      ? "계속"
+      : "조회"
     : null;
   const isRemoteProjectPending = isRemoteProjectLookingUp || isRemoteProjectCloning;
   const canSubmitRemoteProjectFlow =
@@ -2047,10 +2048,11 @@ function OpenCommandPaletteDialog(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to run command",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          title: "명령을 실행할 수 없음",
+          description: "명령을 실행하지 못했습니다. 다시 시도하세요.",
         }),
       );
+      console.error("Unable to run command", error);
     });
   }
 
@@ -2136,8 +2138,8 @@ function OpenCommandPaletteDialog(props: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not add WSL project",
-            description: "Start the matching WSL backend, then choose the folder again.",
+            title: "WSL 프로젝트를 추가하지 못했습니다",
+            description: "일치하는 WSL 백엔드를 시작한 뒤 폴더를 다시 선택하세요.",
           }),
         );
         return;
@@ -2175,7 +2177,7 @@ function OpenCommandPaletteDialog(props: {
               size="xs"
               tabIndex={-1}
               className="absolute inset-e-2.5 top-1/2 gap-1.5 pe-1 ps-2 -translate-y-1/2"
-              aria-label={`${remoteProjectButtonLabel ?? "Continue"} (Enter)`}
+              aria-label={`${remoteProjectButtonLabel ?? "계속"} (Enter)`}
               disabled={!canSubmitRemoteProjectFlow}
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -2186,12 +2188,12 @@ function OpenCommandPaletteDialog(props: {
             />
           }
         >
-          <span>{isRemoteProjectPending ? "Working" : remoteProjectButtonLabel}</span>
+          <span>{isRemoteProjectPending ? "작업 중" : remoteProjectButtonLabel}</span>
           <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1">
             <Kbd>Enter</Kbd>
           </KbdGroup>
         </TooltipTrigger>
-        <TooltipPopup side="top">{remoteProjectButtonLabel ?? "Continue"} (Enter)</TooltipPopup>
+        <TooltipPopup side="top">{remoteProjectButtonLabel ?? "계속"} (Enter)</TooltipPopup>
       </Tooltip>
     ) : isBrowsing ? (
       <Tooltip>
@@ -2228,7 +2230,7 @@ function OpenCommandPaletteDialog(props: {
           }
         >
           <span>
-            {isCloneDestinationStep && isRemoteProjectPending ? "Cloning" : submitActionLabel}
+            {isCloneDestinationStep && isRemoteProjectPending ? "복제 중" : submitActionLabel}
           </span>
           <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1">
             <Kbd>{hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter"}</Kbd>
@@ -2242,9 +2244,9 @@ function OpenCommandPaletteDialog(props: {
 
   const footerActionLabel =
     addProjectCloneFlow?.step === "repository"
-      ? (remoteProjectButtonLabel ?? "Continue")
+      ? (remoteProjectButtonLabel ?? "계속")
       : !canSubmitBrowsePath || hasHighlightedBrowseItem
-        ? "Select"
+        ? "선택"
         : undefined;
 
   const footerTrailing = canOpenProjectFromFileManager ? (
@@ -2257,14 +2259,14 @@ function OpenCommandPaletteDialog(props: {
         void handleOpenProjectFromFileManager();
       }}
     >
-      {`Open in ${fileManagerName}`}
+      {`${fileManagerName}에서 열기`}
     </Button>
   ) : null;
 
   return (
     <CommandPaletteContent
       key={`${viewStack.length}-${browseGeneration}-${isBrowsing}-${addProjectCloneFlow?.step ?? "none"}`}
-      aria-label="Command palette"
+      aria-label="명령 팔레트"
       autoHighlight={isBrowsing || isRemoteProjectCloneFlow ? false : "always"}
       footerActionLabel={footerActionLabel}
       footerTrailing={footerTrailing}
@@ -2288,7 +2290,7 @@ function OpenCommandPaletteDialog(props: {
                 <button
                   type="button"
                   className="flex cursor-pointer items-center"
-                  aria-label="Back"
+                  aria-label="뒤로"
                   onClick={popView}
                 >
                   <ArrowLeftIcon />
@@ -2311,7 +2313,7 @@ function OpenCommandPaletteDialog(props: {
     >
       {remoteProjectContext ? (
         <div className="p-2 pb-0">
-          <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Repository</div>
+          <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">저장소</div>
           <div className="flex min-h-8 items-center gap-2 rounded-sm px-2 py-1.5">
             {remoteProjectContext.icon}
             <span className="flex min-w-0 flex-1 flex-col">
@@ -2333,19 +2335,19 @@ function OpenCommandPaletteDialog(props: {
           ? {
               emptyStateMessage:
                 addProjectCloneFlow.source === "url"
-                  ? "Enter a Git clone URL and press Enter to continue."
-                  : "Enter a repository path and press Enter to look it up.",
+                  ? "Git 복제 URL을 입력하고 Enter를 눌러 계속하세요."
+                  : "저장소 경로를 입력하고 Enter를 눌러 조회하세요.",
             }
           : addProjectCloneFlow?.step === "confirm"
-            ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
+            ? { emptyStateMessage: "대상 경로를 선택하고 Enter를 눌러 복제하세요." }
             : relativePathNeedsActiveProject
-              ? { emptyStateMessage: "Relative paths require an active project." }
+              ? { emptyStateMessage: "상대 경로를 사용하려면 활성 프로젝트가 필요합니다." }
               : willCreateProjectPath
                 ? {
-                    emptyStateMessage: "Press Enter to create this folder and add it as a project.",
+                    emptyStateMessage: "Enter를 눌러 이 폴더를 만들고 프로젝트로 추가하세요.",
                   }
                 : threadSearch.isPending
-                  ? { emptyStateMessage: "Searching thread messages…" }
+                  ? { emptyStateMessage: "대화 메시지 검색 중…" }
                   : {})}
       />
     </CommandPaletteContent>

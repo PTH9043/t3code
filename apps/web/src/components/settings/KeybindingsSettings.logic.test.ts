@@ -104,7 +104,7 @@ describe("KeybindingsSettings.logic", () => {
     });
     expect(parseWhenExpressionDraft("editorFocus &&")).toEqual({
       ok: false,
-      message: "Use variables with !, &&, ||, and parentheses.",
+      message: "변수와 !, &&, ||, 괄호를 사용해 조건식을 작성하세요.",
     });
 
     expect(parseWhenExpressionDraft("!(terminalFocus || modelPickerOpen)")).toEqual({
@@ -121,9 +121,9 @@ describe("KeybindingsSettings.logic", () => {
   });
 
   it("formats static and project script command labels", () => {
-    expect(commandLabel("commandPalette.toggle")).toBe("Command Palette: Toggle");
-    expect(commandLabel("themeEditor.toggle")).toBe("Theme Editor: Toggle");
-    expect(commandLabel("script.setup-db.run")).toBe("Run Script: Setup Db");
+    expect(commandLabel("commandPalette.toggle")).toBe("명령 팔레트 전환");
+    expect(commandLabel("themeEditor.toggle")).toBe("테마 편집기 전환");
+    expect(commandLabel("script.setup-db.run")).toBe("스크립트 실행: Setup Db");
   });
 
   it("builds known when variable options from defaults without frontend labels", () => {
@@ -237,13 +237,13 @@ describe("KeybindingsSettings.logic", () => {
       "",
     );
 
-    expect(rows[0]?.conflicts).toEqual(["Chat: New Local"]);
+    expect(rows[0]?.conflicts).toEqual(["새 로컬 대화"]);
     expect(
       keybindingConflictLabels(rows, {
         rowId: rows[0]?.id ?? "",
         key: "mod+n",
         when: "",
       }),
-    ).toEqual(["Chat: New Local"]);
+    ).toEqual(["새 로컬 대화"]);
   });
 });

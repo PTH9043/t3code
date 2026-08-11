@@ -7,6 +7,6 @@ import { PREVIEW_ERROR_CODE_MESSAGES } from "./previewConstants";
 export function describePreviewError(description: string): string {
   const friendly = PREVIEW_ERROR_CODE_MESSAGES[description];
   if (friendly) return friendly;
-  if (description.length > 0) return description;
-  return "Network error";
+  if (description.length > 0) return "알 수 없는 네트워크 오류";
+  return "네트워크 오류";
 }

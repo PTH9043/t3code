@@ -58,41 +58,41 @@ export function isDesktopUpdateButtonDisabled(state: DesktopUpdateState | null):
 
 export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState): string {
   if (!shouldShowArm64IntelBuildWarning(state)) {
-    return "This install is using the correct architecture.";
+    return "현재 설치는 올바른 아키텍처를 사용하고 있습니다.";
   }
 
   const action = resolveDesktopUpdateButtonAction(state);
   if (action === "download") {
-    return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.";
+    return "이 Mac은 Apple Silicon을 사용하지만 T3 Code가 Rosetta에서 Intel 빌드로 실행 중입니다. 업데이트를 다운로드하면 Apple Silicon 네이티브 빌드로 전환됩니다.";
   }
   if (action === "install") {
-    return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. Restart to install the downloaded Apple Silicon build.";
+    return "이 Mac은 Apple Silicon을 사용하지만 T3 Code가 Rosetta에서 Intel 빌드로 실행 중입니다. 다시 시작해 다운로드한 Apple Silicon 빌드를 설치하세요.";
   }
-  return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
+  return "이 Mac은 Apple Silicon을 사용하지만 T3 Code가 Rosetta에서 Intel 빌드로 실행 중입니다. 다음 앱 업데이트에서 Apple Silicon 네이티브 빌드로 교체됩니다.";
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
   if (state.status === "available") {
-    return `Update ${state.availableVersion ?? "available"} ready to download`;
+    return `업데이트 ${state.availableVersion ?? "새 버전"} 다운로드 가능`;
   }
   if (state.status === "downloading") {
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Downloading update${progress}`;
+    return `업데이트 다운로드 중${progress}`;
   }
   if (state.status === "downloaded") {
-    return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
+    return `업데이트 ${state.downloadedVersion ?? state.availableVersion ?? "새 버전"} 다운로드 완료. 눌러서 다시 시작하고 설치하세요.`;
   }
   if (state.status === "error") {
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Download failed for ${state.availableVersion}. Click to retry.`;
+      return `${state.availableVersion} 다운로드 실패. 눌러서 다시 시도하세요.`;
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
-      return `Install failed for ${state.downloadedVersion}. Click to retry.`;
+      return `${state.downloadedVersion} 설치 실패. 눌러서 다시 시도하세요.`;
     }
-    return state.message ?? "Update failed";
+    return state.message && /[가-힣]/.test(state.message) ? state.message : "업데이트 실패";
   }
-  return "Up to date";
+  return "최신 버전";
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
@@ -101,16 +101,17 @@ export function getDesktopUpdateInstallConfirmationMessage(
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
   const windowsInstallWarning = isWindowsPlatform(platform)
-    ? "\n\nOn Windows, T3 Code may remain closed for several minutes while the update installs, and no installer window may appear. T3 Code will reopen automatically when installation finishes."
+    ? "\n\nWindows에서는 업데이트 설치 중 T3 Code가 몇 분 동안 닫혀 있을 수 있으며 설치 창이 표시되지 않을 수도 있습니다. 설치가 끝나면 T3 Code가 자동으로 다시 열립니다."
     : "";
-  return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.${windowsInstallWarning}`;
+  return `${version ? `업데이트 ${version}을` : "업데이트를"} 설치하고 T3 Code를 다시 시작할까요?\n\n실행 중인 작업은 중단됩니다. 계속하기 전에 준비되었는지 확인하세요.${windowsInstallWarning}`;
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
   if (!result.accepted || result.completed) return null;
   if (typeof result.state.message !== "string") return null;
   const message = result.state.message.trim();
-  return message.length > 0 ? message : null;
+  if (message.length === 0) return null;
+  return /[가-힣]/.test(message) ? message : "업데이트 작업을 완료하지 못했습니다.";
 }
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {

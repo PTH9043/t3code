@@ -323,8 +323,8 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const [expanded, setExpanded] = useState(readInitialWordWrapSetting);
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const expandLabel = expanded ? "Collapse table cells" : "Expand table cells";
-  const copyLabel = copied ? "Copied" : "Copy table";
+  const expandLabel = expanded ? "표 셀 접기" : "표 셀 펼치기";
+  const copyLabel = copied ? "복사됨" : "표 복사";
 
   function toggleExpanded() {
     const table = tableRef.current;
@@ -443,8 +443,8 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
             <TooltipPopup side="top">{copyLabel}</TooltipPopup>
           </Tooltip>
           <MenuPopup align="end">
-            <MenuItem onClick={() => handleCopy("markdown")}>Copy as Markdown</MenuItem>
-            <MenuItem onClick={() => handleCopy("csv")}>Copy as CSV</MenuItem>
+            <MenuItem onClick={() => handleCopy("markdown")}>마크다운으로 복사</MenuItem>
+            <MenuItem onClick={() => handleCopy("csv")}>CSV로 복사</MenuItem>
           </MenuPopup>
         </Menu>
       </div>
@@ -465,7 +465,7 @@ function MarkdownDetails({
   const summary =
     isValidElement<{ children?: ReactNode }>(summaryNode) && summaryNode.props.children
       ? summaryNode.props.children
-      : "Details";
+      : "세부 정보";
   const content = childNodes.filter((_, index) => index !== summaryIndex);
 
   return (
@@ -526,7 +526,7 @@ function MarkdownCodeBlockTitleContent({
     <Tooltip>
       <TooltipTrigger
         render={
-          <span className="inline-flex shrink-0 rounded-sm" aria-label={`Language: ${language}`} />
+          <span className="inline-flex shrink-0 rounded-sm" aria-label={`언어: ${language}`} />
         }
       >
         <PierreEntryIcon pathValue={fileName} kind="file" theme={theme} className="size-3.5" />
@@ -552,8 +552,8 @@ function MarkdownCodeBlock({
   const [copied, setCopied] = useState(false);
   const [wrapped, setWrapped] = useState(readInitialWordWrapSetting);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
-  const copyLabel = copied ? "Copied" : "Copy code";
+  const wrapLabel = wrapped ? "줄 바꿈 끄기" : "줄 바꿈 사용";
+  const copyLabel = copied ? "복사됨" : "코드 복사";
 
   const handleCopy = useCallback(() => {
     if (typeof navigator === "undefined" || navigator.clipboard == null) {
@@ -607,7 +607,7 @@ function MarkdownCodeBlock({
             theme={theme}
           />
         </span>
-        <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
+        <span className="flex items-center gap-0.5" role="toolbar" aria-label="코드 블록 작업">
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1041,12 +1041,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { operation: "open-file-in-editor", target: targetPath },
           result.cause,
         );
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Unable to open file",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "파일을 열 수 없음",
+            description: "파일을 열지 못했습니다. 다시 시도하세요.",
           }),
         );
       } catch (cause) {
@@ -1057,8 +1056,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Unable to open file",
-            description: cause instanceof Error ? cause.message : "An error occurred.",
+            title: "파일을 열 수 없음",
+            description: "파일을 열지 못했습니다. 다시 시도하세요.",
           }),
         );
       }
@@ -1087,12 +1086,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { operation: "open-file-in-browser", target: targetPath },
           result.cause,
         );
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Unable to open file in browser",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "브라우저에서 파일을 열 수 없음",
+            description: "브라우저에서 파일을 열지 못했습니다. 다시 시도하세요.",
           }),
         );
       } catch (cause) {
@@ -1103,8 +1101,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Unable to open file in browser",
-            description: cause instanceof Error ? cause.message : "An error occurred.",
+            title: "브라우저에서 파일을 열 수 없음",
+            description: "브라우저에서 파일을 열지 못했습니다. 다시 시도하세요.",
           }),
         );
       }
@@ -1117,8 +1115,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Failed to copy ${title.toLowerCase()}`,
-            description: "Clipboard API unavailable.",
+            title: `${title} 복사 실패`,
+            description: "클립보드를 사용할 수 없습니다.",
           }),
         );
         return;
@@ -1128,7 +1126,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         () => {
           toastManager.add({
             type: "success",
-            title: `${title} copied`,
+            title: `${title} 복사됨`,
             description: value,
           });
         },
@@ -1140,8 +1138,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: `Failed to copy ${title.toLowerCase()}`,
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: `${title} 복사 실패`,
+              description: "경로를 복사하지 못했습니다. 다시 시도하세요.",
             }),
           );
         },
@@ -1161,12 +1159,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       try {
         const clicked = await api.contextMenu.show(
           [
-            { id: "open", label: "Open in editor" },
+            { id: "open", label: "편집기에서 열기" },
             ...(onOpenInBrowser
-              ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
+              ? ([{ id: "open-in-browser", label: "내장 브라우저에서 열기" }] as const)
               : []),
-            { id: "copy-relative", label: "Copy relative path" },
-            { id: "copy-full", label: "Copy full path" },
+            { id: "copy-relative", label: "상대 경로 복사" },
+            { id: "copy-full", label: "전체 경로 복사" },
           ] as const,
           { x: event.clientX, y: event.clientY },
         );
@@ -1180,11 +1178,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           return;
         }
         if (clicked === "copy-relative") {
-          handleCopy(displayPath, "Relative path");
+          handleCopy(displayPath, "상대 경로");
           return;
         }
         if (clicked === "copy-full") {
-          handleCopy(targetPath, "Full path");
+          handleCopy(targetPath, "전체 경로");
         }
       } catch (cause) {
         reportMarkdownActionFailure(
@@ -1331,7 +1329,7 @@ function ChatMarkdown({
           AsyncResult.failure<void, BrowserPreviewUnavailableError>(
             Cause.fail(
               new BrowserPreviewUnavailableError({
-                message: "Thread context is unavailable.",
+                message: "대화 컨텍스트를 사용할 수 없습니다.",
               }),
             ),
           ),
@@ -1351,7 +1349,7 @@ function ChatMarkdown({
           AsyncResult.failure<void, BrowserPreviewUnavailableError>(
             Cause.fail(
               new BrowserPreviewUnavailableError({
-                message: "Environment is not connected.",
+                message: "실행 환경이 연결되어 있지 않습니다.",
               }),
             ),
           ),
@@ -1443,7 +1441,7 @@ function ChatMarkdown({
             {...props}
             type="checkbox"
             name="markdown-task"
-            aria-label="Toggle task"
+            aria-label="작업 상태 전환"
             checked={checked}
             onChange={(event) => {
               const markerOffset = Number(

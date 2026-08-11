@@ -158,7 +158,7 @@ export function useVcsInitAction(scope: SourceControlActionScope) {
       input: { cwd: target.cwd },
     });
   }, [init, scope]);
-  return useAction({ kind: "init", label: "Initializing repository", scope, action });
+  return useAction({ kind: "init", label: "저장소 초기화 중", scope, action });
 }
 
 export function useVcsPullAction(scope: SourceControlActionScope) {
@@ -191,7 +191,7 @@ export function useVcsPullAction(scope: SourceControlActionScope) {
   }, [pull, scope]);
   return useAction({
     kind: "pull",
-    label: "Pulling latest changes",
+    label: "최신 변경 사항 가져오는 중",
     scope,
     action,
     onSuccess: status.refresh,
@@ -245,7 +245,7 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
 
   return useAction({
     kind: "runStackedAction",
-    label: "Running source control action",
+    label: "소스 제어 작업 실행 중",
     scope,
     action,
     onSuccess: status.refresh,
@@ -297,7 +297,7 @@ export function useSourceControlPublishRepositoryAction(scope: SourceControlActi
   );
   return useAction({
     kind: "publishRepository",
-    label: "Publishing repository",
+    label: "저장소 게시 중",
     scope,
     action,
     onSuccess: status.refresh,
@@ -336,7 +336,7 @@ export function usePreparePullRequestThreadAction(scope: SourceControlActionScop
   );
   return useAction({
     kind: "preparePullRequestThread",
-    label: "Preparing pull request thread",
+    label: "풀 리퀘스트 대화 준비 중",
     scope,
     action,
   });

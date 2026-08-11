@@ -31,6 +31,39 @@ export interface SidebarProjectPickerEntry {
   isPreferred: boolean;
 }
 
+type SidebarProjectScope = Pick<SidebarProjectSnapshot, "projectKey" | "memberProjectRefs">;
+
+export function findSidebarProjectKeyForRef(
+  groups: ReadonlyArray<SidebarProjectScope>,
+  projectRef: ScopedProjectRef | null,
+): string | null {
+  if (projectRef === null) return null;
+  return (
+    groups.find((group) =>
+      group.memberProjectRefs.some(
+        (member) =>
+          member.environmentId === projectRef.environmentId &&
+          member.projectId === projectRef.projectId,
+      ),
+    )?.projectKey ?? null
+  );
+}
+
+/**
+ * Project scope is mandatory in the conversation sidebar. While projects are
+ * loading there may be no selection; as soon as at least one project exists,
+ * keep a valid selection or fall back to the first ordered project.
+ */
+export function resolveRequiredSidebarProjectKey(
+  groups: ReadonlyArray<SidebarProjectScope>,
+  currentKey: string | null,
+): string | null {
+  if (currentKey !== null && groups.some((group) => group.projectKey === currentKey)) {
+    return currentKey;
+  }
+  return groups[0]?.projectKey ?? null;
+}
+
 export function buildPhysicalToLogicalProjectKeyMap(input: {
   projects: ReadonlyArray<Project>;
   settings: ProjectGroupingSettings;

@@ -31,8 +31,8 @@ describe("ProviderSettingsForm helpers", () => {
     );
 
     expect(serverPassword).toMatchObject({
-      label: "Server password",
-      description: "Stored in plain text on disk.",
+      label: "서버 비밀번호",
+      description: "디스크에 일반 텍스트로 저장됩니다.",
       control: "password",
     });
   });

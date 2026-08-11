@@ -136,23 +136,23 @@ export function formatDiagnosticsDescription(input: {
   readonly otlpMetricsEnabled: boolean;
   readonly otlpMetricsUrl?: string | undefined;
 }): string {
-  const mode = input.localTracingEnabled ? "Local trace file" : "Terminal logs only";
+  const mode = input.localTracingEnabled ? "로컬 추적 파일 사용" : "터미널 로그만 사용";
   const tracesUrl = input.otlpTracesEnabled ? input.otlpTracesUrl : undefined;
   const metricsUrl = input.otlpMetricsEnabled ? input.otlpMetricsUrl : undefined;
 
   if (tracesUrl && metricsUrl) {
     const collapsedUrl = collapseOtelSignalsUrl({ tracesUrl, metricsUrl });
     return collapsedUrl
-      ? `${mode}. Exporting OTEL to ${collapsedUrl}.`
-      : `${mode}. Exporting OTEL traces to ${tracesUrl} and metrics to ${metricsUrl}.`;
+      ? `${mode}. OTEL 데이터를 ${collapsedUrl}(으)로 내보냅니다.`
+      : `${mode}. OTEL 추적은 ${tracesUrl}, 메트릭은 ${metricsUrl}(으)로 내보냅니다.`;
   }
 
   if (tracesUrl) {
-    return `${mode}. Exporting OTEL traces to ${tracesUrl}.`;
+    return `${mode}. OTEL 추적을 ${tracesUrl}(으)로 내보냅니다.`;
   }
 
   if (metricsUrl) {
-    return `${mode}. Exporting OTEL metrics to ${metricsUrl}.`;
+    return `${mode}. OTEL 메트릭을 ${metricsUrl}(으)로 내보냅니다.`;
   }
 
   return `${mode}.`;

@@ -336,10 +336,18 @@ async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
     await waitForAuthenticatedSessionAfterBootstrap();
     return { status: "authenticated" };
   } catch (error) {
+    console.error("Primary environment authentication failed", error);
+    const errorMessage =
+      typeof error === "object" &&
+      error !== null &&
+      "_tag" in error &&
+      error._tag === "PrimaryEnvironmentAuthSessionTimeoutError"
+        ? "부트스트랩 후 인증 세션을 기다리는 시간이 초과되었습니다."
+        : "인증에 실패했습니다.";
     return {
       status: "requires-auth",
       auth: currentSession.auth,
-      errorMessage: error instanceof Error ? error.message : "Authentication failed.",
+      errorMessage,
     };
   }
 }

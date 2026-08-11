@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
@@ -128,21 +127,39 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
   }
 
   if (lastCheckedRelative.status === "invalid") {
-    return <span className="text-[11px] text-muted-foreground/50">Checked unavailable</span>;
+    return <span className="text-[11px] text-muted-foreground/50">확인 시각 없음</span>;
   }
+
+  const checkedLabel = (() => {
+    if (lastCheckedRelative.value === "just now") return "방금";
+    const match = /^(\d+)([mhd])$/.exec(lastCheckedRelative.value);
+    if (!match) return lastCheckedRelative.value;
+    const unit = match[2] === "m" ? "분" : match[2] === "h" ? "시간" : "일";
+    return `${match[1]}${unit} 전`;
+  })();
 
   return (
     <span className="text-[11px] text-muted-foreground/60">
-      {lastCheckedRelative.suffix ? (
-        <>
-          Checked <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
-          {lastCheckedRelative.suffix}
-        </>
-      ) : (
-        <>Checked {lastCheckedRelative.value}</>
-      )}
+      최근 확인 <span className="font-mono tabular-nums">{checkedLabel}</span>
     </span>
   );
+}
+
+function providerConnectionStatusText(connection: EnvironmentPresentation["connection"]): string {
+  switch (connection.phase) {
+    case "available":
+      return "연결 가능";
+    case "offline":
+      return "오프라인";
+    case "connecting":
+      return "연결 중";
+    case "reconnecting":
+      return "다시 연결 중";
+    case "connected":
+      return "연결됨";
+    case "error":
+      return "연결 실패";
+  }
 }
 
 function providerEnvironmentIcon(environment: EnvironmentPresentation) {
@@ -154,11 +171,11 @@ function providerEnvironmentIcon(environment: EnvironmentPresentation) {
 }
 
 function providerEnvironmentDetail(environment: EnvironmentPresentation): string {
-  if (environment.entry.target._tag === "PrimaryConnectionTarget") return "Primary device";
+  if (environment.entry.target._tag === "PrimaryConnectionTarget") return "기본 장치";
   if (environment.relayManaged) return "T3 Connect";
   if (environment.entry.target._tag === "SshConnectionTarget") return "SSH";
-  if (isDesktopLocalConnectionTarget(environment.entry.target)) return "Local device";
-  return environment.displayUrl ?? "Remote device";
+  if (isDesktopLocalConnectionTarget(environment.entry.target)) return "로컬 장치";
+  return environment.displayUrl ?? "원격 장치";
 }
 
 function EnvironmentUnavailableRow({
@@ -170,19 +187,19 @@ function EnvironmentUnavailableRow({
 }) {
   const isLoading = access.kind === "loading";
   const title = isLoading
-    ? "Loading provider settings"
+    ? "CLI 계정 설정 불러오는 중"
     : access.kind === "error"
-      ? "Could not connect to this device"
-      : "Provider settings are unavailable";
+      ? "이 장치에 연결할 수 없음"
+      : "CLI 계정 설정을 사용할 수 없음";
   const description = isLoading
     ? access.reason === "permissions"
-      ? "Checking what this session is allowed to change."
-      : `Waiting for ${environment.label}'s configuration.`
-    : connectionStatusText(environment.connection);
+      ? "이 세션에서 변경할 수 있는 항목을 확인하고 있습니다."
+      : `${environment.label} 설정을 기다리고 있습니다.`
+    : providerConnectionStatusText(environment.connection);
   // No spinner: this state can persist indefinitely for a wedged device, and a
   // continuously repainting animation would run the whole time.
   return (
-    <SettingsSection title="Providers">
+    <SettingsSection title="AI 제공자 및 CLI 계정">
       <SettingsRow title={title} description={description} />
     </SettingsSection>
   );
@@ -214,16 +231,16 @@ export function ProviderSettingsPanel() {
   return (
     <SettingsPageContainer>
       {!onlyPrimaryDevice ? (
-        <SettingsSection title="Devices">
+        <SettingsSection title="장치">
           {options.length === 0 ? (
             // The catalog hydrates asynchronously, so an empty list before it is
             // ready means "not loaded yet", not "nothing is connected".
             <SettingsRow
-              title={isReady ? "No connected devices" : "Loading devices"}
+              title={isReady ? "연결된 장치 없음" : "장치 불러오는 중"}
               description={
                 isReady
-                  ? "Connect an execution environment before configuring providers."
-                  : "Reading connected execution environments."
+                  ? "CLI 계정을 설정하려면 먼저 실행 환경을 연결하세요."
+                  : "연결된 실행 환경을 확인하고 있습니다."
               }
             />
           ) : (
@@ -231,7 +248,7 @@ export function ProviderSettingsPanel() {
               {options.map((environment) => {
                 const Icon = providerEnvironmentIcon(environment);
                 const selected = environment.environmentId === effectiveEnvironmentId;
-                const statusText = connectionStatusText(environment.connection);
+                const statusText = providerConnectionStatusText(environment.connection);
                 return (
                   <button
                     key={environment.environmentId}
@@ -463,11 +480,8 @@ export function EnvironmentProviderSettings({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Could not update ${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver}`,
-            description:
-              error instanceof Error
-                ? error.message
-                : "The provider update command could not be started.",
+            title: `${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver} 업데이트 실패`,
+            description: "CLI 업데이트 명령을 시작하지 못했습니다.",
           }),
         );
       }
@@ -674,13 +688,13 @@ export function EnvironmentProviderSettings({
                         variant="ghost"
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         onClick={() => setIsAddInstanceDialogOpen(true)}
-                        aria-label="Add provider instance"
+                        aria-label="CLI 계정 추가"
                       >
                         <PlusIcon className="size-3" />
                       </Button>
                     }
                   />
-                  <TooltipPopup side="top">Add provider instance</TooltipPopup>
+                  <TooltipPopup side="top">CLI 계정 추가</TooltipPopup>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
@@ -691,7 +705,7 @@ export function EnvironmentProviderSettings({
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         disabled={isRefreshingProviders}
                         onClick={() => void refreshProviders()}
-                        aria-label="Refresh provider status"
+                        aria-label="CLI 상태 새로고침"
                       >
                         {isRefreshingProviders ? (
                           <LoaderIcon className="size-3 animate-spin" />
@@ -701,7 +715,7 @@ export function EnvironmentProviderSettings({
                       </Button>
                     }
                   />
-                  <TooltipPopup side="top">Refresh provider status</TooltipPopup>
+                  <TooltipPopup side="top">CLI 상태 새로고침</TooltipPopup>
                 </Tooltip>
               </>
             ) : null}
@@ -710,8 +724,8 @@ export function EnvironmentProviderSettings({
       >
         {readOnly ? (
           <SettingsRow
-            title="Limited permissions"
-            description={`This session can view ${environmentLabel}'s providers, but its credential does not allow changing their configuration.`}
+            title="제한된 권한"
+            description={`이 세션에서는 ${environmentLabel}의 CLI 계정을 볼 수 있지만 설정을 변경할 권한은 없습니다.`}
           />
         ) : null}
         <div
@@ -725,20 +739,20 @@ export function EnvironmentProviderSettings({
           <SettingsRow
             title={
               <span className="inline-flex items-center gap-1.5">
-                Health check interval
+                상태 확인 주기
                 <PolicyTooltip>
-                  This interval is configured here, then the shared Background activity policy
-                  decides whether provider probes may run when the timer fires. Custom intervals
-                  appear as Advanced in General settings.
+                  여기서 정한 주기마다 CLI 상태 확인을 시도하며, 실제 백그라운드 실행 여부는 공용
+                  백그라운드 활동 정책을 따릅니다. 사용자 지정 주기는 일반 설정의 고급 항목에
+                  표시됩니다.
                 </PolicyTooltip>
               </span>
             }
-            description="Refresh provider availability, versions, auth state, and model metadata in the background. Set this to 0 seconds to rely on manual refreshes."
+            description="CLI 사용 가능 여부, 버전, 인증 상태와 모델 정보를 백그라운드에서 확인합니다. 수동으로만 새로고침하려면 0초로 설정하세요."
             resetAction={
               providerHealthRefreshIntervalSeconds !==
               defaultProviderHealthRefreshIntervalSeconds ? (
                 <SettingResetButton
-                  label="provider health check interval"
+                  label="CLI 상태 확인 주기"
                   onClick={() =>
                     updateSettings(
                       backgroundActivityOverrideSettings(
@@ -776,12 +790,12 @@ export function EnvironmentProviderSettings({
                   }
                 >
                   <NumberFieldGroup>
-                    <NumberFieldDecrement aria-label="Decrease provider health check interval" />
-                    <NumberFieldInput aria-label="Provider health check interval in seconds" />
-                    <NumberFieldIncrement aria-label="Increase provider health check interval" />
+                    <NumberFieldDecrement aria-label="CLI 상태 확인 주기 줄이기" />
+                    <NumberFieldInput aria-label="CLI 상태 확인 주기(초)" />
+                    <NumberFieldIncrement aria-label="CLI 상태 확인 주기 늘리기" />
                   </NumberFieldGroup>
                 </NumberField>
-                <span className="text-xs text-muted-foreground">seconds</span>
+                <span className="text-xs text-muted-foreground">초</span>
               </div>
             }
           />
@@ -821,7 +835,7 @@ export function EnvironmentProviderSettings({
             const headerAction =
               row.isDefault && row.isDirty ? (
                 <SettingResetButton
-                  label={`${resetLabel} provider settings`}
+                  label={`${resetLabel} CLI 설정`}
                   onClick={() => resetDefaultInstance(row.driver)}
                 />
               ) : null;

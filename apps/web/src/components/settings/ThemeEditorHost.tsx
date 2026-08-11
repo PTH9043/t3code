@@ -31,8 +31,8 @@ export function ThemeEditorHost() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not save your theme",
-              description: "Browser storage is unavailable, so the change was not kept.",
+              title: "테마를 저장하지 못했습니다",
+              description: "브라우저 저장소를 사용할 수 없어 변경 사항이 저장되지 않았습니다.",
             }),
           );
           return false;
@@ -40,8 +40,8 @@ export function ThemeEditorHost() {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: `${savedTheme.label} updated`,
-            description: `Its ${mergedAppearance} palette was added.`,
+            title: `${savedTheme.label} 업데이트됨`,
+            description: `${mergedAppearance === "light" ? "밝은" : "어두운"} 색상 팔레트를 추가했습니다.`,
           }),
         );
         return true;
@@ -58,8 +58,8 @@ export function ThemeEditorHost() {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: `${savedTheme.label} saved`,
-            description: wasActive ? "Your changes are now active." : "Your changes are saved.",
+            title: `${savedTheme.label} 저장됨`,
+            description: wasActive ? "변경 사항을 적용했습니다." : "변경 사항을 저장했습니다.",
           }),
         );
         return true;
@@ -69,8 +69,8 @@ export function ThemeEditorHost() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not save your theme",
-            description: "Browser storage is unavailable, so the change was not kept.",
+            title: "테마를 저장하지 못했습니다",
+            description: "브라우저 저장소를 사용할 수 없어 변경 사항이 저장되지 않았습니다.",
           }),
         );
         return false;
@@ -78,8 +78,8 @@ export function ThemeEditorHost() {
       toastManager.add(
         stackedThreadToast({
           type: "success",
-          title: `${savedTheme.label} created`,
-          description: "It’s now active.",
+          title: `${savedTheme.label} 생성됨`,
+          description: "현재 테마로 적용했습니다.",
         }),
       );
       return true;

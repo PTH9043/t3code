@@ -116,6 +116,38 @@ export function formatTerminalContextLabel(selection: {
   return `${selection.terminalLabel} ${formatTerminalContextRange(selection)}`;
 }
 
+export function formatTerminalContextDisplayLabel(selection: {
+  terminalLabel: string;
+  lineStart: number;
+  lineEnd: number;
+}): string {
+  const terminalLabel = formatTerminalNameForDisplay(selection.terminalLabel);
+  const range =
+    selection.lineStart === selection.lineEnd
+      ? `${selection.lineStart}줄`
+      : `${selection.lineStart}~${selection.lineEnd}줄`;
+  return `${terminalLabel} · ${range}`;
+}
+
+export function formatTerminalNameForDisplay(label: string): string {
+  return label.replace(/^Terminal(?=\s|$)/i, "터미널");
+}
+
+export function formatTerminalContextHeaderForDisplay(header: string): string {
+  const match = /^(.*?)\s+line(?:s)?\s+(\d+)(?:-(\d+))?$/i.exec(header.trim());
+  if (!match) return header;
+
+  const lineStart = Number.parseInt(match[2] ?? "", 10);
+  const lineEnd = Number.parseInt(match[3] ?? match[2] ?? "", 10);
+  if (!Number.isFinite(lineStart) || !Number.isFinite(lineEnd)) return header;
+
+  return formatTerminalContextDisplayLabel({
+    terminalLabel: match[1]?.trim() || "터미널",
+    lineStart,
+    lineEnd,
+  });
+}
+
 export function formatInlineTerminalContextLabel(selection: {
   terminalLabel: string;
   lineStart: number;

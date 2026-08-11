@@ -13,14 +13,14 @@ function connection(
 describe("saved cloud environment connection presentation", () => {
   it("only labels a live connection as connected", () => {
     expect(presentSavedCloudEnvironmentConnection(connection("connected"))).toEqual({
-      buttonLabel: "Connected",
-      statusText: "Connected",
+      buttonLabel: "연결됨",
+      statusText: "연결됨",
       tone: "connected",
     });
 
     expect(presentSavedCloudEnvironmentConnection(connection("connecting"))).toEqual({
-      buttonLabel: "Connecting…",
-      statusText: "Connecting...",
+      buttonLabel: "연결 중…",
+      statusText: "연결 중...",
       tone: "connecting",
     });
   });
@@ -31,17 +31,16 @@ describe("saved cloud environment connection presentation", () => {
         connection("reconnecting", "Relay environment endpoint is unavailable."),
       ),
     ).toEqual({
-      buttonLabel: "Reconnecting…",
-      statusText:
-        "Failed to connect. Reconnecting... Reason: Relay environment endpoint is unavailable.",
+      buttonLabel: "다시 연결 중…",
+      statusText: "연결에 실패해 다시 연결하고 있습니다...",
       tone: "connecting",
     });
   });
 
   it.each([
-    ["error", "Connection failed", "Connection failed. Reason: Access denied.", "error"],
-    ["offline", "Offline", "Offline", "idle"],
-    ["available", "Not connected", "Available", "idle"],
+    ["error", "연결 실패", "연결에 실패했습니다. 연결 설정을 확인해 주세요.", "error"],
+    ["offline", "오프라인", "오프라인", "idle"],
+    ["available", "연결 안 됨", "사용 가능", "idle"],
   ] as const)(
     "presents %s without claiming the environment is connected",
     (phase, buttonLabel, statusText, tone) => {

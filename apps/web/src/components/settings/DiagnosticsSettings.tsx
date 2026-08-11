@@ -65,7 +65,7 @@ function formatBytes(value: number): string {
 }
 
 function formatRelative(value: DateTime.Utc | null): string {
-  if (!value) return "No trace records";
+  if (!value) return "추적 기록 없음";
   return formatRelativeTimeLabel(DateTime.formatIso(value));
 }
 
@@ -104,7 +104,7 @@ function StatBlock({
                 <button
                   type="button"
                   className="inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground"
-                  aria-label={`${label} details`}
+                  aria-label={`${label} 세부 정보`}
                 >
                   <InfoIcon className="size-3" />
                 </button>
@@ -164,7 +164,7 @@ function ExpandableText({
   text,
   className,
   collapsedClassName = "line-clamp-3",
-  expandLabel = "Show full error",
+  expandLabel = "오류 전체 보기",
 }: {
   text: string;
   className?: string;
@@ -190,7 +190,7 @@ function ExpandableText({
           className="mt-1 text-[11px] font-medium text-foreground/70 underline-offset-2 hover:text-foreground hover:underline"
           onClick={() => setExpanded((value) => !value)}
         >
-          {expanded ? "Show less" : expandLabel}
+          {expanded ? "접기" : expandLabel}
         </button>
       ) : null}
     </div>
@@ -248,7 +248,7 @@ function DiagnosticsTable({
 
 function TraceIdCell({ traceId }: { traceId: string }) {
   const { copyToClipboard, isCopied: copied } = useCopyToClipboard({
-    target: "trace ID",
+    target: "추적 ID",
     timeout: 1_200,
   });
 
@@ -275,14 +275,14 @@ function TraceIdCell({ traceId }: { traceId: string }) {
             <button
               type="button"
               className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label={copied ? "Copied trace ID" : "Copy trace ID"}
+              aria-label={copied ? "추적 ID 복사됨" : "추적 ID 복사"}
               onClick={() => copyToClipboard(traceId)}
             >
               <CopyIcon className="size-3" />
             </button>
           }
         />
-        <TooltipPopup side="top">{copied ? "Copied" : "Copy full trace ID"}</TooltipPopup>
+        <TooltipPopup side="top">{copied ? "복사됨" : "전체 추적 ID 복사"}</TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -297,9 +297,9 @@ function formatProcessName(command: string): string {
 }
 
 function formatProcessType(process: ServerProcessDiagnosticsEntry): string {
-  if (process.depth > 0) return "Subprocess";
-  if (/\b(codex|claude|opencode|cursor)\b/i.test(process.command)) return "Agent";
-  return "Process";
+  if (process.depth > 0) return "하위 프로세스";
+  if (/\b(codex|claude|opencode|cursor)\b/i.test(process.command)) return "에이전트";
+  return "프로세스";
 }
 
 function ProcessNameCell({
@@ -324,7 +324,7 @@ function ProcessNameCell({
         <button
           type="button"
           className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label={isExpanded ? `Collapse ${name}` : `Expand ${name}`}
+          aria-label={isExpanded ? `${name} 접기` : `${name} 펼치기`}
           onClick={() => onToggle(process.pid)}
         >
           <ChevronIcon className="size-3.5" />
@@ -372,7 +372,7 @@ function ProcessSignalActions({
             </button>
           }
         />
-        <TooltipPopup side="top">Send SIGINT</TooltipPopup>
+        <TooltipPopup side="top">SIGINT 보내기</TooltipPopup>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger
@@ -387,7 +387,7 @@ function ProcessSignalActions({
             </button>
           }
         />
-        <TooltipPopup side="top">Send SIGKILL</TooltipPopup>
+        <TooltipPopup side="top">SIGKILL 보내기</TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -455,20 +455,20 @@ function ProcessDiagnosticsTable({
         </colgroup>
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">Name</th>
+            <th className="px-4 py-2 font-semibold sm:pl-5">이름</th>
             <th className="px-3 py-2 text-right font-semibold">CPU</th>
-            <th className="px-3 py-2 text-right font-semibold">Memory</th>
-            <th className="px-3 py-2 font-semibold">Command</th>
+            <th className="px-3 py-2 text-right font-semibold">메모리</th>
+            <th className="px-3 py-2 font-semibold">명령</th>
             <th className="px-3 py-2 text-right font-semibold">PID</th>
-            <th className="px-3 py-2 font-semibold">Type</th>
-            <th className="p-2 text-right font-semibold sm:pr-4">Kill</th>
+            <th className="px-3 py-2 font-semibold">유형</th>
+            <th className="p-2 text-right font-semibold sm:pr-4">종료</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
           {visibleProcesses.length === 0 ? (
             <tr>
               <td colSpan={7} className="px-4 py-4 text-xs text-muted-foreground sm:px-5">
-                {emptyLabel ?? "No live descendant processes found."}
+                {emptyLabel ?? "실행 중인 하위 프로세스가 없습니다."}
               </td>
             </tr>
           ) : null}
@@ -522,17 +522,17 @@ function ProcessDiagnosticsTable({
 }
 
 const RESOURCE_HISTORY_WINDOWS = [
-  { label: "5m", windowMs: 5 * 60_000, bucketMs: 30_000 },
-  { label: "15m", windowMs: 15 * 60_000, bucketMs: 60_000 },
-  { label: "30m", windowMs: 30 * 60_000, bucketMs: 2 * 60_000 },
-  { label: "1h", windowMs: 60 * 60_000, bucketMs: 5 * 60_000 },
+  { label: "5분", windowMs: 5 * 60_000, bucketMs: 30_000 },
+  { label: "15분", windowMs: 15 * 60_000, bucketMs: 60_000 },
+  { label: "30분", windowMs: 30 * 60_000, bucketMs: 2 * 60_000 },
+  { label: "1시간", windowMs: 60 * 60_000, bucketMs: 5 * 60_000 },
 ] as const;
 
 function formatCpuTime(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}초`;
   const minutes = seconds / 60;
-  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}m`;
-  return `${(minutes / 60).toFixed(2)}h`;
+  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}분`;
+  return `${(minutes / 60).toFixed(2)}시간`;
 }
 
 function formatShortProcessName(command: string): string {
@@ -553,7 +553,7 @@ function ResourceHistoryProcessNameCell({
     <div
       className="grid min-w-0 grid-cols-[1.25rem_0.375rem_minmax(0,1fr)] items-center gap-2"
       style={{ paddingLeft: `${Math.min(visualDepth, 6) * 10}px` }}
-      aria-label={`${process.isServerRoot ? "Root" : "Child"} process ${name}`}
+      aria-label={`${process.isServerRoot ? "루트" : "하위"} 프로세스 ${name}`}
     >
       <span className="size-5 shrink-0" aria-hidden="true" />
       <span
@@ -601,7 +601,7 @@ function ProcessResourceHistoryChart({
                   <div className="flex h-full min-w-1 flex-1 items-end">
                     <div
                       className="relative h-full w-full"
-                      aria-label={`Average CPU ${bucket.avgCpuPercent.toFixed(1)}%, peak CPU ${bucket.maxCpuPercent.toFixed(1)}%`}
+                      aria-label={`평균 CPU ${bucket.avgCpuPercent.toFixed(1)}%, 최대 CPU ${bucket.maxCpuPercent.toFixed(1)}%`}
                     >
                       <div
                         className="absolute inset-x-0 bottom-0 rounded-t-sm bg-foreground/15 transition-colors"
@@ -616,7 +616,7 @@ function ProcessResourceHistoryChart({
                 }
               />
               <TooltipPopup side="top">
-                Avg {bucket.avgCpuPercent.toFixed(1)}%, peak {bucket.maxCpuPercent.toFixed(1)}%
+                평균 {bucket.avgCpuPercent.toFixed(1)}%, 최대 {bucket.maxCpuPercent.toFixed(1)}%
               </TooltipPopup>
             </Tooltip>
           );
@@ -684,13 +684,13 @@ function ProcessResourceHistoryTable({
         </colgroup>
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">Process</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU Time</th>
-            <th className="px-3 py-2 text-right font-semibold">Current</th>
-            <th className="px-3 py-2 text-right font-semibold">Average</th>
-            <th className="px-3 py-2 text-right font-semibold">Peak</th>
-            <th className="px-3 py-2 text-right font-semibold">Max Mem</th>
-            <th className="px-3 py-2 font-semibold">Command</th>
+            <th className="px-4 py-2 font-semibold sm:pl-5">프로세스</th>
+            <th className="px-3 py-2 text-right font-semibold">CPU 시간</th>
+            <th className="px-3 py-2 text-right font-semibold">현재</th>
+            <th className="px-3 py-2 text-right font-semibold">평균</th>
+            <th className="px-3 py-2 text-right font-semibold">최대</th>
+            <th className="px-3 py-2 text-right font-semibold">최대 메모리</th>
+            <th className="px-3 py-2 font-semibold">명령</th>
             <th className="px-3 py-2 text-right font-semibold sm:pr-5">PID</th>
           </tr>
         </thead>
@@ -758,21 +758,21 @@ function DiagnosticsLastChecked({ checkedAt }: { checkedAt: DateTime.Utc | null 
   const relative = getRelativeTimeState(checkedAt ? DateTime.formatIso(checkedAt) : null);
 
   if (relative.status === "missing") {
-    return <span className="text-[11px] text-muted-foreground/50">Checking</span>;
+    return <span className="text-[11px] text-muted-foreground/50">확인 중</span>;
   }
 
   if (relative.status === "invalid") {
-    return <span className="text-[11px] text-muted-foreground/50">Checked unavailable</span>;
+    return <span className="text-[11px] text-muted-foreground/50">확인 시각 없음</span>;
   }
 
   return (
     <span className="text-[11px] text-muted-foreground/60">
       {relative.suffix ? (
         <>
-          Checked <span className="font-mono tabular-nums">{relative.value}</span> {relative.suffix}
+          확인: <span className="font-mono tabular-nums">{relative.value}</span> {relative.suffix}
         </>
       ) : (
-        <>Checked {relative.value}</>
+        <>확인: {relative.value}</>
       )}
     </span>
   );
@@ -864,11 +864,11 @@ export function DiagnosticsSettingsPanel() {
 
     const editor = resolveAndPersistPreferredEditor(availableEditors ?? []);
     if (!editor) {
-      setOpenLogsDirectoryError("No available editors found.");
+      setOpenLogsDirectoryError("사용 가능한 편집기가 없습니다.");
       return;
     }
     if (environmentId === null) {
-      setOpenLogsDirectoryError("No environment is selected.");
+      setOpenLogsDirectoryError("선택된 실행 환경이 없습니다.");
       return;
     }
 
@@ -886,7 +886,7 @@ export function DiagnosticsSettingsPanel() {
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         setOpenLogsDirectoryError(
-          error instanceof Error ? error.message : "Unable to open logs folder.",
+          error instanceof Error ? error.message : "로그 폴더를 열지 못했습니다.",
         );
       }
     })();
@@ -898,7 +898,7 @@ export function DiagnosticsSettingsPanel() {
     (pid: number, signal: ServerProcessSignal) => {
       if (
         signal === "SIGKILL" &&
-        !window.confirm(`Send SIGKILL to process ${pid}? This cannot be handled by the process.`)
+        !window.confirm(`프로세스 ${pid}에 SIGKILL을 보낼까요? 프로세스가 이를 처리할 수 없습니다.`)
       ) {
         return;
       }
@@ -922,8 +922,9 @@ export function DiagnosticsSettingsPanel() {
             const error = squashAtomCommandFailure(result);
             toastManager.add({
               type: "error",
-              title: `Could not send ${signal}`,
-              description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+              title: `${signal}을 보내지 못했습니다`,
+              description:
+                error instanceof Error ? error.message : `${signal} 전송에 실패했습니다.`,
             });
           }
           return;
@@ -934,17 +935,17 @@ export function DiagnosticsSettingsPanel() {
           if (isStaleProcessSignalMessage(message)) {
             toastManager.add({
               type: "info",
-              title: "Process already exited",
+              title: "프로세스가 이미 종료되었습니다",
               description:
-                "The process is not a child of the T3 Server. It might already have exited.",
+                "이 프로세스는 더 이상 T3 서버의 하위 프로세스가 아닙니다. 이미 종료되었을 수 있습니다.",
             });
             return;
           }
 
           toastManager.add({
             type: "error",
-            title: `Could not send ${signal}`,
-            description: message ?? `Failed to send ${signal}.`,
+            title: `${signal}을 보내지 못했습니다`,
+            description: message ?? `${signal} 전송에 실패했습니다.`,
           });
           return;
         }
@@ -966,13 +967,13 @@ export function DiagnosticsSettingsPanel() {
       <ResourceTelemetryDiagnostics />
 
       <SettingsSection
-        title="Live Processes"
+        title="실행 중인 프로세스"
         headerAction={
           <div className="flex items-center gap-1.5">
             <DiagnosticsLastChecked checkedAt={processData?.readAt ?? null} />
             <DiagnosticsRefreshButton
               isPending={isProcessPending}
-              label="Refresh process diagnostics"
+              label="프로세스 진단 새로고침"
               onClick={refreshProcesses}
             />
           </div>
@@ -980,23 +981,20 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="Child Processes"
+            label="하위 프로세스"
             value={processData ? formatCount(processData.processCount) : "..."}
           />
           <StatBlock
             label="CPU"
             value={processData ? `${processData.totalCpuPercent.toFixed(1)}%` : "..."}
-            tooltip="Total CPU across live child processes of the current server process. The desktop shell and other parent processes are not included."
+            tooltip="현재 서버 프로세스에서 실행 중인 모든 하위 프로세스의 CPU 합계입니다. 데스크톱 셸과 그 밖의 상위 프로세스는 포함하지 않습니다."
           />
           <StatBlock
-            label="Memory"
+            label="메모리"
             value={processData ? formatBytes(processData.totalRssBytes) : "..."}
-            tooltip="Total resident memory across live child processes of the current server process. The desktop shell and other parent processes are not included."
+            tooltip="현재 서버 프로세스에서 실행 중인 모든 하위 프로세스의 상주 메모리 합계입니다. 데스크톱 셸과 그 밖의 상위 프로세스는 포함하지 않습니다."
           />
-          <StatBlock
-            label="Server PID"
-            value={processData ? String(processData.serverPid) : "..."}
-          />
+          <StatBlock label="서버 PID" value={processData ? String(processData.serverPid) : "..."} />
         </StatsGrid>
         {processDiagnosticsError || processError ? (
           <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-5">
@@ -1020,14 +1018,14 @@ export function DiagnosticsSettingsPanel() {
           onSignal={signalProcess}
           emptyLabel={
             isProcessInitialLoading
-              ? "Loading live processes..."
-              : "No live descendant processes found."
+              ? "실행 중인 프로세스를 불러오는 중..."
+              : "실행 중인 하위 프로세스가 없습니다."
           }
         />
       </SettingsSection>
 
       <SettingsSection
-        title="Resource History"
+        title="리소스 기록"
         headerAction={
           <div className="flex items-center gap-1.5">
             <ResourceHistoryWindowSelector
@@ -1037,7 +1035,7 @@ export function DiagnosticsSettingsPanel() {
             <DiagnosticsLastChecked checkedAt={resourceData?.readAt ?? null} />
             <DiagnosticsRefreshButton
               isPending={isResourcePending}
-              label="Refresh resource history"
+              label="리소스 기록 새로고침"
               onClick={refreshResources}
             />
           </div>
@@ -1045,21 +1043,21 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="CPU Time"
+            label="CPU 시간"
             value={resourceData ? formatCpuTime(resourceData.totalCpuSecondsApprox) : "..."}
-            tooltip="Approximate active CPU time for the T3 server root process and its descendants during the selected window. It grows only while sampled processes use CPU and older samples leave as the window moves."
+            tooltip="선택한 기간 동안 T3 서버 루트 프로세스와 하위 프로세스가 사용한 대략적인 CPU 시간입니다. 샘플링된 프로세스가 CPU를 사용할 때만 늘어나며, 기간이 이동하면 오래된 샘플은 제외됩니다."
           />
           <StatBlock
-            label="Samples"
+            label="샘플"
             value={resourceData ? formatCount(resourceData.retainedSampleCount) : "..."}
-            tooltip="In-memory process samples retained by the server. This resets when the server restarts."
+            tooltip="서버가 메모리에 보관 중인 프로세스 샘플입니다. 서버를 다시 시작하면 초기화됩니다."
           />
           <StatBlock
-            label="Interval"
+            label="수집 간격"
             value={resourceData ? formatDuration(resourceData.sampleIntervalMs) : "..."}
           />
           <StatBlock
-            label="Processes"
+            label="프로세스"
             value={resourceData ? formatCount(resourceData.topProcesses.length) : "..."}
           />
         </StatsGrid>
@@ -1084,14 +1082,14 @@ export function DiagnosticsSettingsPanel() {
           processes={resourceData?.topProcesses ?? []}
           emptyLabel={
             isResourcePending && resourceData === null
-              ? "Collecting process resource samples..."
-              : "No process resource samples found for this window."
+              ? "프로세스 리소스 샘플을 수집하는 중..."
+              : "이 기간에 수집된 프로세스 리소스 샘플이 없습니다."
           }
         />
       </SettingsSection>
 
       <SettingsSection
-        title="Trace Diagnostics"
+        title="추적 진단"
         headerAction={
           <div className="flex items-center gap-1.5">
             <DiagnosticsLastChecked checkedAt={data?.readAt ?? null} />
@@ -1104,41 +1102,41 @@ export function DiagnosticsSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={!observability?.logsDirectoryPath || isOpeningLogsDirectory}
                     onClick={openLogsDirectory}
-                    aria-label="Open logs folder"
+                    aria-label="로그 폴더 열기"
                   >
                     <FolderOpenIcon className="size-3" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Open logs folder</TooltipPopup>
+              <TooltipPopup side="top">로그 폴더 열기</TooltipPopup>
             </Tooltip>
             <DiagnosticsRefreshButton
               isPending={isPending}
-              label="Refresh trace diagnostics"
+              label="추적 진단 새로고침"
               onClick={refresh}
             />
           </div>
         }
       >
         <StatsGrid>
-          <StatBlock label="Spans" value={data ? formatCount(data.recordCount) : "..."} />
+          <StatBlock label="스팬" value={data ? formatCount(data.recordCount) : "..."} />
           <StatBlock
-            label="Failures"
+            label="실패"
             value={data ? formatCount(data.failureCount) : "..."}
             tone={data && data.failureCount > 0 ? "danger" : "default"}
           />
           <StatBlock
-            label="Slow Spans"
+            label="느린 스팬"
             value={data ? formatCount(data.slowSpanCount) : "..."}
             tooltip={
               data
-                ? `Spans with a duration of ${formatDuration(data.slowSpanThresholdMs)} or longer.`
-                : "Spans at or above the configured slow-span threshold."
+                ? `${formatDuration(data.slowSpanThresholdMs)} 이상 걸린 스팬입니다.`
+                : "설정된 느린 스팬 기준 이상인 스팬입니다."
             }
             tone={data && data.slowSpanCount > 0 ? "warning" : "default"}
           />
           <StatBlock
-            label="Parse Errors"
+            label="분석 오류"
             value={data ? formatCount(data.parseErrorCount) : "..."}
             tone={data && data.parseErrorCount > 0 ? "warning" : "default"}
           />
@@ -1163,7 +1161,7 @@ export function DiagnosticsSettingsPanel() {
                 <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
                 <span>
                   {traceDiagnosticsPartialFailure
-                    ? `Some trace files could not be read, so diagnostics may be incomplete. ${traceDiagnosticsError.message}`
+                    ? `일부 추적 파일을 읽지 못해 진단 결과가 완전하지 않을 수 있습니다. ${traceDiagnosticsError.message}`
                     : traceDiagnosticsError.message}
                 </span>
               </div>
@@ -1178,9 +1176,9 @@ export function DiagnosticsSettingsPanel() {
         ) : null}
       </SettingsSection>
 
-      <SettingsSection title="Latest Failures">
+      <SettingsSection title="최근 실패">
         {data && data.latestFailures.length > 0 ? (
-          <DiagnosticsTable headers={["Span", "Cause", "Duration", "Ended"]}>
+          <DiagnosticsTable headers={["스팬", "원인", "소요 시간", "종료"]}>
             {data.latestFailures.map((failure) => (
               <tr key={`${failure.traceId}:${failure.spanId}`}>
                 <td className="px-4 py-3 align-top text-xs font-medium text-foreground first:sm:pl-5">
@@ -1199,14 +1197,16 @@ export function DiagnosticsSettingsPanel() {
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows label={isInitialLoading ? "Loading failures..." : "No failed spans found."} />
+          <EmptyRows
+            label={isInitialLoading ? "실패 기록을 불러오는 중..." : "실패한 스팬이 없습니다."}
+          />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Most Common Failures">
+      <SettingsSection title="자주 발생한 실패">
         {data && data.commonFailures.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Count", "Cause", "Last Seen"]}
+            headers={["스팬", "횟수", "원인", "마지막 발생"]}
             minTableWidth="min-w-[760px]"
           >
             {data.commonFailures.map((failure) => (
@@ -1228,15 +1228,15 @@ export function DiagnosticsSettingsPanel() {
           </DiagnosticsTable>
         ) : (
           <EmptyRows
-            label={isInitialLoading ? "Loading failure groups..." : "No repeated failures found."}
+            label={isInitialLoading ? "실패 그룹을 불러오는 중..." : "반복된 실패가 없습니다."}
           />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Slowest Spans">
+      <SettingsSection title="가장 느린 스팬">
         {data && data.slowestSpans.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Duration", "Ended", "Trace"]}
+            headers={["스팬", "소요 시간", "종료", "추적"]}
             minTableWidth="min-w-[900px]"
             columnWidths={["w-[44%]", "w-[14%]", "w-[12%]", "w-[30%]"]}
           >
@@ -1258,11 +1258,11 @@ export function DiagnosticsSettingsPanel() {
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows label={isInitialLoading ? "Loading slow spans..." : "No spans found."} />
+          <EmptyRows label={isInitialLoading ? "느린 스팬을 불러오는 중..." : "스팬이 없습니다."} />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Span Logs">
+      <SettingsSection title="스팬 로그">
         {data && data.latestWarningAndErrorLogs.length > 0 ? (
           <ScrollArea
             chainVerticalScroll
@@ -1280,11 +1280,11 @@ export function DiagnosticsSettingsPanel() {
               </colgroup>
               <thead className="border-b border-border/60 text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
                 <tr>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold sm:pl-5">Time</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">Level</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">Span</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">Message</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold sm:pr-5">Trace</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold sm:pl-5">시각</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">수준</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">스팬</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold">메시지</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-semibold sm:pr-5">추적</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/60">
@@ -1307,7 +1307,7 @@ export function DiagnosticsSettingsPanel() {
                     <td className="px-4 py-3 align-top text-muted-foreground">
                       <ExpandableText
                         collapsedClassName="line-clamp-2"
-                        expandLabel="Show full message"
+                        expandLabel="메시지 전체 보기"
                         text={event.message}
                       />
                     </td>
@@ -1321,15 +1321,15 @@ export function DiagnosticsSettingsPanel() {
           </ScrollArea>
         ) : (
           <EmptyRows
-            label={isInitialLoading ? "Loading recent logs..." : "No warnings or errors found."}
+            label={isInitialLoading ? "최근 로그를 불러오는 중..." : "경고나 오류가 없습니다."}
           />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Top Span Names">
+      <SettingsSection title="주요 스팬 이름">
         {data && data.topSpansByCount.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Count", "Failures", "Average", "Max"]}
+            headers={["스팬", "횟수", "실패", "평균", "최대"]}
             minTableWidth="min-w-[760px]"
             columnWidths={["w-[48%]", "w-[13%]", "w-[13%]", "w-[13%]", "w-[13%]"]}
           >
@@ -1354,7 +1354,7 @@ export function DiagnosticsSettingsPanel() {
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows label={isInitialLoading ? "Loading span names..." : "No spans found."} />
+          <EmptyRows label={isInitialLoading ? "스팬 이름을 불러오는 중..." : "스팬이 없습니다."} />
         )}
       </SettingsSection>
     </SettingsPageContainer>

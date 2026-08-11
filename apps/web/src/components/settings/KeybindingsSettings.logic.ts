@@ -82,7 +82,7 @@ export function parseWhenExpressionDraft(
   if (!ast) {
     return {
       ok: false,
-      message: "Use variables with !, &&, ||, and parentheses.",
+      message: "변수와 !, &&, ||, 괄호를 사용해 조건식을 작성하세요.",
     };
   }
 
@@ -270,8 +270,41 @@ export function buildKeybindingCommandOptions(
 export function commandLabel(command: KeybindingCommand): string {
   const raw = String(command);
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
-    return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
+    return `스크립트 실행: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
   }
+  const labels: Readonly<Record<string, string>> = {
+    "sidebar.toggle": "사이드바 전환",
+    "terminal.toggle": "터미널 전환",
+    "terminal.split": "터미널 가로 분할",
+    "terminal.splitVertical": "터미널 세로 분할",
+    "terminal.new": "새 터미널",
+    "terminal.close": "터미널 닫기",
+    "rightPanel.toggle": "오른쪽 패널 전환",
+    "diff.toggle": "변경 사항 비교 전환",
+    "preview.toggle": "미리보기 전환",
+    "preview.refresh": "미리보기 새로 고침",
+    "preview.focusUrl": "미리보기 주소창 포커스",
+    "preview.zoomIn": "미리보기 확대",
+    "preview.zoomOut": "미리보기 축소",
+    "preview.resetZoom": "미리보기 배율 초기화",
+    "commandPalette.toggle": "명령 팔레트 전환",
+    "filePicker.toggle": "파일 선택기 전환",
+    "projectSearch.toggle": "프로젝트 검색 전환",
+    "themeEditor.toggle": "테마 편집기 전환",
+    "composer.stash": "입력 내용 임시 보관",
+    "chat.new": "새 대화",
+    "chat.newLocal": "새 로컬 대화",
+    "editor.openFavorite": "즐겨찾는 편집기에서 열기",
+    "modelPicker.toggle": "모델 선택기 전환",
+    "thread.previous": "이전 대화",
+    "thread.next": "다음 대화",
+  };
+  const label = labels[raw];
+  if (label) return label;
+  const modelJump = /^modelPicker\.jump\.(\d+)$/.exec(raw);
+  if (modelJump) return `모델 선택 ${modelJump[1]}`;
+  const threadJump = /^thread\.jump\.(\d+)$/.exec(raw);
+  if (threadJump) return `대화로 이동 ${threadJump[1]}`;
   return raw.split(".").map(titleCaseCommandSegment).join(": ");
 }
 

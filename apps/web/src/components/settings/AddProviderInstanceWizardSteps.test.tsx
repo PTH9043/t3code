@@ -20,7 +20,7 @@ function renderStepButtons(
 ): ReactElement<StepButtonProps>[] {
   const header = AddProviderInstanceWizardSteps({
     currentStep,
-    summaries: ["Codex", "Codex Workspace", null],
+    summaries: ["Codex", "Codex 계정", null],
     instanceIdError,
     onNavigation,
   });
@@ -33,7 +33,7 @@ function renderStepButtons(
 describe("AddProviderInstanceWizardSteps", () => {
   it("gates the actual Config header click through Identity validation", () => {
     const onNavigation = vi.fn();
-    const buttons = renderStepButtons(0, "Instance ID is required.", onNavigation);
+    const buttons = renderStepButtons(0, "인스턴스 ID를 입력하세요.", onNavigation);
 
     expect(buttons).toHaveLength(ADD_PROVIDER_WIZARD_STEPS.length);
     buttons[2]!.props.onClick();
@@ -42,12 +42,12 @@ describe("AddProviderInstanceWizardSteps", () => {
     expect(onNavigation).toHaveBeenCalledWith({
       kind: "blocked",
       step: 1,
-      error: "Instance ID is required.",
+      error: "인스턴스 ID를 입력하세요.",
     });
   });
 
   it("marks the wizard step separately from the clicked button focus", () => {
-    const buttons = renderStepButtons(1, "Instance ID is required.", vi.fn());
+    const buttons = renderStepButtons(1, "인스턴스 ID를 입력하세요.", vi.fn());
 
     expect(buttons[0]!.props["aria-current"]).toBeUndefined();
     expect(buttons[1]!.props["aria-current"]).toBe("step");
@@ -56,7 +56,7 @@ describe("AddProviderInstanceWizardSteps", () => {
 
   it("preserves the actual backward header click", () => {
     const onNavigation = vi.fn();
-    const buttons = renderStepButtons(2, "Instance ID is required.", onNavigation);
+    const buttons = renderStepButtons(2, "인스턴스 ID를 입력하세요.", onNavigation);
 
     buttons[0]!.props.onClick();
 

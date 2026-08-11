@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   type EnvironmentId,
   type ProviderInstanceConfig,
+  type ProviderInstanceEnvironmentVariable,
 } from "@t3tools/contracts";
 
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
@@ -36,6 +37,7 @@ import {
   type WizardNavigation,
 } from "./AddProviderInstanceDialog.logic";
 import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps";
+import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -106,12 +108,12 @@ const COMING_SOON_DRIVER_OPTIONS: readonly ComingSoonDriverOption[] = [
  * Returns a user-facing error string, or `null` if valid.
  */
 function validateInstanceId(id: string, existing: ReadonlySet<string>): string | null {
-  if (id.length === 0) return "Instance ID is required.";
-  if (id.length > 64) return "Instance ID must be 64 characters or fewer.";
+  if (id.length === 0) return "인스턴스 ID를 입력하세요.";
+  if (id.length > 64) return "인스턴스 ID는 64자 이하여야 합니다.";
   if (!INSTANCE_ID_PATTERN.test(id)) {
-    return "Instance ID must start with a letter and use only letters, digits, '-', or '_'.";
+    return "인스턴스 ID는 영문자로 시작하고 영문자, 숫자, '-', '_'만 사용할 수 있습니다.";
   }
-  if (existing.has(id)) return `An instance named '${id}' already exists.`;
+  if (existing.has(id)) return `'${id}' 인스턴스가 이미 존재합니다.`;
   return null;
 }
 
@@ -139,6 +141,9 @@ export function AddProviderInstanceDialog({
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
   const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
+  const [environmentByDriver, setEnvironmentByDriver] = useState<
+    Record<string, ReadonlyArray<ProviderInstanceEnvironmentVariable>>
+  >({});
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
@@ -156,10 +161,14 @@ export function AddProviderInstanceDialog({
   );
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
-  const previewLabel = label.trim() || `${driverOption.label} Workspace`;
+  const previewLabel = label.trim() || `${driverOption.label} 계정`;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+  const environment = environmentByDriver[driver] ?? [];
+  const setEnvironment = (next: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
+    setEnvironmentByDriver((existing) => ({ ...existing, [driver]: next }));
+  };
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
     setConfigByDriver((existing) => {
       const next = { ...existing };
@@ -200,6 +209,7 @@ export function AddProviderInstanceDialog({
       enabled: true,
       ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
       ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
+      ...(environment.length > 0 ? { environment } : {}),
       ...(hasConfig ? { config } : {}),
     };
     // `ProviderInstanceId.make` revalidates the slug; we've already checked
@@ -215,15 +225,15 @@ export function AddProviderInstanceDialog({
       updateSettings({ providerInstances: nextMap });
       toastManager.add({
         type: "success",
-        title: "Provider instance added",
-        description: `${driverOption.label} instance '${instanceId}' was added.`,
+        title: "CLI 계정을 추가했습니다",
+        description: `${driverOption.label} 계정 '${instanceId}'을(를) 추가했습니다.`,
       });
       onOpenChange(false);
     } catch (error) {
       toastManager.add({
         type: "error",
-        title: "Could not add provider instance",
-        description: error instanceof Error ? error.message : "Update failed.",
+        title: "CLI 계정을 추가하지 못했습니다",
+        description: "설정을 저장하는 중 오류가 발생했습니다.",
       });
     }
   };
@@ -233,10 +243,10 @@ export function AddProviderInstanceDialog({
       <DialogPopup className="max-w-xl overflow-hidden">
         <div className="flex min-h-0 flex-col overflow-hidden">
           <DialogHeader>
-            <DialogTitle>Add provider instance</DialogTitle>
+            <DialogTitle>CLI 계정 추가</DialogTitle>
             <DialogDescription>
-              Configure an additional provider instance on {environmentLabel} — for example, a
-              second Codex install pointed at a different workspace.
+              {environmentLabel}에 추가 CLI 계정을 등록합니다. 개인용·업무용처럼 같은 제공자의
+              계정을 여러 개로 분리할 수 있습니다.
             </DialogDescription>
             <AddProviderInstanceWizardSteps
               currentStep={wizardStep}
@@ -253,7 +263,7 @@ export function AddProviderInstanceDialog({
             <AnimatedHeight>
               <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
                 <div id="add-instance-driver-label" className="text-sm font-medium text-foreground">
-                  Driver
+                  CLI 제공자
                 </div>
                 <RadioGroup
                   value={driver}
@@ -306,7 +316,7 @@ export function AddProviderInstanceDialog({
                           {option.label}
                         </span>
                         <Badge variant="warning" size="sm">
-                          Coming Soon
+                          준비 중
                         </Badge>
                       </RadioPrimitive.Root>
                     );
@@ -315,20 +325,20 @@ export function AddProviderInstanceDialog({
               </div>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Label</span>
+                <span className="text-xs font-medium text-foreground">표시 이름</span>
                 <Input
                   className="bg-background"
-                  placeholder="e.g. Work"
+                  placeholder="예: 업무용"
                   value={label}
                   onChange={(event) => setLabel(event.target.value)}
                 />
                 <span className="text-[11px] text-muted-foreground">
-                  Shown in the provider list. Optional.
+                  계정 목록에 표시할 이름입니다. 입력하지 않아도 됩니다.
                 </span>
               </label>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Instance ID</span>
+                <span className="text-xs font-medium text-foreground">인스턴스 ID</span>
                 <Input
                   className="bg-background"
                   placeholder={`${driver}_work`}
@@ -342,19 +352,20 @@ export function AddProviderInstanceDialog({
                   <span className="text-[11px] text-destructive">{instanceIdError}</span>
                 ) : (
                   <span className="text-[11px] text-muted-foreground">
-                    Routing key used by threads and sessions. Letters, digits, '-', or '_'.
+                    대화와 세션을 계정에 연결하는 식별자입니다. 영문자, 숫자, '-', '_'를 사용할 수
+                    있습니다.
                   </span>
                 )}
               </label>
 
               <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Accent color</span>
+                <span className="text-xs font-medium text-foreground">구분 색상</span>
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <input
                     type="color"
                     value={normalizeProviderAccentColor(accentColor) ?? PROVIDER_ACCENT_SWATCHES[0]}
                     onChange={(event) => setAccentColor(event.target.value)}
-                    aria-label="Provider instance accent color"
+                    aria-label="CLI 계정 구분 색상"
                     className="h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
                   />
                   <div className="flex flex-wrap gap-1.5">
@@ -372,7 +383,7 @@ export function AddProviderInstanceDialog({
                           )}
                           style={{ backgroundColor: swatch }}
                           onClick={() => setAccentColor(swatch)}
-                          aria-label={`Use ${swatch} accent`}
+                          aria-label={`${swatch} 구분 색상 사용`}
                         />
                       );
                     })}
@@ -385,17 +396,17 @@ export function AddProviderInstanceDialog({
                       className="h-7 px-2 text-xs text-muted-foreground"
                       onClick={() => setAccentColor("")}
                     >
-                      Clear
+                      지우기
                     </Button>
                   ) : null}
                 </div>
                 <span className="text-[11px] text-muted-foreground">
-                  Optional marker shown in the picker.
+                  계정 선택 목록에서 계정을 빠르게 구분하는 색상입니다.
                 </span>
               </div>
 
-              {driverSettingsFields.length > 0 ? (
-                <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
+              <div className={cn("grid gap-5", wizardStep !== 2 && "hidden")}>
+                {driverSettingsFields.length > 0 ? (
                   <ProviderSettingsForm
                     definition={driverOption}
                     value={configDraft}
@@ -403,14 +414,15 @@ export function AddProviderInstanceDialog({
                     variant="dialog"
                     onChange={setConfigDraft}
                   />
-                </div>
-              ) : wizardStep === 2 ? (
-                <div className="grid gap-2">
+                ) : (
                   <p className="text-sm text-muted-foreground">
-                    This driver has no required configuration. You can add the instance now.
+                    이 CLI 제공자는 필수 설정이 없습니다. 바로 계정을 추가할 수 있습니다.
                   </p>
+                )}
+                <div className="border-t border-border/60 pt-4">
+                  <ProviderEnvironmentSection environment={environment} onChange={setEnvironment} />
                 </div>
-              ) : null}
+              </div>
             </AnimatedHeight>
           </div>
 
@@ -426,15 +438,15 @@ export function AddProviderInstanceDialog({
                 setWizardStep((step) => Math.max(0, step - 1));
               }}
             >
-              {wizardStep === 0 ? "Cancel" : "Back"}
+              {wizardStep === 0 ? "취소" : "이전"}
             </Button>
             {wizardStep < ADD_PROVIDER_WIZARD_STEPS.length - 1 ? (
               <Button size="sm" onClick={() => navigateToStep(wizardStep + 1)}>
-                Next
+                다음
               </Button>
             ) : (
               <Button size="sm" onClick={handleSave}>
-                Add instance
+                계정 추가
               </Button>
             )}
           </DialogFooter>

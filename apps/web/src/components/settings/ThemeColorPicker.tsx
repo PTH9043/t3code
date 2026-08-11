@@ -5,25 +5,66 @@ import { cn } from "../../lib/utils";
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 export function getThemeRoleLabel(role: ThemeColorRole): string {
-  const labels: Partial<Record<ThemeColorRole, string>> = {
-    canvas: "Background",
-    toolbar: "Toolbar background",
-    toolbarForeground: "Toolbar text",
-    toolbarBorder: "Toolbar border",
-    toolbarControl: "Toolbar control",
-    toolbarControlForeground: "Toolbar control text",
-    toolbarControlHover: "Toolbar control hover",
-    accent: "Accent color",
-    errorForeground: "Error text",
-    errorSurface: "Error background",
-    warningForeground: "Warning text",
-    warningSurface: "Warning background",
-    updateForeground: "Update text",
-    updateSurface: "Update background",
+  const labels: Record<ThemeColorRole, string> = {
+    canvas: "배경",
+    chrome: "앱 외곽",
+    toolbar: "도구 모음 배경",
+    toolbarForeground: "도구 모음 글자",
+    toolbarBorder: "도구 모음 테두리",
+    toolbarControl: "도구 모음 컨트롤",
+    toolbarControlForeground: "도구 모음 컨트롤 글자",
+    toolbarControlHover: "도구 모음 컨트롤 강조",
+    surface: "기본 표면",
+    surfaceRaised: "떠 있는 표면",
+    surfaceOverlay: "오버레이 표면",
+    text: "기본 글자",
+    textMuted: "흐린 글자",
+    border: "테두리",
+    input: "입력란",
+    focus: "포커스",
+    accent: "강조 색상",
+    accentForeground: "강조 영역 글자",
+    secondary: "보조 영역",
+    secondaryForeground: "보조 영역 글자",
+    muted: "흐린 영역",
+    mutedForeground: "흐린 영역 글자",
+    placeholder: "입력 안내 글자",
+    secondaryLabel: "보조 레이블",
+    iconMuted: "흐린 아이콘",
+    error: "오류",
+    errorForeground: "오류 글자",
+    errorSurface: "오류 배경",
+    warning: "경고",
+    warningForeground: "경고 글자",
+    warningSurface: "경고 배경",
+    update: "업데이트",
+    updateForeground: "업데이트 글자",
+    updateSurface: "업데이트 배경",
+    accentSurface: "강조 표면",
+    accentSurfaceForeground: "강조 표면 글자",
+    messageSurface: "메시지 표면",
+    messageForeground: "메시지 글자",
+    messageAction: "메시지 동작",
+    messageActionForeground: "메시지 동작 글자",
+    messageActionHover: "메시지 동작 강조",
+    codeBackground: "코드 배경",
+    codeForeground: "코드 글자",
+    sidebar: "사이드바 배경",
+    sidebarForeground: "사이드바 글자",
+    sidebarMutedForeground: "사이드바 흐린 글자",
+    sidebarControlSurface: "사이드바 컨트롤",
+    sidebarRowHover: "사이드바 행 강조",
+    sidebarRowActive: "사이드바 활성 행",
+    sidebarRowSelected: "사이드바 선택 행",
+    sidebarBorder: "사이드바 테두리",
+    terminalBackground: "터미널 배경",
+    terminalForeground: "터미널 글자",
+    terminalCursor: "터미널 커서",
+    terminalSelection: "터미널 선택 영역",
+    terminalScrollbar: "터미널 스크롤 막대",
+    terminalScrollbarHover: "터미널 스크롤 막대 강조",
   };
-  const label = labels[role];
-  if (label) return label;
-  return role.replace(/([A-Z])/g, " $1").replace(/^./, (character) => character.toUpperCase());
+  return labels[role];
 }
 
 type ThemeColorHsv = {
@@ -317,7 +358,7 @@ function ThemeColorPickerPanel({
       <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-semibold text-foreground">{label}</p>
-          <p className="text-[11px] text-muted-foreground">Choose a color</p>
+          <p className="text-[11px] text-muted-foreground">색상 선택</p>
         </div>
         <span
           className="size-7 shrink-0 rounded-full shadow-sm"
@@ -326,8 +367,8 @@ function ThemeColorPickerPanel({
       </div>
       <div className="grid gap-3 px-3 pb-3 pt-3">
         <div
-          aria-label={`${label} saturation and brightness`}
-          aria-valuetext={`saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
+          aria-label={`${label} 채도와 밝기`}
+          aria-valuetext={`채도 ${Math.round(hsv.s * 100)}%, 밝기 ${Math.round(hsv.v * 100)}%`}
           className="relative h-32 cursor-crosshair touch-none overflow-hidden rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover"
           role="slider"
           style={{
@@ -354,7 +395,7 @@ function ThemeColorPickerPanel({
           />
         </div>
         <div
-          aria-label={`${label} hue`}
+          aria-label={`${label} 색조`}
           aria-valuemax={360}
           aria-valuemin={0}
           aria-valuenow={Math.round(hsv.h)}
@@ -398,7 +439,7 @@ function ThemeColorPickerPanel({
                 style={{ backgroundColor: currentColor }}
               />
               <input
-                aria-label={`${label} picker hex value`}
+                aria-label={`${label} HEX 값`}
                 className="h-8 min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground outline-none"
                 onBlur={() => {
                   isEditingTextRef.current = false;
@@ -420,7 +461,7 @@ function ThemeColorPickerPanel({
             </span>
             <span className="flex min-w-0 items-center rounded-lg border border-input bg-background px-2 focus-within:border-ring">
               <input
-                aria-label={`${label} picker RGB value`}
+                aria-label={`${label} RGB 값`}
                 className="h-8 min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground outline-none"
                 onBlur={() => {
                   isEditingTextRef.current = false;
@@ -458,11 +499,11 @@ function ThemeColorPicker({
       <PopoverTrigger
         render={
           <button
-            aria-label={`Choose ${label} color`}
+            aria-label={`${label} 색상 선택`}
             className="relative flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-foreground/30 transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
             onFocus={onInteract}
             onPointerDown={onInteract}
-            title={`Choose ${label} color`}
+            title={`${label} 색상 선택`}
             type="button"
           >
             <span
@@ -515,11 +556,11 @@ export const ThemeColorField = memo(function ThemeColorField({
       data-theme-color-role={role}
     >
       <button
-        aria-label={`${selected ? "Hide" : "Show"} ${label} usage`}
+        aria-label={`${label} 사용 위치 ${selected ? "숨기기" : "보기"}`}
         aria-pressed={selected}
         className="flex min-w-0 flex-1 cursor-pointer items-center rounded-md text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
         onClick={() => onToggleSelected?.(role)}
-        title={`${selected ? "Hide" : "Show"} where ${label} is used`}
+        title={`${label} 사용 위치 ${selected ? "숨기기" : "보기"}`}
         type="button"
       >
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -533,7 +574,7 @@ export const ThemeColorField = memo(function ThemeColorField({
         />
         <Input
           aria-invalid={!isColorValue}
-          aria-label={`${label} hex value`}
+          aria-label={`${label} HEX 값`}
           className="w-28 shrink-0 rounded-md border-0 bg-black/10 font-mono text-xs text-foreground shadow-none focus-within:bg-black/15 focus-within:ring-0 dark:bg-black/20 dark:focus-within:bg-black/25 [&_[data-slot=input]]:text-right"
           id={`${role}-hex`}
           nativeInput

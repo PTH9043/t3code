@@ -25,11 +25,10 @@ describe("ChangedFilesCard", () => {
     expect(markup).toContain("whitespace-nowrap");
     expect(markup).toContain("!size-[22px]");
     expect(markup).toContain("size-3");
-    expect(markup).toContain('aria-label="Collapse all folders"');
-    expect(markup).toContain('aria-label="Open diff"');
-    expect(markup).toContain('role="group" aria-label="2 additions, 1 deletions"');
-    expect(markup).toContain("1 changed file");
-    expect(markup).not.toContain("1 changed files");
+    expect(markup).toContain('aria-label="모든 폴더 접기"');
+    expect(markup).toContain('aria-label="차이 열기"');
+    expect(markup).toContain('role="group" aria-label="추가 2줄, 삭제 1줄"');
+    expect(markup).toContain("변경된 파일 1개");
   });
 
   it("renders a scope and representative-file preview for a large latest change", () => {
@@ -60,13 +59,13 @@ describe("ChangedFilesCard", () => {
     expect(markup).toContain('data-changed-files-state="preview"');
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain("apps");
-    expect(markup).toContain("2 files");
+    expect(markup).toContain("파일 2개");
     expect(markup).toContain("packages");
     expect(markup).toContain("root");
     expect(markup).toContain("App.tsx");
     expect(markup).toContain("git.ts");
     expect(markup).toContain("README.md");
-    expect(markup).toContain("Show all 4 files");
+    expect(markup).toContain("파일 4개 모두 보기");
     expect(markup).not.toContain("App.test.tsx");
   });
 
@@ -86,8 +85,8 @@ describe("ChangedFilesCard", () => {
     );
 
     expect(markup).toContain('data-changed-files-state="collapsed"');
-    expect(markup).toContain("1 changed file");
-    expect(markup).not.toContain("Show all");
+    expect(markup).toContain("변경된 파일 1개");
+    expect(markup).not.toContain("모두 보기");
     expect(markup).not.toContain("App.tsx");
   });
 });

@@ -232,8 +232,8 @@ export function PreviewView({
         const error = squashAtomCommandFailure(result);
         toastManager.add({
           type: "error",
-          title: "Unable to resize browser viewport",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "브라우저 화면 크기를 조절할 수 없음",
+          description: "브라우저 화면 크기를 조절하지 못했습니다. 다시 시도하세요.",
         });
         throw error;
       }
@@ -291,10 +291,11 @@ export function PreviewView({
       ? previewBridge.pictureInPicture.close
       : previewBridge.pictureInPicture.open;
     void operation(runtimeTabId).catch((error) => {
+      console.error("Unable to update popped-out preview", error);
       toastManager.add({
         type: "error",
-        title: "Unable to update popped-out preview",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        title: "별도 미리보기를 업데이트할 수 없음",
+        description: "별도 미리보기를 업데이트하지 못했습니다. 다시 시도하세요.",
       });
     });
   }, [desktopOverlay?.pictureInPicture, runtimeTabId]);
@@ -316,8 +317,8 @@ export function PreviewView({
                   toastId,
                   stackedThreadToast({
                     type: "error",
-                    title: "Unable to copy recording path",
-                    description: "Clipboard API unavailable.",
+                    title: "녹화 경로를 복사할 수 없음",
+                    description: "클립보드를 사용할 수 없습니다.",
                     actionProps: revealAction,
                   }),
                 );
@@ -334,12 +335,13 @@ export function PreviewView({
                   }, 2_000);
                 },
                 (error) => {
+                  console.error("Unable to copy recording path", error);
                   toastManager.update(
                     toastId,
                     stackedThreadToast({
                       type: "error",
-                      title: "Unable to copy recording path",
-                      description: error instanceof Error ? error.message : "An error occurred.",
+                      title: "녹화 경로를 복사할 수 없음",
+                      description: "녹화 경로를 복사하지 못했습니다. 다시 시도하세요.",
                       actionProps: revealAction,
                     }),
                   );
@@ -356,11 +358,11 @@ export function PreviewView({
                 toastId,
                 stackedThreadToast({
                   type: "success",
-                  title: "Recording saved",
+                  title: "녹화 저장됨",
                   actionProps: revealAction,
                   data: {
                     secondaryActionProps: {
-                      children: pathCopied ? "Copied!" : "Copy path",
+                      children: pathCopied ? "복사됨" : "경로 복사",
                       disabled: pathCopied,
                       onClick: copyPath,
                     },
@@ -373,11 +375,11 @@ export function PreviewView({
             toastId = toastManager.add(
               stackedThreadToast({
                 type: "success",
-                title: "Recording saved",
+                title: "녹화 저장됨",
                 actionProps: revealAction,
                 data: {
                   secondaryActionProps: {
-                    children: "Copy path",
+                    children: "경로 복사",
                     onClick: copyPath,
                   },
                   secondaryActionVariant: "outline",
@@ -386,10 +388,11 @@ export function PreviewView({
             );
           },
           (error) => {
+            console.error("Unable to stop recording", error);
             toastManager.add({
               type: "error",
-              title: "Unable to stop recording",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "녹화를 중지할 수 없음",
+              description: "녹화를 중지하지 못했습니다. 다시 시도하세요.",
             });
           },
         );
@@ -397,10 +400,11 @@ export function PreviewView({
       }
       if (record) {
         void startBrowserRecording(runtimeTabId, threadRef, tabId).catch((error) => {
+          console.error("Unable to start recording", error);
           toastManager.add({
             type: "error",
-            title: "Unable to start recording",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "녹화를 시작할 수 없음",
+            description: "녹화를 시작하지 못했습니다. 다시 시도하세요.",
           });
         });
         return;
@@ -417,7 +421,7 @@ export function PreviewView({
 
           const updateScreenshotToast = (
             type: "success" | "error" = "success",
-            title = "Screenshot saved",
+            title = "스크린샷 저장됨",
             description?: string,
           ) => {
             toastManager.update(
@@ -427,7 +431,7 @@ export function PreviewView({
                 title,
                 description,
                 actionProps: {
-                  children: imageCopied ? "Copied!" : "Copy image",
+                  children: imageCopied ? "복사됨" : "이미지 복사",
                   disabled: imageCopied,
                   onClick: copyImage,
                 },
@@ -436,7 +440,7 @@ export function PreviewView({
                     {
                       id: "copy-path",
                       props: {
-                        children: pathCopied ? "Copied!" : "Copy path",
+                        children: pathCopied ? "복사됨" : "경로 복사",
                         disabled: pathCopied,
                         onClick: copyPath,
                       },
@@ -455,8 +459,8 @@ export function PreviewView({
             if (!navigator.clipboard?.writeText) {
               updateScreenshotToast(
                 "error",
-                "Unable to copy screenshot path",
-                "Clipboard API unavailable.",
+                "스크린샷 경로를 복사할 수 없음",
+                "클립보드를 사용할 수 없습니다.",
               );
               return;
             }
@@ -471,10 +475,11 @@ export function PreviewView({
                 }, 2_000);
               },
               (error) => {
+                console.error("Unable to copy screenshot path", error);
                 updateScreenshotToast(
                   "error",
-                  "Unable to copy screenshot path",
-                  error instanceof Error ? error.message : "An error occurred.",
+                  "스크린샷 경로를 복사할 수 없음",
+                  "스크린샷 경로를 복사하지 못했습니다. 다시 시도하세요.",
                 );
               },
             );
@@ -491,10 +496,11 @@ export function PreviewView({
                 }, 2_000);
               },
               (error) => {
+                console.error("Unable to copy screenshot", error);
                 updateScreenshotToast(
                   "error",
-                  "Unable to copy screenshot",
-                  error instanceof Error ? error.message : "An error occurred.",
+                  "스크린샷을 복사할 수 없음",
+                  "스크린샷을 복사하지 못했습니다. 다시 시도하세요.",
                 );
               },
             );
@@ -503,9 +509,9 @@ export function PreviewView({
           toastId = toastManager.add(
             stackedThreadToast({
               type: "success",
-              title: "Screenshot saved",
+              title: "스크린샷 저장됨",
               actionProps: {
-                children: "Copy image",
+                children: "이미지 복사",
                 onClick: copyImage,
               },
               data: {
@@ -513,7 +519,7 @@ export function PreviewView({
                   {
                     id: "copy-path",
                     props: {
-                      children: "Copy path",
+                      children: "경로 복사",
                       onClick: copyPath,
                     },
                   },
@@ -527,10 +533,11 @@ export function PreviewView({
           );
         },
         (error) => {
+          console.error("Unable to capture screenshot", error);
           toastManager.add({
             type: "error",
-            title: "Unable to capture screenshot",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "스크린샷을 캡처할 수 없음",
+            description: "스크린샷을 캡처하지 못했습니다. 다시 시도하세요.",
           });
         },
       );
@@ -730,7 +737,7 @@ export function PreviewView({
         ) : null}
         {controller !== "none" ? (
           <div className="pointer-events-none absolute left-3 top-3 z-40 rounded-full border border-border/70 bg-background/90 px-2.5 py-1 text-[11px] font-medium shadow-sm backdrop-blur">
-            {controller === "agent" ? "Agent controlling browser" : "Human control"}
+            {controller === "agent" ? "에이전트가 브라우저 제어 중" : "사용자 제어"}
           </div>
         ) : null}
         {navStatus._tag === "LoadFailed" ? (

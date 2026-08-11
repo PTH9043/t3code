@@ -429,7 +429,7 @@ describe("resolveInitialServerAuthGateState", () => {
     await expect(gateStatePromise).resolves.toEqual({
       status: "requires-auth",
       auth: DESKTOP_AUTH,
-      errorMessage: "Timed out waiting for authenticated session after bootstrap.",
+      errorMessage: "부트스트랩 후 인증 세션을 기다리는 시간이 초과되었습니다.",
     });
     expect(testApi.calls.browserSession).toEqual([{ credential: "desktop-bootstrap-token" }]);
   });

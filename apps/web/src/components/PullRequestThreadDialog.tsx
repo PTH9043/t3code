@@ -36,6 +36,21 @@ interface PullRequestThreadDialogProps {
   onPrepared: (input: { branch: string; worktreePath: string | null }) => Promise<void> | void;
 }
 
+function pullRequestStateLabel(state: string): string {
+  switch (state.toLowerCase()) {
+    case "open":
+      return "열림";
+    case "closed":
+      return "닫힘";
+    case "merged":
+      return "병합됨";
+    case "draft":
+      return "초안";
+    default:
+      return state;
+  }
+}
+
 export function PullRequestThreadDialog({
   open,
   environmentId,
@@ -171,19 +186,17 @@ export function PullRequestThreadDialog({
   const validationMessage = !referenceDirty
     ? null
     : reference.trim().length === 0
-      ? `Paste a ${terminology.singular} URL, checkout command, or enter 123 / #123.`
+      ? `${terminology.shortLabel} URL이나 체크아웃 명령을 붙여 넣거나 123 / #123을 입력하세요.`
       : parsedReference === null
-        ? `Use a ${terminology.singular} URL, checkout command, 123, or #123.`
+        ? `${terminology.shortLabel} URL, 체크아웃 명령, 123 또는 #123 형식을 사용하세요.`
         : null;
   const errorMessage =
     validationMessage ??
     (resolvedPullRequest === null && pullRequestResolution.error
-      ? pullRequestResolution.error
-      : preparePullRequestThreadAction.error instanceof Error
-        ? preparePullRequestThreadAction.error.message
-        : preparePullRequestThreadAction.error
-          ? `Failed to prepare ${terminology.singular} thread.`
-          : null);
+      ? `${terminology.shortLabel} 정보를 확인하지 못했습니다. 입력을 확인하고 다시 시도하세요.`
+      : preparePullRequestThreadAction.error
+        ? `${terminology.shortLabel} 대화를 준비하지 못했습니다. 다시 시도하세요.`
+        : null);
 
   return (
     <Dialog
@@ -198,11 +211,11 @@ export function PullRequestThreadDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SourceControlIcon className="size-4" />
-            Checkout {terminology.singular}
+            {terminology.shortLabel} 체크아웃
           </DialogTitle>
           <DialogDescription>
-            Resolve a {sourceControlPresentation.providerName} {terminology.singular}, then create
-            the draft thread in the main repo or in a dedicated worktree.
+            {sourceControlPresentation.providerName}의 {terminology.shortLabel}을 확인한 뒤 기본
+            저장소나 전용 작업 트리에 초안 대화를 만듭니다.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -212,7 +225,7 @@ export function PullRequestThreadDialog({
             </span>
             <Input
               ref={referenceInputRef}
-              placeholder={`${terminology.shortLabel} URL, checkout command, or #42`}
+              placeholder={`${terminology.shortLabel} URL, 체크아웃 명령 또는 #42`}
               value={reference}
               onChange={(event) => {
                 setReferenceDirty(true);
@@ -236,12 +249,12 @@ export function PullRequestThreadDialog({
                 <div className="min-w-0">
                   <p className="truncate font-medium text-sm">{resolvedPullRequest.title}</p>
                   <p className="truncate text-muted-foreground text-xs">
-                    #{resolvedPullRequest.number} · {resolvedPullRequest.headBranch} to{" "}
+                    #{resolvedPullRequest.number} · {resolvedPullRequest.headBranch} →{" "}
                     {resolvedPullRequest.baseBranch}
                   </p>
                 </div>
                 <span className={cn("shrink-0 text-xs capitalize", statusTone)}>
-                  {resolvedPullRequest.state}
+                  {pullRequestStateLabel(resolvedPullRequest.state)}
                 </span>
               </div>
             </div>
@@ -250,7 +263,7 @@ export function PullRequestThreadDialog({
           {isResolving ? (
             <div className="flex items-center gap-2 text-muted-foreground text-xs">
               <Spinner className="size-3.5" />
-              Resolving {terminology.singular}...
+              {terminology.shortLabel} 확인 중...
             </div>
           ) : null}
 
@@ -264,7 +277,7 @@ export function PullRequestThreadDialog({
             onClick={() => onOpenChange(false)}
             disabled={preparePullRequestThreadAction.isPending}
           >
-            Cancel
+            취소
           </Button>
           <Button
             type="button"
@@ -280,7 +293,7 @@ export function PullRequestThreadDialog({
               preparePullRequestThreadAction.isPending
             }
           >
-            {preparingMode === "local" ? "Preparing local..." : "Local"}
+            {preparingMode === "local" ? "로컬 준비 중..." : "로컬"}
           </Button>
           <Button
             type="button"
@@ -295,7 +308,7 @@ export function PullRequestThreadDialog({
               preparePullRequestThreadAction.isPending
             }
           >
-            {preparingMode === "worktree" ? "Preparing worktree..." : "Worktree"}
+            {preparingMode === "worktree" ? "작업 트리 준비 중..." : "작업 트리"}
           </Button>
         </DialogFooter>
       </DialogPopup>

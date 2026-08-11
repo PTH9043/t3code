@@ -286,8 +286,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "initial",
       type: "warning",
-      title: "Update Available: Codex v1.1.0",
-      description: "Install the update now or review provider settings.",
+      title: "업데이트 가능: Codex v1.1.0",
+      description: "지금 업데이트하거나 제공자 설정에서 내용을 확인하세요.",
     });
   });
 
@@ -300,7 +300,7 @@ describe("provider update launch notification logic", () => {
       oneClickProviders: [],
     });
 
-    expect(view.description).toBe("Codex and Cursor can be updated from provider settings.");
+    expect(view.description).toBe("제공자 설정에서 Codex, Cursor 업데이트를 진행할 수 있습니다.");
   });
 
   it("uses server update state for running progress", () => {
@@ -323,7 +323,7 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "running",
       type: "loading",
-      title: "Updating provider",
+      title: "제공자 업데이트 중",
     });
   });
 
@@ -347,8 +347,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "failed",
       type: "error",
-      title: "Provider update failed",
-      description: "command failed",
+      title: "제공자 업데이트 실패",
+      description: "Codex 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.",
     });
   });
 
@@ -369,8 +369,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "failed",
       type: "error",
-      title: "Codex v1.1.0 update failed",
-      description: "command failed",
+      title: "Codex v1.1.0 업데이트 실패",
+      description: "Codex 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.",
     });
   });
 
@@ -394,8 +394,9 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "unchanged",
       type: "warning",
-      title: "Provider still needs an update",
-      description: "Cursor still appears outdated. Check provider settings for details.",
+      title: "제공자 업데이트가 아직 필요합니다",
+      description:
+        "Cursor 제공자가 아직 이전 버전으로 표시됩니다. 제공자 설정에서 자세한 내용을 확인하세요.",
     });
   });
 
@@ -422,8 +423,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "succeeded",
       type: "success",
-      title: "Provider updated",
-      description: "New sessions will use the updated provider.",
+      title: "제공자 업데이트 완료",
+      description: "새 세션부터 업데이트된 제공자를 사용합니다.",
       dismissAfterVisibleMs: 3_000,
     });
   });
@@ -448,19 +449,19 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "succeeded",
       type: "success",
-      title: "Codex updated: v1.1.0",
-      description: "New sessions will use the updated provider.",
+      title: "Codex 업데이트 완료: v1.1.0",
+      description: "새 세션부터 업데이트된 제공자를 사용합니다.",
     });
   });
 
   it("falls back to a rejected RPC message for transport-level failures", () => {
     const results = [AsyncResult.failure(Cause.die(new Error("WebSocket closed")))];
 
-    expect(firstFailedProviderUpdateMessage(results)).toBe("WebSocket closed");
+    expect(firstFailedProviderUpdateMessage(results)).toBe("제공자 업데이트에 실패했습니다.");
     expect(getProviderUpdateRejectedToastView(2, "WebSocket closed")).toMatchObject({
       phase: "failed",
-      title: "Provider updates failed",
-      description: "WebSocket closed",
+      title: "제공자 업데이트 실패",
+      description: "제공자 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.",
     });
   });
 
@@ -503,8 +504,8 @@ describe("provider update launch notification logic", () => {
 
     expect(view).toMatchObject({
       tone: "loading",
-      title: "Updating 2 providers",
-      description: "Codex and Cursor updates are in progress.",
+      title: "제공자 2개 업데이트 중",
+      description: "Codex, Cursor 업데이트를 진행하고 있습니다.",
     });
   });
 
@@ -525,8 +526,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       key: "loading:codex:running",
       tone: "loading",
-      title: "Updating Codex",
-      description: "Codex update in progress.",
+      title: "Codex 업데이트 중",
+      description: "Codex 업데이트를 진행하고 있습니다.",
     });
   });
 
@@ -550,8 +551,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       key: "failed:claudeAgent:2026-04-23T10:00:00.000Z:Update command exited with code 1.",
       tone: "error",
-      title: "Claude v1.1.0 update failed",
-      description: "Update command exited with code 1.",
+      title: "Claude v1.1.0 업데이트 실패",
+      description: "Claude 업데이트에 실패했습니다. 제공자 설정에서 자세한 내용을 확인하세요.",
       dismissible: true,
     });
   });
@@ -579,8 +580,8 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       key: "succeeded:codex:2026-04-23T10:00:00.000Z:Provider updated.",
       tone: "success",
-      title: "Codex updated: v1.1.0",
-      description: "New sessions will use the updated provider.",
+      title: "Codex 업데이트 완료: v1.1.0",
+      description: "새 세션부터 업데이트된 제공자를 사용합니다.",
       dismissAfterVisibleMs: 3_000,
     });
   });
@@ -605,7 +606,7 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       key: "unchanged:cursor:2026-04-23T10:00:00.000Z:still old",
       tone: "warning",
-      title: "Cursor still needs an update",
+      title: "Cursor 업데이트가 아직 필요합니다",
       dismissible: true,
     });
   });
@@ -663,7 +664,7 @@ describe("provider update launch notification logic", () => {
     expect(successView).toMatchObject({
       key: "succeeded:codex:2026-04-23T10:01:00.000Z:Provider updated.",
       tone: "success",
-      title: "Codex updated: v1.2.0",
+      title: "Codex 업데이트 완료: v1.2.0",
     });
 
     const failureView = getProviderUpdateSidebarPillView(providers, {
@@ -673,7 +674,7 @@ describe("provider update launch notification logic", () => {
     expect(failureView).toMatchObject({
       key: "failed:claudeAgent:2026-04-23T10:00:00.000Z:Update command exited with code 1.",
       tone: "error",
-      title: "Claude v1.1.0 update failed",
+      title: "Claude v1.1.0 업데이트 실패",
     });
   });
 
@@ -842,7 +843,7 @@ describe("provider update launch notification logic", () => {
       ];
 
       expect(collectProviderUpdateOutcomeSnapshots(results)).toEqual([primary]);
-      expect(firstRejectedProviderUpdateMessage(results)).toBe("WebSocket closed");
+      expect(firstRejectedProviderUpdateMessage(results)).toBe("제공자 업데이트에 실패했습니다.");
     });
   });
 
@@ -1045,7 +1046,7 @@ describe("provider update launch notification logic", () => {
           pill: successPill,
           isPending: true,
         }),
-      ).toMatchObject({ kind: "failed", text: "boom" });
+      ).toMatchObject({ kind: "failed", text: "업데이트에 실패했습니다." });
     });
 
     it("uses a terminal result snapshot", () => {

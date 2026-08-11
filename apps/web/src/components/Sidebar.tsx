@@ -33,6 +33,7 @@ import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  ActivityIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -96,6 +97,8 @@ import {
 } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
+  findSidebarProjectKeyForRef,
+  resolveRequiredSidebarProjectKey,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
@@ -104,7 +107,6 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { openCommandPalette } from "../commandPaletteBus";
-import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -114,6 +116,7 @@ import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../s
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { projectEnvironment } from "../state/projects";
+import { orchestrationEnvironment } from "../state/orchestration";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -189,14 +192,18 @@ import { useComposerDraftStore } from "../composerDraftStore";
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
 const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
-  repository: "Group by repository",
-  repository_path: "Group by repository path",
-  separate: "Keep separate",
+  repository: "저장소별 그룹화",
+  repository_path: "저장소 경로별 그룹화",
+  separate: "각각 표시",
 };
 
 function compactSidebarTimeLabel(label: string): string {
-  if (label === "just now") return "now";
-  return label.endsWith(" ago") ? label.slice(0, -4) : label;
+  if (label === "방금") return "지금";
+  return label.endsWith(" 전") ? label.slice(0, -2) : label;
+}
+
+function sidebarActionErrorMessage(_error: unknown): string {
+  return "작업 중 오류가 발생했습니다. 잠시 후 다시 시도하세요.";
 }
 
 function threadTimeLabel(thread: SidebarThreadSummary): string {
@@ -247,7 +254,7 @@ function WorkingDuration(props: { startedAt: string | null }) {
 }
 
 function terminalProcessLabel(count: number): string {
-  return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
+  return `터미널 프로세스 ${count}개 실행 중`;
 }
 
 function SidebarThreadTooltip({
@@ -315,7 +322,7 @@ function SidebarThreadTooltip({
             <div className="flex min-w-0 items-start gap-2 text-warning">
               <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
               <div className="min-w-0 flex-1 wrap-break-word leading-5">
-                You're currently checked out on another branch.
+                현재 다른 브랜치를 체크아웃하고 있습니다.
               </div>
             </div>
           ) : null}
@@ -343,7 +350,7 @@ function SidebarThreadTooltip({
           {thread.session?.lastError ? (
             <div className="flex min-w-0 items-center gap-2 text-red-600 dark:text-red-400">
               <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 truncate">Error occurred</div>
+              <div className="min-w-0 truncate">오류 발생</div>
             </div>
           ) : null}
         </div>
@@ -376,7 +383,7 @@ function SnoozePopoverButton(props: {
         render={
           <button
             type="button"
-            aria-label="Snooze thread"
+            aria-label="대화 잠시 미루기"
             onClick={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}
             className="inline-flex h-full cursor-pointer items-center gap-0.5 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
@@ -570,7 +577,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const topStatus =
     status === "working"
       ? {
-          label: "Working",
+          label: "작업 중",
           icon: "working" as const,
           // No shimmer: a label that animates forever is noise in a sidebar
           // full of them (and repaints every vsync on high-refresh displays).
@@ -583,37 +590,37 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         ? {
             // Monitoring is calm background presence, not active progress
             // (monitoring-pill D6), so it keeps the label at full strength.
-            label: "Monitoring",
+            label: "모니터링 중",
             icon: null,
             className: "text-sky-600 dark:text-sky-400",
           }
         : status === "approval"
           ? {
-              label: "Approval",
+              label: "승인 필요",
               icon: null,
               className: "text-amber-700 dark:text-amber-300",
             }
           : status === "input"
             ? {
-                label: "Input",
+                label: "입력 필요",
                 icon: null,
                 className: "text-indigo-600 dark:text-indigo-300",
               }
             : status === "failed"
               ? {
-                  label: "Failed",
+                  label: "실패",
                   icon: null,
                   className: "text-red-700 dark:text-red-300",
                 }
               : isWoke
                 ? {
-                    label: "Woke",
+                    label: "다시 시작됨",
                     icon: "woke" as const,
                     className: "text-amber-700 dark:text-amber-300",
                   }
                 : isUnread
                   ? {
-                      label: "Done",
+                      label: "완료",
                       icon: "done" as const,
                       className: "text-emerald-700 dark:text-emerald-300",
                     }
@@ -812,7 +819,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     <input
       autoFocus
       value={renamingTitle}
-      aria-label="Thread title"
+      aria-label="대화 제목"
       onChange={(event) => onRenameTitleChange(event.target.value)}
       onFocus={(event) => event.currentTarget.select()}
       onKeyDown={handleRenameKeyDown}
@@ -925,7 +932,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
-                Regenerating title
+                제목 다시 생성 중
               </span>
             ) : null}
             {/* The PR badge stays outside the hover-fading slot: it must
@@ -950,13 +957,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   // merged while snoozed); the signal must survive the trip.
                   <button
                     type="button"
-                    aria-label="Dismiss Woke notification"
-                    title="Dismiss Woke notification"
+                    aria-label="다시 시작됨 알림 닫기"
+                    title="다시 시작됨 알림 닫기"
                     onClick={handleAcknowledgeWokeClick}
                     className="inline-flex cursor-pointer items-center gap-1 rounded-sm text-xs font-medium text-amber-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring dark:text-amber-300"
                   >
                     <AlarmClockIcon aria-hidden className="size-3" />
-                    <span role="status">Woke</span>
+                    <span role="status">다시 시작됨</span>
                   </button>
                 ) : (
                   <span className="text-xs">
@@ -970,7 +977,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 !props.snoozeSupported ? null : (
                   <button
                     type="button"
-                    aria-label="Wake thread now"
+                    aria-label="대화 지금 다시 시작"
                     onClick={handleUnsnoozeClick}
                     className={cn(
                       "pointer-events-none absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100",
@@ -983,7 +990,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : !props.settlementSupported ? null : variantAction === "unsettle" ? (
                 <button
                   type="button"
-                  aria-label="Un-settle thread"
+                  aria-label="대화 완료 상태 해제"
                   onClick={handleUnsettleClick}
                   className={cn(
                     "pointer-events-none absolute inset-y-0 right-0 -mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100",
@@ -995,7 +1002,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <button
                   type="button"
-                  aria-label="Settle thread"
+                  aria-label="대화 완료 처리"
                   onClick={handleSettleClick}
                   className={cn(
                     "pointer-events-none absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100",
@@ -1074,8 +1081,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 props.pinningSupported ? (
                   <button
                     type="button"
-                    aria-label="Unpin thread"
-                    title="Unpin thread"
+                    aria-label="대화 고정 해제"
+                    title="대화 고정 해제"
                     onClick={handleUnpinClick}
                     className="inline-flex cursor-pointer items-center rounded-sm text-muted-foreground/65 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   >
@@ -1083,7 +1090,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   </button>
                 ) : (
                   <PinIcon
-                    aria-label="Pinned"
+                    aria-label="고정됨"
                     role="img"
                     className="size-3 shrink-0 text-muted-foreground/65"
                   />
@@ -1110,8 +1117,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     isWokeStatus ? (
                       <button
                         type="button"
-                        aria-label="Dismiss Woke notification"
-                        title="Dismiss Woke notification"
+                        aria-label="다시 시작됨 알림 닫기"
+                        title="다시 시작됨 알림 닫기"
                         onClick={handleAcknowledgeWokeClick}
                         className={cn(
                           "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring",
@@ -1171,12 +1178,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     {props.settlementSupported ? (
                       <button
                         type="button"
-                        aria-label="Settle thread"
+                        aria-label="대화 완료 처리"
                         onClick={handleSettleClick}
                         className="-mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
                       >
                         <CheckIcon className="size-3.5" />
-                        Settle
+                        완료 처리
                       </button>
                     ) : null}
                   </span>
@@ -1187,7 +1194,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               {title}
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
-                  Regenerating title
+                  제목 다시 생성 중
                 </span>
               ) : null}
             </div>
@@ -1390,7 +1397,7 @@ export default function Sidebar() {
     onCopy: ({ path }) => {
       toastManager.add({
         type: "success",
-        title: "Path copied",
+        title: "경로를 복사했습니다",
         description: path,
       });
     },
@@ -1398,18 +1405,18 @@ export default function Sidebar() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy path",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "경로를 복사하지 못했습니다",
+          description: sidebarActionErrorMessage(error),
         }),
       );
     },
   });
   const { copyToClipboard: copyBranchToClipboard } = useCopyToClipboard<{ branch: string }>({
-    target: "branch name",
+    target: "브랜치 이름",
     onCopy: ({ branch }) => {
       toastManager.add({
         type: "success",
-        title: "Branch copied",
+        title: "브랜치를 복사했습니다",
         description: branch,
       });
     },
@@ -1417,8 +1424,8 @@ export default function Sidebar() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to copy branch",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "브랜치를 복사하지 못했습니다",
+          description: sidebarActionErrorMessage(error),
         }),
       );
     },
@@ -1570,20 +1577,79 @@ export default function Sidebar() {
     [],
   );
 
-  // Project scope: one menu above the list. Scoping filters the list without
-  // making the header width depend on the number or length of project names.
+  // A conversation list always belongs to exactly one project. The routed
+  // conversation selects its owner, and a missing/removed selection falls
+  // back to the first ordered project without ever rendering an all-project
+  // mixture in between.
   const [projectScopeKey, setProjectScopeKey] = useState<string | null>(null);
-  const scopedProjectGroup = useMemo(
+  const routedThread = useMemo(
     () =>
-      projectScopeKey === null
+      routeThreadRef === null
         ? null
-        : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null),
+        : (threads.find(
+            (thread) =>
+              thread.environmentId === routeThreadRef.environmentId &&
+              thread.id === routeThreadRef.threadId,
+          ) ?? null),
+    [routeThreadRef, threads],
+  );
+  const routedProjectRef = useMemo(
+    () =>
+      routeDraftThread
+        ? scopeProjectRef(routeDraftThread.environmentId, routeDraftThread.projectId)
+        : routedThread
+          ? scopeProjectRef(routedThread.environmentId, routedThread.projectId)
+          : null,
+    [routeDraftThread, routedThread],
+  );
+  const routedProjectScopeKey = useMemo(
+    () => findSidebarProjectKeyForRef(projectGroups, routedProjectRef),
+    [projectGroups, routedProjectRef],
+  );
+  const effectiveProjectScopeKey = useMemo(
+    () => resolveRequiredSidebarProjectKey(projectGroups, projectScopeKey),
     [projectGroups, projectScopeKey],
   );
+  const scopedProjectGroup = useMemo(
+    () =>
+      effectiveProjectScopeKey === null
+        ? null
+        : (projectGroups.find((project) => project.projectKey === effectiveProjectScopeKey) ??
+          null),
+    [effectiveProjectScopeKey, projectGroups],
+  );
+  const scopedProjectRuntime = useEnvironmentQuery(
+    scopedProjectGroup === null
+      ? null
+      : orchestrationEnvironment.workspaceRuntime({
+          environmentId: scopedProjectGroup.environmentId,
+          input: { projectId: scopedProjectGroup.id },
+        }),
+  );
+  const scopedProjectRuntimeLabel =
+    scopedProjectRuntime.data?.attention === "error"
+      ? "프로젝트 오류 확인 필요"
+      : scopedProjectRuntime.data?.attention === "needs-input"
+        ? "프로젝트에 내 입력 필요"
+        : scopedProjectRuntime.data?.attention === "completed-unseen"
+          ? "프로젝트에 새 완료 있음"
+          : scopedProjectRuntime.data?.lifecycleStatus === "working"
+            ? "프로젝트 실행 중"
+            : "프로젝트 운영 상태";
+  const scopedProjectRuntimeDotClass =
+    scopedProjectRuntime.data?.attention === "error"
+      ? "bg-destructive"
+      : scopedProjectRuntime.data?.attention === "needs-input"
+        ? "bg-warning"
+        : scopedProjectRuntime.data?.attention === "completed-unseen"
+          ? "bg-success"
+          : scopedProjectRuntime.data?.lifecycleStatus === "working"
+            ? "bg-info"
+            : "bg-sidebar-muted-foreground/35";
   const scopedProjectKeys = useMemo(
     () =>
       scopedProjectGroup === null
-        ? null
+        ? new Set<string>()
         : new Set(
             scopedProjectGroup.memberProjectRefs.map(
               (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
@@ -1591,16 +1657,24 @@ export default function Sidebar() {
           ),
     [scopedProjectGroup],
   );
+  const lastRoutedProjectScopeKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (projectScopeKey !== null && scopedProjectGroup === null) {
-      setProjectScopeKey(null);
+    if (routedProjectScopeKey === null) {
+      lastRoutedProjectScopeKeyRef.current = null;
+    } else if (lastRoutedProjectScopeKeyRef.current !== routedProjectScopeKey) {
+      lastRoutedProjectScopeKeyRef.current = routedProjectScopeKey;
+      setProjectScopeKey(routedProjectScopeKey);
+      return;
     }
-  }, [projectScopeKey, scopedProjectGroup]);
+    if (projectScopeKey !== effectiveProjectScopeKey) {
+      setProjectScopeKey(effectiveProjectScopeKey);
+    }
+  }, [effectiveProjectScopeKey, projectScopeKey, routedProjectScopeKey]);
   // Scope flips drop the selection: rows selected under the old scope may be
   // hidden now, and bulk actions must never count or touch invisible rows.
   useEffect(() => {
     clearSelection();
-  }, [clearSelection, projectScopeKey]);
+  }, [clearSelection, effectiveProjectScopeKey]);
 
   const handleRemoveProjectMembers = useCallback(
     async (projectGroup: SidebarProjectSnapshot, members: readonly SidebarProjectGroupMember[]) => {
@@ -1618,34 +1692,34 @@ export default function Sidebar() {
         api.dialogs.confirm(
           projectThreads.length > 0
             ? [
-                `Remove project "${targetLabel}" and delete its ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"}?`,
+                `"${targetLabel}" 프로젝트와 대화 ${projectThreads.length}개를 삭제할까요?`,
                 ...(singleMember
                   ? [
-                      `Path: ${singleMember.workspaceRoot}`,
+                      `경로: ${singleMember.workspaceRoot}`,
                       ...(singleMember.environmentLabel
-                        ? [`Environment: ${singleMember.environmentLabel}`]
+                        ? [`실행 환경: ${singleMember.environmentLabel}`]
                         : []),
                     ]
-                  : [`This removes ${members.length} grouped project entries.`]),
-                "This permanently clears conversation history for those threads.",
+                  : [`그룹화된 프로젝트 항목 ${members.length}개를 삭제합니다.`]),
+                "해당 대화의 기록이 영구적으로 삭제됩니다.",
                 isWholeGroup
-                  ? "This removes only the project entries, not the files on disk."
-                  : "Other entries in this grouped project are unaffected.",
-                "This action cannot be undone.",
+                  ? "프로젝트 항목만 삭제하며 디스크의 파일은 삭제하지 않습니다."
+                  : "이 그룹의 다른 프로젝트 항목에는 영향을 주지 않습니다.",
+                "이 작업은 되돌릴 수 없습니다.",
               ].join("\n")
             : [
-                `Remove project "${targetLabel}"?`,
+                `"${targetLabel}" 프로젝트를 제거할까요?`,
                 ...(singleMember
                   ? [
-                      `Path: ${singleMember.workspaceRoot}`,
+                      `경로: ${singleMember.workspaceRoot}`,
                       ...(singleMember.environmentLabel
-                        ? [`Environment: ${singleMember.environmentLabel}`]
+                        ? [`실행 환경: ${singleMember.environmentLabel}`]
                         : []),
                     ]
-                  : [`This removes ${members.length} grouped project entries.`]),
+                  : [`그룹화된 프로젝트 항목 ${members.length}개를 삭제합니다.`]),
                 isWholeGroup
-                  ? "This removes only the project entries, not the files on disk."
-                  : "Other entries in this grouped project are unaffected.",
+                  ? "프로젝트 항목만 삭제하며 디스크의 파일은 삭제하지 않습니다."
+                  : "이 그룹의 다른 프로젝트 항목에는 영향을 주지 않습니다.",
               ].join("\n"),
         ),
       );
@@ -1679,8 +1753,8 @@ export default function Sidebar() {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: `Failed to remove "${project.title}"`,
-                description: error instanceof Error ? error.message : "An error occurred.",
+                title: `"${project.title}" 프로젝트를 제거하지 못했습니다`,
+                description: sidebarActionErrorMessage(error),
               }),
             );
           }
@@ -1708,7 +1782,7 @@ export default function Sidebar() {
     async (member: SidebarProjectGroupMember, nextTitle: string) => {
       const title = nextTitle.trim();
       if (!title) {
-        toastManager.add({ type: "warning", title: "Project title cannot be empty" });
+        toastManager.add({ type: "warning", title: "프로젝트 이름을 입력하세요" });
         return;
       }
       if (title === member.title) return;
@@ -1721,8 +1795,8 @@ export default function Sidebar() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to rename project",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: "프로젝트 이름을 바꾸지 못했습니다",
+            description: sidebarActionErrorMessage(error),
           }),
         );
       }
@@ -1777,8 +1851,7 @@ export default function Sidebar() {
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
-        (scopedProjectKeys === null ||
-          scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`),
     );
     const pinned: EnvironmentThreadShell[] = [];
     const active: EnvironmentThreadShell[] = [];
@@ -1904,7 +1977,7 @@ export default function Sidebar() {
   // filter context changes so a scope/search flip never inherits a deep
   // page state.
   const [settledVisibleCount, setSettledVisibleCount] = useState(SETTLED_TAIL_INITIAL_COUNT);
-  const settledResetKey = projectScopeKey ?? "all";
+  const settledResetKey = effectiveProjectScopeKey ?? "none";
   const lastSettledResetKeyRef = useRef(settledResetKey);
   if (lastSettledResetKeyRef.current !== settledResetKey) {
     lastSettledResetKeyRef.current = settledResetKey;
@@ -2054,6 +2127,45 @@ export default function Sidebar() {
     [clearSelection, isMobile, router, setOpenMobile, setSelectionAnchor],
   );
 
+  const handleProjectScopeChange = useCallback(
+    (scopeKey: string) => {
+      const projectGroup = projectGroups.find((project) => project.projectKey === scopeKey);
+      if (!projectGroup) return;
+      setProjectScopeKey(scopeKey);
+      setProjectScopeMenuOpen(false);
+      setThreadSearchQuery("");
+      setActiveSearchResultIndex(0);
+      if (routedProjectScopeKey === scopeKey) return;
+
+      const memberKeys = new Set(
+        projectGroup.memberProjectRefs.map(
+          (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+        ),
+      );
+      const nextThread = sortThreadsForSidebar(
+        threads.filter(
+          (thread) =>
+            thread.archivedAt === null &&
+            memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+        ),
+      )[0];
+      if (nextThread) {
+        navigateToThread(scopeThreadRef(nextThread.environmentId, nextThread.id));
+        return;
+      }
+      void newThreadContext.handleNewThread(
+        scopeProjectRef(projectGroup.environmentId, projectGroup.id),
+      );
+    },
+    [
+      navigateToThread,
+      newThreadContext.handleNewThread,
+      projectGroups,
+      routedProjectScopeKey,
+      threads,
+    ],
+  );
+
   const clearThreadSearch = useCallback(() => {
     setThreadSearchQuery("");
     setActiveSearchResultIndex(0);
@@ -2117,7 +2229,7 @@ export default function Sidebar() {
         const trimmed = title.trim();
         setRenamingThreadKey(null);
         if (trimmed.length === 0) {
-          toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
+          toastManager.add({ type: "warning", title: "대화 제목을 입력하세요" });
           return;
         }
         if (trimmed === originalTitle) return;
@@ -2130,8 +2242,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to rename thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "대화 이름을 바꾸지 못했습니다",
+              description: sidebarActionErrorMessage(error),
             }),
           );
         }
@@ -2212,8 +2324,8 @@ export default function Sidebar() {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Failed to settle thread",
-                  description: error instanceof Error ? error.message : "An error occurred.",
+                  title: "대화를 완료 처리하지 못했습니다",
+                  description: sidebarActionErrorMessage(error),
                 }),
               );
             }
@@ -2240,8 +2352,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to un-settle thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "대화 완료 상태를 해제하지 못했습니다",
+              description: sidebarActionErrorMessage(error),
             }),
           );
         }
@@ -2258,8 +2370,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to wake thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "대화를 다시 시작하지 못했습니다",
+              description: sidebarActionErrorMessage(error),
             }),
           );
         }
@@ -2337,8 +2449,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to pin thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "대화를 고정하지 못했습니다",
+              description: sidebarActionErrorMessage(error),
             }),
           );
         }
@@ -2355,8 +2467,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to unpin thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: "대화 고정을 해제하지 못했습니다",
+              description: sidebarActionErrorMessage(error),
             }),
           );
         }
@@ -2410,8 +2522,8 @@ export default function Sidebar() {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "Failed to reorder pinned threads",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                title: "고정한 대화 순서를 바꾸지 못했습니다",
+                description: sidebarActionErrorMessage(error),
               }),
             );
             return;
@@ -2469,9 +2581,8 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to snooze thread",
-              description:
-                outcome.error instanceof Error ? outcome.error.message : "An error occurred.",
+              title: "대화를 미루지 못했습니다",
+              description: sidebarActionErrorMessage(outcome.error),
             }),
           );
           return;
@@ -2482,10 +2593,10 @@ export default function Sidebar() {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: `Snoozed until ${snoozeWakeDescription(preset.snoozedUntil, new Date(), timestampFormat)}`,
+            title: `${snoozeWakeDescription(preset.snoozedUntil, new Date(), timestampFormat)}까지 미뤘습니다`,
             timeout: 5_000,
             actionProps: {
-              children: "Undo",
+              children: "실행 취소",
               onClick: () => attemptUnsnooze(threadRef),
             },
           }),
@@ -2537,12 +2648,12 @@ export default function Sidebar() {
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
           [
-            { id: "settle", label: `Settle (${count})` },
+            { id: "settle", label: `완료 처리 (${count})` },
             ...(canSnoozeSelection
               ? [
                   {
                     id: "snooze",
-                    label: `Snooze (${count})`,
+                    label: `다시 알림 (${count})`,
                     children: snoozePresets.map((preset) => ({
                       id: `snooze:${preset.id}`,
                       label: `${preset.label} (${preset.whenLabel})`,
@@ -2551,8 +2662,8 @@ export default function Sidebar() {
                 ]
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
-            { id: "mark-unread", label: `Mark unread (${count})` },
-            { id: "delete", label: `Delete (${count})`, destructive: true },
+            { id: "mark-unread", label: `읽지 않음으로 표시 (${count})` },
+            { id: "delete", label: `삭제 (${count})`, destructive: true },
           ],
           position,
         ),
@@ -2589,15 +2700,13 @@ export default function Sidebar() {
                 type: failedCount > 0 ? "warning" : "success",
                 title:
                   failedCount > 0
-                    ? `Snoozed ${snoozedCount} of ${selectedThreads.length} threads`
-                    : `Snoozed ${snoozedCount} thread${snoozedCount === 1 ? "" : "s"}`,
+                    ? `대화 ${selectedThreads.length}개 중 ${snoozedCount}개를 미뤘습니다`
+                    : `대화 ${snoozedCount}개를 미뤘습니다`,
                 description:
-                  failedCount > 0
-                    ? `${failedCount} thread${failedCount === 1 ? "" : "s"} couldn't be snoozed.`
-                    : undefined,
+                  failedCount > 0 ? `대화 ${failedCount}개를 미루지 못했습니다.` : undefined,
                 timeout: 5_000,
                 actionProps: {
-                  children: "Undo",
+                  children: "실행 취소",
                   onClick: () => {
                     for (const threadRef of snoozedThreadRefs) attemptUnsnooze(threadRef);
                   },
@@ -2609,9 +2718,8 @@ export default function Sidebar() {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "Failed to snooze threads",
-                description:
-                  firstError instanceof Error ? firstError.message : "An error occurred.",
+                title: "대화들을 미루지 못했습니다",
+                description: sidebarActionErrorMessage(firstError),
               }),
             );
           }
@@ -2630,8 +2738,8 @@ export default function Sidebar() {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "Failed to regenerate thread titles",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                title: "대화 제목들을 다시 만들지 못했습니다",
+                description: sidebarActionErrorMessage(error),
               }),
             );
           }
@@ -2667,10 +2775,9 @@ export default function Sidebar() {
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
           api.dialogs.confirm(
-            [
-              `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              "This permanently clears conversation history for these threads.",
-            ].join("\n"),
+            [`대화 ${count}개를 삭제할까요?`, "선택한 대화의 기록이 영구적으로 삭제됩니다."].join(
+              "\n",
+            ),
           ),
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
@@ -2692,8 +2799,8 @@ export default function Sidebar() {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "Failed to delete threads",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                title: "대화들을 삭제하지 못했습니다",
+                description: sidebarActionErrorMessage(error),
               }),
             );
           }
@@ -2801,8 +2908,8 @@ export default function Sidebar() {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Could not create thread",
-                  description: error instanceof Error ? error.message : "An error occurred.",
+                  title: "새 대화를 만들지 못했습니다",
+                  description: sidebarActionErrorMessage(error),
                 }),
               );
             }
@@ -2837,8 +2944,8 @@ export default function Sidebar() {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Failed to regenerate thread title",
-                  description: error instanceof Error ? error.message : "An error occurred.",
+                  title: "대화 제목을 다시 만들지 못했습니다",
+                  description: sidebarActionErrorMessage(error),
                 }),
               );
             }
@@ -2852,8 +2959,8 @@ export default function Sidebar() {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Path unavailable",
-                  description: "This thread does not have a workspace path to copy.",
+                  title: "경로를 사용할 수 없습니다",
+                  description: "이 대화에는 복사할 작업공간 경로가 없습니다.",
                 }),
               );
               return;
@@ -2870,8 +2977,8 @@ export default function Sidebar() {
               const confirmed = await settlePromise(() =>
                 api.dialogs.confirm(
                   [
-                    `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    `"${thread.title}" 대화를 삭제할까요?`,
+                    "이 대화의 기록이 영구적으로 삭제됩니다.",
                   ].join("\n"),
                 ),
               );
@@ -2883,8 +2990,8 @@ export default function Sidebar() {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "Failed to delete thread",
-                  description: error instanceof Error ? error.message : "An error occurred.",
+                  title: "대화를 삭제하지 못했습니다",
+                  description: sidebarActionErrorMessage(error),
                 }),
               );
               return;
@@ -2988,30 +3095,17 @@ export default function Sidebar() {
     autoAnimate(node, { duration: 150, easing: "ease-out" });
   }, []);
 
-  // New thread defaults to the project you're in (active thread's project,
-  // falling back to the top project) — same resolution the command palette
-  // uses. The command palette already offers a "New thread in..." submenu
-  // for multi-project setups.
+  // The project selector is the parent context, so creating a conversation
+  // never opens a second project picker or accidentally targets another project.
   const handleNewThreadClick = useCallback(() => {
-    // One project: nothing to pick, create immediately.
-    if (projectGroups.length <= 1) {
-      if (isMobile) setOpenMobile(false);
-      void startNewThreadFromContext({
-        activeDraftThread: newThreadContext.activeDraftThread,
-        activeThread: newThreadContext.activeThread ?? undefined,
-        defaultProjectRef: newThreadContext.defaultProjectRef,
-        handleNewThread: newThreadContext.handleNewThread,
-      });
-      return;
-    }
+    if (!scopedProjectGroup) return;
     if (isMobile) setOpenMobile(false);
-    openCommandPalette({ open: "new-thread-in" });
-  }, [isMobile, newThreadContext, projectGroups.length, setOpenMobile]);
+    void newThreadContext.handleNewThread(
+      scopeProjectRef(scopedProjectGroup.environmentId, scopedProjectGroup.id),
+    );
+  }, [isMobile, newThreadContext.handleNewThread, scopedProjectGroup, setOpenMobile]);
 
-  // The button mirrors chat.new: in multi-project setups both route through
-  // the command palette's "New thread in..." picker, and in single-project
-  // setups both create immediately. chat.newLocal always creates directly, so
-  // it is only a correct label when chat.new is unbound.
+  // chat.newLocal is the direct-create fallback when chat.new is unbound.
   const newThreadShortcutLabel =
     shortcutLabelForCommand(keybindings, "chat.new") ??
     shortcutLabelForCommand(keybindings, "chat.newLocal");
@@ -3038,8 +3132,8 @@ export default function Sidebar() {
                     setActiveSearchResultIndex(0);
                   }}
                   onKeyDown={handleThreadSearchKeyDown}
-                  placeholder="Search"
-                  aria-label="Search threads"
+                  placeholder="검색"
+                  aria-label="대화 검색"
                   role="combobox"
                   aria-autocomplete="list"
                   aria-expanded={isSearchingThreads && threadSearchResults.length > 0}
@@ -3061,7 +3155,7 @@ export default function Sidebar() {
                     size="icon-xs"
                     variant="ghost"
                     className="size-5 shrink-0 rounded-sm text-sidebar-muted-foreground hover:bg-sidebar-control-surface hover:text-sidebar-foreground"
-                    aria-label="Clear thread search"
+                    aria-label="대화 검색 지우기"
                     onClick={() => {
                       clearThreadSearch();
                       threadSearchInputRef.current?.focus();
@@ -3081,7 +3175,7 @@ export default function Sidebar() {
                         className="relative focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                         onClick={handleNewThreadClick}
                         disabled={projects.length === 0}
-                        aria-label="New thread"
+                        aria-label="새 대화"
                       />
                     }
                   >
@@ -3092,9 +3186,7 @@ export default function Sidebar() {
                     />
                   </TooltipTrigger>
                   <TooltipPopup side="right">
-                    {newThreadShortcutLabel
-                      ? `New thread (${newThreadShortcutLabel})`
-                      : "New thread"}
+                    {newThreadShortcutLabel ? `새 대화 (${newThreadShortcutLabel})` : "새 대화"}
                   </TooltipPopup>
                 </Tooltip>
               </div>
@@ -3105,7 +3197,7 @@ export default function Sidebar() {
                   <MenuTrigger
                     render={
                       <SidebarMenuButton
-                        aria-label="Filter threads by project"
+                        aria-label="프로젝트별 대화 필터"
                         className="min-w-0 flex-1 ps-[calc(var(--sidebar-row-content-inset)-1px)] focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                       />
                     }
@@ -3120,25 +3212,15 @@ export default function Sidebar() {
                       <FolderIcon className="size-4 shrink-0" />
                     )}
                     <span className="min-w-0 flex-1 truncate">
-                      {scopedProjectGroup?.displayName ?? "All projects"}
+                      {scopedProjectGroup?.displayName ?? "프로젝트 선택"}
                     </span>
                     <ChevronDownIcon className="-mr-px size-4 shrink-0" />
                   </MenuTrigger>
                   <MenuPopup align="start" className="w-(--anchor-width)">
                     <MenuRadioGroup
-                      value={projectScopeKey ?? "all"}
-                      onValueChange={(value) =>
-                        setProjectScopeKey(value === "all" ? null : (value as string))
-                      }
+                      value={effectiveProjectScopeKey ?? ""}
+                      onValueChange={(value) => handleProjectScopeChange(value as string)}
                     >
-                      <MenuRadioItem
-                        value="all"
-                        closeOnClick
-                        className="h-8 min-h-8 px-1 py-0 text-sm font-medium [&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
-                      >
-                        <FolderIcon className="size-4 shrink-0" />
-                        <span className="min-w-0 truncate text-sm">All projects</span>
-                      </MenuRadioItem>
                       {projectGroups.map((project) => {
                         const scopeKey = project.projectKey;
                         return (
@@ -3156,8 +3238,8 @@ export default function Sidebar() {
                             <span className="min-w-0 truncate text-sm">{project.displayName}</span>
                             <button
                               type="button"
-                              aria-label={`Project actions for ${project.displayName}`}
-                              title={`Project actions for ${project.displayName}`}
+                              aria-label={`${project.displayName} 프로젝트 작업`}
+                              title={`${project.displayName} 프로젝트 작업`}
                               className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                               onPointerDown={(event) => event.stopPropagation()}
                               onClick={(event) => {
@@ -3172,6 +3254,40 @@ export default function Sidebar() {
                     </MenuRadioGroup>
                   </MenuPopup>
                 </Menu>
+                {scopedProjectGroup ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <SidebarMenuButton
+                          size="icon"
+                          type="button"
+                          className="relative shrink-0 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+                          aria-label={scopedProjectRuntimeLabel}
+                          onClick={() => {
+                            if (isMobile) setOpenMobile(false);
+                            void router.navigate({
+                              to: "/control-center/$environmentId/$projectId",
+                              params: {
+                                environmentId: scopedProjectGroup.environmentId,
+                                projectId: scopedProjectGroup.id,
+                              },
+                            });
+                          }}
+                        />
+                      }
+                    >
+                      <ActivityIcon />
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "absolute right-1 top-1 size-2 rounded-full ring-2 ring-sidebar",
+                          scopedProjectRuntimeDotClass,
+                        )}
+                      />
+                    </TooltipTrigger>
+                    <TooltipPopup side="right">{scopedProjectRuntimeLabel}</TooltipPopup>
+                  </Tooltip>
+                ) : null}
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -3180,7 +3296,7 @@ export default function Sidebar() {
                         className="relative shrink-0 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                         onClick={openAddProjectCommandPalette}
                         type="button"
-                        aria-label="New project"
+                        aria-label="새 프로젝트"
                       />
                     }
                   >
@@ -3190,7 +3306,7 @@ export default function Sidebar() {
                       aria-hidden="true"
                     />
                   </TooltipTrigger>
-                  <TooltipPopup side="right">New project</TooltipPopup>
+                  <TooltipPopup side="right">새 프로젝트</TooltipPopup>
                 </Tooltip>
               </div>
             ) : null}
@@ -3209,7 +3325,7 @@ export default function Sidebar() {
                 <ul
                   id="sidebar-thread-search-results"
                   role="listbox"
-                  aria-label="Thread search results"
+                  aria-label="대화 검색 결과"
                   className="flex flex-col gap-px"
                 >
                   {threadSearchResults.map((thread, index) => {
@@ -3245,7 +3361,7 @@ export default function Sidebar() {
                 role="status"
                 className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
               >
-                No threads found
+                대화를 찾지 못했습니다
               </p>
             )
           ) : null}
@@ -3424,8 +3540,8 @@ export default function Sidebar() {
                         >
                           <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
                             {snoozedShelfExpanded
-                              ? "Snoozed"
-                              : `Snoozed (${snoozedThreads.length})`}
+                              ? "미룬 대화"
+                              : `미룬 대화 (${snoozedThreads.length})`}
                           </span>
                           <span className="h-px flex-1 bg-blue-500/20 dark:bg-blue-400/15" />
                           <ChevronDownIcon
@@ -3457,9 +3573,7 @@ export default function Sidebar() {
                           className="mb-1 mt-3 flex w-full cursor-pointer items-center gap-2 px-2.5 text-left"
                         >
                           <span className="text-xs font-medium text-muted-foreground/50">
-                            {settledShelfExpanded
-                              ? "Settled"
-                              : `Settled (${settledThreads.length})`}
+                            {settledShelfExpanded ? "완료됨" : `완료됨 (${settledThreads.length})`}
                           </span>
                           <span className="h-px flex-1 bg-sidebar-border/60" />
                           <ChevronDownIcon
@@ -3486,7 +3600,7 @@ export default function Sidebar() {
                       className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-sidebar-muted-foreground/55 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
                     >
                       <PlusIcon aria-hidden className="size-4 shrink-0" />
-                      Show {Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)} more
+                      {Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)}개 더 보기
                     </button>
                   </li>
                 ) : null}
@@ -3502,20 +3616,20 @@ export default function Sidebar() {
             <div className="flex flex-col items-center gap-2 px-2 py-6 text-center text-xs text-muted-foreground/60">
               {projects.length === 0 ? (
                 <>
-                  <span>No projects yet</span>
+                  <span>아직 프로젝트가 없습니다</span>
                   <button
                     type="button"
                     onClick={openAddProjectCommandPalette}
                     className="inline-flex items-center gap-1.5 rounded-md border border-sidebar-border px-2.5 py-1 text-[11px] font-medium text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
                   >
                     <PlusIcon className="-mx-0.5 size-3" />
-                    Add project
+                    프로젝트 추가
                   </button>
                 </>
               ) : scopedProjectGroup ? (
-                `No threads in ${scopedProjectGroup.displayName} yet`
+                `${scopedProjectGroup.displayName}에 아직 대화가 없습니다`
               ) : (
-                "No threads yet"
+                "아직 대화가 없습니다"
               )}
             </div>
           ) : null}
@@ -3529,9 +3643,9 @@ export default function Sidebar() {
       >
         <DialogPopup className="max-w-xl">
           <DialogHeader className="gap-3 pb-1!">
-            <DialogTitle className="text-balance">Project settings</DialogTitle>
+            <DialogTitle className="text-balance">프로젝트 설정</DialogTitle>
             <DialogDescription className="sr-only">
-              Manage project names, grouping rules, and environments.
+              프로젝트 이름, 그룹화 규칙, 환경을 관리합니다.
             </DialogDescription>
             <div className="grid gap-1.5 text-base text-muted-foreground">
               {projectActionsTarget?.memberProjects.map((member) => (
@@ -3543,8 +3657,8 @@ export default function Sidebar() {
                       size="icon-xs"
                       variant="ghost"
                       className="size-4 shrink-0 rounded-sm"
-                      aria-label="Copy project path"
-                      title="Copy project path"
+                      aria-label="프로젝트 경로 복사"
+                      title="프로젝트 경로 복사"
                       onClick={() =>
                         copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot })
                       }
@@ -3555,7 +3669,7 @@ export default function Sidebar() {
                   <span className="flex min-w-0 shrink-0 items-center gap-1">
                     <ServerIcon className="size-3.5 shrink-0 opacity-60" />
                     <span className="min-w-0 truncate">
-                      {member.environmentLabel ?? "Current environment"}
+                      {member.environmentLabel ?? "현재 환경"}
                     </span>
                   </span>
                 </div>
@@ -3571,10 +3685,10 @@ export default function Sidebar() {
                 >
                   <div className="grid gap-4 sm:grid-cols-2 sm:gap-3">
                     <label className="grid min-w-0 gap-1.5">
-                      <span className="font-medium text-foreground">Project name</span>
+                      <span className="font-medium text-foreground">프로젝트 이름</span>
                       <Input
                         key={`${member.physicalProjectKey}:${member.title}`}
-                        aria-label={`Project name in ${member.environmentLabel ?? "current environment"}`}
+                        aria-label={`${member.environmentLabel ?? "현재 환경"}의 프로젝트 이름`}
                         defaultValue={member.title}
                         onBlur={(event) => {
                           void renameProjectMember(member, event.currentTarget.value);
@@ -3585,7 +3699,7 @@ export default function Sidebar() {
                       />
                     </label>
                     <label className="grid min-w-0 gap-1.5">
-                      <span className="font-medium text-foreground">Grouping rule</span>
+                      <span className="font-medium text-foreground">그룹화 규칙</span>
                       <Select
                         value={
                           projectGroupingSettings.sidebarProjectGroupingOverrides?.[
@@ -3605,7 +3719,7 @@ export default function Sidebar() {
                       >
                         <SelectTrigger
                           className="w-full sm:min-h-7.5"
-                          aria-label={`Grouping rule for ${member.environmentLabel ?? "current environment"}`}
+                          aria-label={`${member.environmentLabel ?? "현재 환경"}의 그룹화 규칙`}
                         >
                           <SelectValue>
                             {(() => {
@@ -3614,14 +3728,14 @@ export default function Sidebar() {
                                   deriveProjectGroupingOverrideKey(member)
                                 ] ?? "inherit";
                               return selection === "inherit"
-                                ? `Default (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`
+                                ? `기본값 (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`
                                 : PROJECT_GROUPING_MODE_LABELS[selection];
                             })()}
                           </SelectValue>
                         </SelectTrigger>
                         <SelectPopup align="start" alignItemWithTrigger={false}>
                           <SelectItem hideIndicator value="inherit">
-                            Use global default
+                            전체 기본값 사용
                           </SelectItem>
                           <SelectItem hideIndicator value="repository">
                             {PROJECT_GROUPING_MODE_LABELS.repository}
@@ -3649,7 +3763,7 @@ export default function Sidebar() {
                         }}
                       >
                         <Trash2Icon />
-                        Remove project
+                        프로젝트 제거
                       </Button>
                     </div>
                   ) : null}
@@ -3660,10 +3774,10 @@ export default function Sidebar() {
               <div className="flex flex-col gap-3 border-t border-border/60 bg-muted/32 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-base font-medium text-foreground sm:text-sm">
-                    Remove this project everywhere
+                    이 프로젝트를 모든 환경에서 제거
                   </p>
                   <p className="text-base text-pretty text-muted-foreground sm:text-sm">
-                    Deletes all grouped entries and their conversation history.
+                    그룹화된 모든 항목과 대화 기록을 삭제합니다.
                   </p>
                 </div>
                 <Button
@@ -3677,7 +3791,7 @@ export default function Sidebar() {
                   }}
                 >
                   <Trash2Icon />
-                  Remove all entries
+                  모든 항목 제거
                 </Button>
               </div>
             ) : null}
@@ -3698,10 +3812,10 @@ export default function Sidebar() {
                 }}
               >
                 <Trash2Icon />
-                Remove project
+                프로젝트 제거
               </Button>
             ) : null}
-            <Button onClick={() => setProjectActionsTarget(null)}>Close</Button>
+            <Button onClick={() => setProjectActionsTarget(null)}>닫기</Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
