@@ -262,6 +262,15 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
       expect(yield* repository.listResumable()).toEqual([
         expect.objectContaining({ id: runA, projectId: workspaceA, status: "cancel-requested" }),
       ]);
+
+      // Resuming a run whose project is gone would create fresh threads and turns under a
+      // project the user deleted, so a soft-deleted project drops out of recovery.
+      yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = '2026-08-08T05:00:00.000Z'
+        WHERE project_id = ${workspaceA}
+      `;
+      expect(yield* repository.listResumable()).toEqual([]);
     }),
   );
 });

@@ -69,9 +69,15 @@ const make = Effect.gen(function* () {
     Request: Schema.Void,
     Result: DbRow,
     execute: () =>
-      sql`SELECT ${selectColumns} FROM projection_workspace_collaboration_runs
-          WHERE status IN ('queued', 'running', 'cancel-requested')
-          ORDER BY created_at ASC, run_id ASC`,
+      // Runs belonging to a deleted project are not resumable: restarting them would create
+      // fresh threads and turns under a project the user removed.
+      sql`SELECT ${selectColumns} FROM projection_workspace_collaboration_runs AS runs
+          WHERE runs.status IN ('queued', 'running', 'cancel-requested')
+            AND EXISTS (
+              SELECT 1 FROM projection_projects AS projects
+              WHERE projects.project_id = runs.project_id AND projects.deleted_at IS NULL
+            )
+          ORDER BY runs.created_at ASC, runs.run_id ASC`,
   });
 
   const upsert: ProjectionWorkspaceCollaborationRunRepositoryShape["upsert"] = (run) =>

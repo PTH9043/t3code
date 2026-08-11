@@ -1385,27 +1385,73 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     const current = yield* getRun(runRef);
     if (current.status === "cancelled") return;
     if (current.status === "completed" || current.status === "failed") return;
-    const activeIndex = current.steps.findIndex(
-      (step) => step.status === "running" || step.status === "queued",
-    );
-    const activeStep = activeIndex >= 0 ? current.steps[activeIndex] : undefined;
-    if (activeStep !== undefined) yield* interruptStepThread(runRef, activeStep);
-    const cancelledAt = yield* nowIso;
-    const next =
-      activeStep === undefined
-        ? current
-        : replaceStep(current, activeIndex, {
-            ...activeStep,
-            status: "cancelled",
-            completedAt: cancelledAt,
-          });
+    const settled = yield* settleInFlightWork(runRef, current, "cancelled", null);
     yield* persistRun({
-      ...next,
+      ...settled,
       status: "cancelled",
       error: null,
-      updatedAt: cancelledAt,
+      updatedAt: settled.updatedAt,
     });
   });
+
+  /**
+   * Brings every piece of a run that is still in flight to a terminal state.
+   *
+   * A wave runs up to MAX_PARALLEL_GRAPH_NODES provider turns at once, so stopping only the
+   * first one leaves the rest editing the working tree and spending quota under a run the
+   * user already sees as finished. Folding the graph as well is what keeps a cancelled run
+   * from displaying nodes as still running forever.
+   */
+  const settleInFlightWork = Effect.fn("WorkspaceCollaborationReactor.settleInFlightWork")(
+    function* (
+      runRef: RunRef,
+      run: WorkspaceCollaborationRun,
+      status: "cancelled" | "failed",
+      error: string | null,
+    ) {
+      const settledAt = yield* nowIso;
+      yield* Effect.forEach(
+        run.steps.filter((step) => step.status === "running"),
+        (step) => interruptStepThread(runRef, step),
+        { concurrency: 1, discard: true },
+      );
+      const steps = run.steps.map((step) =>
+        step.status === "running" || step.status === "queued"
+          ? {
+              ...step,
+              status,
+              error: status === "failed" ? error : step.error,
+              completedAt: settledAt,
+            }
+          : step,
+      );
+      const graph =
+        run.graph === null
+          ? null
+          : {
+              ...run.graph,
+              // The graph vocabulary has no cancelled state; a run that stopped early did
+              // not converge either way.
+              status: "failed" as const,
+              nodes: run.graph.nodes.map((node) => {
+                if (
+                  node.status !== "running" &&
+                  node.status !== "queued" &&
+                  node.status !== "awaiting-validation"
+                ) {
+                  return node;
+                }
+                const attempts = node.attempts.map((attempt) =>
+                  attempt.status === "running"
+                    ? { ...attempt, status, error, completedAt: settledAt }
+                    : attempt,
+                );
+                return { ...node, attempts, status, completedAt: settledAt };
+              }),
+            };
+      return { ...run, steps, graph, updatedAt: settledAt };
+    },
+  );
 
   const finalizeFailed = Effect.fn("WorkspaceCollaborationReactor.finalizeFailed")(function* (
     runRef: RunRef,
@@ -1416,26 +1462,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       return yield* finalizeCancelled(runRef);
     }
     if (["cancelled", "completed", "failed"].includes(current.status)) return;
-    const failedAt = yield* nowIso;
-    const activeIndex = current.steps.findIndex(
-      (step) => step.status === "running" || step.status === "queued",
-    );
-    const activeStep = activeIndex >= 0 ? current.steps[activeIndex] : undefined;
-    const next =
-      activeStep === undefined
-        ? current
-        : replaceStep(current, activeIndex, {
-            ...activeStep,
-            status: "failed",
-            error,
-            completedAt: failedAt,
-          });
+    const settled = yield* settleInFlightWork(runRef, current, "failed", error);
     yield* persistRun({
-      ...next,
+      ...settled,
       status: "failed",
       finalOutput: null,
       error,
-      updatedAt: failedAt,
+      updatedAt: settled.updatedAt,
     });
   });
 
@@ -1514,10 +1547,50 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       Effect.andThen(enqueue({ projectId: run.projectId, runId: run.id })),
     );
 
-  const enqueueEvent = (event: OrchestrationEvent) =>
-    event.type === "project.collaboration-run-requested"
-      ? enqueueRequestedRun(event.payload.run, event.payload.preempt)
-      : Effect.void;
+  /**
+   * Deleting a project has to stop its collaboration work too. Without this the run keeps
+   * going, and because a graph node that loses its thread simply retries, it creates fresh
+   * threads and turns under a project the user already removed.
+   */
+  const cancelProjectRuns = Effect.fn("WorkspaceCollaborationReactor.cancelProjectRuns")(function* (
+    projectId: ProjectId,
+  ) {
+    const runs = yield* runRepository.list({
+      projectId,
+      statuses: ["queued", "running"],
+    });
+    yield* Effect.forEach(
+      runs,
+      (run) =>
+        Effect.gen(function* () {
+          yield* orchestrationEngine.dispatch({
+            type: "project.collaboration.run.cancel",
+            commandId: CommandId.make(yield* randomUUID),
+            projectId,
+            runId: run.id,
+            createdAt: yield* nowIso,
+          });
+        }),
+      { concurrency: 1, discard: true },
+    );
+  });
+
+  const enqueueEvent = (event: OrchestrationEvent) => {
+    if (event.type === "project.collaboration-run-requested") {
+      return enqueueRequestedRun(event.payload.run, event.payload.preempt);
+    }
+    if (event.type === "project.deleted") {
+      return cancelProjectRuns(event.payload.projectId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Failed to cancel collaboration runs for a deleted project", {
+            projectId: event.payload.projectId,
+            cause: conciseCause(cause),
+          }),
+        ),
+      );
+    }
+    return Effect.void;
+  };
 
   const enqueueStartupRuns = runRepository.listResumable().pipe(
     Effect.flatMap((runs) => {
