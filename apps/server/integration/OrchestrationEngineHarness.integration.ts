@@ -63,6 +63,9 @@ import {
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
+import { WorkspaceKnowledgeReactor } from "../src/orchestration/Services/WorkspaceKnowledgeReactor.ts";
+import { WorkspaceCollaborationReactor } from "../src/orchestration/Services/WorkspaceCollaborationReactor.ts";
+import { WorkspaceSchedulerReactor } from "../src/orchestration/Services/WorkspaceSchedulerReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -372,6 +375,25 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
+          drain: Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(WorkspaceKnowledgeReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(WorkspaceCollaborationReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(WorkspaceSchedulerReactor, {
+          start: () => Effect.void,
+          tick: Effect.void,
           drain: Effect.void,
         }),
       ),

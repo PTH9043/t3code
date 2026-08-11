@@ -1743,6 +1743,93 @@ it.layer(
     }),
   );
 
+  it.effect("pins one project terminal controller while other clients observe", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const controllerEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const observerEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const projectInput = openInput({ projectId: "project-1" });
+
+      const unsubscribeController = yield* manager.attachStream(
+        { ...projectInput, controlMode: "auto" },
+        (event) => Ref.update(controllerEvents, (events) => [...events, event]),
+        { clientId: "client-a", projectId: "project-1" },
+      );
+      const unsubscribeObserver = yield* manager.attachStream(
+        { ...projectInput, controlMode: "auto" },
+        (event) => Ref.update(observerEvents, (events) => [...events, event]),
+        { clientId: "client-b", projectId: "project-1" },
+      );
+
+      expect(
+        (yield* Ref.get(controllerEvents)).find((event) => event.type === "snapshot"),
+      ).toMatchObject({
+        type: "snapshot",
+        access: "controller",
+        snapshot: { projectId: "project-1", controllerAttached: true },
+      });
+      expect(
+        (yield* Ref.get(observerEvents)).find((event) => event.type === "snapshot"),
+      ).toMatchObject({
+        type: "snapshot",
+        access: "observer",
+        snapshot: { projectId: "project-1", controllerAttached: true, observerCount: 1 },
+      });
+
+      const observerWriteError = yield* Effect.flip(
+        manager.write(
+          {
+            threadId: projectInput.threadId,
+            terminalId: projectInput.terminalId,
+            projectId: "project-1",
+            data: "blocked",
+          },
+          { clientId: "client-b", projectId: "project-1" },
+        ),
+      );
+      expect(observerWriteError._tag).toBe("TerminalControllerRequiredError");
+
+      const projectMismatch = yield* Effect.flip(
+        manager.attachStream(
+          { ...projectInput, projectId: "project-2", controlMode: "observe" },
+          () => Effect.void,
+          { clientId: "client-c", projectId: "project-2" },
+        ),
+      );
+      expect(projectMismatch._tag).toBe("TerminalProjectMismatchError");
+
+      yield* Effect.sync(unsubscribeController);
+      yield* waitFor(
+        Effect.map(Ref.get(observerEvents), (events) =>
+          events.some((event) => event.type === "control" && event.controllerAttached === false),
+        ),
+      );
+      yield* Effect.sync(unsubscribeObserver);
+
+      const promotedEvents = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const unsubscribePromoted = yield* manager.attachStream(
+        { ...projectInput, controlMode: "control" },
+        (event) => Ref.update(promotedEvents, (events) => [...events, event]),
+        { clientId: "client-b", projectId: "project-1" },
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribePromoted));
+      expect(
+        (yield* Ref.get(promotedEvents)).find((event) => event.type === "snapshot"),
+      ).toMatchObject({ type: "snapshot", access: "controller" });
+
+      yield* manager.write(
+        {
+          threadId: projectInput.threadId,
+          terminalId: projectInput.terminalId,
+          projectId: "project-1",
+          data: "allowed",
+        },
+        { clientId: "client-b", projectId: "project-1" },
+      );
+      expect(ptyAdapter.processes[0]?.writes).toEqual(["allowed"]);
+    }),
+  );
+
   it.effect("scoped runtime shutdown stops active terminals cleanly", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make("sequential");

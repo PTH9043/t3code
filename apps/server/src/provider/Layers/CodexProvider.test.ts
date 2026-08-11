@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 
 import {
   applyPreferredCodexDefaultModel,
+  codexAccountUsage,
   isLegacyCodexModel,
   mapCodexModelCapabilities,
 } from "./CodexProvider.ts";
@@ -162,4 +163,50 @@ it("ignores custom models that shadow a preferred slug", () => {
   ]);
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
+});
+
+it("projects Codex lifetime tokens and quota windows into account usage", () => {
+  const usage = codexAccountUsage(
+    {
+      account: { account: null, requiresOpenaiAuth: false },
+      version: "1.2.3",
+      models: [],
+      skills: [],
+      rateLimits: {
+        rateLimits: {
+          planType: "pro",
+          primary: { usedPercent: 25, resetsAt: 1_775_779_200, windowDurationMins: 300 },
+          secondary: { usedPercent: 48, windowDurationMins: 10_080 },
+          credits: { balance: "15", hasCredits: true, unlimited: false },
+        },
+      },
+      tokenUsage: {
+        summary: {
+          lifetimeTokens: 8_765_432,
+          currentStreakDays: 12,
+          peakDailyTokens: 345_678,
+        },
+      },
+    },
+    "2026-08-09T03:00:00.000Z",
+  );
+
+  assert.deepStrictEqual(usage, {
+    source: "provider",
+    updatedAt: "2026-08-09T03:00:00.000Z",
+    sessionTokens: 0,
+    sessionCount: 0,
+    activeSessionCount: 0,
+    lifetimeTokens: 8_765_432,
+    currentStreakDays: 12,
+    peakDailyTokens: 345_678,
+    planType: "pro",
+    primary: {
+      usedPercent: 25,
+      resetsAt: 1_775_779_200,
+      windowDurationMinutes: 300,
+    },
+    secondary: { usedPercent: 48, windowDurationMinutes: 10_080 },
+    credits: { balance: "15", hasCredits: true, unlimited: false },
+  });
 });

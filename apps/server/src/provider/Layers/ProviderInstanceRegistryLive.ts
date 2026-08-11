@@ -61,6 +61,7 @@ import {
   type ProviderInstanceRegistryMutatorShape,
 } from "../Services/ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
+import { trackProviderInstanceUsage } from "../providerAccountUsage.ts";
 
 /**
  * Live registry entry: the materialized `ProviderInstance` + the fresh
@@ -194,10 +195,14 @@ const buildEntry = <R>(input: {
       };
     }
 
+    const trackedInstance = yield* trackProviderInstanceUsage(createResult.success).pipe(
+      Effect.provideService(Scope.Scope, childScope),
+    );
+
     return {
       kind: "live" as const,
       live: {
-        instance: createResult.success,
+        instance: trackedInstance,
         scope: childScope,
         entry,
       },

@@ -55,6 +55,11 @@ import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRun
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
+import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
+import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceSchedulerReactor.ts";
+import { WorkspaceProgramSupervisorLive } from "./orchestration/Layers/WorkspaceProgramSupervisor.ts";
+import { WorkspaceKnowledgeFileStoreLive } from "./orchestration/Layers/WorkspaceKnowledgeFileStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -230,12 +235,23 @@ const PlatformServicesLive = Layer.unwrap(
   }),
 );
 
+const WorkspaceProgramSupervisorLayerLive = WorkspaceProgramSupervisorLive.pipe(
+  Layer.provide(PtyAdapterLive),
+);
+const OrchestrationReactorWithProgramsLive = OrchestrationReactorLive.pipe(
+  Layer.provideMerge(WorkspaceProgramSupervisorLayerLive),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
-  Layer.provideMerge(OrchestrationReactorLive),
+  Layer.provideMerge(OrchestrationReactorWithProgramsLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(WorkspaceKnowledgeReactorLive),
+  Layer.provideMerge(WorkspaceCollaborationReactorLive),
+  Layer.provideMerge(WorkspaceSchedulerReactorLive),
+  Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );

@@ -29,6 +29,12 @@ import {
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadsError,
+  OrchestrationWorkspaceKnowledgeError,
+  OrchestrationWorkspaceAgentRolesError,
+  OrchestrationWorkspaceCollaborationError,
+  OrchestrationWorkspaceScheduleError,
+  OrchestrationWorkspaceProgramError,
+  OrchestrationWorkspaceRuntimeError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
   type ProjectId,
@@ -50,6 +56,8 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  TerminalProjectLookupError,
+  TerminalProjectMismatchError,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -73,6 +81,7 @@ import {
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as WorkspaceProgramSupervisor from "./orchestration/Services/WorkspaceProgramSupervisor.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
   observeRpcStream as instrumentRpcStream,
@@ -355,6 +364,9 @@ const makeWsRpcLayer = (
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const workspaceProgramSupervisor = yield* Effect.serviceOption(
+        WorkspaceProgramSupervisor.WorkspaceProgramSupervisor,
+      );
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -543,6 +555,8 @@ const makeWsRpcLayer = (
         switch (event.type) {
           case "project.created":
           case "project.meta-updated":
+          case "project.workspace-control-updated":
+          case "project.runtime-viewed":
             return projectUpsertOrRemove(event.payload.projectId, event.sequence);
           case "project.deleted":
             return Effect.succeed(
@@ -1023,6 +1037,51 @@ const makeWsRpcLayer = (
         };
       });
 
+      const resolveTerminalAccessContext = Effect.fn("ws.resolveTerminalAccessContext")(function* (
+        input: {
+          readonly threadId: string;
+          readonly terminalId: string;
+          readonly projectId?: string | undefined;
+        },
+        clientId: string,
+      ) {
+        const thread = yield* projectionSnapshotQuery
+          .getThreadShellById(ThreadId.make(input.threadId))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new TerminalProjectLookupError({
+                  threadId: input.threadId,
+                  cause,
+                }),
+            ),
+          );
+        if (Option.isNone(thread)) {
+          return yield* new TerminalProjectLookupError({
+            threadId: input.threadId,
+          });
+        }
+
+        const projectId = thread.value.projectId;
+        if (input.projectId !== undefined && input.projectId !== projectId) {
+          return yield* new TerminalProjectMismatchError({
+            threadId: input.threadId,
+            terminalId: input.terminalId,
+            expectedProjectId: input.projectId,
+            actualProjectId: projectId,
+          });
+        }
+        return { clientId, projectId };
+      });
+
+      const terminalMutationAccessContext = (
+        input: { readonly projectId?: string | undefined },
+        clientId: string,
+      ): TerminalManager.TerminalAccessContext => ({
+        clientId,
+        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+      });
+
       const refreshGitStatus = (cwd: string) =>
         vcsStatusBroadcaster
           .refreshStatus(cwd)
@@ -1142,6 +1201,259 @@ const makeWsRpcLayer = (
               ),
             ),
             { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge,
+            projectionSnapshotQuery.listWorkspaceKnowledge === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceKnowledgeError({
+                    message: "프로젝트 지식 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceKnowledge(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceKnowledgeError({
+                        message: "Failed to list Workspace knowledge",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.searchWorkspaceRag]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.searchWorkspaceRag,
+            projectionSnapshotQuery.searchWorkspaceRag === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceKnowledgeError({
+                    message: "프로젝트 RAG 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.searchWorkspaceRag(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceKnowledgeError({
+                        message: "Failed to search Workspace RAG",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.composeWorkspacePrompt]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.composeWorkspacePrompt,
+            projectionSnapshotQuery.composeWorkspacePrompt === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceKnowledgeError({
+                    message: "프로젝트 프롬프트 결합을 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.composeWorkspacePrompt(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceKnowledgeError({
+                        message: "Failed to compose Workspace prompt",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceAgentRoles]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceAgentRoles,
+            projectionSnapshotQuery.listWorkspaceAgentRoles === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceAgentRolesError({
+                    message: "프로젝트 에이전트 역할 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceAgentRoles(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceAgentRolesError({
+                        message: "Failed to list Workspace agent roles",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceCollaborationRuns]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceCollaborationRuns,
+            projectionSnapshotQuery.listWorkspaceCollaborationRuns === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceCollaborationError({
+                    message: "프로젝트 협업 실행 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceCollaborationRuns(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceCollaborationError({
+                        message: "Failed to list Workspace collaboration runs",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceSchedules]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceSchedules,
+            projectionSnapshotQuery.listWorkspaceSchedules === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceScheduleError({
+                    message: "프로젝트 스케줄 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceSchedules(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceScheduleError({
+                        message: "Failed to list Workspace schedules",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.getWorkspaceRuntime]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getWorkspaceRuntime,
+            projectionSnapshotQuery.getWorkspaceRuntime === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceRuntimeError({
+                    message: "프로젝트 실행 상태 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.getWorkspaceRuntime(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceRuntimeError({
+                        message: "프로젝트 실행 상태를 불러오지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.subscribeWorkspaceRuntime]: (input) =>
+          observeRpcStreamEffect(
+            ORCHESTRATION_WS_METHODS.subscribeWorkspaceRuntime,
+            Effect.sync(() => {
+              const loadRuntime =
+                projectionSnapshotQuery.getWorkspaceRuntime === undefined
+                  ? Effect.fail(
+                      new OrchestrationWorkspaceRuntimeError({
+                        message: "프로젝트 실행 상태 구독을 사용할 수 없습니다",
+                      }),
+                    )
+                  : projectionSnapshotQuery.getWorkspaceRuntime(input).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new OrchestrationWorkspaceRuntimeError({
+                            message: "프로젝트 실행 상태를 불러오지 못했습니다",
+                            cause,
+                          }),
+                      ),
+                    );
+              const live = orchestrationEngine.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.aggregateKind === "thread" ||
+                    (event.aggregateKind === "project" && event.aggregateId === input.projectId),
+                ),
+                Stream.debounce(Duration.millis(75)),
+                Stream.mapEffect(() => loadRuntime),
+              );
+              return Stream.concat(Stream.fromEffect(loadRuntime), live).pipe(Stream.changes);
+            }),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.discoverWorkspacePrograms]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.discoverWorkspacePrograms,
+            Option.isNone(workspaceProgramSupervisor)
+              ? Effect.fail(
+                  new OrchestrationWorkspaceProgramError({
+                    message: "프로젝트 프로그램 검색을 사용할 수 없습니다",
+                  }),
+                )
+              : workspaceProgramSupervisor.value.discover(input.projectId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceProgramError({
+                        message: "프로젝트 프로그램 후보를 찾지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspacePrograms]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspacePrograms,
+            projectionSnapshotQuery.listWorkspacePrograms === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceProgramError({
+                    message: "프로젝트 프로그램 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspacePrograms(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceProgramError({
+                        message: "프로젝트 프로그램을 불러오지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceProgramRuns]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceProgramRuns,
+            projectionSnapshotQuery.listWorkspaceProgramRuns === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceProgramError({
+                    message: "프로젝트 프로그램 실행 기록 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceProgramRuns(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceProgramError({
+                        message: "프로젝트 프로그램 실행 기록을 불러오지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
+          ),
+        [ORCHESTRATION_WS_METHODS.listWorkspaceIncidents]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.listWorkspaceIncidents,
+            projectionSnapshotQuery.listWorkspaceIncidents === undefined
+              ? Effect.fail(
+                  new OrchestrationWorkspaceProgramError({
+                    message: "프로젝트 오류 보고 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.listWorkspaceIncidents(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationWorkspaceProgramError({
+                        message: "프로젝트 오류 보고를 불러오지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
           ),
         [ORCHESTRATION_WS_METHODS.subscribeShell]: (input) =>
           observeRpcStreamEffect(
@@ -1884,41 +2196,79 @@ const makeWsRpcLayer = (
             review.getDiffFileContents(input),
             { "rpc.aggregate": "review" },
           ),
-        [WS_METHODS.terminalOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
-            "rpc.aggregate": "terminal",
-          }),
-        [WS_METHODS.terminalAttach]: (input) =>
-          observeRpcStream(
+        [WS_METHODS.terminalOpen]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalOpen,
+            resolveTerminalAccessContext(input, String(metadata.client.id)).pipe(
+              Effect.flatMap((accessContext) => terminalManager.open(input, accessContext)),
+            ),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
+        [WS_METHODS.terminalAttach]: (input, metadata) =>
+          observeRpcStreamEffect(
             WS_METHODS.terminalAttach,
-            Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-              Effect.acquireRelease(
-                terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
-                (unsubscribe) => Effect.sync(unsubscribe),
+            resolveTerminalAccessContext(input, String(metadata.client.id)).pipe(
+              Effect.map((accessContext) =>
+                Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
+                  Effect.acquireRelease(
+                    terminalManager.attachStream(
+                      input,
+                      (event) => Queue.offer(queue, event),
+                      accessContext,
+                    ),
+                    (unsubscribe) => Effect.sync(unsubscribe),
+                  ),
+                ),
               ),
             ),
             { "rpc.aggregate": "terminal" },
           ),
-        [WS_METHODS.terminalWrite]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
-            "rpc.aggregate": "terminal",
-          }),
-        [WS_METHODS.terminalResize]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
-            "rpc.aggregate": "terminal",
-          }),
-        [WS_METHODS.terminalClear]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalClear, terminalManager.clear(input), {
-            "rpc.aggregate": "terminal",
-          }),
-        [WS_METHODS.terminalRestart]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-            "rpc.aggregate": "terminal",
-          }),
-        [WS_METHODS.terminalClose]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
-            "rpc.aggregate": "terminal",
-          }),
+        [WS_METHODS.terminalWrite]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalWrite,
+            terminalManager.write(
+              input,
+              terminalMutationAccessContext(input, String(metadata.client.id)),
+            ),
+            { "rpc.aggregate": "terminal" },
+          ),
+        [WS_METHODS.terminalResize]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalResize,
+            terminalManager.resize(
+              input,
+              terminalMutationAccessContext(input, String(metadata.client.id)),
+            ),
+            { "rpc.aggregate": "terminal" },
+          ),
+        [WS_METHODS.terminalClear]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalClear,
+            terminalManager.clear(
+              input,
+              terminalMutationAccessContext(input, String(metadata.client.id)),
+            ),
+            { "rpc.aggregate": "terminal" },
+          ),
+        [WS_METHODS.terminalRestart]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalRestart,
+            resolveTerminalAccessContext(input, String(metadata.client.id)).pipe(
+              Effect.flatMap((accessContext) => terminalManager.restart(input, accessContext)),
+            ),
+            { "rpc.aggregate": "terminal" },
+          ),
+        [WS_METHODS.terminalClose]: (input, metadata) =>
+          observeRpcEffect(
+            WS_METHODS.terminalClose,
+            terminalManager.close(
+              input,
+              terminalMutationAccessContext(input, String(metadata.client.id)),
+            ),
+            { "rpc.aggregate": "terminal" },
+          ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           observeRpcStream(
             WS_METHODS.subscribeTerminalEvents,

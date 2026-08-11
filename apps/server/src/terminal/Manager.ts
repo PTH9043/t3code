@@ -12,9 +12,12 @@ import {
   TerminalCwdNotDirectoryError,
   TerminalCwdNotFoundError,
   TerminalCwdStatError,
+  TerminalControllerConflictError,
+  TerminalControllerRequiredError,
   TerminalError,
   TerminalHistoryError,
   TerminalNotRunningError,
+  TerminalProjectMismatchError,
   TerminalResizeError,
   TerminalSessionLookupError,
   TerminalWriteError,
@@ -66,9 +69,12 @@ export {
   TerminalCwdNotDirectoryError,
   TerminalCwdNotFoundError,
   TerminalCwdStatError,
+  TerminalControllerConflictError,
+  TerminalControllerRequiredError,
   TerminalError,
   TerminalHistoryError,
   TerminalNotRunningError,
+  TerminalProjectMismatchError,
   TerminalResizeError,
   TerminalSessionLookupError,
   TerminalWriteError,
@@ -84,6 +90,11 @@ const DEFAULT_OPEN_ROWS = 30;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
+
+export interface TerminalAccessContext {
+  readonly clientId: string;
+  readonly projectId?: string;
+}
 
 class TerminalSubprocessCheckError extends Schema.TaggedErrorClass<TerminalSubprocessCheckError>()(
   "TerminalSubprocessCheckError",
@@ -125,6 +136,7 @@ export class TerminalManager extends Context.Service<
      */
     readonly open: (
       input: TerminalOpenInput,
+      context?: TerminalAccessContext,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
@@ -135,22 +147,32 @@ export class TerminalManager extends Context.Service<
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+      context?: TerminalAccessContext,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /**
      * Write input bytes to a terminal session.
      */
-    readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
+    readonly write: (
+      input: TerminalWriteInput,
+      context?: TerminalAccessContext,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Resize the PTY backing a terminal session.
      */
-    readonly resize: (input: TerminalResizeInput) => Effect.Effect<void, TerminalError>;
+    readonly resize: (
+      input: TerminalResizeInput,
+      context?: TerminalAccessContext,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Clear terminal output history.
      */
-    readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
+    readonly clear: (
+      input: TerminalClearInput,
+      context?: TerminalAccessContext,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Restart a terminal session in place.
@@ -159,6 +181,7 @@ export class TerminalManager extends Context.Service<
      */
     readonly restart: (
       input: TerminalRestartInput,
+      context?: TerminalAccessContext,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
@@ -166,7 +189,10 @@ export class TerminalManager extends Context.Service<
      *
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
-    readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    readonly close: (
+      input: TerminalCloseInput,
+      context?: TerminalAccessContext,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Subscribe to terminal runtime events with a direct callback.
@@ -232,6 +258,9 @@ export interface TerminalStartInput extends TerminalOpenInput {
 export interface TerminalSessionState {
   threadId: string;
   terminalId: string;
+  projectId: string;
+  controllerClientId: string | null;
+  attachedClientCounts: Map<string, number>;
   cwd: string;
   worktreePath: string | null;
   status: TerminalSessionStatus;
@@ -323,10 +352,17 @@ function terminalWireLabel(session: TerminalSessionState): string {
   return truncateTerminalWireLabel(getTerminalLabel(session.terminalId));
 }
 
+function observerCount(session: TerminalSessionState): number {
+  return [...session.attachedClientCounts.keys()].filter(
+    (clientId) => clientId !== session.controllerClientId,
+  ).length;
+}
+
 function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
   return {
     threadId: session.threadId,
     terminalId: session.terminalId,
+    projectId: session.projectId,
     cwd: session.cwd,
     worktreePath: session.worktreePath,
     status: session.status,
@@ -337,6 +373,8 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     label: terminalWireLabel(session),
     updatedAt: session.updatedAt,
     sequence: session.eventSequence,
+    controllerAttached: session.controllerClientId !== null,
+    observerCount: observerCount(session),
   };
 }
 
@@ -344,6 +382,7 @@ function summary(session: TerminalSessionState): TerminalSummary {
   return {
     threadId: session.threadId,
     terminalId: session.terminalId,
+    projectId: session.projectId,
     cwd: session.cwd,
     worktreePath: session.worktreePath,
     status: session.status,
@@ -353,6 +392,8 @@ function summary(session: TerminalSessionState): TerminalSummary {
     hasRunningSubprocess: session.hasRunningSubprocess,
     label: terminalWireLabel(session),
     updatedAt: session.updatedAt,
+    controllerAttached: session.controllerClientId !== null,
+    observerCount: observerCount(session),
   };
 }
 
@@ -364,6 +405,7 @@ function shouldPublishTerminalMetadataEvent(event: TerminalEvent): boolean {
     case "closed":
     case "error":
     case "activity":
+    case "control":
       return true;
     case "output":
     case "cleared":
@@ -385,6 +427,7 @@ function terminalEventToAttachEvent(event: TerminalEvent): TerminalAttachStreamE
     case "cleared":
     case "restarted":
     case "activity":
+    case "control":
       return event;
   }
 }
@@ -393,6 +436,13 @@ function isDuplicateAttachSnapshotEvent(
   event: TerminalEvent,
   initialSnapshot: TerminalSessionSnapshot,
 ) {
+  if (
+    event.type === "control" &&
+    event.controllerAttached === (initialSnapshot.controllerAttached ?? false) &&
+    event.observerCount === (initialSnapshot.observerCount ?? 0)
+  ) {
+    return true;
+  }
   return typeof event.sequence === "number" && typeof initialSnapshot.sequence === "number"
     ? event.sequence <= initialSnapshot.sequence
     : event.type === "started" &&
@@ -1258,6 +1308,131 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         yield* listener(event).pipe(Effect.ignoreCause({ log: true }));
       }
     });
+
+  const accessClientId = (
+    input: { readonly threadId: string },
+    accessContext?: TerminalAccessContext,
+  ) => accessContext?.clientId ?? `legacy:${input.threadId}`;
+
+  const owningProjectId = (
+    input: { readonly threadId: string; readonly projectId?: string | undefined },
+    accessContext?: TerminalAccessContext,
+  ) => accessContext?.projectId ?? input.projectId ?? `legacy:${input.threadId}`;
+
+  const assertOwningProject = Effect.fn("terminal.assertOwningProject")(function* (
+    session: TerminalSessionState,
+    input: { readonly projectId?: string | undefined },
+    accessContext?: TerminalAccessContext,
+  ) {
+    const expectedProjectIds = [accessContext?.projectId, input.projectId].filter(
+      (projectId): projectId is string => projectId !== undefined,
+    );
+    for (const expectedProjectId of expectedProjectIds) {
+      if (expectedProjectId !== session.projectId) {
+        return yield* new TerminalProjectMismatchError({
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          expectedProjectId,
+          actualProjectId: session.projectId,
+        });
+      }
+    }
+  });
+
+  const makeControlEvent = (session: TerminalSessionState): TerminalEvent => {
+    return {
+      type: "control",
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+      controllerAttached: session.controllerClientId !== null,
+      observerCount: observerCount(session),
+    };
+  };
+
+  const ensureController = Effect.fn("terminal.ensureController")(function* (
+    session: TerminalSessionState,
+    input: { readonly threadId: string; readonly projectId?: string | undefined },
+    accessContext?: TerminalAccessContext,
+  ) {
+    yield* assertOwningProject(session, input, accessContext);
+    // Calls without an RPC access context are trusted server-internal lifecycle work.
+    if (accessContext === undefined) return;
+    const clientId = accessClientId(input, accessContext);
+    if (session.controllerClientId === clientId) return;
+
+    return yield* new TerminalControllerRequiredError({
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+    });
+  });
+
+  const claimAttachment = Effect.fn("terminal.claimAttachment")(function* (
+    session: TerminalSessionState,
+    input: TerminalAttachInput,
+    accessContext?: TerminalAccessContext,
+  ) {
+    yield* assertOwningProject(session, input, accessContext);
+    const clientId = accessClientId(input, accessContext);
+    const controlMode = input.controlMode ?? "auto";
+
+    if (
+      controlMode === "control" &&
+      session.controllerClientId !== null &&
+      session.controllerClientId !== clientId
+    ) {
+      return yield* new TerminalControllerConflictError({
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+      });
+    }
+
+    if (controlMode !== "observe" && session.controllerClientId === null) {
+      session.controllerClientId = clientId;
+    }
+
+    session.attachedClientCounts.set(
+      clientId,
+      (session.attachedClientCounts.get(clientId) ?? 0) + 1,
+    );
+    yield* publishEvent(makeControlEvent(session));
+
+    return {
+      access:
+        session.controllerClientId === clientId ? ("controller" as const) : ("observer" as const),
+      clientId,
+    };
+  });
+
+  const releaseAttachment = Effect.fn("terminal.releaseAttachment")(function* (
+    threadId: string,
+    terminalId: string,
+    clientId: string,
+  ) {
+    yield* withThreadLock(
+      threadId,
+      Effect.gen(function* () {
+        const current = yield* getSession(threadId, terminalId);
+        if (Option.isNone(current)) return;
+
+        const session = current.value;
+        const currentCount = session.attachedClientCounts.get(clientId) ?? 0;
+        if (currentCount <= 0) return;
+        if (currentCount === 1) {
+          session.attachedClientCounts.delete(clientId);
+        } else {
+          session.attachedClientCounts.set(clientId, currentCount - 1);
+        }
+
+        if (
+          session.controllerClientId === clientId &&
+          !session.attachedClientCounts.has(clientId)
+        ) {
+          session.controllerClientId = null;
+        }
+        yield* publishEvent(makeControlEvent(session));
+      }),
+    );
+  });
 
   const historyPath = (threadId: string, terminalId: string) => {
     const threadPart = toSafeThreadId(threadId);
@@ -2180,7 +2355,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
-  const openLocked = Effect.fn("terminal.openLocked")(function* (input: TerminalOpenInput) {
+  const openLocked = Effect.fn("terminal.openLocked")(function* (
+    input: TerminalOpenInput,
+    accessContext?: TerminalAccessContext,
+  ) {
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);
 
@@ -2194,6 +2372,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const session: TerminalSessionState = {
         threadId: input.threadId,
         terminalId,
+        projectId: owningProjectId(input, accessContext),
+        controllerClientId: null,
+        attachedClientCounts: new Map(),
         cwd: input.cwd,
         worktreePath: input.worktreePath ?? null,
         status: "starting",
@@ -2242,6 +2423,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     const liveSession = existing.value;
+    yield* assertOwningProject(liveSession, input, accessContext);
     const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
     const currentRuntimeEnv = liveSession.runtimeEnv;
     const targetCols = input.cols ?? liveSession.cols;
@@ -2255,6 +2437,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.worktreePath !== nextWorktreePath;
 
     if (launchContextChanged) {
+      yield* ensureController(liveSession, input, accessContext);
       yield* stopProcess(liveSession);
       liveSession.cwd = input.cwd;
       liveSession.worktreePath = nextWorktreePath;
@@ -2277,6 +2460,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     if (!liveSession.process) {
+      yield* ensureController(liveSession, input, accessContext);
       yield* startSession(
         liveSession,
         {
@@ -2294,6 +2478,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
+      yield* ensureController(liveSession, input, accessContext);
       yield* resizePtyProcess(liveSession, liveSession.process, targetCols, targetRows);
       liveSession.cols = targetCols;
       liveSession.rows = targetRows;
@@ -2303,10 +2488,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(input.threadId, openLocked(input));
+  const open: TerminalManager["Service"]["open"] = (input, accessContext) =>
+    withThreadLock(input.threadId, openLocked(input, accessContext));
 
-  const openOrAttachForStream = (input: TerminalAttachInput) =>
+  const openOrAttachForStream = (
+    input: TerminalAttachInput,
+    accessContext: TerminalAccessContext | undefined,
+    onClaim: (clientId: string) => void,
+  ) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -2321,26 +2510,47 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             });
           }
 
-          return yield* openLocked({
-            ...input,
-            terminalId,
-            cwd: input.cwd,
-          });
+          yield* openLocked(
+            {
+              ...input,
+              terminalId,
+              cwd: input.cwd,
+            },
+            accessContext,
+          );
+          const createdSession = yield* requireSession(input.threadId, terminalId);
+          const attachment = yield* claimAttachment(createdSession, input, accessContext);
+          onClaim(attachment.clientId);
+          return {
+            access: attachment.access,
+            snapshot: snapshot(createdSession),
+          };
         }
 
         const session = existing.value;
+        const attachment = yield* claimAttachment(session, input, accessContext);
+        onClaim(attachment.clientId);
         const targetCols = input.cols ?? session.cols;
         const targetRows = input.rows ?? session.rows;
 
-        if (!session.process && input.cwd && input.restartIfNotRunning === true) {
-          return yield* openLocked({
-            ...input,
-            terminalId,
-            cwd: input.cwd,
-          });
+        if (
+          attachment.access === "controller" &&
+          !session.process &&
+          input.cwd &&
+          input.restartIfNotRunning === true
+        ) {
+          yield* openLocked(
+            {
+              ...input,
+              terminalId,
+              cwd: input.cwd,
+            },
+            accessContext,
+          );
         }
 
         if (
+          attachment.access === "controller" &&
           session.process &&
           session.status === "running" &&
           (session.cols !== targetCols || session.rows !== targetRows)
@@ -2352,7 +2562,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           session.updatedAt = yield* nowIso;
         }
 
-        return snapshot(session);
+        return {
+          access: attachment.access,
+          snapshot: snapshot(session),
+        };
       }),
     );
 
@@ -2386,8 +2599,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       };
     });
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) => {
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    accessContext,
+  ) => {
     let unsubscribe: (() => void) | null = null;
+    let claimedClientId: string | null = null;
 
     return Effect.gen(function* () {
       const bufferedEvents: TerminalEvent[] = [];
@@ -2407,15 +2625,18 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return attachEvent ? listener(attachEvent) : Effect.void;
       });
 
-      const initialSnapshot = yield* openOrAttachForStream(input);
+      const initial = yield* openOrAttachForStream(input, accessContext, (clientId) => {
+        claimedClientId = clientId;
+      });
 
       yield* listener({
         type: "snapshot",
-        snapshot: initialSnapshot,
+        snapshot: initial.snapshot,
+        access: initial.access,
       });
 
       for (const event of bufferedEvents) {
-        if (isDuplicateAttachSnapshotEvent(event, initialSnapshot)) {
+        if (isDuplicateAttachSnapshotEvent(event, initial.snapshot)) {
           continue;
         }
 
@@ -2429,16 +2650,26 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return () => {
         unsubscribe?.();
         unsubscribe = null;
+        const clientId = claimedClientId;
+        claimedClientId = null;
+        if (clientId) {
+          runFork(releaseAttachment(input.threadId, input.terminalId, clientId));
+        }
       };
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.flatMap(
-          Effect.sync(() => {
+        Effect.gen(function* () {
+          yield* Effect.sync(() => {
             unsubscribe?.();
             unsubscribe = null;
-          }),
-          () => Effect.failCause(cause),
-        ),
+          });
+          const clientId = claimedClientId;
+          claimedClientId = null;
+          if (clientId) {
+            yield* releaseAttachment(input.threadId, input.terminalId, clientId);
+          }
+          return yield* Effect.failCause(cause);
+        }),
       ),
     );
   };
@@ -2525,35 +2756,47 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
-    const terminalId = input.terminalId;
-    const session = yield* requireSession(input.threadId, terminalId);
-    const process = session.process;
-    if (!process || session.status !== "running") {
-      if (session.status === "exited") return;
-      return yield* new TerminalNotRunningError({
-        threadId: input.threadId,
-        terminalId,
-      });
-    }
-    yield* Effect.try({
-      try: () => process.write(input.data),
-      catch: (cause) =>
-        new TerminalWriteError({
-          threadId: input.threadId,
-          terminalId,
-          terminalPid: process.pid,
-          cause,
+  const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(
+    function* (input, accessContext) {
+      yield* withThreadLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const terminalId = input.terminalId;
+          const session = yield* requireSession(input.threadId, terminalId);
+          yield* ensureController(session, input, accessContext);
+          const process = session.process;
+          if (!process || session.status !== "running") {
+            if (session.status === "exited") return;
+            return yield* new TerminalNotRunningError({
+              threadId: input.threadId,
+              terminalId,
+            });
+          }
+          yield* Effect.try({
+            try: () => process.write(input.data),
+            catch: (cause) =>
+              new TerminalWriteError({
+                threadId: input.threadId,
+                terminalId,
+                terminalPid: process.pid,
+                cause,
+              }),
+          });
         }),
-    });
-  });
+      );
+    },
+  );
 
-  const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
+  const resizeLocked = Effect.fn("terminal.resize")(function* (
+    input: TerminalResizeInput,
+    accessContext?: TerminalAccessContext,
+  ) {
     const session = yield* getSession(input.threadId, input.terminalId);
     // ResizeObserver traffic can already be in flight when the UI closes the session.
     if (Option.isNone(session)) {
       return;
     }
+    yield* ensureController(session.value, input, accessContext);
     const process = session.value.process;
     if (!process || session.value.status !== "running") {
       return;
@@ -2564,15 +2807,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     session.value.updatedAt = yield* nowIso;
   });
 
-  const resize: TerminalManager["Service"]["resize"] = (input) =>
-    withThreadLock(input.threadId, resizeLocked(input));
+  const resize: TerminalManager["Service"]["resize"] = (input, accessContext) =>
+    withThreadLock(input.threadId, resizeLocked(input, accessContext));
 
-  const clear: TerminalManager["Service"]["clear"] = (input) =>
+  const clear: TerminalManager["Service"]["clear"] = (input, accessContext) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         const terminalId = input.terminalId;
         const session = yield* requireSession(input.threadId, terminalId);
+        yield* ensureController(session, input, accessContext);
         session.history = "";
         session.pendingHistoryControlSequence = "";
         session.pendingProcessEvents = [];
@@ -2589,7 +2833,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const restart: TerminalManager["Service"]["restart"] = (input) =>
+  const restart: TerminalManager["Service"]["restart"] = (input, accessContext) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -2606,6 +2850,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           session = {
             threadId: input.threadId,
             terminalId,
+            projectId: owningProjectId(input, accessContext),
+            controllerClientId: null,
+            attachedClientCounts: new Map(),
             cwd: input.cwd,
             worktreePath: input.worktreePath ?? null,
             status: "starting",
@@ -2637,6 +2884,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           yield* evictInactiveSessionsIfNeeded();
         } else {
           session = existingSession.value;
+          yield* ensureController(session, input, accessContext);
           yield* stopProcess(session);
           session.cwd = input.cwd;
           session.worktreePath = input.worktreePath ?? null;
@@ -2669,16 +2917,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const close: TerminalManager["Service"]["close"] = (input) =>
+  const close: TerminalManager["Service"]["close"] = (input, accessContext) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         if (input.terminalId) {
+          const session = yield* requireSession(input.threadId, input.terminalId);
+          yield* ensureController(session, input, accessContext);
           yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
           return;
         }
 
         const threadSessions = yield* sessionsForThread(input.threadId);
+        yield* Effect.forEach(
+          threadSessions,
+          (session) => ensureController(session, input, accessContext),
+          { discard: true },
+        );
         yield* Effect.forEach(
           threadSessions,
           (session) => closeSession(input.threadId, session.terminalId, false),

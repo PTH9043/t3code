@@ -21,6 +21,7 @@ import type {
   ProviderOptionDescriptor,
   ServerProviderModel,
   ServerProviderSkill,
+  ServerProviderUsage,
 } from "@t3tools/contracts";
 import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/contracts";
 
@@ -33,6 +34,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { normalizeProviderRateLimits } from "../providerAccountUsage.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -48,6 +50,8 @@ export interface CodexAppServerProviderSnapshot {
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly rateLimits?: CodexSchema.V2GetAccountRateLimitsResponse;
+  readonly tokenUsage?: CodexSchema.V2GetAccountTokenUsageResponse;
 }
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -395,12 +399,14 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
-  const [skillsResponse, models] = yield* Effect.all(
+  const [skillsResponse, models, rateLimitsResult, tokenUsageResult] = yield* Effect.all(
     [
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
       requestAllCodexModels(client),
+      client.request("account/rateLimits/read", undefined).pipe(Effect.result),
+      client.request("account/usage/read", undefined).pipe(Effect.result),
     ],
     { concurrency: "unbounded" },
   );
@@ -412,6 +418,8 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       appendCustomCodexModels(models, input.customModels ?? []),
     ),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+    ...(Result.isSuccess(rateLimitsResult) ? { rateLimits: rateLimitsResult.success } : {}),
+    ...(Result.isSuccess(tokenUsageResult) ? { tokenUsage: tokenUsageResult.success } : {}),
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -498,6 +506,42 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
   }
 
   return { status: "ready", auth };
+}
+
+function optionalNonNegative(value: number | null | undefined): number | undefined {
+  return value !== null && value !== undefined && value >= 0 ? value : undefined;
+}
+
+export function codexAccountUsage(
+  snapshot: CodexAppServerProviderSnapshot,
+  updatedAt: string,
+): ServerProviderUsage | undefined {
+  const rateLimits = normalizeProviderRateLimits(snapshot.rateLimits);
+  const lifetimeTokens = optionalNonNegative(snapshot.tokenUsage?.summary.lifetimeTokens);
+  const currentStreakDays = optionalNonNegative(snapshot.tokenUsage?.summary.currentStreakDays);
+  const peakDailyTokens = optionalNonNegative(snapshot.tokenUsage?.summary.peakDailyTokens);
+  if (
+    !rateLimits &&
+    lifetimeTokens === undefined &&
+    currentStreakDays === undefined &&
+    peakDailyTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    source: "provider",
+    updatedAt,
+    sessionTokens: 0,
+    sessionCount: 0,
+    activeSessionCount: 0,
+    ...(lifetimeTokens !== undefined ? { lifetimeTokens } : {}),
+    ...(currentStreakDays !== undefined ? { currentStreakDays } : {}),
+    ...(peakDailyTokens !== undefined ? { peakDailyTokens } : {}),
+    ...(rateLimits?.planType ? { planType: rateLimits.planType } : {}),
+    ...(rateLimits?.primary ? { primary: rateLimits.primary } : {}),
+    ...(rateLimits?.secondary ? { secondary: rateLimits.secondary } : {}),
+    ...(rateLimits?.credits ? { credits: rateLimits.credits } : {}),
+  };
 }
 
 export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(function* (
@@ -594,6 +638,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   const snapshot = probeResult.success.value;
   const accountStatus = accountProbeStatus(snapshot.account);
+  const usage = codexAccountUsage(snapshot, checkedAt);
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
@@ -601,6 +646,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     checkedAt,
     models: snapshot.models,
     skills: snapshot.skills,
+    ...(usage ? { usage } : {}),
     probe: {
       installed: true,
       version: snapshot.version ?? null,
