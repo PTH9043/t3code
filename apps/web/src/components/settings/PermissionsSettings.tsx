@@ -220,7 +220,7 @@ export function PermissionsSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("workspace-program-auto-diagnosis")}
-          description="오류 사건이 생성되면 읽기 전용 AI 진단 스레드를 자동으로 시작합니다. 실제 코드는 수정하지 않습니다."
+          description="장애가 보고되면 읽기 전용 AI 진단 대화를 자동으로 시작합니다. 실제 코드는 수정하지 않습니다."
           status={programPermissions.autoDiagnosis ? "허용됨" : "허용 안 함"}
           control={
             <Switch

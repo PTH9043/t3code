@@ -951,7 +951,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
             <FileWarningIcon className="size-4" />
             <span className="text-xs font-semibold uppercase tracking-wide">자동 오류 보고</span>
           </div>
-          <CardTitle>오류 사건과 AI 진단</CardTitle>
+          <CardTitle>장애와 AI 진단</CardTitle>
           <CardDescription>
             비정상 종료·승인된 로그 패턴·상태검사 실패를 묶어 보관합니다. AI는 진단까지만 자동으로
             수행하며 수정은 사용자의 명시적 지시 후 시작합니다.
