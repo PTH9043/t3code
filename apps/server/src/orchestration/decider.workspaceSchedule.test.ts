@@ -114,6 +114,28 @@ it.layer(NodeServices.layer)("Workspace schedule decider", (it) => {
       }
       expect(scheduled.payload.run).toMatchObject({ source: "schedule", scheduleId });
       expect(user.payload.run).toMatchObject({ source: "user", scheduleId: null });
+      // A person's request displaces the queued schedule; that is what `preempt` carries.
+      expect(user.payload.preempt).toBe(true);
+
+      const integrity = singleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.collaboration.run.request",
+            commandId: CommandId.make("integrity-run-a"),
+            runId: WorkspaceCollaborationRunId.make("integrity-run-a"),
+            projectId,
+            task: "Integrity convergence",
+            source: "integrity",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      expect(integrity.type).toBe("project.collaboration-run-requested");
+      if (integrity.type !== "project.collaboration-run-requested") return;
+      // The integrity loop runs on its own initiative, so it must not cancel the schedule.
+      expect(integrity.payload.run).toMatchObject({ source: "integrity", scheduleId: null });
+      expect(integrity.payload.preempt).toBe(false);
     }),
   );
 });

@@ -586,7 +586,9 @@ function RunCard({
                   ? "사용자 요청"
                   : run.source === "schedule"
                     ? "예약 실행"
-                    : "장애 복구"
+                    : run.source === "integrity"
+                      ? "무결성 수렴"
+                      : "장애 복구"
               }
             />
           </View>

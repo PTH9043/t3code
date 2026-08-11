@@ -636,10 +636,24 @@ export const WorkspaceCollaborationStep = Schema.Struct({
 });
 export type WorkspaceCollaborationStep = typeof WorkspaceCollaborationStep.Type;
 
+/**
+ * Who asked for a collaboration run. This is persisted on the run and on the event log, so
+ * a value here outlives the release that introduced it. `integrity` runs are started by the
+ * program integrity loop rather than by a person, which is what keeps them from preempting
+ * a project's scheduled runs.
+ */
+export const WorkspaceCollaborationRunSource = Schema.Literals([
+  "user",
+  "schedule",
+  "incident",
+  "integrity",
+]);
+export type WorkspaceCollaborationRunSource = typeof WorkspaceCollaborationRunSource.Type;
+
 export const WorkspaceCollaborationRun = Schema.Struct({
   id: WorkspaceCollaborationRunId,
   projectId: ProjectId,
-  source: Schema.Literals(["user", "schedule", "incident"]),
+  source: WorkspaceCollaborationRunSource,
   scheduleId: Schema.NullOr(WorkspaceScheduleId),
   incidentId: Schema.NullOr(WorkspaceIncidentId).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -1525,6 +1539,13 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
   runId: WorkspaceCollaborationRunId,
   projectId: ProjectId,
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  /** Omitted by clients, which always speak for a person. */
+  source: Schema.optionalKey(Schema.Literals(["user", "integrity"])),
+  /**
+   * Whether starting this run should cancel the project's queued scheduled runs. Defaults to
+   * true for a person's request, false for anything the server starts on its own.
+   */
+  preempt: Schema.optionalKey(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -2266,6 +2287,12 @@ export const ProjectAgentRoleRemovedPayload = Schema.Struct({
 
 export const ProjectCollaborationRunRequestedPayload = Schema.Struct({
   run: WorkspaceCollaborationRun,
+  /**
+   * Carried on the event rather than on the run: it decides what happens at the moment the
+   * run starts and is not part of the run's own state. Older events decode as false so a
+   * replay never cancels a schedule after the fact.
+   */
+  preempt: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 
 export const ProjectCollaborationRunCancelRequestedPayload = Schema.Struct({

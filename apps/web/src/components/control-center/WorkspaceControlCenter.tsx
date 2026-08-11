@@ -1432,7 +1432,9 @@ function CollaborationSection({ project }: { project: EnvironmentProject }) {
                       ? "사용자 명령"
                       : run.source === "incident"
                         ? `프로그램 장애 ${run.incidentId}`
-                        : `스케줄 ${run.scheduleId}`}{" "}
+                        : run.source === "integrity"
+                          ? "무결성 수렴"
+                          : `스케줄 ${run.scheduleId}`}{" "}
                     · {formatTimestamp(run.createdAt)}
                   </span>
                 </span>

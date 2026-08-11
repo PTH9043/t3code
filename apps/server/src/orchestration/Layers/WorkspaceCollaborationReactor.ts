@@ -1509,14 +1509,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     },
   );
 
-  const enqueueRequestedRun = (run: WorkspaceCollaborationRun) =>
-    (run.source === "user" ? preemptScheduledRuns(run.projectId) : Effect.void).pipe(
+  const enqueueRequestedRun = (run: WorkspaceCollaborationRun, preempt: boolean) =>
+    (preempt ? preemptScheduledRuns(run.projectId) : Effect.void).pipe(
       Effect.andThen(enqueue({ projectId: run.projectId, runId: run.id })),
     );
 
   const enqueueEvent = (event: OrchestrationEvent) =>
     event.type === "project.collaboration-run-requested"
-      ? enqueueRequestedRun(event.payload.run)
+      ? enqueueRequestedRun(event.payload.run, event.payload.preempt)
       : Effect.void;
 
   const enqueueStartupRuns = runRepository.listResumable().pipe(
@@ -1527,7 +1527,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           ? priority
           : left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
       });
-      return Effect.forEach(ordered, enqueueRequestedRun, { concurrency: 1, discard: true });
+      // The per-request `preempt` flag lives on the event, not on the run, so recovery
+      // cannot read back what a particular request asked for. It falls back to the default
+      // for the run's source, which finishes a preemption that a crash interrupted while
+      // still leaving server-started integrity runs alone.
+      return Effect.forEach(ordered, (run) => enqueueRequestedRun(run, run.source === "user"), {
+        concurrency: 1,
+        discard: true,
+      });
     }),
     Effect.catchCause((cause) =>
       Effect.logWarning("Workspace collaboration startup recovery failed", {

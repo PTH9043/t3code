@@ -908,6 +908,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           runId,
           projectId,
           task,
+          source: "integrity",
           createdAt,
         }),
       );

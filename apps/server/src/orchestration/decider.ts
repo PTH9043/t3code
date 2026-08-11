@@ -494,7 +494,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           run: {
             id: command.runId,
             projectId: command.projectId,
-            source: "user",
+            source: command.source ?? "user",
             scheduleId: null,
             incidentId: null,
             task: command.task,
@@ -506,6 +506,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
           },
+          // Only a person's request displaces the schedule by default; anything the server
+          // starts for itself has to ask for that explicitly.
+          preempt: command.preempt ?? (command.source ?? "user") === "user",
         },
       };
     }
