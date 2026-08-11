@@ -133,6 +133,32 @@ describe("terminal session reducers", () => {
     });
   });
 
+  it("retains observer access while controller availability changes", () => {
+    const attached = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
+      type: "snapshot",
+      access: "observer",
+      snapshot: {
+        ...BASE_SNAPSHOT,
+        controllerAttached: true,
+        observerCount: 1,
+      },
+    });
+    const released = applyTerminalAttachStreamEvent(attached, {
+      type: "control",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      controllerAttached: false,
+      observerCount: 1,
+    });
+
+    expect(released).toMatchObject({
+      access: "observer",
+      controllerAttached: false,
+      observerCount: 1,
+      version: 2,
+    });
+  });
+
   it("reduces terminal metadata snapshots, upserts, and removals", () => {
     const initial = applyTerminalMetadataStreamEvent([], {
       type: "snapshot",

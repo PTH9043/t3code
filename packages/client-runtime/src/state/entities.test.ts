@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -116,6 +117,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
       repositoryIdentity: null,
       defaultModelSelection: null,
       scripts: [],
+      workspaceControl: DEFAULT_WORKSPACE_CONTROL_SETTINGS,
       createdAt: "2026-06-01T00:00:00.000Z",
       updatedAt: "2026-06-01T00:00:00.000Z",
     },
@@ -126,6 +128,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
       repositoryIdentity: null,
       defaultModelSelection: null,
       scripts: [],
+      workspaceControl: DEFAULT_WORKSPACE_CONTROL_SETTINGS,
       createdAt: "2026-06-01T00:00:00.000Z",
       updatedAt: "2026-06-01T00:00:00.000Z",
     },

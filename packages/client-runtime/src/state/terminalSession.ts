@@ -11,6 +11,9 @@ export interface TerminalSessionState {
   readonly summary: TerminalSummary | null;
   readonly buffer: string;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
+  readonly access: "controller" | "observer";
+  readonly controllerAttached: boolean;
+  readonly observerCount: number;
   readonly error: string | null;
   readonly hasRunningSubprocess: boolean;
   readonly updatedAt: string | null;
@@ -20,6 +23,9 @@ export interface TerminalSessionState {
 export interface TerminalBufferState {
   readonly buffer: string;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
+  readonly access: "controller" | "observer";
+  readonly controllerAttached: boolean;
+  readonly observerCount: number;
   readonly error: string | null;
   readonly updatedAt: string | null;
   readonly version: number;
@@ -47,6 +53,9 @@ export function selectRunningSubprocessTerminalIds(
 export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   buffer: "",
   status: "closed",
+  access: "controller",
+  controllerAttached: false,
+  observerCount: 0,
   error: null,
   updatedAt: null,
   version: 0,
@@ -56,6 +65,9 @@ export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>(
   summary: null,
   buffer: "",
   status: "closed",
+  access: "controller",
+  controllerAttached: false,
+  observerCount: 0,
   error: null,
   hasRunningSubprocess: false,
   updatedAt: null,
@@ -91,10 +103,14 @@ function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
 export function terminalBufferStateFromSnapshot(
   snapshot: TerminalSessionSnapshot,
   maxBufferBytes: number,
+  access: "controller" | "observer" = "controller",
 ): TerminalBufferState {
   return {
     buffer: trimBufferToBytes(snapshot.history, maxBufferBytes),
     status: snapshot.status,
+    access,
+    controllerAttached: snapshot.controllerAttached ?? access === "controller",
+    observerCount: snapshot.observerCount ?? 0,
     error: null,
     updatedAt: snapshot.updatedAt,
     version: 1,
@@ -115,6 +131,13 @@ export function combineTerminalSessionState(
     summary,
     buffer: buffer.buffer,
     status: buffer.version > 0 ? buffer.status : (summary?.status ?? buffer.status),
+    access: buffer.access,
+    controllerAttached:
+      buffer.version > 0
+        ? buffer.controllerAttached
+        : (summary?.controllerAttached ?? buffer.controllerAttached),
+    observerCount:
+      buffer.version > 0 ? buffer.observerCount : (summary?.observerCount ?? buffer.observerCount),
     error: buffer.error,
     hasRunningSubprocess: summary?.hasRunningSubprocess ?? false,
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
@@ -129,8 +152,13 @@ export function applyTerminalAttachStreamEvent(
 ): TerminalBufferState {
   switch (event.type) {
     case "snapshot":
+      return terminalBufferStateFromSnapshot(
+        event.snapshot,
+        maxBufferBytes,
+        event.access ?? "controller",
+      );
     case "restarted":
-      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes);
+      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes, current.access);
     case "output":
       return {
         ...current,
@@ -169,6 +197,13 @@ export function applyTerminalAttachStreamEvent(
       };
     case "activity":
       return current;
+    case "control":
+      return {
+        ...current,
+        controllerAttached: event.controllerAttached,
+        observerCount: event.observerCount,
+        version: current.version + 1,
+      };
   }
 }
 

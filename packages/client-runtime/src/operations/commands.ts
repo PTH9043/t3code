@@ -30,6 +30,27 @@ type CommandInput<T extends CommandType> = Omit<
 
 export type CreateProjectInput = CommandInput<"project.create">;
 export type UpdateProjectInput = CommandInput<"project.meta.update">;
+export type UpdateWorkspaceControlInput = CommandInput<"project.workspace-control.update">;
+export type MarkWorkspaceRuntimeViewedInput = CommandInput<"project.runtime.view">;
+export type UpsertWorkspaceKnowledgeItemInput = CommandInput<"project.knowledge.item.upsert">;
+export type ArchiveWorkspaceKnowledgeItemInput = CommandInput<"project.knowledge.item.archive">;
+export type UpsertWorkspaceAgentRoleInput = CommandInput<"project.agent-role.upsert">;
+export type RemoveWorkspaceAgentRoleInput = CommandInput<"project.agent-role.remove">;
+export type RequestWorkspaceCollaborationRunInput =
+  CommandInput<"project.collaboration.run.request">;
+export type CancelWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.cancel">;
+export type UpsertWorkspaceScheduleInput = CommandInput<"project.schedule.upsert">;
+export type RemoveWorkspaceScheduleInput = CommandInput<"project.schedule.remove">;
+export type UpsertWorkspaceProgramInput = CommandInput<"project.program.upsert">;
+export type RemoveWorkspaceProgramInput = CommandInput<"project.program.remove">;
+export type StartWorkspaceProgramInput = CommandInput<"project.program.start">;
+export type StopWorkspaceProgramInput = CommandInput<"project.program.stop">;
+export type RestartWorkspaceProgramInput = CommandInput<"project.program.restart">;
+export type StartWorkspaceProgramIntegrityInput = CommandInput<"project.program.integrity.start">;
+export type StopWorkspaceProgramIntegrityInput = CommandInput<"project.program.integrity.stop">;
+export type RequestWorkspaceIncidentRepairInput =
+  CommandInput<"project.program.incident.repair.request">;
+export type ResolveWorkspaceIncidentInput = CommandInput<"project.program.incident.resolve">;
 export type DeleteProjectInput = CommandInput<"project.delete">;
 export type CreateThreadInput = CommandInput<"thread.create">;
 export type DeleteThreadInput = CommandInput<"thread.delete">;
@@ -107,6 +128,227 @@ export const updateProject: (input: UpdateProjectInput) => CommandEffect = Effec
     commandId: yield* commandId(input),
   });
 });
+
+export const updateWorkspaceControl: (input: UpdateWorkspaceControlInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.updateWorkspaceControl")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "project.workspace-control.update",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const markWorkspaceRuntimeViewed: (input: MarkWorkspaceRuntimeViewedInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.markWorkspaceRuntimeViewed")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.runtime.view",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+export const upsertWorkspaceKnowledgeItem: (
+  input: UpsertWorkspaceKnowledgeItemInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.upsertWorkspaceKnowledgeItem")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.knowledge.item.upsert",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const archiveWorkspaceKnowledgeItem: (
+  input: ArchiveWorkspaceKnowledgeItemInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.archiveWorkspaceKnowledgeItem")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.knowledge.item.archive",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const upsertWorkspaceAgentRole: (input: UpsertWorkspaceAgentRoleInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.upsertWorkspaceAgentRole")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.agent-role.upsert",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+export const removeWorkspaceAgentRole: (input: RemoveWorkspaceAgentRoleInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.removeWorkspaceAgentRole")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.agent-role.remove",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+export const requestWorkspaceCollaborationRun: (
+  input: RequestWorkspaceCollaborationRunInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.requestWorkspaceCollaborationRun")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.collaboration.run.request",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const cancelWorkspaceCollaborationRun: (
+  input: CancelWorkspaceCollaborationRunInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.cancelWorkspaceCollaborationRun")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.collaboration.run.cancel",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const upsertWorkspaceSchedule: (input: UpsertWorkspaceScheduleInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.upsertWorkspaceSchedule")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.schedule.upsert",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+export const removeWorkspaceSchedule: (input: RemoveWorkspaceScheduleInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.removeWorkspaceSchedule")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.schedule.remove",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+
+export const upsertWorkspaceProgram: (input: UpsertWorkspaceProgramInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.upsertWorkspaceProgram")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.upsert",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+export const removeWorkspaceProgram: (input: RemoveWorkspaceProgramInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.removeWorkspaceProgram")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.remove",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+export const startWorkspaceProgram: (input: StartWorkspaceProgramInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.startWorkspaceProgram")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.start",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+export const stopWorkspaceProgram: (input: StopWorkspaceProgramInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.stopWorkspaceProgram",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "project.program.stop",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+export const restartWorkspaceProgram: (input: RestartWorkspaceProgramInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.restartWorkspaceProgram")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.restart",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
+export const startWorkspaceProgramIntegrity: (
+  input: StartWorkspaceProgramIntegrityInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.startWorkspaceProgramIntegrity")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.integrity.start",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+export const stopWorkspaceProgramIntegrity: (
+  input: StopWorkspaceProgramIntegrityInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.stopWorkspaceProgramIntegrity")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.integrity.stop",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+export const requestWorkspaceIncidentRepair: (
+  input: RequestWorkspaceIncidentRepairInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.requestWorkspaceIncidentRepair")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.incident.repair.request",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+export const resolveWorkspaceIncident: (input: ResolveWorkspaceIncidentInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.resolveWorkspaceIncident")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.program.incident.resolve",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
 
 export const deleteProject: (input: DeleteProjectInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.deleteProject",

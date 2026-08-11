@@ -1,4 +1,4 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { DEFAULT_WORKSPACE_CONTROL_SETTINGS, EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "./models.ts";
@@ -35,6 +35,7 @@ function makeProject(
     repositoryIdentity,
     defaultModelSelection: null,
     scripts: [],
+    workspaceControl: DEFAULT_WORKSPACE_CONTROL_SETTINGS,
     createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
     ...overrides,

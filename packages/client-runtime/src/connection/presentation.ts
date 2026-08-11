@@ -58,27 +58,25 @@ export function presentConnectionState(
 export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
   switch (connection.phase) {
     case "available":
-      return "Available";
+      return "사용 가능";
     case "offline":
-      return "Offline";
+      return "오프라인";
     case "connecting":
-      return "Connecting...";
+      return "연결 중...";
     case "reconnecting":
-      return connection.error
-        ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
-        : "Reconnecting...";
+      return connection.error ? "연결에 실패해 다시 연결하고 있습니다..." : "다시 연결 중...";
     case "connected":
-      return "Connected";
+      return "연결됨";
     case "error":
       return connection.error
-        ? `Connection failed. Reason: ${connection.error}`
-        : "Connection failed";
+        ? "연결에 실패했습니다. 연결 설정을 확인해 주세요."
+        : "연결에 실패했습니다";
   }
 }
 
 export function connectionStatusTitle(connection: EnvironmentConnectionPresentation): string {
   if (connection.phase === "reconnecting" && connection.error) {
-    return "Failed to connect. Reconnecting...";
+    return "연결에 실패해 다시 연결하고 있습니다...";
   }
   return connectionStatusText({ ...connection, error: null });
 }
@@ -112,18 +110,18 @@ export function connectionPhaseMessage(
   networkStatus: NetworkStatus,
 ): string {
   if (networkStatus === "offline" || phase === "offline") {
-    return "You are offline";
+    return "오프라인 상태입니다";
   }
   switch (phase) {
     case "available":
-      return "Available";
+      return "사용 가능";
     case "connecting":
-      return `Connecting to ${label}...`;
+      return `${label}에 연결 중...`;
     case "reconnecting":
-      return `Reconnecting to ${label}...`;
+      return `${label}에 다시 연결 중...`;
     case "connected":
-      return "Connected";
+      return "연결됨";
     case "error":
-      return "Connection failed";
+      return "연결에 실패했습니다";
   }
 }

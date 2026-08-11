@@ -1,7 +1,10 @@
 import { ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
-import { createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
+import {
+  createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
+} from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 
 export function createOrchestrationEnvironmentAtoms<R, E>(
@@ -32,6 +35,60 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
+    }),
+    workspaceKnowledge: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-knowledge",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge,
+      staleTimeMs: 1_000,
+    }),
+    workspaceRag: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-rag",
+      tag: ORCHESTRATION_WS_METHODS.searchWorkspaceRag,
+      staleTimeMs: 1_000,
+    }),
+    workspacePrompt: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-prompt",
+      tag: ORCHESTRATION_WS_METHODS.composeWorkspacePrompt,
+      staleTimeMs: 1_000,
+    }),
+    workspaceAgentRoles: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-agent-roles",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceAgentRoles,
+      staleTimeMs: 1_000,
+    }),
+    workspaceCollaborationRuns: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-collaboration-runs",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceCollaborationRuns,
+      staleTimeMs: 1_000,
+    }),
+    workspaceSchedules: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-schedules",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceSchedules,
+      staleTimeMs: 1_000,
+    }),
+    workspaceRuntime: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-runtime",
+      tag: ORCHESTRATION_WS_METHODS.subscribeWorkspaceRuntime,
+    }),
+    workspaceProgramCandidates: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-program-candidates",
+      tag: ORCHESTRATION_WS_METHODS.discoverWorkspacePrograms,
+      staleTimeMs: 30_000,
+    }),
+    workspacePrograms: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-programs",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspacePrograms,
+      staleTimeMs: 500,
+    }),
+    workspaceProgramRuns: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-program-runs",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceProgramRuns,
+      staleTimeMs: 500,
+    }),
+    workspaceIncidents: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:workspace-incidents",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceIncidents,
+      staleTimeMs: 500,
     }),
   };
 }

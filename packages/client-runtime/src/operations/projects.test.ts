@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   EnvironmentId,
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   ProjectId,
   CommandId,
   SourceControlDiscoveryResult,
@@ -113,6 +114,7 @@ describe("add project shared logic", () => {
         repositoryIdentity: null,
         defaultModelSelection: null,
         scripts: [],
+        workspaceControl: DEFAULT_WORKSPACE_CONTROL_SETTINGS,
       },
       {
         environmentId: env,
@@ -124,6 +126,7 @@ describe("add project shared logic", () => {
         repositoryIdentity: null,
         defaultModelSelection: null,
         scripts: [],
+        workspaceControl: DEFAULT_WORKSPACE_CONTROL_SETTINGS,
       },
     ];
 
