@@ -1,41 +1,41 @@
-# Resource telemetry architecture
+# 리소스 텔레메트리 아키텍처
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> 메인테이너용 문서입니다. T3 Code를 사용 중이신가요? [docs/user](../user/)를 참고하세요.
 
-Status: implemented
+상태: 구현 완료
 
-## Purpose
+## 목적
 
-Resource telemetry replaces recurring `ps`, PowerShell, `ioreg`, and `pmset`
-subprocess probes with two persistent, direct data sources:
+리소스 텔레메트리는 주기적으로 반복되던 `ps`, PowerShell, `ioreg`, `pmset`
+하위 프로세스 프로브를 상시 유지되는 두 가지 직접 데이터 소스로 대체합니다.
 
-1. a standalone Rust resource-monitor executable that reads process counters
-   through operating-system APIs via `sysinfo`;
-2. Electron main-process APIs for Electron process metrics and host power state.
+1. `sysinfo`를 통해 운영체제 API로 프로세스 카운터를 읽는 독립 실행형 Rust
+   리소스 모니터 실행 파일;
+2. Electron 프로세스 지표와 호스트 전원 상태를 위한 Electron 메인 프로세스 API.
 
-The native monitor owns bounded in-memory history. The server only merges and
-summarizes that history when diagnostics requests it. Telemetry history is not
-persisted to disk or continuously copied into Node.
+네이티브 모니터는 크기가 제한된 인메모리 이력을 소유합니다. 서버는 진단이
+요청할 때만 그 이력을 병합하고 요약합니다. 텔레메트리 이력은 디스크에
+저장되지도, Node로 계속 복사되지도 않습니다.
 
-## Why a standalone executable
+## 독립 실행형 실행 파일을 쓰는 이유
 
-The monitor is intentionally not a Node native addon.
+이 모니터는 의도적으로 Node 네이티브 애드온이 아닙니다.
 
-- No N-API, `ffi-rs`, or dynamic-library ABI is loaded into the server process.
-- A monitor crash cannot corrupt the Node runtime.
-- The server can supervise, restart, version-check, and measure the monitor as a
-  normal child process.
-- The same protocol works for the desktop app and the published CLI.
-- Packaging is a single platform executable instead of an addon toolchain plus
-  Node/Electron ABI matrix.
+- N-API, `ffi-rs`, 동적 라이브러리 ABI 중 어느 것도 서버 프로세스에 로드되지 않습니다.
+- 모니터가 비정상 종료해도 Node 런타임을 손상시킬 수 없습니다.
+- 서버는 모니터를 일반 자식 프로세스로 감독하고, 재시작하고, 버전을 확인하고,
+  측정할 수 있습니다.
+- 같은 프로토콜이 데스크톱 앱과 배포된 CLI 양쪽에서 동작합니다.
+- 패키징은 애드온 툴체인과 Node/Electron ABI 매트릭스 대신 플랫폼별 실행 파일
+  하나로 끝납니다.
 
-The cost is one persistent child process and NDJSON serialization. That is a
-better failure boundary than repeatedly spawning shell utilities or loading
-native code into Node.
+대가는 상시 유지되는 자식 프로세스 하나와 NDJSON 직렬화입니다. 이는 셸
+유틸리티를 반복해서 실행하거나 네이티브 코드를 Node에 로드하는 것보다 나은
+실패 경계입니다.
 
-## Runtime topology
+## 런타임 토폴로지
 
-### Desktop
+### 데스크톱
 
 ```text
 Electron main
@@ -51,29 +51,29 @@ Node server ── stdin/stdout NDJSON ── Rust resource monitor
      └─ WebSocket RPC/subscription ── diagnostics UI
 ```
 
-### Web, headless, and remote server
+### 웹, 헤드리스, 원격 서버
 
-Electron telemetry is unavailable. The native monitor still runs beside the
-server and tracks the server process tree. Power fields degrade to `unknown`
-instead of invoking platform shell commands.
+Electron 텔레메트리는 사용할 수 없습니다. 네이티브 모니터는 여전히 서버 옆에서
+실행되며 서버 프로세스 트리를 추적합니다. 전원 관련 필드는 플랫폼 셸 명령을
+호출하는 대신 `unknown`으로 낮아집니다.
 
-### WSL backend limitation
+### WSL 백엔드 제약
 
-Windows desktop packages currently ship the Windows resource-monitor executable.
-That executable cannot run inside the Linux WSL backend, so a WSL-only backend
-does not receive `resourceMonitorPath` and reports native process telemetry as
-unavailable. Electron host-power telemetry remains available over the inherited
-desktop pipe. Supporting native WSL process telemetry requires publishing a
-Linux sidecar for each supported architecture in the Windows artifact and
-converting its packaged path into the selected distro; the configuration
-deliberately does not pass the Windows `.exe` into WSL as a false fallback.
+Windows 데스크톱 패키지는 현재 Windows 리소스 모니터 실행 파일을 함께 배포합니다.
+이 실행 파일은 Linux WSL 백엔드 안에서 실행될 수 없으므로, WSL 전용 백엔드는
+`resourceMonitorPath`를 받지 못하고 네이티브 프로세스 텔레메트리를 사용할 수 없다고
+보고합니다. Electron 호스트 전원 텔레메트리는 상속된 데스크톱 파이프를 통해 계속
+사용할 수 있습니다. 네이티브 WSL 프로세스 텔레메트리를 지원하려면 지원 대상
+아키텍처마다 Linux 사이드카를 Windows 아티팩트에 담아 배포하고 그 패키징 경로를
+선택된 배포판 기준으로 변환해야 하며, 이 구성은 잘못된 대체 수단으로 Windows
+`.exe`를 WSL에 넘기는 일을 의도적으로 하지 않습니다.
 
-## Native monitor
+## 네이티브 모니터
 
-The executable lives in `native/resource-monitor`.
+실행 파일은 `native/resource-monitor`에 있습니다.
 
-It receives schema-compatible commands on stdin and emits one JSON object per
-line on stdout:
+이 실행 파일은 stdin으로 스키마 호환 명령을 받고 stdout으로 한 줄에 하나씩 JSON
+객체를 출력합니다.
 
 - `configure`
 - `setExternalProcesses`
@@ -87,307 +87,307 @@ line on stdout:
 - `historyChunk`
 - `error`
 
-The protocol version is defined by
-`RESOURCE_MONITOR_PROTOCOL_VERSION` in
-`packages/contracts/src/resourceTelemetry.ts`.
+프로토콜 버전은
+`packages/contracts/src/resourceTelemetry.ts`의
+`RESOURCE_MONITOR_PROTOCOL_VERSION`에 정의되어 있습니다.
 
-### Collection
+### 수집
 
-The monitor keeps one `sysinfo::System` instance and refreshes it at the
-power-adaptive interval selected by the server. It collects:
+모니터는 `sysinfo::System` 인스턴스 하나를 유지하며 서버가 선택한 전원 적응형
+주기로 이를 갱신합니다. 수집하는 항목은 다음과 같습니다.
 
-- PID and parent PID;
-- process start time and run time;
-- process name and command line;
-- current and cumulative CPU usage;
-- resident and virtual memory;
-- cumulative process I/O counters.
+- PID와 부모 PID;
+- 프로세스 시작 시각과 실행 시간;
+- 프로세스 이름과 명령줄;
+- 현재 CPU 사용량과 누적 CPU 사용량;
+- 상주 메모리와 가상 메모리;
+- 누적 프로세스 I/O 카운터.
 
-On Linux, task/thread enumeration is disabled. Command lines are loaded only
-when first needed. This avoids the expensive default behavior of walking every
-`/proc/<pid>/task/<tid>` directory on each refresh.
+Linux에서는 태스크/스레드 열거를 비활성화합니다. 명령줄은 처음 필요할 때만
+로드합니다. 이렇게 하면 갱신할 때마다 모든 `/proc/<pid>/task/<tid>` 디렉터리를
+훑는 비용 큰 기본 동작을 피할 수 있습니다.
 
-### Process-tree selection
+### 프로세스 트리 선택
 
-Each sample scans the accessible process table, builds the PID/PPID graph, and
-retains:
+각 샘플은 접근 가능한 프로세스 테이블을 훑어 PID/PPID 그래프를 만들고 다음을
+유지합니다.
 
-- the server process;
-- every descendant of the server, including provider-spawned grandchildren such
-  as shells, `node`, `tsgo`, language servers, and other tools;
-- Electron processes supplied as explicit external roots;
-- descendants of those Electron roots;
-- the resource monitor itself, because it is a server child.
+- 서버 프로세스;
+- 셸, `node`, `tsgo`, 언어 서버, 그 밖의 도구처럼 제공자가 생성한 손자 프로세스를
+  포함한 서버의 모든 하위 프로세스;
+- 명시적 외부 루트로 전달된 Electron 프로세스;
+- 그 Electron 루트의 하위 프로세스;
+- 서버의 자식 프로세스이므로, 리소스 모니터 자신.
 
-Process identity is `(pid, startTimeMs)`, not PID alone. Electron and native
-start times are matched with a two-second tolerance because native start times
-can have coarser platform resolution.
+프로세스 식별자는 PID 단독이 아니라 `(pid, startTimeMs)`입니다. 네이티브 시작
+시각은 플랫폼에 따라 해상도가 더 거칠 수 있으므로 Electron과 네이티브의 시작
+시각은 2초 허용 오차로 대조합니다.
 
-The process list is emitted in depth-first tree order so renderer collapse and
-expansion preserves complete subtrees.
+프로세스 목록은 깊이 우선 트리 순서로 내보내므로 렌더러에서 접고 펼칠 때 하위
+트리 전체가 그대로 유지됩니다.
 
-### Native history and streaming
+### 네이티브 이력과 스트리밍
 
-Every native sample is appended to a one-hour in-memory ring bounded to 3,600
-snapshots, 20,000 retained process rows, and 64 MiB of retained history bytes.
-History stays in the sidecar until a `readHistory` request and is returned in
-bounded chunks. The first bound reached wins, so high process counts or large
-process names and command lines shorten the effective history window.
+모든 네이티브 샘플은 스냅샷 3,600개, 유지 프로세스 행 20,000개, 유지 이력
+64 MiB로 제한된 1시간 분량의 인메모리 링에 추가됩니다. 이력은 `readHistory`
+요청이 있을 때까지 사이드카에 남아 있으며 크기가 제한된 청크로 반환됩니다. 가장
+먼저 도달한 한계가 적용되므로, 프로세스 수가 많거나 프로세스 이름과 명령줄이 길면
+실제 이력 구간이 짧아집니다.
 
-Periodic snapshot streaming is disabled by default. The server enables it only
-while at least one diagnostics subscription is retained. `sampleNow` remains
-available for explicit refreshes and identity validation.
+주기적 스냅샷 스트리밍은 기본적으로 꺼져 있습니다. 서버는 진단 구독이 하나 이상
+유지되는 동안에만 이를 켭니다. `sampleNow`는 명시적 갱신과 식별자 검증에 계속
+사용할 수 있습니다.
 
-The server adjusts native sampling without restarting the sidecar:
+서버는 사이드카를 재시작하지 않고 네이티브 샘플링을 조정합니다.
 
-- suspended, locked, low-power, or serious/critical thermal state: 15 seconds;
-- battery: 5 seconds;
-- normal AC: 1 second;
-- unknown or stale power: 5 seconds in the background and 1 second while live
-  diagnostics is open.
+- 일시 중단, 잠금, 저전력 또는 serious/critical 열 상태: 15초;
+- 배터리: 5초;
+- 일반 AC 전원: 1초;
+- 알 수 없거나 오래된 전원 정보: 백그라운드에서는 5초, 실시간 진단이 열려 있는
+  동안에는 1초.
 
-### Sampling limits
+### 샘플링의 한계
 
-This is counter sampling, not syscall tracing.
+이것은 시스템 호출 추적이 아니라 카운터 샘플링입니다.
 
-- A process that starts and exits entirely between samples may not be observed.
-- Cumulative CPU and I/O counters still provide accurate deltas for processes
-  that survive across samples.
-- Exact file paths, individual write syscalls, ETW events, eBPF events, and
-  Endpoint Security events are outside this implementation.
+- 샘플 사이에 시작해서 완전히 종료된 프로세스는 관측되지 않을 수 있습니다.
+- 여러 샘플에 걸쳐 살아남는 프로세스에 대해서는 누적 CPU·I/O 카운터가 여전히
+  정확한 증분을 제공합니다.
+- 정확한 파일 경로, 개별 쓰기 시스템 호출, ETW 이벤트, eBPF 이벤트,
+  Endpoint Security 이벤트는 이 구현의 범위 밖입니다.
 
-Those deeper tracing systems can be added later as opt-in diagnostic modes
-without changing the public `ResourceTelemetry` model.
+이런 더 깊은 추적 시스템은 공개 `ResourceTelemetry` 모델을 바꾸지 않고 나중에
+선택형 진단 모드로 추가할 수 있습니다.
 
-## I/O semantics
+## I/O 의미 체계
 
-The monitor preserves platform semantics instead of presenting all counters as
-equivalent:
+모니터는 모든 카운터를 동등한 것처럼 제시하지 않고 플랫폼별 의미 체계를
+보존합니다.
 
-- Unix-like platforms report storage I/O counters exposed by `sysinfo`.
-- Windows reports all process I/O bytes, not only disk bytes.
-- Operating-system caches can prevent logical application reads or writes from
-  appearing as physical storage bytes.
+- Unix 계열 플랫폼은 `sysinfo`가 노출하는 스토리지 I/O 카운터를 보고합니다.
+- Windows는 디스크 바이트만이 아니라 모든 프로세스 I/O 바이트를 보고합니다.
+- 운영체제 캐시 때문에 논리적인 애플리케이션 읽기·쓰기가 물리적 스토리지
+  바이트로 나타나지 않을 수 있습니다.
 
-The UI therefore labels these values as I/O reads and writes and exposes the
-per-process `ioSemantics` value.
+따라서 UI는 이 값들을 I/O 읽기·쓰기로 표시하고 프로세스별 `ioSemantics` 값을
+노출합니다.
 
-Group totals are observed deltas since telemetry startup. Per-process total
-columns are the operating system's cumulative counters for that process.
+그룹 합계는 텔레메트리 시작 이후 관측된 증분입니다. 프로세스별 합계 열은 해당
+프로세스에 대한 운영체제의 누적 카운터입니다.
 
-## Electron telemetry
+## Electron 텔레메트리
 
-Electron main owns `DesktopTelemetryPublisher`.
+Electron 메인 프로세스는 `DesktopTelemetryPublisher`를 소유합니다.
 
-Power events trigger an immediate snapshot. While diagnostics is closed, the
-server sends the configured active and idle host-power intervals to Electron
-(30 seconds and 2 minutes in the balanced profile). During those heartbeats
-Electron reads:
+전원 이벤트는 즉시 스냅샷을 유발합니다. 진단이 닫혀 있는 동안 서버는 설정된
+활성·유휴 호스트 전원 주기를 Electron에 전달합니다(균형 프로필에서는 30초와 2분).
+이 하트비트마다 Electron은 다음을 읽습니다.
 
 - `powerMonitor.isOnBatteryPower()`;
 - `powerMonitor.getSystemIdleTime()`;
 - `powerMonitor.getSystemIdleState()`;
 - `powerMonitor.getCurrentThermalState()`.
 
-`app.getAppMetrics()` is only called while diagnostics demand is active. Its
-live cadence is 1 second on AC, 5 seconds on battery, and 15 seconds while
-locked, suspended, or thermally constrained.
+`app.getAppMetrics()`는 진단 수요가 활성 상태일 때만 호출됩니다. 실시간 호출
+주기는 AC 전원에서 1초, 배터리에서 5초, 잠금·일시 중단·열 제약 상태에서는
+15초입니다.
 
-It also listens for:
+또한 다음 이벤트를 수신합니다.
 
-- lock and unlock;
-- suspend and resume;
-- AC and battery transitions;
-- thermal-state changes;
-- CPU speed-limit changes.
+- 잠금과 잠금 해제;
+- 일시 중단과 재개;
+- AC 전원과 배터리 전환;
+- 열 상태 변화;
+- CPU 속도 제한 변화.
 
-Suspension stays latched across event-driven snapshots. An explicit resume
-clears it immediately; a periodic heartbeat also clears a stale latch so a
-missed resume event cannot leave telemetry permanently constrained.
+일시 중단 상태는 이벤트 기반 스냅샷 사이에 래치로 유지됩니다. 명시적인 재개는
+이를 즉시 해제하며, 주기적 하트비트도 오래된 래치를 해제하므로 재개 이벤트를
+놓치더라도 텔레메트리가 영구히 제약된 상태로 남지 않습니다.
 
-Electron does not expose a cross-platform low-power-mode getter, so that field
-remains `unknown`.
+Electron은 플랫폼 공통 저전력 모드 게터를 제공하지 않으므로 해당 필드는
+`unknown`으로 유지됩니다.
 
-The desktop backend is spawned with:
+데스크톱 백엔드는 다음과 함께 생성됩니다.
 
-- fd 3 for the existing bootstrap payload;
-- fd 4 for Electron-to-server telemetry NDJSON;
-- fd 5 for server-to-Electron diagnostics-demand NDJSON.
+- 기존 부트스트랩 페이로드용 fd 3;
+- Electron에서 서버로 보내는 텔레메트리 NDJSON용 fd 4;
+- 서버에서 Electron으로 보내는 진단 수요 NDJSON용 fd 5.
 
-These are private Electron-main/server pipes. They do not use the renderer
-WebSocket and are recreated for every backend restart.
+이 파이프는 Electron 메인 프로세스와 서버만 쓰는 전용 파이프입니다. 렌더러
+WebSocket을 사용하지 않으며 백엔드가 재시작될 때마다 새로 만들어집니다.
 
-## Server Effect services
+## 서버 Effect 서비스
 
-The implementation is under `apps/server/src/resourceTelemetry`.
+구현은 `apps/server/src/resourceTelemetry` 아래에 있습니다.
 
 ### `ResourceMonitorBinary`
 
-Resolves an executable from:
+다음 순서로 실행 파일을 찾습니다.
 
 1. `T3CODE_RESOURCE_MONITOR_PATH`;
-2. desktop bootstrap configuration;
-3. bundled CLI resources;
-4. local Cargo build outputs.
+2. 데스크톱 부트스트랩 구성;
+3. 번들에 포함된 CLI 리소스;
+4. 로컬 Cargo 빌드 산출물.
 
-Unsupported platforms, missing binaries, and non-executable binaries use
-schema-backed tagged errors with descriptive messages.
+지원되지 않는 플랫폼, 존재하지 않는 바이너리, 실행할 수 없는 바이너리는 설명이
+담긴 메시지와 함께 스키마 기반 태그 오류를 사용합니다.
 
 ### `NativeTelemetryClient`
 
-Owns the resource-monitor process and protocol.
+리소스 모니터 프로세스와 프로토콜을 소유합니다.
 
-- validates the hello/version handshake;
-- sends configuration and external process roots;
-- adapts the native interval from host power state;
-- enables streaming only for scoped live subscribers;
-- reads chunked native history on demand;
-- exposes `sampleNow`;
-- serializes commands;
-- supervises process exit and protocol failure;
-- restarts with bounded exponential backoff;
-- opens a circuit after repeated failures;
-- supports explicit retry;
-- publishes health changes immediately.
+- hello/버전 핸드셰이크를 검증합니다;
+- 구성과 외부 프로세스 루트를 전송합니다;
+- 호스트 전원 상태에 맞춰 네이티브 주기를 조정합니다;
+- 스코프가 지정된 실시간 구독자에 대해서만 스트리밍을 켭니다;
+- 요청이 있을 때만 청크 단위로 네이티브 이력을 읽습니다;
+- `sampleNow`를 노출합니다;
+- 명령을 직렬화합니다;
+- 프로세스 종료와 프로토콜 실패를 감독합니다;
+- 상한이 있는 지수 백오프로 재시작합니다;
+- 실패가 반복되면 서킷을 엽니다;
+- 명시적 재시도를 지원합니다;
+- 상태 변화를 즉시 게시합니다.
 
-Snapshot sequence numbers are scoped to a monitor generation. Server ingestion
-uses the monitor restart count as the generation key, so sequence reset after a
-restart cannot freeze telemetry.
+스냅샷 시퀀스 번호는 모니터 세대 단위로 스코프가 정해집니다. 서버 수집은 모니터
+재시작 횟수를 세대 키로 사용하므로, 재시작 후 시퀀스가 초기화되어도 텔레메트리가
+멈추지 않습니다.
 
 ### `DesktopTelemetryReceiver`
 
-Reads fd 4, decodes schema-validated messages, stores the latest Electron
-snapshot, and publishes desktop health. It writes diagnostics demand to fd 5
-and gives the first sample a 90-second startup deadline. Once samples arrive,
-the stale deadline stays beyond the slower configured host-power interval with
-30 seconds of scheduling grace, so intentional 2–10 minute idle polling does
-not oscillate the policy between constrained and unconstrained states. Decode
-errors, protocol mismatch, control-write failure, stream failure, stale input,
-and normal stream closure are represented explicitly.
+fd 4를 읽어 스키마 검증을 거친 메시지를 디코딩하고, 최신 Electron 스냅샷을
+저장하며, 데스크톱 상태를 게시합니다. 진단 수요는 fd 5에 기록하고 첫 샘플에는
+90초의 시작 제한 시간을 부여합니다. 샘플이 도착한 뒤에는 오래됨 판정 기한을
+설정된 더 느린 호스트 전원 주기보다 30초의 스케줄링 여유만큼 뒤에 두므로,
+의도적인 2–10분 유휴 폴링이 정책을 제약 상태와 비제약 상태 사이에서 진동시키지
+않습니다. 디코딩 오류, 프로토콜 불일치, 제어 쓰기 실패, 스트림 실패, 오래된 입력,
+정상적인 스트림 종료는 각각 명시적으로 표현됩니다.
 
 ### `ResourceTelemetry`
 
-Merges native and Electron data and owns public telemetry semantics.
+네이티브 데이터와 Electron 데이터를 병합하고 공개 텔레메트리 의미 체계를
+소유합니다.
 
-- calculates CPU and I/O rates from cumulative native counters;
-- preserves the last native rates during desktop-only updates;
-- classifies backend, Electron, and monitor processes;
-- computes process depth and child relationships;
-- tracks starts, exits, CPU time, and observed I/O;
-- projects power data;
-- acquires native streaming and Electron process metrics only for scoped live
-  subscribers;
-- queries and replays native history only when requested;
-- validates `(pid, startTimeMs)` before process signaling;
-- updates history health even when no further native sample arrives.
+- 누적 네이티브 카운터에서 CPU·I/O 속도를 계산합니다;
+- 데스크톱 전용 갱신 중에는 마지막 네이티브 속도를 유지합니다;
+- 백엔드·Electron·모니터 프로세스를 분류합니다;
+- 프로세스 깊이와 자식 관계를 계산합니다;
+- 시작, 종료, CPU 시간, 관측된 I/O를 추적합니다;
+- 전원 데이터를 프로젝션합니다;
+- 스코프가 지정된 실시간 구독자에 대해서만 네이티브 스트리밍과 Electron 프로세스
+  지표를 확보합니다;
+- 요청이 있을 때만 네이티브 이력을 조회하고 재생합니다;
+- 프로세스에 시그널을 보내기 전에 `(pid, startTimeMs)`를 검증합니다;
+- 네이티브 샘플이 더 도착하지 않아도 이력 상태를 갱신합니다.
 
-Electron and monitor processes are visible but are not valid targets for the
-existing process-signal RPC.
+Electron과 모니터 프로세스는 화면에 보이지만 기존 프로세스 시그널 RPC의 유효한
+대상은 아닙니다.
 
-### History projection
+### 이력 프로젝션
 
-`ResourceTelemetryHistory` is a pure on-demand projection. It replays raw native
-snapshots to derive rates, lifecycle counters, buckets, and process summaries.
-Current Electron process metrics are intentionally excluded from historical
-replay so they cannot overwrite older native CPU or memory samples.
+`ResourceTelemetryHistory`는 요청이 있을 때만 계산되는 순수 프로젝션입니다. 원본
+네이티브 스냅샷을 재생해 속도, 수명 주기 카운터, 버킷, 프로세스 요약을 도출합니다.
+현재 Electron 프로세스 지표는 과거 데이터 재생에서 의도적으로 제외되므로 더 오래된
+네이티브 CPU·메모리 샘플을 덮어쓸 수 없습니다.
 
 ### `ResourceAttribution`
 
-Tracks known logical application I/O separately from OS counters. Current
-integration points record successful writes for:
+알려진 논리적 애플리케이션 I/O를 OS 카운터와 별도로 추적합니다. 현재 연동
+지점에서는 다음에 대한 성공한 쓰기를 기록합니다.
 
-- provider native and canonical event logs;
-- the local server trace sink.
+- 제공자 네이티브 이벤트 로그와 정규 이벤트 로그;
+- 로컬 서버 트레이스 싱크.
 
-Entries contain component, operation, logical bytes, count, and elapsed time.
-Future persistence paths should call `ResourceAttribution.record` rather than
-adding diagnostics-specific counters.
+각 항목에는 구성 요소, 작업, 논리 바이트 수, 횟수, 경과 시간이 담깁니다. 앞으로
+추가되는 저장 경로는 진단 전용 카운터를 새로 만들지 말고
+`ResourceAttribution.record`를 호출해야 합니다.
 
-## Background policy integration
+## 백그라운드 정책 연동
 
-`HostPowerMonitor` consumes `DesktopTelemetryReceiver` directly; observing host
-power does not retain live resource diagnostics or invoke shell probes.
+`HostPowerMonitor`는 `DesktopTelemetryReceiver`를 직접 소비하며, 호스트 전원을
+관찰한다고 해서 실시간 리소스 진단이 유지되거나 셸 프로브가 실행되지는 않습니다.
 
-The monitor updates its latest timestamp on every Electron sample but only
-publishes semantic state changes. Increasing idle seconds alone does not cause a
-background-policy broadcast every second.
+이 모니터는 Electron 샘플이 올 때마다 최신 타임스탬프를 갱신하지만 의미 있는 상태
+변화만 게시합니다. 유휴 시간(초)이 늘어나는 것만으로는 매초 백그라운드 정책
+브로드캐스트가 발생하지 않습니다.
 
-## Public API and UI
+## 공개 API와 UI
 
-The WebSocket RPC surface provides:
+WebSocket RPC 표면은 다음을 제공합니다.
 
-- current snapshot;
-- bounded history;
-- explicit monitor retry;
-- a live snapshot subscription.
+- 현재 스냅샷;
+- 크기가 제한된 이력;
+- 명시적 모니터 재시도;
+- 실시간 스냅샷 구독.
 
-The diagnostics page displays:
+진단 페이지는 다음을 표시합니다.
 
-- aggregate CPU, memory, I/O, and process counts;
-- backend, Electron, and monitor overhead groups;
-- power and thermal state;
-- collector health and restart information;
-- CPU and I/O history;
-- a collapsible live process tree;
-- safe process signaling for backend descendants;
-- instrumented logical application I/O.
+- CPU·메모리·I/O 총계와 프로세스 수;
+- 백엔드·Electron·모니터 오버헤드 그룹;
+- 전원 상태와 열 상태;
+- 수집기 상태와 재시작 정보;
+- CPU·I/O 이력;
+- 접을 수 있는 실시간 프로세스 트리;
+- 백엔드 하위 프로세스에 대한 안전한 프로세스 시그널 전송;
+- 계측된 논리적 애플리케이션 I/O.
 
-Legacy process diagnostics RPCs are projected from the same service so they no
-longer start recurring process-table commands.
+기존 프로세스 진단 RPC도 같은 서비스에서 프로젝션되므로 더 이상 반복적인 프로세스
+테이블 명령을 실행하지 않습니다.
 
-## Packaging
+## 패키징
 
-Desktop artifact builds compile the Rust target, stage it as
-`resources/resource-monitor/t3-resource-monitor[.exe]`, and pass its path to the
-backend bootstrap.
+데스크톱 아티팩트 빌드는 Rust 타깃을 컴파일해
+`resources/resource-monitor/t3-resource-monitor[.exe]`로 배치하고 그 경로를 백엔드
+부트스트랩에 전달합니다.
 
-CLI release jobs upload each active platform monitor artifact and copy it into:
+CLI 릴리스 작업은 활성 플랫폼별 모니터 아티팩트를 업로드하고 다음 위치로
+복사합니다.
 
 ```text
 apps/server/dist/resource-monitor/<platform>-<arch>/
 ```
 
-The published server package already includes `dist`, so those executables ship
-with the CLI. Missing platform artifacts degrade native telemetry to
-`unavailable`; the server continues running.
+배포되는 서버 패키지에는 이미 `dist`가 포함되어 있으므로 이 실행 파일들은 CLI와
+함께 배포됩니다. 플랫폼 아티팩트가 없으면 네이티브 텔레메트리는 `unavailable`로
+낮아지지만 서버는 계속 실행됩니다.
 
-## Resource and failure behavior
+## 리소스 사용과 실패 동작
 
-Steady state uses:
+정상 상태에서 사용하는 것은 다음과 같습니다.
 
-- one native process;
-- power-adaptive native counter sampling with no periodic Node snapshot stream;
-- event-driven Electron power updates plus profile-driven heartbeats (30–60
-  seconds while active and 2–10 minutes while idle);
-- no `app.getAppMetrics()` calls while diagnostics is closed;
-- no telemetry database;
-- no recurring shell probes;
-- bounded PubSub queues and native ring history.
+- 네이티브 프로세스 하나;
+- 주기적인 Node 스냅샷 스트림 없이 동작하는 전원 적응형 네이티브 카운터 샘플링;
+- 이벤트 기반 Electron 전원 갱신과 프로필 기반 하트비트(활성 상태에서 30–60초,
+  유휴 상태에서 2–10분);
+- 진단이 닫혀 있는 동안에는 `app.getAppMetrics()` 호출 없음;
+- 텔레메트리 데이터베이스 없음;
+- 반복 실행되는 셸 프로브 없음;
+- 크기가 제한된 PubSub 큐와 네이티브 링 이력.
 
-The diagnostics page exposes the monitor's own process resource usage and
-collection duration so the observer's cost is measurable.
+진단 페이지는 모니터 자신의 프로세스 리소스 사용량과 수집 소요 시간을 노출하므로
+관측자가 치르는 비용도 측정할 수 있습니다.
 
-Failures are isolated:
+실패는 격리됩니다.
 
-- native failure does not stop the server;
-- Electron telemetry loss does not stop native telemetry;
-- schema/version errors are visible in health;
-- repeated native failures stop automatic restart churn until explicit retry;
-- server and desktop shutdown close their respective streams and child process
-  scopes.
+- 네이티브 실패가 서버를 멈추지 않습니다;
+- Electron 텔레메트리가 끊겨도 네이티브 텔레메트리는 멈추지 않습니다;
+- 스키마·버전 오류는 상태에 표시됩니다;
+- 네이티브 실패가 반복되면 명시적으로 재시도할 때까지 자동 재시작 반복을
+  중단합니다;
+- 서버와 데스크톱이 종료되면 각자의 스트림과 자식 프로세스 스코프를 닫습니다.
 
-## Future integration points
+## 향후 연동 지점
 
-High-value follow-up work can use the existing service boundaries:
+가치가 큰 후속 작업은 기존 서비스 경계를 그대로 활용할 수 있습니다.
 
-- opt-in file-path attribution through platform-specific tracing;
-- process lifecycle events to reduce the chance of missing very short-lived
-  children;
-- additional `ResourceAttribution` instrumentation for databases, checkpoints,
-  caches, and file synchronization;
-- exported diagnostic bundles;
-- adaptive sample intervals based on diagnostics visibility and active work.
+- 플랫폼별 추적을 통한 선택형 파일 경로 귀속;
+- 매우 짧게 살아 있는 자식 프로세스를 놓칠 가능성을 줄이는 프로세스 수명 주기
+  이벤트;
+- 데이터베이스, 체크포인트, 캐시, 파일 동기화에 대한 추가 `ResourceAttribution`
+  계측;
+- 내보낼 수 있는 진단 번들;
+- 진단 화면 표시 여부와 활성 작업에 따른 적응형 샘플 주기.
 
-These additions should preserve the current rules: direct platform APIs,
-schema-validated boundaries, explicit metric semantics, bounded retention, and
-no mandatory telemetry persistence.
+이런 추가 기능은 현재 규칙을 그대로 지켜야 합니다. 직접적인 플랫폼 API, 스키마
+검증을 거친 경계, 명시적인 지표 의미 체계, 제한된 보존, 그리고 텔레메트리 저장을
+강제하지 않는다는 규칙입니다.

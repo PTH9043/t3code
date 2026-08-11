@@ -1,14 +1,10 @@
-# Keybindings
+# 단축키
 
-Edit keybindings from **Settings** → **Keybindings**. That page lists every command, its current
-shortcut, whether it is a default or your own, and warns about conflicts.
+**설정 → 단축키**에서 단축키를 편집합니다. 이 페이지에는 모든 명령과 현재 지정된 단축키, 그 단축키가 기본값인지 사용자가 직접 지정한 것인지가 표시되며 충돌도 알려 줍니다.
 
-The same configuration lives in `~/.t3/userdata/keybindings.json` on the machine running the
-server, if you prefer editing it directly. T3 Code writes the built-in defaults into that file on
-first run, and adds any new defaults on later startups unless a rule of yours already claims the
-command or the shortcut.
+직접 편집하고 싶다면 서버를 실행하는 컴퓨터의 `~/.t3/userdata/keybindings.json`에 같은 설정이 들어 있습니다. T3 Code는 처음 실행할 때 내장 기본값을 이 파일에 기록하고, 사용자의 규칙이 해당 명령이나 단축키를 이미 차지하고 있지 않다면 이후 시작할 때 새로 생긴 기본값을 추가합니다.
 
-The file is a JSON array of rules.
+파일은 규칙을 담은 JSON 배열입니다.
 
 ```json
 [
@@ -17,69 +13,46 @@ The file is a JSON array of rules.
 ]
 ```
 
-Invalid rules are ignored. An invalid file is ignored entirely, and the server logs a warning.
+잘못된 규칙은 무시됩니다. 잘못된 파일은 전체가 무시되며 서버는 경고를 로그에 남깁니다.
 
-## Rule Shape
+## 규칙 구조
 
-- `key` (required): shortcut string, like `mod+j`, `ctrl+k`, `cmd+shift+d`
-- `command` (required): the command ID to run
-- `when` (optional): boolean expression controlling when the shortcut is active
+- `key`(필수): `mod+j`, `ctrl+k`, `cmd+shift+d` 같은 단축키 문자열
+- `command`(필수): 실행할 명령 ID
+- `when`(선택): 단축키가 활성화되는 시점을 제어하는 불리언 표현식
 
-## Key Syntax
+## 키 표기법
 
-Modifiers: `mod` (`cmd` on macOS, `ctrl` elsewhere), `cmd` / `meta`, `ctrl` / `control`, `shift`,
-`alt` / `option`.
+조합키: `mod`(macOS에서는 `cmd`, 그 외 환경에서는 `ctrl`), `cmd` / `meta`, `ctrl` / `control`, `shift`, `alt` / `option`.
 
-Examples: `mod+j`, `mod+shift+d`, `ctrl+l`, `cmd+k`.
+예: `mod+j`, `mod+shift+d`, `ctrl+l`, `cmd+k`.
 
-## Commands
+## 명령
 
-Commands are IDs like `terminal.toggle`, `commandPalette.toggle`, `preview.refresh`, and
-`chat.new`. Project scripts are addressable as `script.{id}.run`, for example `script.test.run`.
+명령은 `terminal.toggle`, `commandPalette.toggle`, `preview.refresh`, `chat.new` 같은 ID입니다. 프로젝트 스크립트는 `script.{id}.run` 형식으로 지정할 수 있으며, 예를 들면 `script.test.run`입니다.
 
-`filePicker.toggle` opens file search for the active project and defaults to `mod+p`.
-`projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
-Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
-`themeEditor.toggle` opens or closes the floating theme editor and defaults to
-`mod+alt+shift+t`. Select a color label to spotlight the elements that use it; select the label
-again to clear the spotlight. The swatch and hex field keep that color selected while you edit it.
-Use **Inspect** to pick an element in the app and reveal its color token. Inspect disarms after one
-successful pick; its hover glow and badge preview the element and token that click will select.
-**Cancel** or `Escape` exits Inspect and clears its selection and spotlight.
+`filePicker.toggle`은 활성 프로젝트의 파일 검색을 열며 기본 단축키는 `mod+p`입니다. `projectSearch.toggle`은 활성 프로젝트의 파일 내부를 검색하며 기본 단축키는 `mod+shift+f`입니다. 두 단축키 중 하나를 다시 누르면 해당 검색이 닫히고, 다른 단축키로 바꾸면 열려 있던 검색이 교체됩니다. `themeEditor.toggle`은 플로팅 테마 편집기를 열거나 닫으며 기본 단축키는 `mod+alt+shift+t`입니다. 색상 라벨을 선택하면 그 색을 사용하는 요소가 강조되고, 라벨을 다시 선택하면 강조가 지워집니다. 색상 견본과 16진수 입력란은 편집하는 동안 해당 색을 선택 상태로 유지합니다. 앱에서 요소를 선택해 그 색상 토큰을 확인하려면 **검사**를 사용하세요. 검사는 한 번 성공적으로 선택하면 해제되며, 마우스를 올렸을 때 나타나는 발광 효과와 배지가 클릭 시 선택될 요소와 토큰을 미리 보여 줍니다. **취소** 또는 `Escape`를 누르면 검사가 종료되고 선택과 강조가 지워집니다.
 
-The command palette searches active thread titles, projects, branches, user messages, and final
-agent responses across connected environments. Message matches show one labeled excerpt while
-keeping the thread's project, branch, and machine context visible. Message search begins after two
-characters and uses SQLite's ASCII case-insensitive matching.
+명령 팔레트는 연결된 환경 전체에서 활성 대화 제목, 프로젝트, 브랜치, 사용자 메시지, 에이전트의 최종 응답을 검색합니다. 메시지가 일치하면 라벨이 붙은 발췌 한 개를 보여 주면서 해당 대화의 프로젝트, 브랜치, 컴퓨터 정보도 함께 볼 수 있게 유지합니다. 메시지 검색은 두 글자부터 시작하며 SQLite의 ASCII 대소문자 구분 없는 매칭을 사용합니다.
 
-The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
-always matches the build you are running. Use that rather than a copied list.
+전체 명령 목록과 현재 기본값은 **설정 → 단축키**에 표시되며, 이 화면은 항상 실행 중인 빌드와 일치합니다. 복사해 둔 목록 대신 이 화면을 사용하세요.
 
-Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
-inherits the project you were in, along with model and mode selections. Branch, worktree, and
-environment mode always come from your configured defaults, not from the thread you were looking
-at. To keep a worktree, use the explicit "new thread in this worktree" action in the branch
-toolbar. The only difference between the two commands: with the current sidebar and more than one
-project, `chat.new` opens a project chooser first.
+`chat.new`와 `chat.newLocal`은 모두 같은 경로로 대화를 만든다는 점에 유의하세요. 새 대화는 사용자가 있던 프로젝트와 함께 모델·모드 선택을 이어받습니다. 브랜치, 워크트리, 환경 모드는 보고 있던 대화가 아니라 항상 설정해 둔 기본값을 따릅니다. 워크트리를 유지하려면 브랜치 툴바의 "이 워크트리에서 새 대화" 동작을 명시적으로 사용하세요. 두 명령의 유일한 차이는, 현재 사이드바에서 프로젝트가 둘 이상이면 `chat.new`가 프로젝트 선택 화면을 먼저 연다는 점입니다.
 
-## `when` Conditions
+## `when` 조건
 
-A `when` expression is evaluated against context keys describing the current UI state. The keys
-the app supplies today are `terminalFocus`, `terminalOpen`, `previewFocus`, `previewOpen`, and
-`modelPickerOpen`. The set is open and grows over time, so treat that as the current list rather
-than a fixed one. Any key the running app does not supply evaluates to `false`.
+`when` 표현식은 현재 UI 상태를 나타내는 컨텍스트 키를 기준으로 평가됩니다. 현재 앱이 제공하는 키는 `terminalFocus`, `terminalOpen`, `previewFocus`, `previewOpen`, `modelPickerOpen`입니다. 이 집합은 확정된 것이 아니라 시간이 지나면서 늘어나므로, 고정된 목록이 아니라 현재 시점의 목록으로 보아야 합니다. 실행 중인 앱이 제공하지 않는 키는 모두 `false`로 평가됩니다.
 
-Operators: `!` (not), `&&` (and), `||` (or), and parentheses.
+연산자: `!`(부정), `&&`(그리고), `||`(또는), 그리고 괄호.
 
-Examples:
+예:
 
 - `"when": "terminalFocus"`
 - `"when": "terminalOpen && !terminalFocus"`
 - `"when": "!terminalFocus"`
 
-## Precedence
+## 우선순위
 
-- Rules are evaluated in array order.
-- For a key event, the last rule where both `key` matches and `when` evaluates to `true` wins.
-- Precedence is across commands, not only within the same command. A later rule for a different
-  command can take a key away from an earlier one.
+- 규칙은 배열 순서대로 평가됩니다.
+- 하나의 키 이벤트에 대해 `key`가 일치하고 `when`이 `true`로 평가되는 마지막 규칙이 적용됩니다.
+- 우선순위는 같은 명령 안에서만이 아니라 명령 전체에 걸쳐 적용됩니다. 뒤에 오는 다른 명령의 규칙이 앞선 규칙에서 키를 가져갈 수 있습니다.

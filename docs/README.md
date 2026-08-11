@@ -1,45 +1,45 @@
-# T3 Code docs
+# T3 Code 문서
 
-## Using T3 Code
+## T3 Code 사용하기
 
-- [Install and first run](./user/install.md)
-- [Permission modes](./user/permission-modes.md)
-- [Keyboard shortcuts](./user/keybindings.md)
-- [Organizing threads](./user/thread-sidebar.md)
-- [Remote access](./user/remote-access.md)
-- [Keeping app and server in sync](./user/updating.md)
-- [워크스페이스 프로그램 운영](./user/workspace-programs.md)
-- [Fable 작업 오케스트레이션](./user/workspace-orchestration.md)
-- [Source control integrations](./user/source-control.md)
-- [Background service (Linux)](./user/background-service.md)
-- Providers: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md)
+- [설치와 첫 실행](./user/install.md)
+- [권한 모드](./user/permission-modes.md)
+- [키보드 단축키](./user/keybindings.md)
+- [대화 정리](./user/thread-sidebar.md)
+- [원격 접속](./user/remote-access.md)
+- [앱과 서버 동기화 유지](./user/updating.md)
+- [프로젝트 프로그램 운영](./user/workspace-programs.md)
+- [페이블 작업 오케스트레이션](./user/workspace-orchestration.md)
+- [소스 컨트롤 연동](./user/source-control.md)
+- [백그라운드 서비스(리눅스)](./user/background-service.md)
+- 제공자: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md)
 
-Mobile app: [apps/mobile/README.md](../apps/mobile/README.md)
+모바일 앱: [apps/mobile/README.md](../apps/mobile/README.md)
 
 ---
 
-## Working on T3 Code
+## T3 Code 개발하기
 
-Everything below is for maintainers. Setup lives in the [root README](../README.md);
-policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../AGENTS.md).
+아래 내용은 모두 메인테이너용입니다. 설치와 설정은 [루트 README](../README.md),
+정책은 [CONTRIBUTING.md](../CONTRIBUTING.md), 에이전트 규칙은 [AGENTS.md](../AGENTS.md)에 있습니다.
 
-- [Architecture overview](./internals/overview.md)
-- [Workspace layout](./internals/workspace-layout.md)
-- [Glossary](./internals/glossary.md)
-- [Scripts](./internals/scripts.md)
-- [Connection runtime](./internals/connection-runtime.md)
-- [Providers](./internals/providers.md)
-- [Remote environments](./internals/remote.md)
-- [Server updates](./internals/server-updates.md)
-- [Resource telemetry](./internals/resource-telemetry.md)
-- [Environment auth](./internals/environment-auth.md)
-- [Workspace collaboration task graphs](./internals/workspace-collaboration.md)
+- [아키텍처 개요](./internals/overview.md)
+- [워크스페이스 구조](./internals/workspace-layout.md)
+- [용어집](./internals/glossary.md)
+- [스크립트](./internals/scripts.md)
+- [연결 런타임](./internals/connection-runtime.md)
+- [제공자](./internals/providers.md)
+- [원격 환경](./internals/remote.md)
+- [서버 업데이트](./internals/server-updates.md)
+- [리소스 텔레메트리](./internals/resource-telemetry.md)
+- [환경 인증](./internals/environment-auth.md)
+- [프로젝트 협업 작업 그래프](./internals/workspace-collaboration.md)
 - [T3 Connect](./internals/t3-connect.md)
-- [CI gates](./internals/ci.md)
+- [CI 게이트](./internals/ci.md)
 
-### Runbooks
+### 운영 절차서
 
-- [Release](./operations/release.md)
-- [Observability](./operations/observability.md)
-- [Relay observability](./operations/relay-observability.md)
-- [Mobile app store screenshots](./operations/mobile-app-store-screenshots.md)
+- [릴리스](./operations/release.md)
+- [관측성](./operations/observability.md)
+- [relay(중계 서버) 관측성](./operations/relay-observability.md)
+- [모바일 앱스토어 스크린샷](./operations/mobile-app-store-screenshots.md)

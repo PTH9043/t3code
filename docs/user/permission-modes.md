@@ -1,48 +1,31 @@
-# Permission Modes
+# 권한 모드
 
-A permission mode controls how much the agent does on its own and when it stops to ask you.
+권한 모드는 에이전트가 어디까지 스스로 처리하고 어느 시점에 멈춰 사용자에게 확인을 요청할지 결정합니다.
 
-The mode is set per thread, from the mode control in the message composer. Changing it in one
-thread does not change any other thread. A thread created from inside another thread keeps that
-thread's mode; otherwise new threads start in **Full access** unless you pick something else
-before sending.
+모드는 대화마다 설정하며, 메시지 입력창의 모드 선택기에서 지정합니다. 한 대화에서 모드를 바꿔도 다른 대화의 모드는 바뀌지 않습니다. 다른 대화 안에서 만든 대화는 그 대화의 모드를 그대로 사용하고, 그 밖의 새 대화는 보내기 전에 다른 모드를 선택하지 않으면 **전체 권한**으로 시작합니다.
 
-## The Modes
+## 모드 종류
 
-**Supervised**: ask before commands and file changes. The agent pauses and shows you what it
-wants to run or edit, and waits for approval. Work outside the workspace is restricted.
+**승인 필요**: 명령 실행과 파일 변경 전에 확인합니다. 에이전트는 실행하거나 수정하려는 내용을 보여준 뒤 멈춰서 승인을 기다립니다. 프로젝트 밖의 작업은 제한됩니다.
 
-**Auto-accept edits**: auto-approve edits, ask before other actions. File changes go through
-without prompting; commands and anything else still stop for approval.
+**수정 자동 승인**: 파일 수정은 자동 승인하고 다른 작업은 확인합니다. 파일 변경은 추가 확인 없이 진행되지만, 명령을 비롯한 나머지 작업은 여전히 승인을 위해 멈춥니다.
 
-**Auto**: routine actions proceed without you; risky ones still ask. How this is enforced depends
-on the provider: Codex delegates routine approvals to an AI reviewer, Claude uses its own auto
-permission mode, and providers without an equivalent (such as OpenCode) fall back to asking, like
-Supervised.
+**자동**: 일반 작업은 사용자 확인 없이 진행하고 위험한 작업은 여전히 확인합니다. 적용 방식은 제공자마다 다릅니다. Codex는 일반 작업의 승인을 AI 검토자에게 맡기고, Claude는 자체 자동 권한 모드를 사용하며, 대응하는 기능이 없는 제공자(예: OpenCode)는 승인 필요와 마찬가지로 확인을 요청하는 방식으로 동작합니다.
 
-**Full access**: allow commands and edits without prompts. The default. The agent runs
-unattended until it finishes or asks a question of its own.
+**전체 권한**: 추가 확인 없이 명령 실행과 파일 수정을 허용합니다. 기본값입니다. 에이전트는 작업을 마치거나 스스로 질문할 때까지 사용자 개입 없이 실행됩니다.
 
-Approvals appear inline in the conversation. Approve or reject one and the agent continues from
-there.
+승인 요청은 대화 안에 그대로 표시됩니다. 승인하거나 거부하면 에이전트가 그 지점부터 이어서 진행합니다.
 
-## Choosing a Mode
+## 모드 선택
 
-Use **Full access** for work in a worktree or a sandbox you can throw away.
+워크트리나 언제든 버릴 수 있는 샌드박스에서 작업할 때는 **전체 권한**을 사용하세요.
 
-Use **Supervised** on a repository where an unwanted command is expensive, or the first time you
-run an unfamiliar task.
+원하지 않는 명령의 대가가 큰 저장소이거나 익숙하지 않은 작업을 처음 실행할 때는 **승인 필요**를 사용하세요.
 
-**Auto-accept edits** suits refactors where the edits are the point and you only care about the
-shell commands.
+**수정 자동 승인**은 파일 수정 자체가 목적이고 셸 명령만 확인하면 되는 리팩터링에 적합합니다.
 
-## Provider Behavior
+## 제공자별 동작
 
-Each provider maps these modes onto its own approval and sandbox settings. Codex, for example,
-translates the mode into its approval policy and sandbox level, so **Supervised** runs the CLI
-with prompting enabled and a restricted workspace while **Full access** disables both. The
-labels above describe what you get; the exact per-provider translation is internal and may
-change.
+각 제공자는 이 모드를 자신의 승인 설정과 샌드박스 설정으로 변환합니다. 예를 들어 Codex는 모드를 자체 승인 정책과 샌드박스 수준으로 옮기므로, **승인 필요**는 확인 요청을 켜고 프로젝트를 제한한 상태로 CLI를 실행하고 **전체 권한**은 두 가지를 모두 해제합니다. 위 라벨은 실제로 적용되는 동작을 설명하며, 제공자별 정확한 변환 방식은 내부 구현이므로 달라질 수 있습니다.
 
-Mobile offers the same four modes. It labels the first one **Approve actions** rather than
-**Supervised**.
+모바일 앱도 같은 네 가지 모드를 제공합니다. 다만 첫 번째 모드를 **승인 필요**가 아니라 **작업 승인**으로 표시합니다.

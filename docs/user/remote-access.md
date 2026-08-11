@@ -1,227 +1,227 @@
-# Remote Access
+# 원격 접속
 
-Use this when you want to connect to a T3 Code server from another device such as a phone, tablet, or separate desktop app.
+휴대폰, 태블릿, 별도의 데스크톱 앱 같은 다른 기기에서 T3 Code 서버에 연결하려면 이 문서를 참고하세요.
 
-## Quick Pairing for a Running Server
+## 실행 중인 서버 빠른 페어링
 
-If a server is already running on this machine, mint a fresh pairing token and QR code without restarting anything:
+이 컴퓨터에서 서버가 이미 실행 중이면 아무것도 다시 시작하지 않고 새 페어링 토큰과 QR 코드를 발급할 수 있습니다.
 
 ```bash
 npx t3 pair
 ```
 
-`t3 pair` finds the running server (the shared `~/.t3` install, or the current worktree's dev server when run inside one), issues a one-time pairing token, and prints the pairing URL as a QR code you can scan from your phone.
+`t3 pair`는 실행 중인 서버(공용 `~/.t3` 설치본, 또는 워크트리 안에서 실행한 경우 현재 워크트리의 개발 서버)를 찾아 일회용 페어링 토큰을 발급하고, 휴대폰으로 스캔할 수 있는 QR 코드로 페어링 URL을 출력합니다.
 
-If the server is only bound to loopback, the printed URL is not reachable from another device. Pair over your tailnet instead:
+서버가 루프백에만 바인딩되어 있으면 출력된 URL에는 다른 기기에서 접속할 수 없습니다. 이럴 때는 tailnet을 통해 페어링하세요.
 
 ```bash
 npx t3 pair --tailscale
 ```
 
-This publishes the server over Tailscale Serve HTTPS (configuring the mapping if needed — it persists until you run `tailscale serve --https=443 off`) and pairs through the `https://machine.tailnet.ts.net/` URL. Use `--tailscale-serve-port` for a different HTTPS port, `--ttl` to change the token lifetime, and `--base-dir` to target a specific data directory.
+이 명령은 Tailscale Serve HTTPS로 서버를 게시하고(필요하면 매핑을 구성하며, 이 매핑은 `tailscale serve --https=443 off`를 실행할 때까지 유지됩니다) `https://machine.tailnet.ts.net/` URL로 페어링합니다. 다른 HTTPS 포트를 쓰려면 `--tailscale-serve-port`, 토큰 유효 기간을 바꾸려면 `--ttl`, 특정 데이터 디렉터리를 지정하려면 `--base-dir`을 사용하세요.
 
-If no server is running, `t3 pair` says so and points you at `npx t3 serve` or `npx t3 connect`.
+실행 중인 서버가 없으면 `t3 pair`가 그 사실을 알리고 `npx t3 serve` 또는 `npx t3 connect`를 안내합니다.
 
-## Recommended Setup
+## 권장 구성
 
-Use a trusted private network that meshes your devices together, such as a tailnet.
+tailnet처럼 기기들을 하나로 묶어 주는 신뢰할 수 있는 사설 네트워크를 사용하세요.
 
-That gives you:
+이렇게 하면 다음을 얻을 수 있습니다.
 
-- a stable address to connect to
-- transport security at the network layer
-- less exposure than opening the server to the public internet
+- 연결할 안정적인 주소
+- 네트워크 계층의 전송 보안
+- 서버를 공개 인터넷에 여는 것보다 적은 노출
 
-## Enabling Network Access
+## 네트워크 접속 활성화
 
-There are three ways to reach your server from another device: expose the desktop app's backend,
-run a headless server from the CLI, or have the desktop app launch T3 Code over SSH.
+다른 기기에서 서버에 접속하는 방법은 세 가지로, 데스크톱 앱의 백엔드를 노출하거나,
+CLI에서 헤드리스 서버를 실행하거나, 데스크톱 앱이 SSH로 T3 Code를 실행하게 하는 것입니다.
 
-### Option 1: Desktop App
+### 방법 1: 데스크톱 앱
 
-If you are already running the desktop app and want to make it reachable from other devices:
+이미 데스크톱 앱을 실행 중이고 다른 기기에서 접속할 수 있게 하려면 다음과 같이 하세요.
 
-1. Open **Settings** → **Connections**.
-2. Under **This environment**, toggle **Network access** on. This will restart the app and run the backend on all network interfaces.
-3. The settings panel will show the default reachable endpoint, with a `+N` control when more endpoints are available. Expand it to inspect alternatives such as loopback, LAN, private-network, or HTTPS endpoints.
-4. Use **Create Link** to generate a pairing link you can share with another device.
+1. **설정 → 연결**을 엽니다.
+2. **이 환경**에서 **네트워크 접속**을 켭니다. 앱이 다시 시작되고 백엔드가 모든 네트워크 인터페이스에서 실행됩니다.
+3. 설정 패널에는 기본 접속 가능 엔드포인트가 표시되며, 엔드포인트가 더 있으면 `+N` 컨트롤이 함께 나타납니다. 이를 펼치면 루프백, LAN, 사설 네트워크, HTTPS 엔드포인트 같은 다른 선택지를 확인할 수 있습니다.
+4. **링크 만들기**로 다른 기기와 공유할 페어링 링크를 생성합니다.
 
-The default endpoint controls the QR code and primary copy action for pairing links. You can change it from the expanded endpoint list. The preference is stored by endpoint type, so choosing the local LAN endpoint survives normal IP address changes when you move between networks.
+기본 엔드포인트는 페어링 링크의 QR 코드와 기본 복사 동작을 결정합니다. 펼친 엔드포인트 목록에서 변경할 수 있습니다. 이 설정은 엔드포인트 유형별로 저장되므로, 로컬 LAN 엔드포인트를 선택해 두면 네트워크를 옮기며 IP 주소가 바뀌어도 그대로 유지됩니다.
 
-When no user default is saved, the app uses the built-in LAN endpoint for pairing links when
-available. You can set another endpoint as the default from the expanded endpoint list.
+사용자 기본값이 저장되어 있지 않으면 앱은 가능한 경우 내장 LAN 엔드포인트를 페어링 링크에
+사용합니다. 펼친 엔드포인트 목록에서 다른 엔드포인트를 기본값으로 지정할 수 있습니다.
 
-- HTTPS/WSS-compatible endpoints work from `https://app.t3.codes`, but are not made the default
-  automatically.
-- Non-loopback HTTP endpoints are useful for direct LAN pairing.
-- Loopback-only endpoints are not useful for another device unless that device is the same machine.
+- HTTPS/WSS 호환 엔드포인트는 `https://app.t3.codes`에서 동작하지만 자동으로 기본값이 되지는
+  않습니다.
+- 루프백이 아닌 HTTP 엔드포인트는 직접 LAN 페어링에 유용합니다.
+- 루프백 전용 엔드포인트는 상대 기기가 같은 컴퓨터가 아닌 한 다른 기기에서는 쓸모가 없습니다.
 
-If the copied link points directly at `http://192.168.x.y:3773`, open it from a client that can reach that LAN address. If it points at `https://app.t3.codes/pair?...`, the hosted web app will save the environment and connect directly to the backend URL in the link.
+복사한 링크가 `http://192.168.x.y:3773`을 직접 가리키면 해당 LAN 주소에 접속할 수 있는 클라이언트에서 여세요. `https://app.t3.codes/pair?...`를 가리키면 호스팅 웹 앱이 환경을 저장하고 링크에 담긴 백엔드 URL로 직접 연결합니다.
 
-In the mobile app's **Add Environment** form, a numeric IP address without a scheme uses HTTP. Include `https://` explicitly when the backend is served over HTTPS.
+모바일 앱의 **환경 추가** 양식에서는 스킴 없이 숫자 IP 주소만 입력하면 HTTP를 사용합니다. 백엔드가 HTTPS로 제공된다면 `https://`를 명시적으로 포함하세요.
 
-### Tailscale Endpoints
+### Tailscale 엔드포인트
 
-When the desktop app can detect Tailscale, it adds Tailnet endpoints to the reachable endpoint list.
+데스크톱 앱이 Tailscale을 감지할 수 있으면 접속 가능 엔드포인트 목록에 Tailnet 엔드포인트를 추가합니다.
 
-Depending on your Tailscale setup, this may include:
+Tailscale 구성에 따라 다음이 포함될 수 있습니다.
 
-- the machine's `100.x.y.z` Tailnet IP
-- a MagicDNS name
-- an HTTPS MagicDNS endpoint when Tailscale Serve is configured for this backend
+- 해당 컴퓨터의 `100.x.y.z` Tailnet IP
+- MagicDNS 이름
+- 이 백엔드에 Tailscale Serve가 구성된 경우 HTTPS MagicDNS 엔드포인트
 
-The Tailscale HTTPS endpoint uses the clean MagicDNS URL, such as
-`https://machine.tailnet.ts.net/`, and is off until you opt in. Turn on **Enable Tailscale HTTPS**
-on the **Tailscale HTTPS** row in **Settings** → **Connections**. The desktop app restarts the
-backend with the same server-side behavior as `t3 serve --tailscale-serve`, then the server asks
-Tailscale Serve to proxy HTTPS traffic to the local backend. Turn the same switch off to stop it.
+Tailscale HTTPS 엔드포인트는 `https://machine.tailnet.ts.net/`처럼 깔끔한 MagicDNS URL을
+사용하며, 직접 켜기 전까지는 꺼져 있습니다. **설정 → 연결**의 **Tailscale HTTPS** 행에서
+**Tailscale HTTPS 사용**을 켜세요. 데스크톱 앱은 `t3 serve --tailscale-serve`와 동일한 서버 측
+동작으로 백엔드를 다시 시작하고, 이어서 서버가 Tailscale Serve에 HTTPS 트래픽을 로컬 백엔드로
+프록시하도록 요청합니다. 중지하려면 같은 스위치를 끄세요.
 
-The Tailscale support is an endpoint provider add-on. The core remote model still works without Tailscale: LAN HTTP endpoints, custom HTTPS endpoints, future tunnels, and SSH-launched environments all use the same saved environment and pairing flow.
+Tailscale 지원은 엔드포인트 제공자 부가 기능입니다. 핵심 원격 모델은 Tailscale 없이도 동작합니다. LAN HTTP 엔드포인트, 사용자 지정 HTTPS 엔드포인트, 앞으로 추가될 터널, SSH로 실행한 환경 모두 동일한 저장 환경과 페어링 흐름을 사용합니다.
 
-For `https://app.t3.codes`, prefer an HTTPS Tailnet or other HTTPS endpoint. A plain `http://100.x.y.z:3773` endpoint can still work from a desktop client or another browser page served over HTTP, but it will not work from the hosted HTTPS app because of browser mixed-content rules.
+`https://app.t3.codes`에서는 HTTPS Tailnet 엔드포인트나 다른 HTTPS 엔드포인트를 사용하세요. 일반 `http://100.x.y.z:3773` 엔드포인트도 데스크톱 클라이언트나 HTTP로 제공되는 다른 브라우저 페이지에서는 동작하지만, 브라우저의 혼합 콘텐츠 규칙 때문에 호스팅 HTTPS 앱에서는 동작하지 않습니다.
 
-### Option 2: Headless Server (CLI)
+### 방법 2: 헤드리스 서버(CLI)
 
-Use this when you want to run the server without a GUI, for example on a remote machine over SSH.
+SSH로 접속한 원격 컴퓨터처럼 GUI 없이 서버를 실행하려면 이 방법을 사용하세요.
 
-Run the server with `t3 serve`.
+`t3 serve`로 서버를 실행합니다.
 
 ```bash
 npx t3 serve --host "$(tailscale ip -4)"
 ```
 
-`t3 serve` starts the server without opening a browser and prints:
+`t3 serve`는 브라우저를 열지 않고 서버를 시작한 뒤 다음을 출력합니다.
 
-- a connection string
-- a pairing token
-- a pairing URL
-- a QR code for the pairing URL
+- 연결 문자열
+- 페어링 토큰
+- 페어링 URL
+- 페어링 URL의 QR 코드
 
-From there, connect from another device in either of these ways:
+그다음 다른 기기에서 아래 방법 중 하나로 연결합니다.
 
-- scan the QR code on your phone
-- in the desktop app, enter the full pairing URL
-- in the desktop app, enter the host and token separately
-- in the hosted web app, open a hosted pairing URL when the backend is reachable over HTTPS
+- 휴대폰으로 QR 코드를 스캔합니다
+- 데스크톱 앱에 전체 페어링 URL을 입력합니다
+- 데스크톱 앱에 호스트와 토큰을 각각 입력합니다
+- 백엔드에 HTTPS로 접속할 수 있으면 호스팅 웹 앱에서 호스팅 페어링 URL을 엽니다
 
-Use `t3 serve --help` for the full flag reference. It supports the same general startup options as the normal server command, including an optional `cwd` argument.
+전체 플래그 목록은 `t3 serve --help`를 참고하세요. 선택적 `cwd` 인자를 포함해 일반 서버 명령과 동일한 시작 옵션을 지원합니다.
 
-For hosted web pairing over Tailscale HTTPS, opt in to Tailscale Serve:
+Tailscale HTTPS를 통한 호스팅 웹 페어링을 사용하려면 Tailscale Serve를 켜세요.
 
 ```bash
 npx t3 serve --tailscale-serve
 ```
 
-By default this configures Tailscale Serve on HTTPS port 443 and advertises
-`https://machine.tailnet.ts.net/`. Advanced users can choose a different HTTPS port:
+기본적으로 이 명령은 HTTPS 443 포트에 Tailscale Serve를 구성하고
+`https://machine.tailnet.ts.net/`을 알립니다. 고급 사용자는 다른 HTTPS 포트를 선택할 수 있습니다.
 
 ```bash
 npx t3 serve --tailscale-serve --tailscale-serve-port 8443
 ```
 
-Once paired, add projects normally: open the Command Palette and choose **Add Project**, then pick
-the environment the project lives on. Every saved environment is offered, not only the local one.
+페어링을 마치면 평소와 같이 프로젝트를 추가합니다. 명령 팔레트를 열어 **프로젝트 추가**를
+선택한 다음 프로젝트가 있는 환경을 고르세요. 로컬 환경뿐 아니라 저장된 모든 환경이 표시됩니다.
 
-### Option 3: Desktop-Managed SSH Launch
+### 방법 3: 데스크톱이 관리하는 SSH 실행
 
-Use this when you want the desktop app to start or reuse T3 Code on another machine over SSH.
+데스크톱 앱이 SSH로 다른 컴퓨터의 T3 Code를 시작하거나 재사용하게 하려면 이 방법을 사용하세요.
 
-1. Open **Settings** → **Connections**.
-2. Under **Remote Environments**, choose **Add environment**.
-3. Select the SSH launch flow.
-4. Enter the SSH target, such as `user@example.com`.
-5. Confirm the launch. The desktop app probes the host, starts or reuses a remote T3 server, opens a local port forward, and saves the environment.
+1. **설정 → 연결**을 엽니다.
+2. **원격 환경**에서 **환경 추가**를 선택합니다.
+3. SSH 실행 흐름을 선택합니다.
+4. `user@example.com` 같은 SSH 대상을 입력합니다.
+5. 실행을 확인합니다. 데스크톱 앱이 호스트를 탐색하고, 원격 T3 서버를 시작하거나 재사용하며, 로컬 포트 포워딩을 열고, 환경을 저장합니다.
 
-After setup, the renderer connects to a local forwarded HTTP/WebSocket endpoint. The remote host still owns the actual T3 server, projects, files, git state, terminals, and provider sessions.
+설정을 마치면 렌더러는 로컬로 포워딩된 HTTP/WebSocket 엔드포인트에 연결합니다. 실제 T3 서버, 프로젝트, 파일, git 상태, 터미널, 제공자 세션은 여전히 원격 호스트가 소유합니다.
 
-SSH launch is a desktop feature because it needs local process and SSH access. Once the environment is paired and saved, it uses the same environment list and connection model as direct LAN, Tailscale, HTTPS, or future tunnel-backed environments.
+SSH 실행은 로컬 프로세스와 SSH 접근이 필요하기 때문에 데스크톱 기능입니다. 환경을 페어링하고 저장한 뒤에는 직접 LAN, Tailscale, HTTPS 또는 앞으로 추가될 터널 기반 환경과 동일한 환경 목록과 연결 모델을 사용합니다.
 
-#### SSH Launch Troubleshooting
+#### SSH 실행 문제 해결
 
-The desktop SSH launcher connects with a non-interactive `sh` session, writes a small launcher script under `~/.t3/ssh-launch/<host-key>/`, starts or reuses a remote T3 server, and forwards the remote loopback port back to your desktop.
+데스크톱 SSH 실행기는 비대화형 `sh` 세션으로 연결해 `~/.t3/ssh-launch/<host-key>/` 아래에 작은 실행 스크립트를 쓰고, 원격 T3 서버를 시작하거나 재사용한 뒤, 원격 루프백 포트를 데스크톱으로 포워딩합니다.
 
-The remote host must have a compatible Node.js runtime. T3 Code uses the server package's `engines.node` requirement:
+원격 호스트에는 호환되는 Node.js 런타임이 있어야 합니다. T3 Code는 서버 패키지의 `engines.node` 요구 사항을 사용합니다.
 
 ```text
 ^22.16 || ^23.11 || >=24.10
 ```
 
-During SSH launch, T3 Code first checks whether `node` is on `PATH`. If it is missing, the launcher
-looks in the usual install directories and tries to activate a version manager if it finds one
-(Volta, asdf, mise, fnm, nodenv, nvm). That covers most setups, but a version manager that only
-initializes from an interactive shell profile will not be picked up.
+SSH 실행 중에 T3 Code는 먼저 `node`가 `PATH`에 있는지 확인합니다. 없으면 실행기가 일반적인
+설치 디렉터리를 살펴보고, 버전 관리자가 있으면 활성화를 시도합니다(Volta, asdf, mise, fnm,
+nodenv, nvm). 대부분의 구성은 이것으로 해결되지만, 대화형 셸 프로필에서만 초기화되는 버전
+관리자는 인식되지 않습니다.
 
-If launch fails with `node: command not found`, a port-scan failure, or a message that the remote Node version does not satisfy the required range, SSH into the host and check the same non-interactive shell path T3 Code uses:
+실행이 `node: command not found`, 포트 스캔 실패, 또는 원격 Node 버전이 요구 범위를 충족하지 않는다는 메시지와 함께 실패하면, 해당 호스트에 SSH로 접속해 T3 Code가 사용하는 것과 동일한 비대화형 셸 경로를 확인하세요.
 
 ```bash
 ssh user@example.com 'sh -lc "command -v node && node --version"'
 ```
 
-If that does not print a compatible Node version, configure your version manager for non-interactive shells or install a compatible Node binary in one of the searched locations. For example, with nvm you may need a default alias:
+호환되는 Node 버전이 출력되지 않으면 비대화형 셸에 맞게 버전 관리자를 구성하거나, 검색 대상 위치 중 하나에 호환되는 Node 바이너리를 설치하세요. 예를 들어 nvm에서는 기본 별칭이 필요할 수 있습니다.
 
 ```bash
 nvm alias default 24
 ```
 
-With mise, asdf, fnm, or nodenv, make sure the tool's shim directory is installed and resolves to a Node version satisfying the range above without an interactive shell.
+mise, asdf, fnm, nodenv를 사용한다면 해당 도구의 shim 디렉터리가 설치되어 있고 대화형 셸 없이도 위 범위를 충족하는 Node 버전으로 해석되는지 확인하세요.
 
-If reconnecting after an app update fails, retry the SSH launch once. The launcher now compares its generated runner script, stops stale launcher-managed remote servers, clears the SSH launch PID/port state, and starts a fresh remote server. You should not normally need to delete `~/.t3/ssh-launch` or kill `t3` processes manually.
+앱 업데이트 후 재연결이 실패하면 SSH 실행을 한 번 다시 시도하세요. 이제 실행기는 자신이 생성한 러너 스크립트를 비교하고, 실행기가 관리하던 오래된 원격 서버를 중지하며, SSH 실행 PID·포트 상태를 지운 뒤 새 원격 서버를 시작합니다. 보통은 `~/.t3/ssh-launch`를 삭제하거나 `t3` 프로세스를 직접 종료할 필요가 없습니다.
 
-## Updating a Remote Server
+## 원격 서버 업데이트
 
-When the T3 Code web or desktop app and a remote server use different versions, a warning appears in
-the conversation and in **Settings** → **Connections**. Follow the action shown there: T3 Code may
-be able to update and reconnect the server for you, or it may ask you to update the desktop app or
-run a copied command on the server machine.
+T3 Code 웹 또는 데스크톱 앱과 원격 서버가 서로 다른 버전을 사용하면 대화와 **설정 → 연결**에
+경고가 표시됩니다. 그곳에 표시된 작업을 따르세요. T3 Code가 서버를 대신 업데이트하고 다시
+연결할 수도 있고, 데스크톱 앱을 업데이트하거나 서버 컴퓨터에서 복사한 명령을 실행하라고 안내할
+수도 있습니다.
 
-Finish active work before updating because the server restarts briefly. For step-by-step guidance,
-see [Keeping T3 Code in Sync](./updating.md).
+업데이트 중에는 서버가 잠시 다시 시작되므로 진행 중인 작업을 먼저 끝내세요. 단계별 안내는
+[T3 Code 업데이트](./updating.md)를 참고하세요.
 
-On a Linux host, you can keep the server running after logout and manage it independently of the
-connection method. See [Running T3 Code in the Background](./background-service.md).
+Linux 호스트에서는 로그아웃 후에도 서버를 계속 실행하면서 연결 방식과 무관하게 관리할 수
+있습니다. [T3 Code 백그라운드 실행](./background-service.md)을 참고하세요.
 
-## How Pairing Works
+## 페어링 동작 방식
 
-The remote device does not need a long-lived secret up front.
+원격 기기는 처음부터 오래 유지되는 비밀 값을 가지고 있을 필요가 없습니다.
 
-Instead:
+대신 다음 과정을 거칩니다.
 
-1. `t3 serve` issues a one-time owner pairing token.
-2. The remote device exchanges that token with the server.
-3. The server creates an authenticated session for that device.
+1. `t3 serve`가 일회용 소유자 페어링 토큰을 발급합니다.
+2. 원격 기기가 그 토큰을 서버와 교환합니다.
+3. 서버가 해당 기기를 위한 인증된 세션을 생성합니다.
 
-After pairing, future access is session-based. You do not need to keep reusing the original token unless you are pairing a new device.
+페어링 후의 접근은 세션 기반입니다. 새 기기를 페어링하는 경우가 아니라면 처음 토큰을 계속 다시 사용할 필요가 없습니다.
 
-## Hosted Web App Pairing
+## 호스팅 웹 앱 페어링
 
-The hosted web app at `https://app.t3.codes` can save a remote backend in browser local storage from a URL like:
+`https://app.t3.codes`의 호스팅 웹 앱은 다음과 같은 URL로 원격 백엔드를 브라우저 로컬 저장소에 저장할 수 있습니다.
 
 ```text
 https://app.t3.codes/pair?host=https://backend.example.com:3773#token=PAIRCODE
 ```
 
-Use hosted pairing when the backend is reachable from the browser over HTTPS/WSS. This includes a backend behind a trusted HTTPS tunnel or another HTTPS endpoint you operate.
+브라우저에서 HTTPS/WSS로 백엔드에 접속할 수 있을 때 호스팅 페어링을 사용하세요. 신뢰할 수 있는 HTTPS 터널 뒤에 있는 백엔드나 직접 운영하는 다른 HTTPS 엔드포인트도 여기에 해당합니다.
 
-Do not use hosted pairing for plain HTTP LAN URLs such as `http://192.168.x.y:3773`. Browsers block an HTTPS page from connecting to an insecure HTTP or WS backend. For those endpoints, use the direct pairing URL shown by the desktop app or CLI from a client that can open that HTTP URL directly.
+`http://192.168.x.y:3773` 같은 일반 HTTP LAN URL에는 호스팅 페어링을 사용하지 마세요. 브라우저는 HTTPS 페이지가 안전하지 않은 HTTP 또는 WS 백엔드에 연결하는 것을 차단합니다. 그런 엔드포인트에는 해당 HTTP URL을 직접 열 수 있는 클라이언트에서 데스크톱 앱이나 CLI가 표시한 직접 페어링 URL을 사용하세요.
 
-Hosted pairing does not proxy traffic through T3 Code. The browser still connects directly to the backend URL in the pairing link.
+호스팅 페어링은 트래픽을 T3 Code를 거쳐 프록시하지 않습니다. 브라우저는 여전히 페어링 링크에 담긴 백엔드 URL로 직접 연결합니다.
 
-## Managing Access Later
+## 이후의 접근 관리
 
-Use `t3 auth` to manage access after the initial pairing flow.
+최초 페어링 흐름을 마친 뒤에는 `t3 auth`로 접근을 관리하세요.
 
-Typical uses:
+주요 용도는 다음과 같습니다.
 
-- issue additional pairing credentials
-- inspect active sessions
-- revoke old pairing links or sessions
+- 추가 페어링 자격 증명 발급
+- 활성 세션 확인
+- 오래된 페어링 링크나 세션 취소
 
-Use `t3 auth --help` and the nested subcommand help pages for the full reference.
+전체 참고 자료는 `t3 auth --help`와 하위 명령의 도움말 페이지를 확인하세요.
 
-## Security Notes
+## 보안 참고 사항
 
-- Treat pairing URLs and pairing tokens like passwords.
-- Prefer binding `--host` to a trusted private address, such as a Tailnet IP, instead of exposing the server broadly.
-- Anyone with a valid pairing credential can create a session until that credential expires or is revoked.
-- Hosted pairing links keep the credential in the URL hash so it is not sent to the hosted app server, but it can still be exposed through browser history, screenshots, logs, or copy/paste.
-- Use `t3 auth` to revoke credentials or sessions you no longer trust.
+- 페어링 URL과 페어링 토큰은 비밀번호처럼 다루세요.
+- 서버를 넓게 노출하는 대신 Tailnet IP처럼 신뢰할 수 있는 사설 주소에 `--host`를 바인딩하세요.
+- 유효한 페어링 자격 증명을 가진 사람은 그 자격 증명이 만료되거나 취소될 때까지 세션을 생성할 수 있습니다.
+- 호스팅 페어링 링크는 자격 증명을 URL 해시에 담아 호스팅 앱 서버로 전송되지 않게 하지만, 브라우저 기록, 스크린샷, 로그, 복사·붙여넣기를 통해 노출될 수 있습니다.
+- 더 이상 신뢰하지 않는 자격 증명이나 세션은 `t3 auth`로 취소하세요.

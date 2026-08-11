@@ -1,82 +1,82 @@
-# Observability
+# 관측성
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> 메인테이너용 문서입니다. T3 Code를 사용 중이신가요? [docs/user](../user/)를 참고하세요.
 
-T3 Code has one server-side observability model:
+T3 Code의 서버 측 관측성 모델은 하나입니다.
 
-- pretty logs go to stdout for humans
-- completed spans go to a local NDJSON trace file
-- traces and metrics can also be exported over OTLP to a real backend like Grafana LGTM
+- 사람이 읽기 좋은 형식의 로그는 stdout으로 나갑니다
+- 완료된 스팬은 로컬 NDJSON 트레이스 파일로 들어갑니다
+- 트레이스와 메트릭은 OTLP를 통해 Grafana LGTM 같은 실제 백엔드로 내보낼 수도 있습니다
 
-The local trace file is the persisted source of truth for normal local launches. Those launches do not
-write a separate server log file, but SSH-managed launches also persist the remote process's
-stdout/stderr at `~/.t3/ssh-launch/<state>/server.log`.
+일반적인 로컬 실행에서는 로컬 트레이스 파일이 영속화된 단일 기준입니다. 이런 실행은 별도의 서버 로그 파일을
+쓰지 않지만, SSH로 관리되는 실행은 원격 프로세스의 stdout/stderr도 `~/.t3/ssh-launch/<state>/server.log`에
+남깁니다.
 
-## Where To Find Things
+## 확인 위치
 
-### Logs
+### 로그
 
-Logs are human-facing:
+로그는 사람이 보기 위한 것입니다.
 
-- destination: stdout
-- format: `Logger.consolePretty()`
-- normal local persistence: none
-- SSH-managed launch persistence: `~/.t3/ssh-launch/<state>/server.log`
+- 대상: stdout
+- 형식: `Logger.consolePretty()`
+- 일반 로컬 영속화: 없음
+- SSH 관리 실행의 영속화: `~/.t3/ssh-launch/<state>/server.log`
 
-If you want a log message to show up in the trace file, emit it inside an active span with `Effect.log...`. `Logger.tracerLogger` will attach it as a span event.
+로그 메시지를 트레이스 파일에 남기고 싶다면 활성 스팬 안에서 `Effect.log...`으로 기록하세요. `Logger.tracerLogger`가 이를 스팬 이벤트로 붙여 줍니다.
 
-### Traces
+### 트레이스
 
-Completed spans are written as NDJSON records to `serverTracePath`. The default depends on how the
-server starts: production and explicitly configured homes use
-`<home>/userdata/logs/server.trace.ndjson` (so `~/.t3/userdata/...` by default, or
-`/custom/path/userdata/...` with `--home-dir /custom/path`), a linked worktree dev run uses
-`<worktree>/.t3/userdata/logs/server.trace.ndjson`, and an implicit dev run outside a linked
-worktree uses `~/.t3/dev/logs/server.trace.ndjson`.
+완료된 스팬은 NDJSON 레코드로 `serverTracePath`에 기록됩니다. 기본값은 서버를 시작한 방식에 따라
+달라집니다. 프로덕션과 홈을 명시적으로 설정한 경우에는
+`<home>/userdata/logs/server.trace.ndjson`을 사용하고(따라서 기본값은 `~/.t3/userdata/...`이며,
+`--home-dir /custom/path`를 지정하면 `/custom/path/userdata/...`입니다), 연결된 워크트리에서 실행한
+개발 서버는 `<worktree>/.t3/userdata/logs/server.trace.ndjson`을, 연결된 워크트리 밖에서 암묵적으로
+실행한 개발 서버는 `~/.t3/dev/logs/server.trace.ndjson`을 사용합니다.
 
-Important fields common to both record types:
+두 레코드 유형에 공통으로 있는 주요 필드입니다.
 
-- `type`: `effect-span` or `otlp-span`
-- `name`: span name
-- `traceId`, `spanId`, `parentSpanId`: correlation
-- `durationMs`: elapsed time
-- `attributes`: structured context
-- `events`: embedded logs and custom events
+- `type`: `effect-span` 또는 `otlp-span`
+- `name`: 스팬 이름
+- `traceId`, `spanId`, `parentSpanId`: 상관관계
+- `durationMs`: 경과 시간
+- `attributes`: 구조화된 컨텍스트
+- `events`: 내장 로그와 사용자 지정 이벤트
 
-`effect-span` records also contain `exit` with `Success`, `Failure`, or `Interrupted`. `otlp-span`
-records instead carry OTLP resource, scope, and optional status fields.
+`effect-span` 레코드에는 `Success`, `Failure`, `Interrupted` 중 하나를 담은 `exit`도 있습니다. `otlp-span`
+레코드는 대신 OTLP 리소스, 스코프, 선택적 상태 필드를 담습니다.
 
-The `TraceRecord`, `EffectTraceRecord`, and `OtlpTraceRecord` schemas live in
-`packages/shared/src/observability.ts`.
+`TraceRecord`, `EffectTraceRecord`, `OtlpTraceRecord` Schema는
+`packages/shared/src/observability.ts`에 있습니다.
 
-### Metrics
+### 메트릭
 
-Metrics are not written to a local file.
+메트릭은 로컬 파일로 기록되지 않습니다.
 
-- local persistence: none
-- remote export: OTLP only, when configured
-- current definitions: `apps/server/src/observability/Metrics.ts`
+- 로컬 영속화: 없음
+- 원격 내보내기: 설정한 경우에만 OTLP로
+- 현재 정의: `apps/server/src/observability/Metrics.ts`
 
-If OTLP is not configured, metrics still exist in-process, but you will not have a local artifact to inspect.
+OTLP를 설정하지 않아도 메트릭은 프로세스 안에 그대로 존재하지만, 확인할 수 있는 로컬 아티팩트는 없습니다.
 
-### Related Artifacts
+### 관련 아티팩트
 
-Provider event NDJSON files still exist for provider runtime streams. Those are separate from the main server trace file.
+제공자 런타임 스트림을 위한 제공자 이벤트 NDJSON 파일은 여전히 존재합니다. 이 파일은 기본 서버 트레이스 파일과 별개입니다.
 
-## Run The Server In Instrumented Mode
+## 계측 모드로 서버 실행
 
-There are two useful modes:
+유용한 모드는 두 가지입니다.
 
-- local-only: stdout + local `server.trace.ndjson`
-- full local observability: stdout + local trace file + OTLP export to Grafana/Tempo/Prometheus
+- 로컬 전용: stdout + 로컬 `server.trace.ndjson`
+- 완전한 로컬 관측성: stdout + 로컬 트레이스 파일 + Grafana/Tempo/Prometheus로 OTLP 내보내기
 
-The local trace file is always on. OTLP export is opt-in.
+로컬 트레이스 파일은 항상 켜져 있습니다. OTLP 내보내기는 직접 켜야 합니다.
 
-### Option 1: Local Traces Only
+### 선택 1: 로컬 트레이스만 사용
 
-You do not need any extra env vars. Just run the app normally and inspect `server.trace.ndjson`.
+추가 환경 변수는 필요하지 않습니다. 앱을 평소대로 실행하고 `server.trace.ndjson`을 확인하세요.
 
-Examples:
+예시입니다.
 
 ```bash
 npx t3
@@ -90,9 +90,9 @@ node --run dev
 node --run dev:desktop
 ```
 
-### Option 2: Run With A Local LGTM Stack
+### 선택 2: 로컬 LGTM 스택과 함께 실행
 
-#### 1. Start Grafana LGTM
+#### 1. Grafana LGTM 시작
 
 ```bash
 docker run --name lgtm \
@@ -103,14 +103,14 @@ docker run --name lgtm \
   grafana/otel-lgtm
 ```
 
-Then open `http://localhost:3000`.
+그다음 `http://localhost:3000`을 엽니다.
 
-Default Grafana login:
+Grafana 기본 로그인 정보입니다.
 
-- username: `admin`
-- password: `admin`
+- 사용자 이름: `admin`
+- 비밀번호: `admin`
 
-#### 2. Export OTLP env vars
+#### 2. OTLP 환경 변수 내보내기
 
 ```bash
 export T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces
@@ -118,14 +118,14 @@ export T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
 export T3CODE_OTLP_SERVICE_NAME=t3-local
 ```
 
-Optional:
+선택 사항입니다.
 
 ```bash
 export T3CODE_TRACE_MIN_LEVEL=Info
 export T3CODE_TRACE_TIMING_ENABLED=true
 ```
 
-#### 3. Launch the app from that same shell
+#### 3. 같은 셸에서 앱 실행
 
 CLI:
 
@@ -133,23 +133,23 @@ CLI:
 npx t3
 ```
 
-Monorepo web/server dev:
+모노레포 웹·서버 개발:
 
 ```bash
 node --run dev
 ```
 
-Monorepo desktop dev:
+모노레포 데스크톱 개발:
 
 ```bash
 node --run dev:desktop
 ```
 
-Packaged desktop app:
+패키징된 데스크톱 앱:
 
-Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `T3CODE_OTLP_*`.
+데스크톱 앱과 내장 백엔드가 `T3CODE_OTLP_*`를 물려받도록 같은 셸에서 실제 앱 실행 파일을 실행하세요.
 
-macOS app bundle example:
+macOS 앱 번들 예시입니다.
 
 ```bash
 T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
@@ -158,7 +158,7 @@ T3CODE_OTLP_SERVICE_NAME=t3-desktop \
 "/Applications/T3 Code.app/Contents/MacOS/T3 Code"
 ```
 
-Direct binary example:
+바이너리 직접 실행 예시입니다.
 
 ```bash
 T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
@@ -167,44 +167,44 @@ T3CODE_OTLP_SERVICE_NAME=t3-desktop \
 ./path/to/your/desktop-app-binary
 ```
 
-Do not rely on launching from Finder, Spotlight, the dock, or the Start menu after setting shell env vars. Those launches usually will not pick them up.
+셸에서 환경 변수를 설정한 뒤 Finder, Spotlight, 독, 시작 메뉴로 앱을 실행하는 방식에 의존하지 마세요. 이렇게 실행하면 대개 환경 변수가 전달되지 않습니다.
 
-#### 4. Fully restart after changing env
+#### 4. 환경 변수를 바꾼 뒤 완전히 재시작
 
-The backend reads observability config at process start. If you change OTLP env vars, stop the app completely and start it again.
+백엔드는 프로세스가 시작될 때 관측성 설정을 읽습니다. OTLP 환경 변수를 바꿨다면 앱을 완전히 종료한 뒤 다시 시작하세요.
 
-## How To Use Traces And Metrics To Debug The Server
+## 트레이스와 메트릭으로 서버를 디버깅하는 방법
 
-### Start With The Local Trace File
+### 로컬 트레이스 파일부터 확인
 
-The trace file is the fastest way to inspect raw span data.
+원시 스팬 데이터를 확인하는 가장 빠른 방법은 트레이스 파일입니다.
 
-Resolve the path for the launch mode once. Production and explicitly configured homes store runtime
-state under the base directory's `userdata` folder:
+실행 방식에 맞는 경로를 한 번 확인해 두세요. 프로덕션과 홈을 명시적으로 설정한 경우에는 런타임 상태를
+기준 디렉터리의 `userdata` 폴더 아래에 저장합니다.
 
 ```bash
 TRACE_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/logs/server.trace.ndjson"
 ```
 
-A dev server started from a linked worktree defaults to that worktree's local home:
+연결된 워크트리에서 시작한 개발 서버는 기본적으로 해당 워크트리의 로컬 홈을 사용합니다.
 
 ```bash
 TRACE_FILE="$WORKTREE/.t3/userdata/logs/server.trace.ndjson"
 ```
 
-Only an implicit dev run outside a linked worktree uses the shared dev directory:
+연결된 워크트리 밖에서 암묵적으로 실행한 개발 서버만 공용 개발 디렉터리를 사용합니다.
 
 ```bash
 TRACE_FILE="$HOME/.t3/dev/logs/server.trace.ndjson"
 ```
 
-Tail the selected file:
+선택한 파일을 실시간으로 확인합니다.
 
 ```bash
 tail -f "$TRACE_FILE"
 ```
 
-Show failed spans:
+실패한 스팬을 표시합니다.
 
 ```bash
 jq -c 'select(.type == "effect-span" and .exit._tag != "Success") | {
@@ -215,7 +215,7 @@ jq -c 'select(.type == "effect-span" and .exit._tag != "Success") | {
 }' "$TRACE_FILE"
 ```
 
-Show slow spans:
+느린 스팬을 표시합니다.
 
 ```bash
 jq -c 'select(.durationMs > 1000) | {
@@ -226,7 +226,7 @@ jq -c 'select(.durationMs > 1000) | {
 }' "$TRACE_FILE"
 ```
 
-Inspect embedded log events:
+내장된 로그 이벤트를 확인합니다.
 
 ```bash
 jq -c 'select(any(.events[]?; .attributes["effect.logLevel"] != null)) | {
@@ -243,7 +243,7 @@ jq -c 'select(any(.events[]?; .attributes["effect.logLevel"] != null)) | {
 }' "$TRACE_FILE"
 ```
 
-Follow one trace:
+트레이스 하나를 따라갑니다.
 
 ```bash
 jq -r 'select(.traceId == "TRACE_ID_HERE") | [
@@ -254,7 +254,7 @@ jq -r 'select(.traceId == "TRACE_ID_HERE") | [
 ] | @tsv' "$TRACE_FILE"
 ```
 
-Filter orchestration commands:
+오케스트레이션 명령을 필터링합니다.
 
 ```bash
 jq -c 'select(.attributes["orchestration.command_type"] != null) | {
@@ -265,7 +265,7 @@ jq -c 'select(.attributes["orchestration.command_type"] != null) | {
 }' "$TRACE_FILE"
 ```
 
-Filter git activity:
+git 활동을 필터링합니다.
 
 ```bash
 jq -c 'select(.attributes["git.operation"] != null) | {
@@ -280,38 +280,38 @@ jq -c 'select(.attributes["git.operation"] != null) | {
 }' "$TRACE_FILE"
 ```
 
-### Use Tempo When You Need A Real Trace Viewer
+### 제대로 된 트레이스 뷰어가 필요할 때는 Tempo 사용
 
-Tempo is better than raw NDJSON when you want to:
+다음과 같은 작업에는 원시 NDJSON보다 Tempo가 낫습니다.
 
-- search across many traces
-- inspect parent/child relationships visually
-- compare many slow traces
-- drill into one failing request without hand-joining by `traceId`
+- 여러 트레이스를 가로질러 검색
+- 부모·자식 관계를 시각적으로 확인
+- 느린 트레이스를 여러 개 비교
+- `traceId`로 직접 이어 붙이지 않고 실패한 요청 하나를 파고들기
 
-Recommended flow in Grafana:
+Grafana에서 권장하는 흐름입니다.
 
-1. Open `Explore`.
-2. Pick the `Tempo` data source.
-3. Set the time range to something recent like `Last 15 minutes`.
-4. Start broad. Do not begin with a very narrow query.
-5. Look for spans from your configured service name, then narrow by span name or attributes.
+1. `Explore`를 엽니다.
+2. `Tempo` 데이터 소스를 선택합니다.
+3. 시간 범위를 `Last 15 minutes`처럼 최근 구간으로 설정합니다.
+4. 넓게 시작합니다. 아주 좁은 쿼리로 시작하지 마세요.
+5. 설정한 서비스 이름의 스팬을 찾은 뒤 스팬 이름이나 속성으로 범위를 좁힙니다.
 
-Good first searches:
+처음 검색하기 좋은 항목입니다.
 
-- service name such as `t3-local`, `t3-dev`, or `t3-desktop`
-- span names like `sendTurn` or a Git operation such as `GitVcsDriver.statusDetails.status`
-- Git spans whose `git.operation` attribute identifies the operation
-- orchestration spans with attributes like `orchestration.command_type`
+- `t3-local`, `t3-dev`, `t3-desktop` 같은 서비스 이름
+- `sendTurn` 같은 스팬 이름이나 `GitVcsDriver.statusDetails.status` 같은 Git 작업
+- `git.operation` 속성으로 작업을 식별할 수 있는 Git 스팬
+- `orchestration.command_type` 같은 속성이 있는 오케스트레이션 스팬
 
-Once you know traces are arriving, narrower TraceQL queries for names such as `sendTurn` or Git
-operation names become useful.
+트레이스가 들어오고 있음을 확인했다면 `sendTurn` 같은 이름이나 Git 작업 이름을 겨냥한 더 좁은 TraceQL
+쿼리가 유용해집니다.
 
-### Use Metrics To See Systemic Problems
+### 메트릭으로 전반적인 문제 파악
 
-Traces are best for one request. Metrics are best for trends.
+트레이스는 요청 하나를 볼 때 가장 좋습니다. 메트릭은 추세를 볼 때 가장 좋습니다.
 
-Good metric families to watch:
+지켜보기 좋은 메트릭 계열입니다.
 
 - `t3_rpc_request_duration`
 - `t3_orchestration_command_duration`
@@ -319,99 +319,99 @@ Good metric families to watch:
 - `t3_provider_turn_duration`
 - `t3_git_command_duration`
 
-Counters tell you volume and failure rate:
+카운터는 처리량과 실패율을 알려 줍니다.
 
 - `t3_rpc_requests_total`
 - `t3_orchestration_commands_total`
 - `t3_provider_turns_total`
 - `t3_git_commands_total`
 
-Use metrics when the question is:
+다음과 같은 질문에는 메트릭을 사용하세요.
 
-- "is this always slow?"
-- "did this get worse after a change?"
-- "which command type is failing most often?"
+- "이건 항상 느린가?"
+- "변경 이후에 더 나빠졌나?"
+- "어떤 명령 유형이 가장 자주 실패하나?"
 
-Use traces when the question is:
+다음과 같은 질문에는 트레이스를 사용하세요.
 
-- "what happened in this specific request?"
-- "which child span caused this one slow interaction?"
-- "what logs were emitted inside the failing flow?"
+- "이 특정 요청에서 무슨 일이 일어났나?"
+- "이 느린 상호작용을 유발한 자식 스팬은 무엇인가?"
+- "실패한 흐름 안에서 어떤 로그가 발생했나?"
 
-### What The New Ack Metric Means
+### 새 ack 메트릭의 의미
 
-`t3_orchestration_command_ack_duration` measures:
+`t3_orchestration_command_ack_duration`이 측정하는 구간입니다.
 
-- start: command dispatch enters the orchestration engine
-- end: the first committed domain event for that command is published by the server
+- 시작: 명령 디스패치가 오케스트레이션 엔진에 들어가는 시점
+- 끝: 해당 명령에 대해 처음 커밋된 도메인 이벤트를 서버가 발행하는 시점
 
-That is a server-side acknowledgment metric. It does not measure:
+이는 서버 측 확인 응답 메트릭입니다. 다음은 측정하지 않습니다.
 
-- websocket transit to the browser
-- client receipt
-- React render time
+- 브라우저까지의 WebSocket 전송
+- 클라이언트 수신
+- React 렌더링 시간
 
-If you need those later, add client-side instrumentation or a dedicated server fanout metric.
+나중에 이런 값이 필요하면 클라이언트 측 계측이나 전용 서버 팬아웃 메트릭을 추가하세요.
 
-## Common Workflows
+## 자주 쓰는 작업 흐름
 
-### "Why did this request fail?"
+### "이 요청은 왜 실패했나요?"
 
-1. Start with the local NDJSON file.
-2. Find `effect-span` records where `exit._tag != "Success"`.
-3. Group by `traceId`.
-4. Inspect sibling spans and span events.
-5. If needed, move to Tempo for the full trace tree.
+1. 로컬 NDJSON 파일부터 확인합니다.
+2. `exit._tag != "Success"`인 `effect-span` 레코드를 찾습니다.
+3. `traceId`로 묶습니다.
+4. 형제 스팬과 스팬 이벤트를 확인합니다.
+5. 필요하면 Tempo로 옮겨 전체 트레이스 트리를 봅니다.
 
-### "Why is the UI feeling slow?"
+### "UI가 왜 느리게 느껴지나요?"
 
-1. Search for slow top-level spans in the trace file or Tempo.
-2. Check child spans for sqlite, git, provider, or terminal work.
-3. Look at the matching duration metrics to see whether the slowness is systemic.
+1. 트레이스 파일이나 Tempo에서 느린 최상위 스팬을 검색합니다.
+2. 자식 스팬에서 sqlite, git, 제공자, 터미널 작업을 확인합니다.
+3. 대응하는 소요 시간 메트릭을 보고 느린 현상이 전반적인지 확인합니다.
 
-### "Did this command take too long to acknowledge?"
+### "이 명령의 확인 응답이 너무 오래 걸렸나요?"
 
-1. Check `t3_orchestration_command_ack_duration` by `commandType`.
-2. If it is high, inspect the corresponding orchestration trace.
-3. Look at child spans for projection, sqlite, provider, or git work.
+1. `t3_orchestration_command_ack_duration`을 `commandType`별로 확인합니다.
+2. 값이 높으면 해당 오케스트레이션 트레이스를 살펴봅니다.
+3. 자식 스팬에서 프로젝션, sqlite, 제공자, git 작업을 확인합니다.
 
-### "Are git hooks causing latency?"
+### "git 훅이 지연을 유발하나요?"
 
-1. Filter `git.operation` spans.
-2. Inspect `git.hook.started` and `git.hook.finished` events.
-3. Compare hook timing to the enclosing git span duration.
+1. `git.operation` 스팬을 필터링합니다.
+2. `git.hook.started`와 `git.hook.finished` 이벤트를 확인합니다.
+3. 훅의 소요 시간을 이를 감싸는 git 스팬의 소요 시간과 비교합니다.
 
-### "Why do I have spans locally but nothing in Grafana?"
+### "로컬에는 스팬이 있는데 Grafana에는 아무것도 없나요?"
 
-Usually one of these is true:
+보통 다음 중 하나가 원인입니다.
 
-- `T3CODE_OTLP_TRACES_URL` was not set
-- the app was launched from a different environment than the one where you exported the vars
-- the app was not fully restarted after changing env
-- Grafana is looking at the wrong time range or service name
+- `T3CODE_OTLP_TRACES_URL`을 설정하지 않았습니다
+- 환경 변수를 내보낸 곳과 다른 환경에서 앱을 실행했습니다
+- 환경 변수를 바꾼 뒤 앱을 완전히 재시작하지 않았습니다
+- Grafana가 잘못된 시간 범위나 서비스 이름을 보고 있습니다
 
-If the local NDJSON file is updating, local tracing is working. The problem is almost always OTLP export configuration or process startup.
+로컬 NDJSON 파일이 갱신되고 있다면 로컬 트레이싱은 동작하는 것입니다. 문제는 거의 항상 OTLP 내보내기 설정이나 프로세스 시작 방식에 있습니다.
 
-## How To Think About Adding Tracing To Future Code
+## 앞으로 작성할 코드에 트레이싱을 추가할 때의 기준
 
-### Prefer Boundaries Over Tiny Helpers
+### 작은 헬퍼보다 경계를 우선
 
-Good span boundaries:
+좋은 스팬 경계입니다.
 
-- RPC methods
-- orchestration command handling
-- provider adapter calls
-- external process calls
-- persistence writes
-- queue handoffs
+- RPC 메서드
+- 오케스트레이션 명령 처리
+- 제공자 어댑터 호출
+- 외부 프로세스 호출
+- 영속화 쓰기
+- 큐 전달
 
-Avoid tracing every tiny helper. Most helpers should inherit the active span rather than create a new one.
+작은 헬퍼마다 트레이싱을 붙이지 마세요. 대부분의 헬퍼는 새 스팬을 만들기보다 활성 스팬을 물려받아야 합니다.
 
-### Reuse `Effect.fn(...)` Where It Already Exists
+### 이미 있는 `Effect.fn(...)` 재사용
 
-The codebase already uses `Effect.fn("name")` heavily. That should usually be your first tracing boundary.
+이 코드베이스는 이미 `Effect.fn("name")`을 광범위하게 사용합니다. 보통 이것이 첫 번째 트레이싱 경계가 되어야 합니다.
 
-For ad hoc work:
+일회성 작업이라면 다음과 같이 씁니다.
 
 ```ts
 import { Effect } from "effect";
@@ -427,9 +427,9 @@ const runThing = Effect.gen(function* () {
 }).pipe(Effect.withSpan("thing.run"));
 ```
 
-### Put High-Cardinality Detail On Spans
+### 카디널리티가 높은 세부 정보는 스팬에
 
-Use span annotations for IDs, paths, and other detailed context:
+ID, 경로를 비롯한 상세한 컨텍스트에는 스팬 애너테이션을 사용하세요.
 
 ```ts
 yield *
@@ -440,41 +440,41 @@ yield *
   });
 ```
 
-### Keep Metric Labels Low Cardinality
+### 메트릭 라벨은 카디널리티를 낮게 유지
 
-Good metric labels:
+좋은 메트릭 라벨입니다.
 
-- operation kind
-- method name
-- provider kind
-- aggregate kind
-- outcome
+- 작업 종류
+- 메서드 이름
+- 제공자 종류
+- 애그리게이트 종류
+- 결과
 
-Bad metric labels:
+나쁜 메트릭 라벨입니다.
 
-- raw thread IDs
-- command IDs
-- file paths
+- 원시 대화 ID
+- 명령 ID
+- 파일 경로
 - cwd
-- full prompts
-- full model strings when a normalized family label would do
+- 전체 프롬프트
+- 정규화된 계열 라벨로 충분한 상황에서의 전체 모델 문자열
 
-Detailed context belongs on spans, not metrics.
+상세한 컨텍스트는 메트릭이 아니라 스팬에 넣습니다.
 
-### Use Logs As Span Events
+### 로그를 스팬 이벤트로 활용
 
-Logs inside a span become part of the trace story:
+스팬 안의 로그는 트레이스가 들려주는 이야기의 일부가 됩니다.
 
 ```ts
 yield * Effect.logInfo("starting provider turn");
 yield * Effect.logDebug("waiting for approval response");
 ```
 
-Those messages show up as span events because `Logger.tracerLogger` is installed.
+`Logger.tracerLogger`가 설치되어 있으므로 이 메시지들은 스팬 이벤트로 나타납니다.
 
-### Use The Pipeable Metrics API
+### 파이프 가능한 메트릭 API 사용
 
-`withMetrics(...)` is the default way to attach a counter and timer to an effect:
+`withMetrics(...)`는 Effect에 카운터와 타이머를 붙이는 기본 방법입니다.
 
 ```ts
 import { someCounter, someDuration, withMetrics } from "../observability/Metrics.ts";
@@ -490,59 +490,59 @@ const program = doWork().pipe(
 );
 ```
 
-## Detailed API Reference
+## 상세 API 참조
 
-### Runtime Wiring
+### 런타임 구성
 
-The server observability layer is assembled in `apps/server/src/observability/Layers/Observability.ts`.
+서버 관측성 레이어는 `apps/server/src/observability/Layers/Observability.ts`에서 조립됩니다.
 
-It provides:
+제공하는 것은 다음과 같습니다.
 
-- pretty stdout logger
+- 보기 좋은 형식의 stdout 로거
 - `Logger.tracerLogger`
-- local NDJSON tracer
-- optional OTLP trace exporter
-- optional OTLP metrics exporter
-- Effect trace-level and timing refs
+- 로컬 NDJSON 트레이서
+- 선택적 OTLP 트레이스 익스포터
+- 선택적 OTLP 메트릭 익스포터
+- Effect 트레이스 레벨·타이밍 ref
 
-### Env Vars
+### 환경 변수
 
-Local trace file:
+로컬 트레이스 파일입니다.
 
-- `T3CODE_TRACE_FILE`: override trace file path
-- `T3CODE_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
-- `T3CODE_TRACE_MAX_FILES`: rotated file count, default `10`
-- `T3CODE_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
-- `T3CODE_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
-- `T3CODE_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
+- `T3CODE_TRACE_FILE`: 트레이스 파일 경로 재정의
+- `T3CODE_TRACE_MAX_BYTES`: 파일당 로테이션 크기, 기본값 `10485760`
+- `T3CODE_TRACE_MAX_FILES`: 로테이션 파일 개수, 기본값 `10`
+- `T3CODE_TRACE_BATCH_WINDOW_MS`: 플러시 윈도, 기본값 `200`
+- `T3CODE_TRACE_MIN_LEVEL`: 최소 트레이스 레벨, 기본값 `Info`
+- `T3CODE_TRACE_TIMING_ENABLED`: 타이밍 메타데이터 활성화, 기본값 `true`
 
-OTLP export:
+OTLP 내보내기입니다.
 
-- `T3CODE_OTLP_TRACES_URL`: OTLP trace endpoint
-- `T3CODE_OTLP_METRICS_URL`: OTLP metric endpoint
-- `T3CODE_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
-- `T3CODE_OTLP_SERVICE_NAME`: service name, default `t3-server`
+- `T3CODE_OTLP_TRACES_URL`: OTLP 트레이스 엔드포인트
+- `T3CODE_OTLP_METRICS_URL`: OTLP 메트릭 엔드포인트
+- `T3CODE_OTLP_EXPORT_INTERVAL_MS`: 내보내기 주기, 기본값 `10000`
+- `T3CODE_OTLP_SERVICE_NAME`: 서비스 이름, 기본값 `t3-server`
 
-If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
+OTLP URL을 설정하지 않아도 로컬 트레이싱은 그대로 동작하며 메트릭은 프로세스 안에만 남습니다.
 
-### What Is Instrumented Today
+### 현재 계측 대상
 
-Current high-value span and metric boundaries include:
+지금 가치가 높은 스팬·메트릭 경계는 다음과 같습니다.
 
-- Effect RPC websocket request spans from `effect/rpc`
-- RPC request metrics in `apps/server/src/observability/RpcInstrumentation.ts`
-- startup phases
-- orchestration command processing
-- orchestration command acknowledgment latency
-- provider session and turn operations
-- git command execution and git hook events
-- terminal session lifecycle
-- sqlite query execution
+- `effect/rpc`에서 나오는 Effect RPC WebSocket 요청 스팬
+- `apps/server/src/observability/RpcInstrumentation.ts`의 RPC 요청 메트릭
+- 시작 단계
+- 오케스트레이션 명령 처리
+- 오케스트레이션 명령 확인 응답 지연
+- 제공자 세션·턴 작업
+- git 명령 실행과 git 훅 이벤트
+- 터미널 세션 수명 주기
+- sqlite 쿼리 실행
 
-### Current Constraints
+### 현재 제약
 
-- logs outside spans are not persisted in the trace file; SSH-managed launch stdout/stderr is still
-  captured in its launcher log
-- metrics are not snapshotted locally
-- the old `serverLogPath` still exists in config for compatibility, but the trace file is the primary
-  structured persisted artifact
+- 스팬 밖의 로그는 트레이스 파일에 남지 않지만, SSH로 관리되는 실행의 stdout/stderr는 여전히 해당 실행기
+  로그에 기록됩니다
+- 메트릭은 로컬에 스냅샷으로 저장되지 않습니다
+- 기존 `serverLogPath`는 호환성을 위해 설정에 남아 있지만, 구조화된 형태로 영속화되는 주된 아티팩트는
+  트레이스 파일입니다

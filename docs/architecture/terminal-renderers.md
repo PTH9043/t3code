@@ -1,42 +1,42 @@
-# Terminal renderers
+# 터미널 렌더러
 
-Terminal sessions remain server-owned PTYs. Clients receive the existing raw byte stream and send
-input and resize events over the existing terminal contracts; renderer choices never cross the
-wire.
+터미널 세션은 서버가 소유하는 PTY로 유지됩니다. 클라이언트는 기존의 원시 바이트 스트림을 받고 기존
+터미널 컨트랙트를 통해 입력과 크기 변경 이벤트를 보냅니다. 렌더러 선택은 네트워크를 통해 전달되지
+않습니다.
 
-## Ghostty alignment
+## Ghostty 정합
 
-Android and web use the official `libghostty-vt` C ABI for parsing, terminal state, grapheme
-boundaries, keyboard encoding, selection, and scrollback:
+Android와 웹은 파싱, 터미널 상태, 그래핌 경계, 키보드 인코딩, 선택 영역, 스크롤백에 공식
+`libghostty-vt` C ABI를 사용합니다.
 
-- Android links the native shared library and converts render state into a compact JNI snapshot.
-- Web loads a separately cached WebAssembly build and reads render state into a Canvas 2D surface.
-- Both artifacts are built from the revision in
-  `native/libghostty-vt/VERSION`.
+- Android는 네이티브 공유 라이브러리를 링크하고 렌더 상태를 압축된 JNI 스냅샷으로 변환합니다.
+- 웹은 별도로 캐시된 WebAssembly 빌드를 불러와 렌더 상태를 Canvas 2D 표면으로 읽어들입니다.
+- 두 아티팩트 모두 `native/libghostty-vt/VERSION`의 리비전에서 빌드됩니다.
 
-The platform adapters deliberately own only platform behavior. Android owns its Kotlin Canvas and
-touch integration. Web owns browser font shaping, the hidden IME textarea, clipboard and DOM input,
-and its Canvas renderer. The web adapter also delegates application mouse encoding, word and line
-selection, and OSC 8 hyperlink metadata to the official ABI. Browser conventions remain available:
-holding Shift bypasses application mouse capture, and the platform link modifier opens hyperlinks.
-React does not participate in terminal frames.
+플랫폼 어댑터는 의도적으로 플랫폼 동작만 담당합니다. Android는 자체 Kotlin Canvas와 터치 연동을
+담당합니다. 웹은 브라우저 폰트 셰이핑, 숨겨진 IME textarea, 클립보드와 DOM 입력, 그리고 자체
+Canvas 렌더러를 담당합니다. 웹 어댑터는 애플리케이션 마우스 인코딩, 단어·행 선택 영역, OSC 8
+하이퍼링크 메타데이터도 공식 ABI에 위임합니다. 브라우저 관례는 그대로 유지되어, Shift를 누르고
+있으면 애플리케이션 마우스 캡처를 우회하고 플랫폼 링크 보조키는 하이퍼링크를 엽니다. React는
+터미널 프레임에 관여하지 않습니다.
 
-The web runtime is singleton-scoped per browser tab so split terminals share one compiled module
-and memory. Each visible terminal owns and frees its own terminal, render state, row iterator, cell
-iterator, key and mouse encoder, and input event handles. Restoring captured scrollback temporarily
-detaches the PTY callback so historical device queries cannot emit replies into the current shell.
+웹 런타임은 브라우저 탭마다 싱글턴 스코프를 가지므로 분할된 터미널이 하나의 컴파일된 모듈과
+메모리를 공유합니다. 화면에 보이는 각 터미널은 자체 터미널, 렌더 상태, 행 이터레이터, 셀
+이터레이터, 키·마우스 인코더, 입력 이벤트 핸들을 직접 소유하고 해제합니다. 캡처된 스크롤백을
+복원할 때는 PTY 콜백을 일시적으로 분리하므로 과거의 장치 질의가 현재 셸로 응답을 내보내지
+못합니다.
 
-## Updating Ghostty
+## Ghostty 업데이트
 
-Update and rebuild Android first, because mobile's `VERSION` file is the single source of truth for
-the upstream pin (the upstream `LICENSE` lives beside it). Then run:
+모바일의 `VERSION` 파일이 업스트림 고정 버전의 유일한 기준이므로(업스트림 `LICENSE`도 그 옆에
+있습니다) Android를 먼저 업데이트하고 다시 빌드하세요. 그런 다음 아래 명령을 실행하세요.
 
 ```sh
 pnpm --dir apps/web build:ghostty-wasm
 ```
 
-Commit the regenerated web `wasm` artifacts. The build embeds the pinned revision into the binary as
-semver build metadata, and the focused web ABI test reads it back through `ghostty_build_info` and
-compares it against mobile's `VERSION` — so the web vendor directory holds only the artifacts, drift
-cannot hide, and there is no second pin to keep in sync. The same test enforces the artifact budget
-and exercises repeated create/write/free cycles with multi-codepoint graphemes.
+다시 생성된 웹 `wasm` 아티팩트를 커밋하세요. 빌드는 고정된 리비전을 semver 빌드 메타데이터로
+바이너리에 심고, 웹 ABI 전용 테스트는 `ghostty_build_info`로 그 값을 다시 읽어 모바일의
+`VERSION`과 비교합니다 — 따라서 웹 vendor 디렉터리에는 아티팩트만 남고, 불일치를 숨길 수 없으며,
+함께 맞춰야 할 두 번째 고정 지점도 없습니다. 같은 테스트가 아티팩트 예산을 강제하고, 여러
+코드포인트로 이루어진 그래핌으로 생성·쓰기·해제 주기를 반복 수행합니다.

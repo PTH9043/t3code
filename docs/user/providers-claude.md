@@ -1,26 +1,26 @@
 # Claude
 
-This guide is for people who want to use more than one Claude setup in T3 Code. For Codex, see
-[Codex](./providers-codex.md). For first-time setup, see [Install T3 Code](./install.md).
+이 문서는 T3 Code에서 Claude 설정을 두 개 이상 사용하려는 분들을 위한 안내입니다. Codex는
+[Codex](./providers-codex.md)를 참고하세요. 처음 설치하는 경우에는 [T3 Code 설치](./install.md)를 참고하세요.
 
-Common reasons:
+흔한 이유는 다음과 같습니다.
 
-- use separate work and personal Claude accounts
-- try a different Claude Code configuration without disturbing your main setup
-- run Claude through a router such as Claude Code Router
-- use external providers exposed through a Claude-compatible workflow
+- 업무용과 개인용 Claude 계정을 분리해서 사용
+- 주로 쓰는 설정을 건드리지 않고 다른 Claude Code 구성을 시험
+- Claude Code Router 같은 라우터를 통해 Claude를 실행
+- Claude 호환 워크플로로 제공되는 외부 제공자를 사용
 
-## I Only Use One Claude Account
+## Claude 계정을 하나만 사용합니다
 
-Use the default provider.
+기본 제공자를 사용하세요.
 
-Log in with Claude Code normally:
+평소처럼 Claude Code로 로그인합니다.
 
 ```bash
 claude auth login
 ```
 
-In T3 Code Settings, your Claude provider can stay like this:
+T3 Code **설정**에서 Claude 제공자를 다음 상태로 두어도 됩니다.
 
 ```text
 Display name: Claude
@@ -28,32 +28,31 @@ Binary path: claude
 CLAUDE_CONFIG_DIR path: empty
 ```
 
-An empty `CLAUDE_CONFIG_DIR path` means T3 Code uses Claude Code's normal config directory.
+`CLAUDE_CONFIG_DIR path`가 비어 있으면 T3 Code는 Claude Code의 기본 설정 디렉터리를 사용합니다.
 
-When you set this field, T3 Code points Claude Code at that directory with the
-`CLAUDE_CONFIG_DIR` environment variable. It does not change `HOME`, so your system keychain and
-the rest of your environment stay as they are.
+이 항목을 지정하면 T3 Code는 `CLAUDE_CONFIG_DIR` 환경 변수로 Claude Code가 해당 디렉터리를 바라보도록
+지정합니다. `HOME`은 바꾸지 않으므로 시스템 키체인과 나머지 환경은 그대로 유지됩니다.
 
-## I Want Work And Personal Claude Accounts
+## 업무용과 개인용 Claude 계정을 함께 사용하고 싶습니다
 
-Use a different Claude config directory for each account.
+계정마다 서로 다른 Claude 설정 디렉터리를 사용하세요.
 
-Example:
+예시:
 
 ```text
 default config dir           work account
 ~/.claude_personal_home      personal account
 ```
 
-### Set Up The First Account
+### 첫 번째 계정 설정
 
-Log in normally:
+평소처럼 로그인합니다.
 
 ```bash
 claude auth login
 ```
 
-In T3 Code Settings:
+T3 Code **설정**에서 다음과 같이 지정합니다.
 
 ```text
 Display name: Claude Work
@@ -61,19 +60,19 @@ Binary path: claude
 CLAUDE_CONFIG_DIR path: empty
 ```
 
-### Set Up The Second Account
+### 두 번째 계정 설정
 
-Log in with a separate config directory:
+별도의 설정 디렉터리로 로그인합니다.
 
 ```bash
 mkdir -p ~/.claude_personal_home
 CLAUDE_CONFIG_DIR=~/.claude_personal_home claude auth login
 ```
 
-Use `CLAUDE_CONFIG_DIR`, not `HOME`. Setting `HOME` writes the login to
-`~/.claude_personal_home/.claude`, which is not where T3 Code looks.
+`HOME`이 아니라 `CLAUDE_CONFIG_DIR`를 사용하세요. `HOME`을 지정하면 로그인 정보가
+`~/.claude_personal_home/.claude`에 기록되는데, 이 경로는 T3 Code가 찾는 위치가 아닙니다.
 
-Then add another Claude provider in T3 Code:
+그다음 T3 Code에 Claude 제공자를 하나 더 추가합니다.
 
 ```text
 Display name: Claude Personal
@@ -81,31 +80,29 @@ Binary path: claude
 CLAUDE_CONFIG_DIR path: ~/.claude_personal_home
 ```
 
-Use the email shown in Settings to confirm each provider is using the intended account. Emails are
-blurred by default; click the blurred email to reveal it.
+각 제공자가 의도한 계정을 사용하는지는 **설정**에 표시되는 이메일로 확인하세요. 이메일은 기본적으로
+흐리게 처리되며, 흐린 이메일을 클릭하면 내용이 드러납니다.
 
-## Can I Switch Claude Accounts In An Existing Thread?
+## 기존 대화에서 Claude 계정을 바꿀 수 있습니까?
 
-Usually, no.
+대부분의 경우 바꿀 수 없습니다.
 
-T3 Code only offers Claude providers that use the same config directory for an existing thread. A
-different config directory is treated as a different Claude environment.
+T3 Code는 기존 대화에 대해 같은 설정 디렉터리를 사용하는 Claude 제공자만 제시합니다. 설정 디렉터리가
+다르면 다른 Claude 환경으로 취급합니다.
 
-This is different from the recommended Codex setup. Claude Code keeps account and local state across
-multiple files under its config directory, so T3 Code keeps separate config directories isolated
-instead of trying to share part of the state.
+이는 권장하는 Codex 설정과 다릅니다. Claude Code는 계정과 로컬 상태를 설정 디렉터리 아래 여러 파일에
+나누어 보관하므로, T3 Code는 상태 일부를 공유하려 하지 않고 서로 다른 설정 디렉터리를 격리된 상태로 유지합니다.
 
-## I Want To Use OpenRouter
+## OpenRouter를 사용하고 싶습니다
 
-Use this when you want Claude Code to talk to OpenRouter directly, without running a local router.
-This is the simplest external-provider setup.
+로컬 라우터를 실행하지 않고 Claude Code가 OpenRouter와 직접 통신하게 하려면 이 방법을 사용하세요.
+외부 제공자 설정 중 가장 간단한 방법입니다.
 
-OpenRouter provides a Claude Code integration through Claude's Anthropic-compatible environment
-variables.
+OpenRouter는 Claude의 Anthropic 호환 환경 변수를 통해 Claude Code 연동을 제공합니다.
 
-### Configure A Claude OpenRouter Provider
+### Claude OpenRouter 제공자 설정
 
-Add or edit a Claude provider in T3 Code Settings:
+T3 Code **설정**에서 Claude 제공자를 추가하거나 수정합니다.
 
 ```text
 Display name: Claude OpenRouter
@@ -113,7 +110,7 @@ Binary path: claude
 CLAUDE_CONFIG_DIR path: ~/.claude_openrouter_home
 ```
 
-In that provider's Environment variables section, add:
+해당 제공자의 **환경 변수** 섹션에 다음을 추가합니다.
 
 ```text
 ANTHROPIC_BASE_URL   https://openrouter.ai/api
@@ -121,24 +118,24 @@ ANTHROPIC_AUTH_TOKEN sk-or-...                Sensitive
 ANTHROPIC_API_KEY                              Empty value
 ```
 
-Mark `ANTHROPIC_AUTH_TOKEN` as sensitive. T3 Code stores the value as a server secret and does not
-send it back to the app after saving.
+`ANTHROPIC_AUTH_TOKEN`은 민감 정보로 표시하세요. T3 Code는 이 값을 서버 시크릿으로 저장하며 저장한
+뒤에는 앱으로 다시 보내지 않습니다.
 
-If you want this setup isolated from your normal Claude account, create that home first:
+이 설정을 평소 사용하는 Claude 계정과 분리하려면 해당 Claude 홈을 먼저 만드세요.
 
 ```bash
 mkdir -p ~/.claude_openrouter_home
 ```
 
-If you previously used the same Claude home with a normal Anthropic login, run `/logout` in a Claude
-Code session for that home before using OpenRouter. Otherwise Claude Code may keep using cached
-Anthropic credentials instead of the OpenRouter token.
+같은 Claude 홈을 일반 Anthropic 로그인으로 사용한 적이 있다면, OpenRouter를 사용하기 전에 해당 홈의 Claude
+Code 세션에서 `/logout`을 실행하세요. 그렇지 않으면 Claude Code가 OpenRouter 토큰 대신 캐시된 Anthropic
+자격 증명을 계속 사용할 수 있습니다.
 
-### Pick OpenRouter Models
+### OpenRouter 모델 선택
 
-OpenRouter can route Claude Code's default model roles to OpenRouter model IDs.
+OpenRouter는 Claude Code의 기본 모델 역할을 OpenRouter 모델 ID로 연결할 수 있습니다.
 
-Example:
+예시:
 
 ```text
 ANTHROPIC_DEFAULT_OPUS_MODEL    anthropic/claude-opus-4.6
@@ -147,43 +144,42 @@ ANTHROPIC_DEFAULT_HAIKU_MODEL   anthropic/claude-haiku-4.5
 CLAUDE_CODE_SUBAGENT_MODEL      anthropic/claude-sonnet-4.6
 ```
 
-Add those to the same provider's Environment variables section if you want stable model choices.
+모델 선택을 고정하려면 같은 제공자의 **환경 변수** 섹션에 위 항목을 추가하세요.
 
-### Verify OpenRouter Is Being Used
+### OpenRouter 사용 확인
 
-Open a Claude session and run:
+Claude 세션을 열고 다음을 실행합니다.
 
 ```text
 /status
 ```
 
-You should see the Anthropic base URL set to:
+Anthropic 기본 URL이 다음으로 설정되어 있어야 합니다.
 
 ```text
 https://openrouter.ai/api
 ```
 
-You can also check the OpenRouter activity dashboard for requests from your API key.
+OpenRouter 활동 대시보드에서 자신의 API 키로 들어온 요청을 확인할 수도 있습니다.
 
-### Common OpenRouter Mistakes
+### 자주 발생하는 OpenRouter 실수
 
-- Use `https://openrouter.ai/api`, not `https://openrouter.ai/api/v1`, for Claude Code.
-- Set `ANTHROPIC_AUTH_TOKEN` to your OpenRouter API key.
-- Set `ANTHROPIC_API_KEY` to an empty string so Claude Code does not try to use an Anthropic login.
-- Put these variables on the Claude provider instance, not in global shell startup files.
+- Claude Code에서는 `https://openrouter.ai/api/v1`이 아니라 `https://openrouter.ai/api`를 사용합니다.
+- `ANTHROPIC_AUTH_TOKEN`에는 OpenRouter API 키를 지정합니다.
+- Claude Code가 Anthropic 로그인을 사용하려 하지 않도록 `ANTHROPIC_API_KEY`는 빈 문자열로 지정합니다.
+- 이 변수들은 전역 셸 시작 파일이 아니라 Claude 제공자 인스턴스에 지정합니다.
 
-OpenRouter's setup can change over time. Use its upstream Claude Code guide for the current details:
+OpenRouter의 설정 방식은 시간이 지나면서 바뀔 수 있습니다. 최신 내용은 OpenRouter의 원본 Claude Code 안내를 참고하세요:
 <https://openrouter.ai/docs/guides/guides/claude-code-integration>.
 
-## I Want To Use Claude Code Router
+## Claude Code Router를 사용하고 싶습니다
 
-Claude Code Router is useful when you want a local routing layer with more control than a direct
-OpenRouter setup.
+Claude Code Router는 OpenRouter를 직접 연결하는 방식보다 더 세밀하게 제어할 수 있는 로컬 라우팅 계층이
+필요할 때 유용합니다.
 
-T3 Code does not need a special Claude Code Router provider. Treat the router as a Claude
-environment: give a Claude provider its own `CLAUDE_CONFIG_DIR path`, and put whatever variables
-the router tells you to export into that provider's Environment variables section. Mark tokens
-and API keys as sensitive.
+T3 Code에는 Claude Code Router 전용 제공자가 필요하지 않습니다. 라우터를 하나의 Claude 환경으로
+다루세요. Claude 제공자에 고유한 `CLAUDE_CONFIG_DIR path`를 지정하고, 라우터가 내보내라고 안내하는 변수를
+해당 제공자의 **환경 변수** 섹션에 넣습니다. 토큰과 API 키는 민감 정보로 표시하세요.
 
 ```text
 Display name: Claude Router
@@ -191,20 +187,20 @@ Binary path: claude
 CLAUDE_CONFIG_DIR path: ~/.claude_router_home
 ```
 
-Follow the upstream project's README for the router's own install, startup, and configuration
-steps: <https://github.com/musistudio/claude-code-router>.
+라우터 자체의 설치·시작·설정 절차는 원본 프로젝트의 README를 따르세요:
+<https://github.com/musistudio/claude-code-router>.
 
-## I Want Different Claude Settings, Not A Different Account
+## 계정이 아니라 Claude 설정만 다르게 쓰고 싶습니다
 
-Create another Claude provider with the same account if you want a named preset.
+이름을 붙인 프리셋이 필요하면 같은 계정으로 Claude 제공자를 하나 더 만드세요.
 
-Examples:
+예시:
 
 - "Claude Default"
 - "Claude Router"
 - "Claude Experimental"
 
-If the preset needs different Claude files, give it a different `CLAUDE_CONFIG_DIR path`. If it needs
-different API keys, base URLs, or router settings, use Environment variables.
+프리셋에 다른 Claude 파일이 필요하면 `CLAUDE_CONFIG_DIR path`를 다르게 지정하세요. 다른 API 키, 기본 URL,
+라우터 설정이 필요하면 **환경 변수**를 사용하세요.
 
-Do not put environment variable assignments in `Launch arguments`.
+환경 변수 지정은 `Launch arguments`에 넣지 마세요.

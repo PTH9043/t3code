@@ -1,49 +1,41 @@
-# Running T3 Code in the Background
+# T3 Code 백그라운드 실행
 
-On a Linux host, T3 Code can run as a background service for your user. It starts when the machine
-boots and keeps running after you log out.
+리눅스 호스트에서는 T3 Code를 사용자 계정의 백그라운드 서비스로 실행할 수 있습니다. 컴퓨터가 부팅될 때 시작되며 로그아웃한 뒤에도 계속 실행됩니다.
 
-## Manage the Service
+## 서비스 관리
 
-Install it with the latest T3 Code release:
+최신 T3 Code 릴리스로 설치합니다.
 
 ```sh
 npx t3@latest service install
 ```
 
-Check whether it is installed:
+설치되어 있는지 확인합니다.
 
 ```sh
 npx t3@latest service status
 ```
 
-Update or repair it:
+업데이트하거나 수정합니다.
 
 ```sh
 npx t3@latest service update
 ```
 
-Stop it and remove it from startup:
+중지하고 시작 프로그램에서 제거합니다.
 
 ```sh
 npx t3@latest service uninstall
 ```
 
-Updating restarts T3 Code briefly. Let active agent work and terminal commands finish first.
-If a remote update is already in progress, wait for it to finish before retrying a local update.
+업데이트하면 T3 Code가 잠시 다시 시작됩니다. 진행 중인 에이전트 작업과 터미널 명령을 먼저 끝내세요. 원격 업데이트가 이미 진행 중이라면 끝날 때까지 기다린 뒤 로컬 업데이트를 다시 시도하세요.
 
-The systemd unit runs a small stable launcher. Exact T3 Code versions are installed separately, so
-a failed remote candidate can return to the previous version without rewriting the unit. The
-launcher snapshots the database before a remote candidate starts, so database updates roll back
-with the server version. An older launcher may require one local `service update` before this is
-available.
+systemd 유닛은 작고 안정적인 실행기를 실행합니다. 정확한 T3 Code 버전은 별도로 설치되므로, 원격 후보가 실패해도 유닛을 다시 쓰지 않고 이전 버전으로 돌아갈 수 있습니다. 실행기는 원격 후보가 시작되기 전에 데이터베이스 스냅샷을 만들기 때문에 데이터베이스 업데이트도 서버 버전과 함께 롤백됩니다. 이전 버전 실행기에서는 이 기능을 사용하기 전에 로컬 `service update`를 한 번 실행해야 할 수 있습니다.
 
-## Using It with T3 Connect
+## T3 Connect와 함께 사용하기
 
-T3 Connect may offer to install the service during setup so the host stays reachable after you log
-out. This is only an onboarding shortcut: the service and T3 Connect are managed separately.
+T3 Connect는 로그아웃한 뒤에도 호스트에 접속할 수 있도록 설정 과정에서 서비스 설치를 제안할 수 있습니다. 이는 온보딩 바로가기일 뿐이며, 서비스와 T3 Connect는 따로 관리됩니다.
 
-Signing out of T3 Connect does not remove the service. Use `t3 service uninstall` when you no longer
-want T3 Code to start in the background.
+T3 Connect에서 로그아웃해도 서비스는 제거되지 않습니다. T3 Code를 더 이상 백그라운드에서 시작하고 싶지 않다면 `t3 service uninstall`을 사용하세요.
 
-The background service currently requires Linux with systemd.
+백그라운드 서비스는 현재 systemd를 사용하는 리눅스에서만 동작합니다.

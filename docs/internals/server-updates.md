@@ -1,98 +1,73 @@
-# Server Update Architecture
+# 서버 업데이트 아키텍처
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> 메인테이너용 문서입니다. T3 Code를 사용 중이신가요? [docs/user](../user/)를 참고하세요.
 
-Remote server updates use one stable systemd launcher. Foreground CLI processes do not self-update,
-and a running server never edits its systemd unit or durable service state.
+원격 서버 업데이트는 안정 systemd 실행기 하나를 사용합니다. 포그라운드 CLI 프로세스는 스스로 업데이트하지 않으며, 실행 중인 서버는 자신의 systemd 유닛이나 영속 서비스 상태를 절대 수정하지 않습니다.
 
-## Ownership
+## 소유권
 
-The service files under `<baseDir>/runtime` are:
+`<baseDir>/runtime` 아래의 서비스 파일은 다음과 같습니다.
 
-- `service-launcher.mjs`, the stable process selected by systemd;
-- `service-state.json`, the launcher's durable selection state;
-- `versions/<version>`, immutable exact-version npm installs.
+- `service-launcher.mjs`는 systemd가 선택하는 안정 프로세스입니다.
+- `service-state.json`은 실행기의 영속 선택 상태입니다.
+- `versions/<version>`은 정확한 버전으로 설치한 불변 npm 설치본입니다.
 
-The launcher is the only runtime writer of `service-state.json`. `t3 service install` and
-`t3 service update` may replace the launcher and state while the unit is stopped. Server children
-only communicate with the launcher over their inherited IPC channel.
+실행 중에 `service-state.json`을 쓰는 주체는 실행기뿐입니다. `t3 service install`과 `t3 service update`는 유닛이 중지된 동안 실행기와 상태를 교체할 수 있습니다. 서버 자식 프로세스는 상속받은 IPC 채널로만 실행기와 통신합니다.
 
-The state contains one active version and, at most, one update record:
+상태에는 활성 버전 하나와 최대 하나의 업데이트 기록이 담깁니다.
 
-- `pending A → B` selects B as a retryable trial;
-- `committed A → B` selects B for ordinary restarts;
-- `rolled-back A → B` or `failed A → B` selects A;
-- invalid state fails closed so systemd cannot guess at a runtime.
+- `pending A → B`는 B를 다시 시도할 수 있는 시험 실행 대상으로 선택합니다.
+- `committed A → B`는 일반 재시작에서 B를 선택합니다.
+- `rolled-back A → B` 또는 `failed A → B`는 A를 선택합니다.
+- 유효하지 않은 상태는 실행을 거부하므로 systemd가 런타임을 임의로 추정할 수 없습니다.
 
-Every write uses same-directory replacement plus file and directory fsync.
+모든 쓰기는 같은 디렉터리 안에서의 교체와 함께 파일·디렉터리 fsync를 수행합니다.
 
-## Remote Update
+## 원격 업데이트
 
-1. The active server installs `t3@<target>` into a unique staging directory.
-2. The target runs `__service-preflight` and verifies that the stable launcher supports its update
-   protocol.
-3. The staging directory is renamed to its immutable version path only after preflight succeeds.
-4. The active child sends `request-update`. The launcher validates the child and target, writes
-   pending state, generates the update ID, then replies `update-accepted`.
-5. After a short response-flush grace period, the launcher stops the active child.
-6. With SQLite quiescent, the launcher snapshots the database, WAL, and shared-memory files.
-7. The launcher starts the target as a trial and gives it the pending update over IPC.
-8. The trial runs migrations, acquires dependencies, binds HTTP, starts every long-running root
-   fiber, and verifies that each root is parked at the activation gate.
-9. The trial sends `prepared`. The launcher durably commits B, deletes the snapshot, then replies
-   `committed`.
-10. The child opens the existing activation gate, accepts commands, and publishes lifecycle ready
-    with the terminal update outcome.
+1. 활성 서버가 `t3@<target>`을 고유한 스테이징 디렉터리에 설치합니다.
+2. 대상 버전이 `__service-preflight`를 실행해 안정 실행기가 자신의 업데이트 프로토콜을 지원하는지 확인합니다.
+3. 프리플라이트가 성공한 뒤에만 스테이징 디렉터리의 이름을 불변 버전 경로로 바꿉니다.
+4. 활성 자식 프로세스가 `request-update`를 보냅니다. 실행기는 자식 프로세스와 대상 버전을 검증하고 대기 상태를 기록한 뒤 업데이트 ID를 생성하고 `update-accepted`로 응답합니다.
+5. 응답을 내보낼 짧은 유예 시간이 지나면 실행기가 활성 자식 프로세스를 중지합니다.
+6. SQLite에 활동이 없는 상태에서 실행기가 데이터베이스, WAL, 공유 메모리 파일의 스냅샷을 만듭니다.
+7. 실행기가 대상 버전을 시험 실행으로 시작하고 IPC로 대기 중인 업데이트를 전달합니다.
+8. 시험 실행은 마이그레이션을 수행하고 의존성을 확보하고 HTTP를 바인딩한 뒤 장시간 실행되는 루트 파이버를 모두 시작하고, 각 루트가 활성화 게이트에서 대기 중인지 확인합니다.
+9. 시험 실행이 `prepared`를 보냅니다. 실행기는 B를 영속적으로 확정하고 스냅샷을 삭제한 뒤 `committed`로 응답합니다.
+10. 자식 프로세스가 이미 만들어 둔 활성화 게이트를 열고 명령을 받기 시작하며, 최종 업데이트 결과와 함께 수명 주기 준비 완료 상태를 게시합니다.
 
-Post-commit startup does not call service `start`, `initialize`, `connect`, `load`, or `acquire`
-operations. It only opens prepared gates and publishes prepared lifecycle state.
+확정 이후의 시작 과정에서는 서비스의 `start`, `initialize`, `connect`, `load`, `acquire` 작업을 호출하지 않습니다. 이미 준비된 게이트를 열고 준비된 수명 주기 상태를 게시할 뿐입니다.
 
-The launcher serializes child exits, IPC messages, and timers. A trial must report prepared within
-120 seconds. If the trial exits or times out before prepared, the launcher stops it, restores the
-snapshot, records rollback, and starts A. A durable restore marker makes an interrupted restore
-resume before either version can boot. After commit, B is active and normal systemd restart policy
-applies.
+실행기는 자식 프로세스 종료, IPC 메시지, 타이머를 직렬화해 처리합니다. 시험 실행은 120초 안에 준비 완료를 보고해야 합니다. 시험 실행이 준비 완료 전에 종료되거나 시간이 초과되면 실행기는 시험 실행을 중지하고 스냅샷을 복원한 뒤 롤백을 기록하고 A를 시작합니다. 영속 복원 표시가 남아 있으면 중단된 복원 작업이 두 버전 중 어느 쪽도 부팅하기 전에 다시 이어집니다. 확정 후에는 B가 활성 버전이 되며 일반 systemd 재시작 정책이 적용됩니다.
 
-## Database Rollback
+## 데이터베이스 롤백
 
-The launcher snapshots `state.sqlite`, `state.sqlite-wal`, and `state.sqlite-shm` after the old
-server stops and before the trial starts. This makes trial migrations and writes reversible without
-requiring down migrations. The snapshot is retained across launcher restarts and is removed only
-after commit or after both restore and the terminal rollback state are durable.
+실행기는 이전 서버가 중지된 뒤 시험 실행이 시작되기 전에 `state.sqlite`, `state.sqlite-wal`, `state.sqlite-shm`의 스냅샷을 만듭니다. 덕분에 시험 실행 중의 마이그레이션과 쓰기를 다운 마이그레이션 없이 되돌릴 수 있습니다. 스냅샷은 실행기가 다시 시작되어도 유지되며, 확정된 뒤 또는 복원과 최종 롤백 상태가 모두 영속화된 뒤에만 삭제됩니다.
 
-The protocol version is part of the safety boundary. A target that requires database snapshots is
-blocked when the installed launcher is too old. Upgrade the launcher once with:
+프로토콜 버전도 안전 경계의 일부입니다. 데이터베이스 스냅샷이 필요한 대상 버전은 설치된 실행기가 너무 오래되었을 때 차단됩니다. 다음 명령으로 실행기를 한 번 업그레이드하세요.
 
 ```sh
 npx t3@<version> service update
 ```
 
-The local command stops the unit, selects the new launcher and exact runtime, then restarts the
-service. Later releases, including releases with migrations, can use the remote trial path.
+이 로컬 명령은 유닛을 중지하고 새 실행기와 정확한 런타임을 선택한 뒤 서비스를 다시 시작합니다. 이후 릴리스는 마이그레이션이 포함된 릴리스까지 원격 시험 실행 경로를 사용할 수 있습니다.
 
-Snapshots briefly require enough free disk for another copy of the SQLite files. Attachments and
-other files under the state directory are outside this rollback boundary.
+스냅샷을 만드는 동안에는 SQLite 파일을 한 벌 더 복사할 만큼의 여유 디스크 공간이 잠시 필요합니다. 첨부 파일을 비롯해 상태 디렉터리 아래의 다른 파일은 이 롤백 경계 밖에 있습니다.
 
-## Client Correlation
+## 클라이언트 연관
 
-The update acknowledgement includes the launcher-generated update ID. After reconnecting, clients
-wait for a lifecycle ready event carrying that same ID. `committed` completes the operation only
-when the ready server is the target version. `rolled-back` and `failed` end it immediately with the
-recorded reason. Older servers without an ID retain version-only reconnect behavior.
+업데이트 확인 응답에는 실행기가 생성한 업데이트 ID가 담깁니다. 클라이언트는 다시 연결한 뒤 같은 ID가 담긴 수명 주기 준비 완료 이벤트를 기다립니다. `committed`는 준비를 마친 서버가 대상 버전일 때만 작업을 완료 처리합니다. `rolled-back`과 `failed`는 기록된 사유와 함께 작업을 즉시 종료합니다. ID가 없는 이전 서버는 버전만으로 재연결을 판단하는 기존 동작을 유지합니다.
 
-## Capability and Compatibility
+## 지원 기능과 호환성
 
-The existing additive RPC and lifecycle schemas remain compatible with older clients. New servers
-advertise remote self-update only when they have valid launcher context and a live IPC channel.
-Desktop-managed servers direct the user to update the desktop app. Other process shapes provide a
-manual command; the old detached foreground respawn path no longer exists.
+기존 RPC·수명 주기 스키마는 항목을 추가하는 방식으로만 확장되므로 이전 클라이언트와 계속 호환됩니다. 새 서버는 유효한 실행기 컨텍스트와 살아 있는 IPC 채널이 있을 때만 원격 자체 업데이트를 지원 기능으로 알립니다. 데스크톱 앱이 관리하는 서버는 데스크톱 앱을 업데이트하도록 사용자에게 안내합니다. 그 밖의 프로세스 형태에는 수동 명령을 제공하며, 예전의 분리된 포그라운드 재실행 경로는 더 이상 존재하지 않습니다.
 
-## Source Map
+## 소스 위치
 
-- Launcher and state machine: `apps/server/src/serviceLauncher.ts`
-- IPC and durable state types: `apps/server/src/cloud/serviceProtocol.ts`
-- Child IPC adapter: `apps/server/src/cloud/serviceLauncherClient.ts`
-- Staging and preflight: `apps/server/src/cloud/pinnedRuntime.ts` and `servicePreflight.ts`
-- Service installation: `apps/server/src/cloud/bootService.ts`
-- Activation boundary: `apps/server/src/serverRuntimeStartup.ts` and `serverActivation.ts`
-- Client outcome correlation: `packages/client-runtime/src/state/server.ts`
+- 실행기와 상태 머신: `apps/server/src/serviceLauncher.ts`
+- IPC와 영속 상태 타입: `apps/server/src/cloud/serviceProtocol.ts`
+- 자식 프로세스 IPC 어댑터: `apps/server/src/cloud/serviceLauncherClient.ts`
+- 스테이징과 프리플라이트: `apps/server/src/cloud/pinnedRuntime.ts` 및 `servicePreflight.ts`
+- 서비스 설치: `apps/server/src/cloud/bootService.ts`
+- 활성화 경계: `apps/server/src/serverRuntimeStartup.ts` 및 `serverActivation.ts`
+- 클라이언트 결과 연관: `packages/client-runtime/src/state/server.ts`

@@ -1,15 +1,15 @@
-# Provider architecture
+# 제공자 아키텍처
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+> 메인테이너용 문서입니다. T3 Code를 사용 중이신가요? [docs/user](../user/)를 참고하세요.
 
-A provider is the agent runtime that does the actual work. T3 Code supports several, and the
-orchestration layer does not know which one is behind a thread.
+제공자는 실제 작업을 수행하는 에이전트 런타임입니다. T3 Code는 여러 제공자를 지원하며,
+오케스트레이션 계층은 대화 뒤에 어떤 제공자가 있는지 알지 못합니다.
 
-## Built-in drivers
+## 내장 드라이버
 
-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five entries:
+[`builtInDrivers.ts`][drivers]는 항목 다섯 개를 담은 `BUILT_IN_DRIVERS`를 내보냅니다.
 
-| Driver kind   | Driver source                           |
+| 드라이버 종류 | 드라이버 소스                           |
 | ------------- | --------------------------------------- |
 | `codex`       | [`Drivers/CodexDriver.ts`][codex]       |
 | `claudeAgent` | [`Drivers/ClaudeDriver.ts`][claude]     |
@@ -17,63 +17,62 @@ orchestration layer does not know which one is behind a thread.
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
-Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
-adapter in a child scope. Adapter implementations live beside them in
-`apps/server/src/provider/Layers/` (`CodexAdapter.ts`, `ClaudeAdapter.ts`, and so on) and conform to
-[`ProviderAdapter.ts`][adapter]. Read the driver plus its adapter to see how a specific agent's
-transport, config, and event shapes are mapped.
+각 드라이버는 자신의 `driverKind`, `configSchema`, 그리고 자식 스코프에서 어댑터를 만드는
+`create` 함수를 선언합니다. 어댑터 구현은 그 옆의
+`apps/server/src/provider/Layers/`(`CodexAdapter.ts`, `ClaudeAdapter.ts` 등)에 있으며
+[`ProviderAdapter.ts`][adapter]를 따릅니다. 특정 에이전트의 전송 방식, 설정, 이벤트 형태가 어떻게
+대응되는지 보려면 드라이버와 그 어댑터를 함께 읽으세요.
 
-## Registry and routing
+## 레지스트리와 라우팅
 
-Two registries separate configuration from live processes:
+레지스트리 두 개가 설정과 실행 중인 프로세스를 분리합니다.
 
-- [`ProviderInstanceRegistry`][instances] keys configured instances by `ProviderInstanceId`. Creating
-  one looks up the driver by `driverKind`, decodes `entry.config` with that driver's schema, opens a
-  child scope, and calls `driver.create`.
-- [`ProviderAdapterRegistry`][registry] resolves an instance ID to its live adapter via
-  `getByInstance`.
+- [`ProviderInstanceRegistry`][instances]는 설정된 인스턴스를 `ProviderInstanceId`로 키를 잡습니다.
+  인스턴스를 만들 때는 `driverKind`로 드라이버를 찾고, 그 드라이버의 스키마로 `entry.config`를
+  디코딩하고, 자식 스코프를 연 뒤 `driver.create`를 호출합니다.
+- [`ProviderAdapterRegistry`][registry]는 `getByInstance`로 인스턴스 ID를 실행 중인 어댑터로
+  해석합니다.
 
-[`ProviderService`][service] sits on top. It combines the adapter registry with the provider session
-directory to route session and turn operations for a thread, so callers name a thread, not an agent.
+그 위에 [`ProviderService`][service]가 놓입니다. 어댑터 레지스트리와 제공자 세션 디렉터리를 결합해
+대화의 세션·턴 작업을 라우팅하므로, 호출자는 에이전트가 아니라 대화를 지정합니다.
 
-Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
-orchestration, contract, or client change is required for the common case.
+드라이버를 추가한다는 것은 드라이버와 어댑터를 작성해 `BUILT_IN_DRIVERS`에 넣는다는 뜻입니다.
+일반적인 경우에는 오케스트레이션, 컨트랙트, 클라이언트를 변경할 필요가 없습니다.
 
-## How provider work is requested
+## 제공자 작업을 요청하는 방식
 
-Clients never call a provider directly. They dispatch orchestration commands over the RPC method
-`orchestration.dispatchCommand`, defined with the rest of the orchestration surface in
-[`orchestration.ts`][contracts]. The client-dispatchable provider-facing commands are
-`thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`,
-`thread.user-input.respond`, `thread.checkpoint.revert`, and `thread.session.stop`, plus the mode
-setters `thread.runtime-mode.set` and `thread.interaction-mode.set`.
+클라이언트는 제공자를 직접 호출하지 않습니다. 클라이언트는 RPC 메서드
+`orchestration.dispatchCommand`로 오케스트레이션 명령을 디스패치하며, 이 메서드는 나머지
+오케스트레이션 인터페이스와 함께 [`orchestration.ts`][contracts]에 정의되어 있습니다. 클라이언트가
+디스패치할 수 있는
+제공자 관련 명령은 `thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`,
+`thread.user-input.respond`, `thread.checkpoint.revert`, `thread.session.stop`과 모드 설정 명령인
+`thread.runtime-mode.set`, `thread.interaction-mode.set`입니다.
 
-The engine persists an event for the command, and a server-side reactor performs the provider call.
-Provider output comes back as internal commands such as `thread.message.assistant.delta` and
-`thread.session.set`, which clients observe through `orchestration.subscribeThread`. See
-[overview.md](./overview.md) for the command/event loop.
+엔진은 명령에 대한 이벤트를 저장하고, 서버 쪽 reactor(후속 작업을 처리하는 워커)가 제공자 호출을
+수행합니다. 제공자 출력은 `thread.message.assistant.delta`, `thread.session.set` 같은 내부 명령으로
+돌아오며, 클라이언트는 `orchestration.subscribeThread`로 이를 관찰합니다. 명령/이벤트 루프는
+[overview.md](./overview.md)를 참고하세요.
 
-## Server-side workers
+## 서버 쪽 워커
 
-Provider work flows through three queue-backed workers. All three are built with
-`makeDrainableWorker` from [`DrainableWorker.ts`][worker] and expose `drain` for deterministic test
-synchronization.
+제공자 작업은 큐 기반 워커 세 개를 거칩니다. 세 워커 모두 [`DrainableWorker.ts`][worker]의
+`makeDrainableWorker`로 만들어지며, 결정적인 테스트 동기화를 위해 `drain`을 노출합니다.
 
-1. [`ProviderRuntimeIngestion`][ingest] consumes provider runtime streams and emits orchestration
-   commands.
-2. [`ProviderCommandReactor`][cmd] reacts to orchestration intent events and dispatches provider
-   calls.
-3. [`CheckpointReactor`][checkpoint] captures workspace checkpoints on turn start and completion, and
-   performs reverts.
+1. [`ProviderRuntimeIngestion`][ingest]은 제공자 런타임 스트림을 소비해 오케스트레이션 명령을
+   내보냅니다.
+2. [`ProviderCommandReactor`][cmd]는 오케스트레이션 의도 이벤트에 반응해 제공자 호출을
+   디스패치합니다.
+3. [`CheckpointReactor`][checkpoint]는 턴 시작과 완료 시점에 프로젝트 체크포인트를 캡처하고
+   되돌리기를 수행합니다.
 
-### Buffered assistant delivery
+### 버퍼링된 어시스턴트 전달
 
-A thread in `buffered` assistant delivery mode accumulates assistant text instead of streaming each
-delta. The buffer is not held until turn completion. In [`ProviderRuntimeIngestion`][ingest],
-`MAX_BUFFERED_ASSISTANT_CHARS` is 24,000: the append that would exceed it invalidates the buffer and
-spills the whole accumulated text as one delta. The buffer also flushes at interaction boundaries,
-when a request opens (approval) or user input is requested, via
-`flushBufferedAssistantMessagesForTurn`.
+어시스턴트 전달 모드가 `buffered`인 대화는 델타를 하나씩 스트리밍하지 않고 어시스턴트 텍스트를
+누적합니다. 버퍼를 턴이 끝날 때까지 들고 있지는 않습니다. [`ProviderRuntimeIngestion`][ingest]에서
+`MAX_BUFFERED_ASSISTANT_CHARS`는 24,000입니다. 이 한도를 넘기게 되는 덧붙이기 작업이 버퍼를
+무효화하고 누적된 텍스트 전체를 델타 하나로 쏟아냅니다. 버퍼는 요청이 열리거나(승인) 사용자 입력이
+요청되는 상호작용 경계에서도 `flushBufferedAssistantMessagesForTurn`을 통해 비워집니다.
 
 [drivers]: ../../apps/server/src/provider/builtInDrivers.ts
 [codex]: ../../apps/server/src/provider/Drivers/CodexDriver.ts

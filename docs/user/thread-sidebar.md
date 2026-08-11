@@ -1,20 +1,11 @@
-# Organizing conversations by project
+# 프로젝트별 대화 정리
 
-Projects are the top-level items in the conversation sidebar. Select a project first; the list,
-search results, and new-conversation action then stay inside that project. T3 Code does not combine
-conversations from unrelated projects into one all-project list.
+프로젝트는 대화 사이드바의 최상위 항목입니다. 프로젝트를 먼저 선택하면 목록, 검색 결과, 새 대화 만들기 동작이 모두 해당 프로젝트 안에 머무릅니다. T3 Code는 서로 관련 없는 프로젝트의 대화를 하나의 전체 프로젝트 목록으로 합치지 않습니다.
 
-Every conversation keeps its owning project when it is created. Opening a deep link also selects
-that conversation's project automatically, so the surrounding list always matches the open work.
+모든 대화는 만들어질 때 소속 프로젝트를 함께 유지합니다. 딥링크를 열 때도 해당 대화의 프로젝트가 자동으로 선택되므로, 함께 보이는 목록은 항상 열려 있는 작업과 일치합니다.
 
-Pin a thread from its context menu to keep it in the pinned section above your active work.
-Pinned threads remain in their owning project's list, including when you connect to more than one
-environment.
+컨텍스트 메뉴에서 대화를 고정하면 진행 중인 작업 위쪽의 고정 영역에 남습니다. 고정한 대화는 두 개 이상의 환경에 연결한 경우에도 소속 프로젝트의 목록에 그대로 남습니다.
 
-On web and desktop, drag a pinned thread to change its position. On mobile, open the thread's menu
-and choose **Move up** or **Move down**. The order is stored by the server and appears on your
-other connected devices.
+웹과 데스크톱에서는 고정한 대화를 끌어서 위치를 바꿉니다. 모바일에서는 대화의 메뉴를 열고 **위로 이동** 또는 **아래로 이동**을 선택합니다. 순서는 서버에 저장되며 연결된 다른 기기에도 표시됩니다.
 
-If reordering is unavailable for one environment, update the T3 Code server running in that
-environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
-their pinned threads keep the default newest-first order below the ones you have arranged.
+한 환경에서 순서 변경을 사용할 수 없다면 해당 환경에서 실행 중인 T3 Code 서버를 업데이트하세요. 이전 버전 서버도 대화를 고정하고 고정 해제할 수 있지만 동기화된 순서는 이해하지 못하며, 그런 서버의 고정한 대화는 사용자가 정렬한 대화 아래에 기본값인 최신순으로 유지됩니다.

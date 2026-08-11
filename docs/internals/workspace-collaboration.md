@@ -1,56 +1,56 @@
-# Workspace collaboration task graphs
+# 프로젝트 협업 작업 그래프
 
-> For maintainers. User-facing behavior is documented in [Fable task orchestration](../user/workspace-orchestration.md).
+> 메인테이너용 문서입니다. 사용자에게 보이는 동작은 [페이블 작업 오케스트레이션](../user/workspace-orchestration.md)에 설명되어 있습니다.
 
-Workspace collaboration runs are durable, provider-backed dependency graphs. They reuse the existing thread and provider runtime instead of introducing a second agent execution system.
+프로젝트 협업 실행은 제공자가 뒷받침하는 영속적인 의존성 그래프입니다. 두 번째 에이전트 실행 시스템을 새로 도입하지 않고 기존 대화와 제공자 런타임을 그대로 재사용합니다.
 
-## Logical agents and provider routes
+## 논리 에이전트와 제공자 경로
 
-The graph uses three logical agents:
+그래프는 세 개의 논리 에이전트를 사용합니다.
 
-- Fable owns planning, validation, graph revision, synthesis, and selective memory.
-- Codex owns implementation, debugging, tests, data work, and automation.
-- Grok owns current-information and social research.
+- 페이블은 계획, 검증, 그래프 수정, 종합, 선택적 기억을 담당합니다.
+- 코덱스는 구현, 디버깅, 테스트, 데이터 작업, 자동화를 담당합니다.
+- 그록은 최신 정보와 소셜 조사를 담당합니다.
 
-Workspace role bindings map Fable to `coordinator`, Codex to `implementer`, and Grok to `researcher`. Codex and Grok routes are rejected unless their provider instance has the matching driver kind. A failed attempt can select an unused enabled instance of the same driver; attempts are bounded so a route cannot loop forever.
+프로젝트 역할 연결은 페이블을 `coordinator`, 코덱스를 `implementer`, 그록을 `researcher`에 대응시킵니다. 코덱스와 그록 경로는 해당 제공자 인스턴스의 드라이버 종류가 일치하지 않으면 거부됩니다. 실패한 시도는 같은 드라이버에서 아직 사용하지 않은 활성 인스턴스를 선택할 수 있으며, 시도 횟수에 상한이 있어 한 경로가 무한히 반복되지 않습니다.
 
-## Durable model
+## 영속 모델
 
-The wire contract stores a `WorkspaceTaskGraph` on each collaboration run. A graph contains nodes, dependencies, attempts, validation receipts, confidence, failure classifications, revision history, next action, and Fable-selected memory candidates. The collaboration projection stores the snapshot as JSON; the orchestration event log retains the sequence of run updates. Legacy runs decode with a null graph and continue through the former linear-step path.
+통신 컨트랙트는 협업 실행마다 `WorkspaceTaskGraph`를 저장합니다. 그래프는 작업, 의존성, 시도 기록, 검증 receipt(작업 완료를 알리는 기록), 신뢰도, 실패 분류, 수정 이력, 다음 행동, 페이블이 선택한 기억 후보를 담습니다. 협업 프로젝션은 스냅샷을 JSON으로 저장하고, 오케스트레이션 이벤트 로그는 실행 갱신의 순서를 보관합니다. 이전 방식의 실행은 그래프가 null인 상태로 디코딩되어 예전의 선형 단계 경로로 계속 동작합니다.
 
-Database migrations separately add incident/operator compatibility and graph storage so upgrading an existing installation preserves roles and collaboration runs.
+데이터베이스 마이그레이션은 장애·운영자 호환성과 그래프 저장을 별도로 추가하므로, 기존 설치를 업그레이드해도 역할과 협업 실행이 그대로 유지됩니다.
 
-## Execution loop
+## 실행 루프
 
-The collaboration reactor implements the loop:
+협업 reactor(후속 작업을 처리하는 워커)가 다음 루프를 구현합니다.
 
-1. create a Fable planning node and compose workspace memory once;
-2. parse a bounded tagged JSON graph proposal;
-3. reject duplicate IDs, missing dependencies, cycles, existing-ID collisions, and incompatible routing;
-4. insert a Fable validation gate after every Codex or Grok producer and a terminal synthesis node;
-5. start up to three dependency-ready nodes in one wave and run their provider turns concurrently;
-6. apply the wave atomically, persist the graph snapshot, refresh the ready frontier, and continue.
+1. 페이블 계획 작업을 만들고 프로젝트 기억을 한 번 구성합니다.
+2. 크기가 제한된 태그 형식의 JSON 그래프 제안을 파싱합니다.
+3. 중복 ID, 존재하지 않는 의존성, 순환, 기존 ID 충돌, 호환되지 않는 경로 배정을 거부합니다.
+4. 모든 코덱스 또는 그록 생성자 뒤에 페이블 검증 관문을 넣고, 마지막에 종합 작업을 넣습니다.
+5. 의존성이 해소된 작업을 한 웨이브에 최대 세 개까지 시작하고 각 작업의 제공자 턴을 동시에 실행합니다.
+6. 웨이브를 원자적으로 적용하고, 그래프 스냅샷을 저장하고, 준비된 작업 경계를 갱신한 뒤 계속 진행합니다.
 
-Every assignment contains only the workspace prompt needed by Fable plus the direct outputs of the node's dependencies. The handoff headings are stable because models and tests rely on them: `TASK`, `GOAL`, `CONTEXT`, `INPUT`, `CONSTRAINTS`, `EXPECTED OUTPUT`, `DEPENDENCIES`, and `SUCCESS CRITERIA`.
+각 배정에는 페이블에 필요한 프로젝트 프롬프트와 해당 작업이 의존하는 작업들의 직접 출력만 담깁니다. 모델과 테스트가 인계 제목에 의존하므로 다음 제목은 고정되어 있습니다: `TASK`, `GOAL`, `CONTEXT`, `INPUT`, `CONSTRAINTS`, `EXPECTED OUTPUT`, `DEPENDENCIES`, `SUCCESS CRITERIA`.
 
-## Validation and graph revision
+## 검증과 그래프 수정
 
-Codex and Grok results stop in `awaiting-validation`. Fable emits a typed receipt with a verdict, confidence, evidence, failure classification, and optional follow-up nodes. Pass with medium or high confidence completes the producer. Failure or low confidence either materializes the bounded follow-up nodes immediately or creates a Fable recovery-planning node.
+코덱스와 그록의 결과는 `awaiting-validation` 상태에서 멈춥니다. 페이블은 판정, 신뢰도, 근거, 실패 분류, 선택적 후속 작업을 담은 타입이 정의된 receipt를 발행합니다. 중간 또는 높은 신뢰도의 통과 판정은 해당 생성자 작업을 완료 처리합니다. 실패 판정이나 낮은 신뢰도는 개수가 제한된 후속 작업을 즉시 생성하거나 페이블 복구 계획 작업을 만듭니다.
 
-Failures are classified as information, implementation, tool, assumption, or validation. Information recovery must include Grok research; implementation recovery must include Codex implementation or debugging; validation recovery must create a new independently validated Codex or Grok path. A low-confidence synthesis or unresolved result conflict creates another cross-validation path instead of retrying the same synthesis.
+실패는 정보, 구현, 도구, 가정, 검증으로 분류됩니다. 정보 실패의 복구에는 그록 조사가 반드시 포함되어야 하고, 구현 실패의 복구에는 코덱스의 구현 또는 디버깅이 반드시 포함되어야 하며, 검증 실패의 복구는 독립적으로 검증되는 새 코덱스 또는 그록 경로를 만들어야 합니다. 신뢰도가 낮은 종합이나 해소되지 않은 결과 충돌은 같은 종합을 다시 시도하지 않고 또 다른 교차 검증 경로를 만듭니다.
 
-Graph application keeps the pre-result graph until parsing and revision succeed. A malformed model response therefore retries the current node without leaving its target partly failed or validated.
+그래프 적용은 파싱과 수정이 성공할 때까지 결과 반영 이전의 그래프를 유지합니다. 따라서 형식이 잘못된 모델 응답은 대상 작업을 일부만 실패하거나 검증된 상태로 남기지 않고 현재 작업을 다시 시도합니다.
 
-## Memory, safety, and payload bounds
+## 기억, 안전, 페이로드 상한
 
-Full graph history remains on the collaboration run. Graph runs do not automatically promote their entire transcript into workspace knowledge. Only synthesis memory candidates are written to long-term memory, with non-high confidence retained as candidates.
+전체 그래프 이력은 협업 실행에 남습니다. 그래프 실행은 전체 대화 기록을 자동으로 프로젝트 지식으로 승격하지 않습니다. 장기기억에는 종합 단계의 기억 후보만 기록하고, 신뢰도가 높지 않은 항목은 후보 상태로 남깁니다.
 
-Incident repair restart approval is typed: the graph must explicitly approve repair, overall confidence cannot be low, and at least one validation receipt for a completed target must pass with non-low confidence. The legacy output marker is read only for pre-graph runs.
+장애 수정 후 재시작 승인은 타입으로 정의됩니다: 그래프가 수정을 명시적으로 승인해야 하고, 전체 신뢰도가 낮아서는 안 되며, 완료된 대상에 대한 검증 receipt가 최소 하나는 낮지 않은 신뢰도로 통과해야 합니다. 이전 방식의 출력 표식은 그래프 도입 이전 실행에서만 읽습니다.
 
-Provider responses, node handoffs, attempt records, visible run count, and refresh frequency are bounded. This keeps the polled web/mobile projection from turning historical agent output into an unbounded WebSocket payload.
+제공자 응답, 작업 인계 내용, 시도 기록, 표시되는 실행 개수, 갱신 주기에는 상한이 있습니다. 덕분에 주기적으로 조회하는 웹·모바일 프로젝션이 과거 에이전트 출력을 상한 없는 WebSocket 페이로드로 만들지 않습니다.
 
-## Client surfaces
+## 클라이언트 화면
 
-Web and desktop render topological columns with parallel lanes, dependency edges, attempts, validation evidence, graph changes, memory candidates, and thread links. Mobile provides the same read model as a vertical graph monitor, with thread navigation and cancellation but leaves run creation and role configuration in the web/desktop control center.
+웹과 데스크톱은 병렬 레인이 있는 위상 정렬 열로 의존성 간선, 시도 기록, 검증 근거, 그래프 변경, 기억 후보, 대화 링크를 표시합니다. 모바일은 같은 읽기 모델을 세로 그래프 모니터로 제공하며 대화 이동과 취소를 지원하지만, 실행 생성과 역할 설정은 웹·데스크톱 제어센터에 남겨 둡니다.
 
-Layout helpers are pure and isolate missing dependencies, duplicate IDs, cycles, and cycle descendants instead of crashing the client.
+레이아웃 헬퍼는 순수 함수이며, 존재하지 않는 의존성, 중복 ID, 순환, 순환의 하위 작업을 클라이언트를 중단시키지 않고 격리합니다.
