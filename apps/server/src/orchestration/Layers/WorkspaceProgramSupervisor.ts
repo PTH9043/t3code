@@ -56,6 +56,7 @@ import {
 
 const MAX_LOG_CHARS = 65_536;
 const LOG_PERSIST_INTERVAL_MS = 1_000;
+const STOP_SIGNAL_GRACE = Duration.seconds(2);
 const STOP_TIMEOUT = Duration.seconds(5);
 const ANSI_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const SECRET_NAME_PATTERN = /(token|secret|password|passwd|api.?key|auth|cookie)/i;
@@ -771,6 +772,30 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     yield* startHealthLoop(state);
   });
 
+  /**
+   * Sends one signal and never fails the caller. A signal to an already-dead pid throws,
+   * which is the expected outcome of escalating after the process finally exited.
+   */
+  const signalProgram = Effect.fn("WorkspaceProgramSupervisor.signalProgram")(function* (
+    state: LiveProgram,
+    signal: "SIGTERM" | "SIGKILL",
+  ) {
+    yield* Effect.try({
+      try: () => state.process.kill(signal),
+      catch: (cause) => conciseFailure(cause),
+    }).pipe(
+      Effect.catch((detail) =>
+        Effect.logDebug("Workspace program signal was rejected", {
+          projectId: state.program.projectId,
+          programId: state.program.id,
+          pid: state.process.pid,
+          signal,
+          detail,
+        }),
+      ),
+    );
+  });
+
   const stopProgram = Effect.fn("WorkspaceProgramSupervisor.stopProgram")(function* (
     projectId: ProjectId,
     programId: WorkspaceProgramId,
@@ -781,26 +806,33 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     state.intentionalStop = true;
     state.run = { ...state.run, status: "stopping", updatedAt: yield* nowIso };
     yield* dispatchRun(state.run);
-    yield* Effect.try({
-      try: () => state.process.kill(),
-      catch: () => undefined,
-    });
-    const exitResult = yield* Deferred.await(state.exit).pipe(Effect.timeoutOption(STOP_TIMEOUT));
-    state.unsubscribeData();
-    state.unsubscribeExit();
-    livePrograms.delete(key);
-    const stoppedAt = yield* nowIso;
-    const exitEvent = Option.getOrNull(exitResult);
-    state.run = {
-      ...state.run,
-      status: "exited",
-      pid: null,
-      stoppedAt,
-      exitCode: exitEvent?.exitCode ?? null,
-      exitSignal: exitEvent?.signal ?? null,
-      updatedAt: stoppedAt,
-    };
-    yield* dispatchRun(state.run);
+
+    // Ask, then insist. A dev server that traps its shutdown needs more than one signal,
+    // and a program that survives both must not be reported as stopped.
+    yield* signalProgram(state, "SIGTERM");
+    const graceful = yield* Deferred.await(state.exit).pipe(
+      Effect.timeoutOption(STOP_SIGNAL_GRACE),
+    );
+    if (Option.isNone(graceful)) {
+      yield* signalProgram(state, "SIGKILL");
+      const forced = yield* Deferred.await(state.exit).pipe(Effect.timeoutOption(STOP_TIMEOUT));
+      if (Option.isNone(forced)) {
+        // The process outlived SIGKILL, or the adapter never reported its exit. Stay
+        // subscribed and keep the live entry: the exit handler can still finish the job
+        // later, and the user can ask again. Reporting "exited" here would claim a port
+        // is free while the process still holds it, and the next start would spawn a
+        // second instance behind the `livePrograms` guard.
+        yield* Effect.logWarning("Workspace program survived the stop escalation", {
+          projectId,
+          programId,
+          pid: state.process.pid,
+        });
+        return;
+      }
+    }
+
+    // The `exit` work item owns teardown — it unsubscribes, drops the live entry, and
+    // reports the terminal status. Repeating that here would race with it.
     restartIncidentByProgram.delete(key);
   });
 

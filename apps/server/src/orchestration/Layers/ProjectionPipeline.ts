@@ -982,15 +982,32 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             programId: event.payload.programId,
           });
           return;
-        case "project.program-run-upserted":
+        // Runs and incidents are children of a program row through a cascading foreign key,
+        // so a late-arriving write for a program the user already deleted would abort the
+        // whole dispatch transaction. The supervisor learns about the removal from the same
+        // event stream and is allowed to be one dispatch behind; dropping the orphan write
+        // keeps its shutdown path alive instead of stranding the OS process.
+        case "project.program-run-upserted": {
+          const owner = yield* projectionWorkspaceProgramRepository.getProgram({
+            projectId: event.payload.run.projectId,
+            programId: event.payload.run.programId,
+          });
+          if (Option.isNone(owner)) return;
           yield* projectionWorkspaceProgramRepository.upsertRun(event.payload.run);
           return;
+        }
         case "project.program-integrity-updated":
           yield* projectionWorkspaceProgramRepository.updateIntegrity(event.payload);
           return;
-        case "project.program-incident-upserted":
+        case "project.program-incident-upserted": {
+          const owner = yield* projectionWorkspaceProgramRepository.getProgram({
+            projectId: event.payload.incident.projectId,
+            programId: event.payload.incident.programId,
+          });
+          if (Option.isNone(owner)) return;
           yield* projectionWorkspaceProgramRepository.upsertIncident(event.payload.incident);
           return;
+        }
         case "project.deleted":
           yield* projectionWorkspaceProgramRepository.removeByProjectId(event.payload.projectId);
           return;

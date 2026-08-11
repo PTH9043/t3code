@@ -553,7 +553,11 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
           ) : null}
           {(programs.data?.programs ?? []).map((program) => {
             const run = latestRunByProgram.get(program.id);
-            const running = run?.status === "running" || run?.status === "starting";
+            // `stopping` keeps the stop control: a program that outlives the stop
+            // escalation stays tracked, so offering start here would be a button that
+            // silently does nothing.
+            const running =
+              run?.status === "running" || run?.status === "starting" || run?.status === "stopping";
             return (
               <article
                 key={program.id}
