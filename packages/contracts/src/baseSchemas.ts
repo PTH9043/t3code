@@ -56,6 +56,32 @@ export const ThreadId = makeEntityId("ThreadId");
 export type ThreadId = typeof ThreadId.Type;
 export const ProjectId = makeEntityId("ProjectId");
 export type ProjectId = typeof ProjectId.Type;
+export const WorkspaceKnowledgeItemId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+).pipe(Schema.brand("WorkspaceKnowledgeItemId"));
+export type WorkspaceKnowledgeItemId = typeof WorkspaceKnowledgeItemId.Type;
+export const WorkspaceCollaborationRunId = makeEntityId("WorkspaceCollaborationRunId");
+export type WorkspaceCollaborationRunId = typeof WorkspaceCollaborationRunId.Type;
+export const WorkspaceTaskNodeId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+).pipe(Schema.brand("WorkspaceTaskNodeId"));
+export type WorkspaceTaskNodeId = typeof WorkspaceTaskNodeId.Type;
+export const WorkspaceScheduleId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+).pipe(Schema.brand("WorkspaceScheduleId"));
+export type WorkspaceScheduleId = typeof WorkspaceScheduleId.Type;
+export const WorkspaceProgramId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+).pipe(Schema.brand("WorkspaceProgramId"));
+export type WorkspaceProgramId = typeof WorkspaceProgramId.Type;
+export const WorkspaceProgramRunId = makeEntityId("WorkspaceProgramRunId");
+export type WorkspaceProgramRunId = typeof WorkspaceProgramRunId.Type;
+export const WorkspaceIncidentId = makeEntityId("WorkspaceIncidentId");
+export type WorkspaceIncidentId = typeof WorkspaceIncidentId.Type;
 export const EnvironmentId = makeEntityId("EnvironmentId");
 export type EnvironmentId = typeof EnvironmentId.Type;
 export const CommandId = makeEntityId("CommandId");

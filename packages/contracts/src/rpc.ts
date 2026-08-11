@@ -61,6 +61,12 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadsError,
   OrchestrationSearchThreadsInput,
+  OrchestrationWorkspaceKnowledgeError,
+  OrchestrationWorkspaceAgentRolesError,
+  OrchestrationWorkspaceCollaborationError,
+  OrchestrationWorkspaceScheduleError,
+  OrchestrationWorkspaceProgramError,
+  OrchestrationWorkspaceRuntimeError,
   OrchestrationGetTurnDiffError,
   OrchestrationGetTurnDiffInput,
   OrchestrationRpcSchemas,
@@ -727,6 +733,115 @@ export const WsOrchestrationSearchThreadsRpc = Rpc.make(ORCHESTRATION_WS_METHODS
   error: Schema.Union([OrchestrationSearchThreadsError, EnvironmentAuthorizationError]),
 });
 
+export const WsOrchestrationListWorkspaceKnowledgeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceKnowledge.input,
+    success: OrchestrationRpcSchemas.listWorkspaceKnowledge.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationSearchWorkspaceRagRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.searchWorkspaceRag,
+  {
+    payload: OrchestrationRpcSchemas.searchWorkspaceRag.input,
+    success: OrchestrationRpcSchemas.searchWorkspaceRag.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationComposeWorkspacePromptRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.composeWorkspacePrompt,
+  {
+    payload: OrchestrationRpcSchemas.composeWorkspacePrompt.input,
+    success: OrchestrationRpcSchemas.composeWorkspacePrompt.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceAgentRolesRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceAgentRoles,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceAgentRoles.input,
+    success: OrchestrationRpcSchemas.listWorkspaceAgentRoles.output,
+    error: Schema.Union([OrchestrationWorkspaceAgentRolesError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceCollaborationRunsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceCollaborationRuns,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceCollaborationRuns.input,
+    success: OrchestrationRpcSchemas.listWorkspaceCollaborationRuns.output,
+    error: Schema.Union([OrchestrationWorkspaceCollaborationError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceSchedulesRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceSchedules,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceSchedules.input,
+    success: OrchestrationRpcSchemas.listWorkspaceSchedules.output,
+    error: Schema.Union([OrchestrationWorkspaceScheduleError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationGetWorkspaceRuntimeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getWorkspaceRuntime,
+  {
+    payload: OrchestrationRpcSchemas.getWorkspaceRuntime.input,
+    success: OrchestrationRpcSchemas.getWorkspaceRuntime.output,
+    error: Schema.Union([OrchestrationWorkspaceRuntimeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationSubscribeWorkspaceRuntimeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.subscribeWorkspaceRuntime,
+  {
+    payload: OrchestrationRpcSchemas.subscribeWorkspaceRuntime.input,
+    success: OrchestrationRpcSchemas.subscribeWorkspaceRuntime.output,
+    error: Schema.Union([OrchestrationWorkspaceRuntimeError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
+
+export const WsOrchestrationDiscoverWorkspaceProgramsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.discoverWorkspacePrograms,
+  {
+    payload: OrchestrationRpcSchemas.discoverWorkspacePrograms.input,
+    success: OrchestrationRpcSchemas.discoverWorkspacePrograms.output,
+    error: Schema.Union([OrchestrationWorkspaceProgramError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceProgramsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspacePrograms,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspacePrograms.input,
+    success: OrchestrationRpcSchemas.listWorkspacePrograms.output,
+    error: Schema.Union([OrchestrationWorkspaceProgramError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceProgramRunsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceProgramRuns,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceProgramRuns.input,
+    success: OrchestrationRpcSchemas.listWorkspaceProgramRuns.output,
+    error: Schema.Union([OrchestrationWorkspaceProgramError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationListWorkspaceIncidentsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceIncidents,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceIncidents.input,
+    success: OrchestrationRpcSchemas.listWorkspaceIncidents.output,
+    error: Schema.Union([OrchestrationWorkspaceProgramError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsOrchestrationGetArchivedShellSnapshotRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
   {
@@ -881,6 +996,18 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadsRpc,
+  WsOrchestrationListWorkspaceKnowledgeRpc,
+  WsOrchestrationSearchWorkspaceRagRpc,
+  WsOrchestrationComposeWorkspacePromptRpc,
+  WsOrchestrationListWorkspaceAgentRolesRpc,
+  WsOrchestrationListWorkspaceCollaborationRunsRpc,
+  WsOrchestrationListWorkspaceSchedulesRpc,
+  WsOrchestrationGetWorkspaceRuntimeRpc,
+  WsOrchestrationSubscribeWorkspaceRuntimeRpc,
+  WsOrchestrationDiscoverWorkspaceProgramsRpc,
+  WsOrchestrationListWorkspaceProgramsRpc,
+  WsOrchestrationListWorkspaceProgramRunsRpc,
+  WsOrchestrationListWorkspaceIncidentsRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,

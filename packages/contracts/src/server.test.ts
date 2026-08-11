@@ -45,6 +45,45 @@ describe("ServerProvider", () => {
     expect(parsed.skills).toEqual([]);
     expect(parsed.versionAdvisory).toBeUndefined();
     expect(parsed.updateState).toBeUndefined();
+    expect(parsed.usage).toBeUndefined();
+  });
+
+  it("decodes account usage independently for each provider instance", () => {
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "codex_work",
+      usage: {
+        source: "combined",
+        updatedAt: "2026-04-10T01:02:03.000Z",
+        sessionTokens: 12_345,
+        sessionCount: 3,
+        activeSessionCount: 1,
+        lifetimeTokens: 9_876_543,
+        currentStreakDays: 7,
+        peakDailyTokens: 456_789,
+        planType: "pro",
+        primary: {
+          label: "5시간",
+          usedPercent: 34,
+          resetsAt: 1_775_779_200,
+          windowDurationMinutes: 300,
+        },
+        secondary: {
+          label: "7일",
+          usedPercent: 62,
+        },
+        credits: {
+          balance: "12.50",
+          hasCredits: true,
+          unlimited: false,
+        },
+      },
+    });
+
+    expect(parsed.instanceId).toBe("codex_work");
+    expect(parsed.usage?.lifetimeTokens).toBe(9_876_543);
+    expect(parsed.usage?.primary?.usedPercent).toBe(34);
+    expect(parsed.usage?.secondary?.usedPercent).toBe(62);
   });
 
   it("defaults one-click update support when decoding older advisory snapshots", () => {

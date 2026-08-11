@@ -26,6 +26,8 @@ const TerminalEnvSchema = Schema.Record(TerminalEnvKeySchema, TerminalEnvValueSc
 
 export const TerminalThreadInput = Schema.Struct({
   threadId: TrimmedNonEmptyStringSchema,
+  /** Owning project. Optional on the wire for compatibility with older clients. */
+  projectId: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type TerminalThreadInput = typeof TerminalThreadInput.Type;
 
@@ -54,6 +56,7 @@ export const TerminalAttachInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   restartIfNotRunning: Schema.optional(Schema.Boolean),
+  controlMode: Schema.optional(Schema.Literals(["auto", "control", "observe"])),
 });
 export type TerminalAttachInput = Schema.Codec.Encoded<typeof TerminalAttachInput>;
 
@@ -96,6 +99,7 @@ export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
 export const TerminalSessionSnapshot = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),
+  projectId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
@@ -107,12 +111,15 @@ export const TerminalSessionSnapshot = Schema.Struct({
   label: Schema.String.check(Schema.isMaxLength(128)),
   updatedAt: Schema.String,
   sequence: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  controllerAttached: Schema.optional(Schema.Boolean),
+  observerCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
 export const TerminalSummary = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),
+  projectId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
@@ -123,6 +130,8 @@ export const TerminalSummary = Schema.Struct({
   /** Server-computed display title (idle shell vs subprocess command). */
   label: Schema.String.check(Schema.isMaxLength(128)),
   updatedAt: Schema.String,
+  controllerAttached: Schema.optional(Schema.Boolean),
+  observerCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export type TerminalSummary = typeof TerminalSummary.Type;
 
@@ -203,6 +212,13 @@ const TerminalActivityEvent = Schema.Struct({
   label: Schema.String.check(Schema.isMaxLength(128)),
 });
 
+const TerminalControlEvent = Schema.Struct({
+  ...TerminalEventBaseSchema.fields,
+  type: Schema.Literal("control"),
+  controllerAttached: Schema.Boolean,
+  observerCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+
 export const TerminalEvent = Schema.Union([
   TerminalStartedEvent,
   TerminalOutputEvent,
@@ -212,12 +228,14 @@ export const TerminalEvent = Schema.Union([
   TerminalClearedEvent,
   TerminalRestartedEvent,
   TerminalActivityEvent,
+  TerminalControlEvent,
 ]);
 export type TerminalEvent = typeof TerminalEvent.Type;
 
 const TerminalAttachSnapshotEvent = Schema.Struct({
   type: Schema.Literal("snapshot"),
   snapshot: TerminalSessionSnapshot,
+  access: Schema.optional(Schema.Literals(["controller", "observer"])),
 });
 
 export const TerminalAttachStreamEvent = Schema.Union([
@@ -229,6 +247,7 @@ export const TerminalAttachStreamEvent = Schema.Union([
   TerminalClearedEvent,
   TerminalRestartedEvent,
   TerminalActivityEvent,
+  TerminalControlEvent,
 ]);
 export type TerminalAttachStreamEvent = typeof TerminalAttachStreamEvent.Type;
 
@@ -341,6 +360,56 @@ export class TerminalResizeError extends Schema.TaggedErrorClass<TerminalResizeE
   }
 }
 
+export class TerminalProjectLookupError extends Schema.TaggedErrorClass<TerminalProjectLookupError>()(
+  "TerminalProjectLookupError",
+  {
+    threadId: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message() {
+    return `Could not resolve the owning project for terminal thread: ${this.threadId}`;
+  }
+}
+
+export class TerminalProjectMismatchError extends Schema.TaggedErrorClass<TerminalProjectMismatchError>()(
+  "TerminalProjectMismatchError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+    expectedProjectId: Schema.String,
+    actualProjectId: Schema.String,
+  },
+) {
+  override get message() {
+    return `Terminal ${this.terminalId} belongs to project ${this.actualProjectId}, not ${this.expectedProjectId}.`;
+  }
+}
+
+export class TerminalControllerConflictError extends Schema.TaggedErrorClass<TerminalControllerConflictError>()(
+  "TerminalControllerConflictError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+  },
+) {
+  override get message() {
+    return `Terminal ${this.terminalId} already has an input controller.`;
+  }
+}
+
+export class TerminalControllerRequiredError extends Schema.TaggedErrorClass<TerminalControllerRequiredError>()(
+  "TerminalControllerRequiredError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+  },
+) {
+  override get message() {
+    return `Terminal ${this.terminalId} is attached in read-only observer mode.`;
+  }
+}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
@@ -348,5 +417,9 @@ export const TerminalError = Schema.Union([
   TerminalNotRunningError,
   TerminalWriteError,
   TerminalResizeError,
+  TerminalProjectLookupError,
+  TerminalProjectMismatchError,
+  TerminalControllerConflictError,
+  TerminalControllerRequiredError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

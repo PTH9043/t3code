@@ -20,6 +20,13 @@ import {
   TrimmedNonEmptyString,
   TrimmedString,
   TurnId,
+  WorkspaceKnowledgeItemId,
+  WorkspaceCollaborationRunId,
+  WorkspaceTaskNodeId,
+  WorkspaceScheduleId,
+  WorkspaceProgramId,
+  WorkspaceProgramRunId,
+  WorkspaceIncidentId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -29,6 +36,18 @@ export const ORCHESTRATION_WS_METHODS = {
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
+  listWorkspaceKnowledge: "orchestration.listWorkspaceKnowledge",
+  searchWorkspaceRag: "orchestration.searchWorkspaceRag",
+  composeWorkspacePrompt: "orchestration.composeWorkspacePrompt",
+  listWorkspaceAgentRoles: "orchestration.listWorkspaceAgentRoles",
+  listWorkspaceCollaborationRuns: "orchestration.listWorkspaceCollaborationRuns",
+  listWorkspaceSchedules: "orchestration.listWorkspaceSchedules",
+  getWorkspaceRuntime: "orchestration.getWorkspaceRuntime",
+  subscribeWorkspaceRuntime: "orchestration.subscribeWorkspaceRuntime",
+  discoverWorkspacePrograms: "orchestration.discoverWorkspacePrograms",
+  listWorkspacePrograms: "orchestration.listWorkspacePrograms",
+  listWorkspaceProgramRuns: "orchestration.listWorkspaceProgramRuns",
+  listWorkspaceIncidents: "orchestration.listWorkspaceIncidents",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -211,6 +230,807 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+/**
+ * Small, shell-safe settings for a folder-owned long-running Workspace.
+ *
+ * Knowledge contents never live in the shell snapshot. They are keyed by
+ * `ProjectId` in dedicated projections; this object only tells clients where
+ * the Workspace's physical long-term-memory boundary is anchored.
+ */
+export const WorkspaceConversationRagSettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  redactSensitiveData: Schema.Boolean,
+  maxInputChars: Schema.Int.check(Schema.isBetween({ minimum: 2_000, maximum: 120_000 })),
+});
+export type WorkspaceConversationRagSettings = typeof WorkspaceConversationRagSettings.Type;
+
+export const DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS: WorkspaceConversationRagSettings = {
+  enabled: true,
+  redactSensitiveData: true,
+  maxInputChars: 24_000,
+};
+
+export const WorkspaceControlSettings = Schema.Struct({
+  isolationMode: Schema.Literal("strict"),
+  longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
+  conversationRag: WorkspaceConversationRagSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS)),
+  ),
+});
+export type WorkspaceControlSettings = typeof WorkspaceControlSettings.Type;
+
+export const DEFAULT_WORKSPACE_CONTROL_SETTINGS: WorkspaceControlSettings = {
+  isolationMode: "strict",
+  longTermMemoryRoot: null,
+  conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+};
+
+export const WorkspaceKnowledgeKind = Schema.Literals([
+  "directive",
+  "goal",
+  "rag-source",
+  "run-memory",
+  "working-memory",
+  "long-term-memory",
+  "prompt",
+]);
+export type WorkspaceKnowledgeKind = typeof WorkspaceKnowledgeKind.Type;
+
+export const WorkspaceKnowledgeStatus = Schema.Literals([
+  "candidate",
+  "active",
+  "superseded",
+  "archived",
+]);
+export type WorkspaceKnowledgeStatus = typeof WorkspaceKnowledgeStatus.Type;
+
+export const WorkspaceKnowledgeOrigin = Schema.Literals(["user", "agent", "imported"]);
+export type WorkspaceKnowledgeOrigin = typeof WorkspaceKnowledgeOrigin.Type;
+
+export const WorkspaceKnowledgeRelativeFolder = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(240),
+  Schema.makeFilter((value) => {
+    const normalized = value.replaceAll("\\", "/");
+    const segments = normalized.split("/");
+    return (
+      !normalized.startsWith("/") &&
+      !/^[A-Za-z]:/.test(normalized) &&
+      segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }),
+);
+export type WorkspaceKnowledgeRelativeFolder = typeof WorkspaceKnowledgeRelativeFolder.Type;
+
+export const WorkspaceKnowledgeItem = Schema.Struct({
+  id: WorkspaceKnowledgeItemId,
+  projectId: ProjectId,
+  kind: WorkspaceKnowledgeKind,
+  title: TrimmedNonEmptyString,
+  content: Schema.String,
+  status: WorkspaceKnowledgeStatus,
+  origin: WorkspaceKnowledgeOrigin,
+  relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
+  tags: Schema.Array(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceKnowledgeItem = typeof WorkspaceKnowledgeItem.Type;
+
+export const WorkspaceKnowledgeListInput = Schema.Struct({
+  projectId: ProjectId,
+  kinds: Schema.optional(Schema.Array(WorkspaceKnowledgeKind)),
+  statuses: Schema.optional(Schema.Array(WorkspaceKnowledgeStatus)),
+});
+export type WorkspaceKnowledgeListInput = typeof WorkspaceKnowledgeListInput.Type;
+
+export const WorkspaceKnowledgeListResult = Schema.Struct({
+  items: Schema.Array(WorkspaceKnowledgeItem),
+});
+export type WorkspaceKnowledgeListResult = typeof WorkspaceKnowledgeListResult.Type;
+
+export const WorkspaceRagSearchInput = Schema.Struct({
+  projectId: ProjectId,
+  query: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
+  includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
+});
+export type WorkspaceRagSearchInput = typeof WorkspaceRagSearchInput.Type;
+
+export const WorkspaceRagMatch = Schema.Struct({
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  kind: Schema.Literals(["rag-source", "long-term-memory"]),
+  title: TrimmedNonEmptyString,
+  snippet: Schema.String,
+  score: Schema.Number,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceRagMatch = typeof WorkspaceRagMatch.Type;
+
+export const WorkspaceRagSearchResult = Schema.Struct({
+  matches: Schema.Array(WorkspaceRagMatch),
+});
+export type WorkspaceRagSearchResult = typeof WorkspaceRagSearchResult.Type;
+
+export const WorkspacePromptComposeInput = Schema.Struct({
+  projectId: ProjectId,
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  includeRag: Schema.optionalKey(Schema.Boolean),
+  includeWorkingMemory: Schema.optionalKey(Schema.Boolean),
+  includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
+  ragLimit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
+  maxContextChars: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 2_000, maximum: 120_000 })),
+  ),
+});
+export type WorkspacePromptComposeInput = typeof WorkspacePromptComposeInput.Type;
+
+export const WorkspacePromptComposeResult = Schema.Struct({
+  prompt: Schema.String,
+  sourceItemIds: Schema.Array(WorkspaceKnowledgeItemId),
+  ragMatches: Schema.Array(WorkspaceRagMatch),
+  truncated: Schema.Boolean,
+});
+export type WorkspacePromptComposeResult = typeof WorkspacePromptComposeResult.Type;
+
+export const WorkspaceAgentRole = Schema.Literals([
+  "coordinator",
+  "operator",
+  "planner",
+  "researcher",
+  "implementer",
+  "reviewer",
+  "verifier",
+]);
+export type WorkspaceAgentRole = typeof WorkspaceAgentRole.Type;
+
+export const WorkspaceAgentRoleBinding = Schema.Struct({
+  projectId: ProjectId,
+  role: WorkspaceAgentRole,
+  displayName: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  instructions: Schema.String.check(Schema.isMaxLength(20_000)),
+  enabled: Schema.Boolean,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceAgentRoleBinding = typeof WorkspaceAgentRoleBinding.Type;
+
+export const WorkspaceAgentRoleListInput = Schema.Struct({
+  projectId: ProjectId,
+});
+export type WorkspaceAgentRoleListInput = typeof WorkspaceAgentRoleListInput.Type;
+
+export const WorkspaceAgentRoleListResult = Schema.Struct({
+  roles: Schema.Array(WorkspaceAgentRoleBinding),
+});
+export type WorkspaceAgentRoleListResult = typeof WorkspaceAgentRoleListResult.Type;
+
+/** Logical worker classes used by the Workspace task-graph orchestrator. */
+export const WorkspaceOrchestrationAgent = Schema.Literals(["fable", "codex", "grok"]);
+export type WorkspaceOrchestrationAgent = typeof WorkspaceOrchestrationAgent.Type;
+
+export const WorkspaceTaskNodeKind = Schema.Literals([
+  "orchestration",
+  "research",
+  "implementation",
+  "debug",
+  "validation",
+  "synthesis",
+]);
+export type WorkspaceTaskNodeKind = typeof WorkspaceTaskNodeKind.Type;
+
+export const WorkspaceTaskNodeStatus = Schema.Literals([
+  "blocked",
+  "queued",
+  "running",
+  "awaiting-validation",
+  "completed",
+  "failed",
+  "cancelled",
+  "skipped",
+]);
+export type WorkspaceTaskNodeStatus = typeof WorkspaceTaskNodeStatus.Type;
+
+export const WorkspaceTaskAttemptStatus = Schema.Literals([
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type WorkspaceTaskAttemptStatus = typeof WorkspaceTaskAttemptStatus.Type;
+
+export const WorkspaceValidationConfidence = Schema.Literals(["high", "medium", "low"]);
+export type WorkspaceValidationConfidence = typeof WorkspaceValidationConfidence.Type;
+
+export const WorkspaceValidationVerdict = Schema.Literals(["pass", "fail", "inconclusive"]);
+export type WorkspaceValidationVerdict = typeof WorkspaceValidationVerdict.Type;
+
+export const WorkspaceFailureClassification = Schema.Literals([
+  "information",
+  "implementation",
+  "tool",
+  "assumption",
+  "validation",
+]);
+export type WorkspaceFailureClassification = typeof WorkspaceFailureClassification.Type;
+
+export const WorkspaceTaskGraphStatus = Schema.Literals([
+  "planning",
+  "executing",
+  "validating",
+  "synthesizing",
+  "completed",
+  "failed",
+]);
+export type WorkspaceTaskGraphStatus = typeof WorkspaceTaskGraphStatus.Type;
+
+export const WorkspaceTaskGraphChangeReason = Schema.Literals([
+  "initial-plan",
+  "new-information",
+  "information-gap",
+  "implementation-failure",
+  "tool-failure",
+  "result-conflict",
+  "invalid-assumption",
+  "low-confidence",
+  "validation-failure",
+]);
+export type WorkspaceTaskGraphChangeReason = typeof WorkspaceTaskGraphChangeReason.Type;
+
+export const WorkspaceMemoryCategory = Schema.Literals([
+  "project-structure",
+  "architecture",
+  "successful-pattern",
+  "failure-pattern",
+  "verified-data-source",
+  "user-workflow",
+  "agent-performance",
+]);
+export type WorkspaceMemoryCategory = typeof WorkspaceMemoryCategory.Type;
+
+const WorkspaceTaskShortText = Schema.String.check(Schema.isMaxLength(4_000));
+const WorkspaceTaskContextText = Schema.String.check(Schema.isMaxLength(20_000));
+
+/** Minimal sufficient context handed to one graph node. */
+export const WorkspaceTaskHandoff = Schema.Struct({
+  task: WorkspaceTaskShortText,
+  goal: WorkspaceTaskShortText,
+  context: WorkspaceTaskContextText,
+  input: WorkspaceTaskContextText,
+  constraints: Schema.Array(WorkspaceTaskShortText),
+  expectedOutput: WorkspaceTaskShortText,
+  successCriteria: Schema.Array(WorkspaceTaskShortText),
+});
+export type WorkspaceTaskHandoff = typeof WorkspaceTaskHandoff.Type;
+
+export const WorkspaceTaskAttempt = Schema.Struct({
+  number: PositiveInt,
+  agent: WorkspaceOrchestrationAgent,
+  role: WorkspaceAgentRole,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  strategy: WorkspaceTaskShortText,
+  threadId: ThreadId,
+  status: WorkspaceTaskAttemptStatus,
+  output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
+  error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
+  failureClassification: Schema.NullOr(WorkspaceFailureClassification),
+  confidence: Schema.NullOr(WorkspaceValidationConfidence),
+  startedAt: IsoDateTime,
+  completedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceTaskAttempt = typeof WorkspaceTaskAttempt.Type;
+
+export const WorkspaceTaskValidationReceipt = Schema.Struct({
+  targetNodeId: WorkspaceTaskNodeId,
+  verdict: WorkspaceValidationVerdict,
+  confidence: WorkspaceValidationConfidence,
+  summary: Schema.String.check(Schema.isMaxLength(8_000)),
+  evidence: Schema.Array(WorkspaceTaskShortText),
+  failureClassification: Schema.NullOr(WorkspaceFailureClassification),
+  nextAction: WorkspaceTaskShortText,
+  recordedAt: IsoDateTime,
+});
+export type WorkspaceTaskValidationReceipt = typeof WorkspaceTaskValidationReceipt.Type;
+
+export const WorkspaceTaskNode = Schema.Struct({
+  id: WorkspaceTaskNodeId,
+  order: NonNegativeInt,
+  kind: WorkspaceTaskNodeKind,
+  agent: WorkspaceOrchestrationAgent,
+  role: WorkspaceAgentRole,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  handoff: WorkspaceTaskHandoff,
+  dependsOn: Schema.Array(WorkspaceTaskNodeId),
+  validationTargetId: Schema.NullOr(WorkspaceTaskNodeId),
+  priority: NonNegativeInt,
+  status: WorkspaceTaskNodeStatus,
+  maxAttempts: PositiveInt.check(Schema.isLessThanOrEqualTo(3)),
+  attempts: Schema.Array(WorkspaceTaskAttempt),
+  output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(40_000))),
+  error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
+  failureClassification: Schema.NullOr(WorkspaceFailureClassification),
+  confidence: Schema.NullOr(WorkspaceValidationConfidence),
+  validation: Schema.NullOr(WorkspaceTaskValidationReceipt),
+  startedAt: Schema.NullOr(IsoDateTime),
+  completedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceTaskNode = typeof WorkspaceTaskNode.Type;
+
+export const WorkspaceTaskGraphChange = Schema.Struct({
+  revision: PositiveInt,
+  reason: WorkspaceTaskGraphChangeReason,
+  summary: Schema.String.check(Schema.isMaxLength(8_000)),
+  addedNodeIds: Schema.Array(WorkspaceTaskNodeId),
+  supersededNodeIds: Schema.Array(WorkspaceTaskNodeId),
+  occurredAt: IsoDateTime,
+});
+export type WorkspaceTaskGraphChange = typeof WorkspaceTaskGraphChange.Type;
+
+export const WorkspaceMemoryCandidate = Schema.Struct({
+  category: WorkspaceMemoryCategory,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  content: Schema.String.check(Schema.isMaxLength(20_000)),
+  tags: Schema.Array(TrimmedNonEmptyString),
+  confidence: WorkspaceValidationConfidence,
+  sourceNodeIds: Schema.Array(WorkspaceTaskNodeId),
+});
+export type WorkspaceMemoryCandidate = typeof WorkspaceMemoryCandidate.Type;
+
+export const WorkspaceTaskGraph = Schema.Struct({
+  revision: NonNegativeInt,
+  status: WorkspaceTaskGraphStatus,
+  nodes: Schema.Array(WorkspaceTaskNode),
+  changes: Schema.Array(WorkspaceTaskGraphChange),
+  nextAction: WorkspaceTaskShortText,
+  overallConfidence: Schema.NullOr(WorkspaceValidationConfidence),
+  repairApproved: Schema.NullOr(Schema.Boolean),
+  memoryCandidates: Schema.Array(WorkspaceMemoryCandidate),
+});
+export type WorkspaceTaskGraph = typeof WorkspaceTaskGraph.Type;
+
+export const WorkspaceCollaborationRunStatus = Schema.Literals([
+  "queued",
+  "running",
+  "cancel-requested",
+  "cancelled",
+  "completed",
+  "failed",
+]);
+export type WorkspaceCollaborationRunStatus = typeof WorkspaceCollaborationRunStatus.Type;
+
+export const WorkspaceCollaborationStepStatus = Schema.Literals([
+  "queued",
+  "running",
+  "completed",
+  "cancelled",
+  "failed",
+]);
+export type WorkspaceCollaborationStepStatus = typeof WorkspaceCollaborationStepStatus.Type;
+
+export const WorkspaceCollaborationPhase = Schema.Literals([
+  "kickoff",
+  "contribution",
+  "finalization",
+]);
+export type WorkspaceCollaborationPhase = typeof WorkspaceCollaborationPhase.Type;
+
+export const WorkspaceCollaborationStep = Schema.Struct({
+  index: NonNegativeInt,
+  phase: WorkspaceCollaborationPhase,
+  role: WorkspaceAgentRole,
+  displayName: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  instructions: Schema.String.check(Schema.isMaxLength(20_000)),
+  threadId: Schema.NullOr(ThreadId),
+  status: WorkspaceCollaborationStepStatus,
+  output: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  startedAt: Schema.NullOr(IsoDateTime),
+  completedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceCollaborationStep = typeof WorkspaceCollaborationStep.Type;
+
+export const WorkspaceCollaborationRun = Schema.Struct({
+  id: WorkspaceCollaborationRunId,
+  projectId: ProjectId,
+  source: Schema.Literals(["user", "schedule", "incident"]),
+  scheduleId: Schema.NullOr(WorkspaceScheduleId),
+  incidentId: Schema.NullOr(WorkspaceIncidentId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  status: WorkspaceCollaborationRunStatus,
+  steps: Schema.Array(WorkspaceCollaborationStep),
+  graph: Schema.NullOr(WorkspaceTaskGraph).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  finalOutput: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceCollaborationRun = typeof WorkspaceCollaborationRun.Type;
+
+export const WorkspaceCollaborationRunListInput = Schema.Struct({
+  projectId: ProjectId,
+  statuses: Schema.optionalKey(Schema.Array(WorkspaceCollaborationRunStatus)),
+});
+export type WorkspaceCollaborationRunListInput = typeof WorkspaceCollaborationRunListInput.Type;
+
+export const WorkspaceCollaborationRunListResult = Schema.Struct({
+  runs: Schema.Array(WorkspaceCollaborationRun),
+});
+export type WorkspaceCollaborationRunListResult = typeof WorkspaceCollaborationRunListResult.Type;
+
+export const WorkspaceScheduleTiming = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("once"),
+    runAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("interval"),
+    everyMinutes: PositiveInt.check(Schema.isLessThanOrEqualTo(10_080)),
+    startAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("daily"),
+    localTime: TrimmedNonEmptyString.check(Schema.isPattern(/^(?:[01]\d|2[0-3]):[0-5]\d$/)),
+    timeZone: TrimmedNonEmptyString,
+  }),
+]);
+export type WorkspaceScheduleTiming = typeof WorkspaceScheduleTiming.Type;
+
+export const WorkspaceSchedule = Schema.Struct({
+  id: WorkspaceScheduleId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  enabled: Schema.Boolean,
+  timing: WorkspaceScheduleTiming,
+  nextTriggerAt: Schema.NullOr(IsoDateTime),
+  lastTriggeredAt: Schema.NullOr(IsoDateTime),
+  lastRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  lastError: Schema.NullOr(Schema.String),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceSchedule = typeof WorkspaceSchedule.Type;
+
+export const WorkspaceScheduleListInput = Schema.Struct({ projectId: ProjectId });
+export type WorkspaceScheduleListInput = typeof WorkspaceScheduleListInput.Type;
+
+export const WorkspaceScheduleListResult = Schema.Struct({
+  schedules: Schema.Array(WorkspaceSchedule),
+});
+export type WorkspaceScheduleListResult = typeof WorkspaceScheduleListResult.Type;
+
+export const WorkspaceProgramStartPolicy = Schema.Literals(["manual", "server-start"]);
+export type WorkspaceProgramStartPolicy = typeof WorkspaceProgramStartPolicy.Type;
+
+export const WorkspaceProgramIntegrityStatus = Schema.Literals([
+  "disabled",
+  "queued",
+  "running",
+  "stopping",
+  "stopped",
+  "converged",
+  "failed",
+]);
+export type WorkspaceProgramIntegrityStatus = typeof WorkspaceProgramIntegrityStatus.Type;
+
+export const WorkspaceProgramIntegrity = Schema.Struct({
+  enabled: Schema.Boolean,
+  validationCommands: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(8_000))),
+  requiredCleanPasses: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5 })),
+  status: WorkspaceProgramIntegrityStatus,
+  cycle: NonNegativeInt,
+  consecutiveCleanPasses: NonNegativeInt,
+  activeRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  lastRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  summary: Schema.NullOr(Schema.String.check(Schema.isMaxLength(65_536))),
+  startedAt: Schema.NullOr(IsoDateTime),
+  convergedAt: Schema.NullOr(IsoDateTime),
+  updatedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceProgramIntegrity = typeof WorkspaceProgramIntegrity.Type;
+
+export const DEFAULT_WORKSPACE_PROGRAM_INTEGRITY: WorkspaceProgramIntegrity = {
+  enabled: false,
+  validationCommands: [],
+  requiredCleanPasses: 2,
+  status: "disabled",
+  cycle: 0,
+  consecutiveCleanPasses: 0,
+  activeRunId: null,
+  lastRunId: null,
+  summary: null,
+  startedAt: null,
+  convergedAt: null,
+  updatedAt: null,
+};
+
+export const WorkspaceProgramRelativeDirectory = TrimmedString.check(
+  Schema.isMaxLength(240),
+  Schema.makeFilter((value) => {
+    const normalized = value.replaceAll("\\", "/");
+    if (normalized === "" || normalized === ".") return true;
+    const segments = normalized.split("/");
+    return (
+      !normalized.startsWith("/") &&
+      !/^[A-Za-z]:/.test(normalized) &&
+      segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }),
+);
+export type WorkspaceProgramRelativeDirectory = typeof WorkspaceProgramRelativeDirectory.Type;
+
+const WorkspaceProgramHealthCheckBase = {
+  intervalSeconds: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 3_600 })),
+  timeoutSeconds: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
+  failureThreshold: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10 })),
+} as const;
+
+export const WorkspaceProgramHealthCheck = Schema.Union([
+  Schema.Struct({
+    ...WorkspaceProgramHealthCheckBase,
+    kind: Schema.Literal("http"),
+    url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_000), Schema.isPattern(/^https?:\/\//i)),
+    expectedStatusMin: Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+    expectedStatusMax: Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  }),
+  Schema.Struct({
+    ...WorkspaceProgramHealthCheckBase,
+    kind: Schema.Literal("tcp"),
+    host: TrimmedNonEmptyString.check(Schema.isMaxLength(253)),
+    port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65_535 })),
+  }),
+]).check(
+  Schema.makeFilter(
+    (check) => check.kind !== "http" || check.expectedStatusMin <= check.expectedStatusMax,
+  ),
+);
+export type WorkspaceProgramHealthCheck = typeof WorkspaceProgramHealthCheck.Type;
+
+export const WorkspaceProgram = Schema.Struct({
+  id: WorkspaceProgramId,
+  projectId: ProjectId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  command: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  relativeDirectory: WorkspaceProgramRelativeDirectory,
+  environmentVariableNames: Schema.Array(
+    TrimmedNonEmptyString.check(
+      Schema.isMaxLength(128),
+      Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    ),
+  ),
+  startPolicy: WorkspaceProgramStartPolicy,
+  healthCheck: Schema.NullOr(WorkspaceProgramHealthCheck),
+  errorPatterns: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))),
+  enabled: Schema.Boolean,
+  integrity: WorkspaceProgramIntegrity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_PROGRAM_INTEGRITY)),
+  ),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceProgram = typeof WorkspaceProgram.Type;
+
+export const WorkspaceProgramRunStatus = Schema.Literals([
+  "starting",
+  "running",
+  "stopping",
+  "exited",
+  "failed",
+]);
+export type WorkspaceProgramRunStatus = typeof WorkspaceProgramRunStatus.Type;
+export const WorkspaceProgramHealthStatus = Schema.Literals([
+  "unknown",
+  "healthy",
+  "degraded",
+  "unhealthy",
+]);
+export type WorkspaceProgramHealthStatus = typeof WorkspaceProgramHealthStatus.Type;
+
+export const WorkspaceProgramRun = Schema.Struct({
+  id: WorkspaceProgramRunId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  status: WorkspaceProgramRunStatus,
+  pid: Schema.NullOr(NonNegativeInt),
+  startedAt: IsoDateTime,
+  stoppedAt: Schema.NullOr(IsoDateTime),
+  exitCode: Schema.NullOr(Schema.Int),
+  exitSignal: Schema.NullOr(Schema.Int),
+  healthStatus: WorkspaceProgramHealthStatus,
+  consecutiveHealthFailures: NonNegativeInt,
+  lastHealthCheckAt: Schema.NullOr(IsoDateTime),
+  recentLogTail: Schema.String.check(Schema.isMaxLength(65_536)),
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceProgramRun = typeof WorkspaceProgramRun.Type;
+
+export const WorkspaceIncidentKind = Schema.Literals([
+  "spawn-failure",
+  "process-exit",
+  "log-pattern",
+  "health-check",
+]);
+export type WorkspaceIncidentKind = typeof WorkspaceIncidentKind.Type;
+export const WorkspaceIncidentSeverity = Schema.Literals(["warning", "error", "critical"]);
+export type WorkspaceIncidentSeverity = typeof WorkspaceIncidentSeverity.Type;
+export const WorkspaceIncidentStatus = Schema.Literals([
+  "open",
+  "diagnosing",
+  "awaiting-user",
+  "repairing",
+  "verifying",
+  "resolved",
+]);
+export type WorkspaceIncidentStatus = typeof WorkspaceIncidentStatus.Type;
+
+export const WorkspaceIncident = Schema.Struct({
+  id: WorkspaceIncidentId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  runId: Schema.NullOr(WorkspaceProgramRunId),
+  kind: WorkspaceIncidentKind,
+  severity: WorkspaceIncidentSeverity,
+  status: WorkspaceIncidentStatus,
+  fingerprint: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  evidence: Schema.String.check(Schema.isMaxLength(65_536)),
+  occurrenceCount: PositiveInt,
+  firstOccurredAt: IsoDateTime,
+  lastOccurredAt: IsoDateTime,
+  diagnosisThreadId: Schema.NullOr(ThreadId),
+  diagnosis: Schema.NullOr(Schema.String.check(Schema.isMaxLength(65_536))),
+  repairRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  resolvedAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceIncident = typeof WorkspaceIncident.Type;
+
+export const WorkspaceProgramCandidateSource = Schema.Literals([
+  "project-script",
+  "package-json",
+  "docker-compose",
+  "python",
+  "rust",
+]);
+export const WorkspaceProgramCandidate = Schema.Struct({
+  id: WorkspaceProgramId,
+  name: TrimmedNonEmptyString,
+  command: TrimmedNonEmptyString,
+  relativeDirectory: WorkspaceProgramRelativeDirectory,
+  source: WorkspaceProgramCandidateSource,
+  reason: TrimmedNonEmptyString,
+});
+export type WorkspaceProgramCandidate = typeof WorkspaceProgramCandidate.Type;
+
+export const WorkspaceProgramListInput = Schema.Struct({ projectId: ProjectId });
+export type WorkspaceProgramListInput = typeof WorkspaceProgramListInput.Type;
+export const WorkspaceProgramListResult = Schema.Struct({
+  programs: Schema.Array(WorkspaceProgram),
+});
+export type WorkspaceProgramListResult = typeof WorkspaceProgramListResult.Type;
+export const WorkspaceProgramDiscoveryResult = Schema.Struct({
+  candidates: Schema.Array(WorkspaceProgramCandidate),
+});
+export type WorkspaceProgramDiscoveryResult = typeof WorkspaceProgramDiscoveryResult.Type;
+export const WorkspaceProgramRunListInput = Schema.Struct({
+  projectId: ProjectId,
+  programId: Schema.optionalKey(WorkspaceProgramId),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+export type WorkspaceProgramRunListInput = typeof WorkspaceProgramRunListInput.Type;
+export const WorkspaceProgramRunListResult = Schema.Struct({
+  runs: Schema.Array(WorkspaceProgramRun),
+});
+export type WorkspaceProgramRunListResult = typeof WorkspaceProgramRunListResult.Type;
+export const WorkspaceIncidentListInput = Schema.Struct({
+  projectId: ProjectId,
+  programId: Schema.optionalKey(WorkspaceProgramId),
+  statuses: Schema.optionalKey(Schema.Array(WorkspaceIncidentStatus)),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+export type WorkspaceIncidentListInput = typeof WorkspaceIncidentListInput.Type;
+export const WorkspaceIncidentListResult = Schema.Struct({
+  incidents: Schema.Array(WorkspaceIncident),
+});
+export type WorkspaceIncidentListResult = typeof WorkspaceIncidentListResult.Type;
+
+export const WorkspaceRuntimeStatus = Schema.Literals([
+  "idle",
+  "working",
+  "blocked",
+  "failed",
+  "done",
+  "unknown",
+]);
+export type WorkspaceRuntimeStatus = typeof WorkspaceRuntimeStatus.Type;
+
+export const WorkspaceRuntimeLifecycleStatus = Schema.Literals([
+  "idle",
+  "working",
+  "failed",
+  "unknown",
+]);
+export type WorkspaceRuntimeLifecycleStatus = typeof WorkspaceRuntimeLifecycleStatus.Type;
+
+export const WorkspaceRuntimeAttention = Schema.Literals([
+  "none",
+  "completed-unseen",
+  "needs-input",
+  "error",
+]);
+export type WorkspaceRuntimeAttention = typeof WorkspaceRuntimeAttention.Type;
+
+export const WorkspaceRuntimeEvidenceAuthority = Schema.Literals([
+  "provider",
+  "orchestration",
+  "program-supervisor",
+  "scheduler",
+]);
+export type WorkspaceRuntimeEvidenceAuthority = typeof WorkspaceRuntimeEvidenceAuthority.Type;
+
+export const WorkspaceRuntimeEvidenceSource = Schema.Literals([
+  "thread",
+  "program",
+  "incident",
+  "collaboration",
+  "schedule",
+]);
+export type WorkspaceRuntimeEvidenceSource = typeof WorkspaceRuntimeEvidenceSource.Type;
+
+export const WorkspaceRuntimeEvidence = Schema.Struct({
+  status: WorkspaceRuntimeStatus,
+  authority: WorkspaceRuntimeEvidenceAuthority,
+  source: WorkspaceRuntimeEvidenceSource,
+  sourceId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  detail: Schema.NullOr(Schema.String.check(Schema.isMaxLength(2_000))),
+  observedAt: IsoDateTime,
+});
+export type WorkspaceRuntimeEvidence = typeof WorkspaceRuntimeEvidence.Type;
+
+export const WorkspaceRuntimeCounts = Schema.Struct({
+  threadCount: NonNegativeInt,
+  workingThreadCount: NonNegativeInt,
+  blockedThreadCount: NonNegativeInt,
+  failedThreadCount: NonNegativeInt,
+  activeProgramCount: NonNegativeInt,
+  unhealthyProgramCount: NonNegativeInt,
+  openIncidentCount: NonNegativeInt,
+  activeCollaborationCount: NonNegativeInt,
+  failedCollaborationCount: NonNegativeInt,
+  enabledScheduleCount: NonNegativeInt,
+  attentionCount: NonNegativeInt,
+  completedUnseenCount: NonNegativeInt,
+});
+export type WorkspaceRuntimeCounts = typeof WorkspaceRuntimeCounts.Type;
+
+export const WorkspaceRuntimeSnapshotInput = Schema.Struct({ projectId: ProjectId });
+export type WorkspaceRuntimeSnapshotInput = typeof WorkspaceRuntimeSnapshotInput.Type;
+
+export const WorkspaceRuntimeSnapshot = Schema.Struct({
+  projectId: ProjectId,
+  status: WorkspaceRuntimeStatus,
+  lifecycleStatus: WorkspaceRuntimeLifecycleStatus,
+  attention: WorkspaceRuntimeAttention,
+  counts: WorkspaceRuntimeCounts,
+  evidence: Schema.Array(WorkspaceRuntimeEvidence).check(Schema.isMaxLength(50)),
+  viewedThrough: Schema.NullOr(IsoDateTime),
+  latestCompletionAt: Schema.NullOr(IsoDateTime),
+  /** Latest program, incident, collaboration, or schedule projection change. */
+  operationsUpdatedAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceRuntimeSnapshot = typeof WorkspaceRuntimeSnapshot.Type;
+
 export const OrchestrationProject = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
@@ -218,6 +1038,8 @@ export const OrchestrationProject = Schema.Struct({
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
+  workspaceControl: Schema.optional(WorkspaceControlSettings),
+  runtimeViewedThrough: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -226,6 +1048,10 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
+
+/** Distinguishes direct human input from prompts emitted by unattended automation. */
+export const OrchestrationInputOrigin = Schema.Literals(["user", "automation"]);
+export type OrchestrationInputOrigin = typeof OrchestrationInputOrigin.Type;
 
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
@@ -412,6 +1238,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
+  workspaceControl: Schema.optional(WorkspaceControlSettings),
+  runtimeViewedThrough: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -612,6 +1440,9 @@ export const ProjectCreateCommand = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   createWorkspaceRootIfMissing: Schema.optional(Schema.Boolean),
+  longTermMemoryRoot: Schema.optional(TrimmedNonEmptyString),
+  createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
+  conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   createdAt: IsoDateTime,
 });
@@ -624,6 +1455,193 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+});
+
+const ProjectWorkspaceControlUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.workspace-control.update"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
+  conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
+  createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
+});
+
+const ProjectRuntimeViewCommand = Schema.Struct({
+  type: Schema.Literal("project.runtime.view"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  viewedThrough: IsoDateTime,
+  createdAt: IsoDateTime,
+});
+
+const ProjectKnowledgeItemUpsertCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.item.upsert"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  kind: WorkspaceKnowledgeKind,
+  title: TrimmedNonEmptyString,
+  content: Schema.String,
+  status: WorkspaceKnowledgeStatus,
+  origin: WorkspaceKnowledgeOrigin,
+  relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
+  tags: Schema.Array(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
+const ProjectKnowledgeItemArchiveCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.item.archive"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectAgentRoleUpsertCommand = Schema.Struct({
+  type: Schema.Literal("project.agent-role.upsert"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  role: WorkspaceAgentRole,
+  displayName: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  instructions: Schema.String.check(Schema.isMaxLength(20_000)),
+  enabled: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+
+const ProjectAgentRoleRemoveCommand = Schema.Struct({
+  type: Schema.Literal("project.agent-role.remove"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  role: WorkspaceAgentRole,
+  createdAt: IsoDateTime,
+});
+
+const ProjectCollaborationRunRequestCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.request"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  projectId: ProjectId,
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  createdAt: IsoDateTime,
+});
+
+const ProjectCollaborationRunCancelCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.cancel"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  projectId: ProjectId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectScheduleUpsertCommand = Schema.Struct({
+  type: Schema.Literal("project.schedule.upsert"),
+  commandId: CommandId,
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  enabled: Schema.Boolean,
+  timing: WorkspaceScheduleTiming,
+  createdAt: IsoDateTime,
+});
+
+const ProjectScheduleRemoveCommand = Schema.Struct({
+  type: Schema.Literal("project.schedule.remove"),
+  commandId: CommandId,
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramUpsertCommand = Schema.Struct({
+  type: Schema.Literal("project.program.upsert"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  command: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  relativeDirectory: WorkspaceProgramRelativeDirectory,
+  environmentVariableNames: Schema.Array(TrimmedNonEmptyString),
+  startPolicy: WorkspaceProgramStartPolicy,
+  healthCheck: Schema.NullOr(WorkspaceProgramHealthCheck),
+  errorPatterns: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))),
+  enabled: Schema.Boolean,
+  integrityEnabled: Schema.optionalKey(Schema.Boolean),
+  integrityValidationCommands: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(8_000))),
+  ),
+  integrityRequiredCleanPasses: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5 })),
+  ),
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramRemoveCommand = Schema.Struct({
+  type: Schema.Literal("project.program.remove"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramStartCommand = Schema.Struct({
+  type: Schema.Literal("project.program.start"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramStopCommand = Schema.Struct({
+  type: Schema.Literal("project.program.stop"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramRestartCommand = Schema.Struct({
+  type: Schema.Literal("project.program.restart"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramIntegrityStartCommand = Schema.Struct({
+  type: Schema.Literal("project.program.integrity.start"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectProgramIntegrityStopCommand = Schema.Struct({
+  type: Schema.Literal("project.program.integrity.stop"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  createdAt: IsoDateTime,
+});
+
+const ProjectIncidentRepairRequestCommand = Schema.Struct({
+  type: Schema.Literal("project.program.incident.repair.request"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  incidentId: WorkspaceIncidentId,
+  instruction: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  createdAt: IsoDateTime,
+});
+
+const ProjectIncidentResolveCommand = Schema.Struct({
+  type: Schema.Literal("project.program.incident.resolve"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  incidentId: WorkspaceIncidentId,
+  createdAt: IsoDateTime,
 });
 
 const ProjectDeleteCommand = Schema.Struct({
@@ -801,6 +1819,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
+  inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
@@ -822,6 +1841,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(UploadChatAttachment),
   }),
+  inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
@@ -875,6 +1895,25 @@ const ThreadSessionStopCommand = Schema.Struct({
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectWorkspaceControlUpdateCommand,
+  ProjectRuntimeViewCommand,
+  ProjectKnowledgeItemUpsertCommand,
+  ProjectKnowledgeItemArchiveCommand,
+  ProjectAgentRoleUpsertCommand,
+  ProjectAgentRoleRemoveCommand,
+  ProjectCollaborationRunRequestCommand,
+  ProjectCollaborationRunCancelCommand,
+  ProjectScheduleUpsertCommand,
+  ProjectScheduleRemoveCommand,
+  ProjectProgramUpsertCommand,
+  ProjectProgramRemoveCommand,
+  ProjectProgramStartCommand,
+  ProjectProgramStopCommand,
+  ProjectProgramRestartCommand,
+  ProjectProgramIntegrityStartCommand,
+  ProjectProgramIntegrityStopCommand,
+  ProjectIncidentRepairRequestCommand,
+  ProjectIncidentResolveCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
@@ -903,6 +1942,25 @@ export type DispatchableClientOrchestrationCommand =
 export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectWorkspaceControlUpdateCommand,
+  ProjectRuntimeViewCommand,
+  ProjectKnowledgeItemUpsertCommand,
+  ProjectKnowledgeItemArchiveCommand,
+  ProjectAgentRoleUpsertCommand,
+  ProjectAgentRoleRemoveCommand,
+  ProjectCollaborationRunRequestCommand,
+  ProjectCollaborationRunCancelCommand,
+  ProjectScheduleUpsertCommand,
+  ProjectScheduleRemoveCommand,
+  ProjectProgramUpsertCommand,
+  ProjectProgramRemoveCommand,
+  ProjectProgramStartCommand,
+  ProjectProgramStopCommand,
+  ProjectProgramRestartCommand,
+  ProjectProgramIntegrityStartCommand,
+  ProjectProgramIntegrityStopCommand,
+  ProjectIncidentRepairRequestCommand,
+  ProjectIncidentResolveCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
@@ -1000,6 +2058,64 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+const ProjectCollaborationRunUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.update"),
+  commandId: CommandId,
+  run: WorkspaceCollaborationRun,
+});
+
+const ProjectScheduledCollaborationRunRequestCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.schedule"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  createdAt: IsoDateTime,
+});
+
+const ProjectScheduleRuntimeUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.schedule.runtime.update"),
+  commandId: CommandId,
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  nextTriggerAt: Schema.NullOr(IsoDateTime),
+  lastTriggeredAt: Schema.NullOr(IsoDateTime),
+  lastRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  lastError: Schema.NullOr(Schema.String),
+  updatedAt: IsoDateTime,
+});
+
+const ProjectProgramRunUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.program.run.update"),
+  commandId: CommandId,
+  run: WorkspaceProgramRun,
+});
+
+const ProjectProgramIntegrityUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.program.integrity.update"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  integrity: WorkspaceProgramIntegrity,
+});
+
+const ProjectIncidentUpsertCommand = Schema.Struct({
+  type: Schema.Literal("project.program.incident.upsert"),
+  commandId: CommandId,
+  incident: WorkspaceIncident,
+});
+
+const ProjectIncidentCollaborationRunRequestCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.incident"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  incidentId: WorkspaceIncidentId,
+  projectId: ProjectId,
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1009,6 +2125,13 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ProjectCollaborationRunUpdateCommand,
+  ProjectScheduledCollaborationRunRequestCommand,
+  ProjectScheduleRuntimeUpdateCommand,
+  ProjectProgramRunUpdateCommand,
+  ProjectProgramIntegrityUpdateCommand,
+  ProjectIncidentUpsertCommand,
+  ProjectIncidentCollaborationRunRequestCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1021,6 +2144,30 @@ export type OrchestrationCommand = typeof OrchestrationCommand.Type;
 export const OrchestrationEventType = Schema.Literals([
   "project.created",
   "project.meta-updated",
+  "project.workspace-control-updated",
+  "project.runtime-viewed",
+  "project.knowledge-item-upserted",
+  "project.knowledge-item-archived",
+  "project.agent-role-upserted",
+  "project.agent-role-removed",
+  "project.collaboration-run-requested",
+  "project.collaboration-run-cancel-requested",
+  "project.collaboration-run-upserted",
+  "project.schedule-upserted",
+  "project.schedule-removed",
+  "project.schedule-runtime-updated",
+  "project.program-upserted",
+  "project.program-removed",
+  "project.program-start-requested",
+  "project.program-stop-requested",
+  "project.program-restart-requested",
+  "project.program-integrity-start-requested",
+  "project.program-integrity-stop-requested",
+  "project.program-integrity-updated",
+  "project.program-run-upserted",
+  "project.program-incident-upserted",
+  "project.program-incident-repair-requested",
+  "project.program-incident-resolve-requested",
   "project.deleted",
   "thread.created",
   "thread.deleted",
@@ -1062,6 +2209,8 @@ export const ProjectCreatedPayload = Schema.Struct({
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
+  workspaceControl: Schema.optional(WorkspaceControlSettings),
+  runtimeViewedThrough: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1075,6 +2224,141 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   scripts: Schema.optional(Schema.Array(ProjectScript)),
   updatedAt: IsoDateTime,
 });
+
+export const ProjectWorkspaceControlUpdatedPayload = Schema.Struct({
+  projectId: ProjectId,
+  workspaceControl: WorkspaceControlSettings,
+  updatedAt: IsoDateTime,
+});
+
+export const ProjectRuntimeViewedPayload = Schema.Struct({
+  projectId: ProjectId,
+  viewedThrough: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ProjectKnowledgeItemUpsertedPayload = Schema.Struct({
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  kind: WorkspaceKnowledgeKind,
+  title: TrimmedNonEmptyString,
+  content: Schema.String,
+  status: WorkspaceKnowledgeStatus,
+  origin: WorkspaceKnowledgeOrigin,
+  relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
+  tags: Schema.Array(TrimmedNonEmptyString),
+  updatedAt: IsoDateTime,
+});
+
+export const ProjectKnowledgeItemArchivedPayload = Schema.Struct({
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  archivedAt: IsoDateTime,
+});
+
+export const ProjectAgentRoleUpsertedPayload = WorkspaceAgentRoleBinding;
+
+export const ProjectAgentRoleRemovedPayload = Schema.Struct({
+  projectId: ProjectId,
+  role: WorkspaceAgentRole,
+  removedAt: IsoDateTime,
+});
+
+export const ProjectCollaborationRunRequestedPayload = Schema.Struct({
+  run: WorkspaceCollaborationRun,
+});
+
+export const ProjectCollaborationRunCancelRequestedPayload = Schema.Struct({
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  cancelledAt: IsoDateTime,
+});
+
+export const ProjectCollaborationRunUpsertedPayload = Schema.Struct({
+  run: WorkspaceCollaborationRun,
+});
+
+export const ProjectScheduleUpsertedPayload = Schema.Struct({
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  enabled: Schema.Boolean,
+  timing: WorkspaceScheduleTiming,
+  updatedAt: IsoDateTime,
+});
+export type ProjectScheduleUpsertedPayload = typeof ProjectScheduleUpsertedPayload.Type;
+
+export const ProjectScheduleRemovedPayload = Schema.Struct({
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  removedAt: IsoDateTime,
+});
+
+export const ProjectScheduleRuntimeUpdatedPayload = Schema.Struct({
+  scheduleId: WorkspaceScheduleId,
+  projectId: ProjectId,
+  nextTriggerAt: Schema.NullOr(IsoDateTime),
+  lastTriggeredAt: Schema.NullOr(IsoDateTime),
+  lastRunId: Schema.NullOr(WorkspaceCollaborationRunId),
+  lastError: Schema.NullOr(Schema.String),
+  updatedAt: IsoDateTime,
+});
+export type ProjectScheduleRuntimeUpdatedPayload = typeof ProjectScheduleRuntimeUpdatedPayload.Type;
+
+export const ProjectProgramUpsertedPayload = Schema.Struct({
+  program: WorkspaceProgram,
+});
+export type ProjectProgramUpsertedPayload = typeof ProjectProgramUpsertedPayload.Type;
+
+export const ProjectProgramRemovedPayload = Schema.Struct({
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  removedAt: IsoDateTime,
+});
+
+export const ProjectProgramActionRequestedPayload = Schema.Struct({
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  requestedAt: IsoDateTime,
+});
+export type ProjectProgramActionRequestedPayload = typeof ProjectProgramActionRequestedPayload.Type;
+
+export const ProjectProgramIntegrityUpdatedPayload = Schema.Struct({
+  projectId: ProjectId,
+  programId: WorkspaceProgramId,
+  integrity: WorkspaceProgramIntegrity,
+});
+export type ProjectProgramIntegrityUpdatedPayload =
+  typeof ProjectProgramIntegrityUpdatedPayload.Type;
+
+export const ProjectProgramRunUpsertedPayload = Schema.Struct({
+  run: WorkspaceProgramRun,
+});
+export type ProjectProgramRunUpsertedPayload = typeof ProjectProgramRunUpsertedPayload.Type;
+
+export const ProjectProgramIncidentUpsertedPayload = Schema.Struct({
+  incident: WorkspaceIncident,
+});
+export type ProjectProgramIncidentUpsertedPayload =
+  typeof ProjectProgramIncidentUpsertedPayload.Type;
+
+export const ProjectProgramIncidentRepairRequestedPayload = Schema.Struct({
+  projectId: ProjectId,
+  incidentId: WorkspaceIncidentId,
+  instruction: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  requestedAt: IsoDateTime,
+});
+export type ProjectProgramIncidentRepairRequestedPayload =
+  typeof ProjectProgramIncidentRepairRequestedPayload.Type;
+
+export const ProjectProgramIncidentResolveRequestedPayload = Schema.Struct({
+  projectId: ProjectId,
+  incidentId: WorkspaceIncidentId,
+  requestedAt: IsoDateTime,
+});
+export type ProjectProgramIncidentResolveRequestedPayload =
+  typeof ProjectProgramIncidentResolveRequestedPayload.Type;
 
 export const ProjectDeletedPayload = Schema.Struct({
   projectId: ProjectId,
@@ -1195,6 +2479,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   role: OrchestrationMessageRole,
+  inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
@@ -1309,6 +2594,126 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.meta-updated"),
     payload: ProjectMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.workspace-control-updated"),
+    payload: ProjectWorkspaceControlUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.runtime-viewed"),
+    payload: ProjectRuntimeViewedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.knowledge-item-upserted"),
+    payload: ProjectKnowledgeItemUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.knowledge-item-archived"),
+    payload: ProjectKnowledgeItemArchivedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.agent-role-upserted"),
+    payload: ProjectAgentRoleUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.agent-role-removed"),
+    payload: ProjectAgentRoleRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-requested"),
+    payload: ProjectCollaborationRunRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-cancel-requested"),
+    payload: ProjectCollaborationRunCancelRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-upserted"),
+    payload: ProjectCollaborationRunUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.schedule-upserted"),
+    payload: ProjectScheduleUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.schedule-removed"),
+    payload: ProjectScheduleRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.schedule-runtime-updated"),
+    payload: ProjectScheduleRuntimeUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-upserted"),
+    payload: ProjectProgramUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-removed"),
+    payload: ProjectProgramRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-start-requested"),
+    payload: ProjectProgramActionRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-stop-requested"),
+    payload: ProjectProgramActionRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-restart-requested"),
+    payload: ProjectProgramActionRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-integrity-start-requested"),
+    payload: ProjectProgramActionRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-integrity-stop-requested"),
+    payload: ProjectProgramActionRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-integrity-updated"),
+    payload: ProjectProgramIntegrityUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-run-upserted"),
+    payload: ProjectProgramRunUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-incident-upserted"),
+    payload: ProjectProgramIncidentUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-incident-repair-requested"),
+    payload: ProjectProgramIncidentRepairRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.program-incident-resolve-requested"),
+    payload: ProjectProgramIncidentResolveRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -1643,6 +3048,54 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationSearchThreadsInput,
     output: OrchestrationSearchThreadsResult,
   },
+  listWorkspaceKnowledge: {
+    input: WorkspaceKnowledgeListInput,
+    output: WorkspaceKnowledgeListResult,
+  },
+  searchWorkspaceRag: {
+    input: WorkspaceRagSearchInput,
+    output: WorkspaceRagSearchResult,
+  },
+  composeWorkspacePrompt: {
+    input: WorkspacePromptComposeInput,
+    output: WorkspacePromptComposeResult,
+  },
+  listWorkspaceAgentRoles: {
+    input: WorkspaceAgentRoleListInput,
+    output: WorkspaceAgentRoleListResult,
+  },
+  listWorkspaceCollaborationRuns: {
+    input: WorkspaceCollaborationRunListInput,
+    output: WorkspaceCollaborationRunListResult,
+  },
+  listWorkspaceSchedules: {
+    input: WorkspaceScheduleListInput,
+    output: WorkspaceScheduleListResult,
+  },
+  getWorkspaceRuntime: {
+    input: WorkspaceRuntimeSnapshotInput,
+    output: WorkspaceRuntimeSnapshot,
+  },
+  subscribeWorkspaceRuntime: {
+    input: WorkspaceRuntimeSnapshotInput,
+    output: WorkspaceRuntimeSnapshot,
+  },
+  discoverWorkspacePrograms: {
+    input: WorkspaceProgramListInput,
+    output: WorkspaceProgramDiscoveryResult,
+  },
+  listWorkspacePrograms: {
+    input: WorkspaceProgramListInput,
+    output: WorkspaceProgramListResult,
+  },
+  listWorkspaceProgramRuns: {
+    input: WorkspaceProgramRunListInput,
+    output: WorkspaceProgramRunListResult,
+  },
+  listWorkspaceIncidents: {
+    input: WorkspaceIncidentListInput,
+    output: WorkspaceIncidentListResult,
+  },
   getArchivedShellSnapshot: {
     input: Schema.Struct({}),
     output: OrchestrationShellSnapshot,
@@ -1659,6 +3112,54 @@ export const OrchestrationRpcSchemas = {
 
 export class OrchestrationGetSnapshotError extends Schema.TaggedErrorClass<OrchestrationGetSnapshotError>()(
   "OrchestrationGetSnapshotError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceKnowledgeError extends Schema.TaggedErrorClass<OrchestrationWorkspaceKnowledgeError>()(
+  "OrchestrationWorkspaceKnowledgeError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceAgentRolesError extends Schema.TaggedErrorClass<OrchestrationWorkspaceAgentRolesError>()(
+  "OrchestrationWorkspaceAgentRolesError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceCollaborationError extends Schema.TaggedErrorClass<OrchestrationWorkspaceCollaborationError>()(
+  "OrchestrationWorkspaceCollaborationError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceScheduleError extends Schema.TaggedErrorClass<OrchestrationWorkspaceScheduleError>()(
+  "OrchestrationWorkspaceScheduleError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceProgramError extends Schema.TaggedErrorClass<OrchestrationWorkspaceProgramError>()(
+  "OrchestrationWorkspaceProgramError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationWorkspaceRuntimeError extends Schema.TaggedErrorClass<OrchestrationWorkspaceRuntimeError>()(
+  "OrchestrationWorkspaceRuntimeError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),

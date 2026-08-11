@@ -158,6 +158,45 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+export const ServerProviderUsageSource = Schema.Literals(["runtime", "provider", "combined"]);
+export type ServerProviderUsageSource = typeof ServerProviderUsageSource.Type;
+
+export const ServerProviderUsageWindow = Schema.Struct({
+  label: Schema.optional(TrimmedNonEmptyString),
+  usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  resetsAt: Schema.optional(NonNegativeInt),
+  windowDurationMinutes: Schema.optional(PositiveInt),
+});
+export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
+
+export const ServerProviderUsageCredits = Schema.Struct({
+  balance: Schema.optional(TrimmedNonEmptyString),
+  hasCredits: Schema.optional(Schema.Boolean),
+  unlimited: Schema.optional(Schema.Boolean),
+});
+export type ServerProviderUsageCredits = typeof ServerProviderUsageCredits.Type;
+
+/**
+ * Per-instance account usage. Provider-supplied lifetime/quota values and
+ * runtime-local session totals intentionally share one snapshot so clients can
+ * render every configured account without collapsing instances by driver kind.
+ */
+export const ServerProviderUsage = Schema.Struct({
+  source: ServerProviderUsageSource,
+  updatedAt: IsoDateTime,
+  sessionTokens: NonNegativeInt,
+  sessionCount: NonNegativeInt,
+  activeSessionCount: NonNegativeInt,
+  lifetimeTokens: Schema.optional(NonNegativeInt),
+  currentStreakDays: Schema.optional(NonNegativeInt),
+  peakDailyTokens: Schema.optional(NonNegativeInt),
+  planType: Schema.optional(TrimmedNonEmptyString),
+  primary: Schema.optionalKey(ServerProviderUsageWindow),
+  secondary: Schema.optionalKey(ServerProviderUsageWindow),
+  credits: Schema.optionalKey(ServerProviderUsageCredits),
+});
+export type ServerProviderUsage = typeof ServerProviderUsage.Type;
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -192,6 +231,7 @@ export const ServerProvider = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  usage: Schema.optionalKey(ServerProviderUsage),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });

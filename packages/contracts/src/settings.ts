@@ -209,6 +209,18 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
 export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 
+export const WorkspaceProgramPermissions = Schema.Struct({
+  manualControl: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  collectLogs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  autoStart: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  autoDiagnosis: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  autoRestartAfterRepair: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type WorkspaceProgramPermissions = typeof WorkspaceProgramPermissions.Type;
+export const DEFAULT_WORKSPACE_PROGRAM_PERMISSIONS: WorkspaceProgramPermissions = Schema.decodeSync(
+  WorkspaceProgramPermissions,
+)({});
+
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
     Schema.decodeTo(
@@ -270,16 +282,16 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
     binaryPath: makeBinaryPathSetting("codex").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Codex binary used by this instance.",
+        title: "실행 파일 경로",
+        description: "이 계정에서 사용할 Codex 실행 파일 경로입니다.",
         providerSettingsForm: { placeholder: "codex", clearWhenEmpty: "omit" },
       }),
     ),
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "CODEX_HOME path",
-        description: "Custom Codex home and config directory.",
+        title: "CODEX_HOME 경로",
+        description: "사용자 지정 Codex 홈 및 설정 디렉터리입니다.",
         providerSettingsForm: {
           placeholder: "~/.codex",
           clearWhenEmpty: "omit",
@@ -289,9 +301,9 @@ export const CodexSettings = makeProviderSettingsSchema(
     shadowHomePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Shadow home path",
+        title: "계정 전용 홈 경로",
         description:
-          "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.",
+          "계정별 Codex 홈입니다. CODEX_HOME의 상태는 공유하면서 auth.json은 분리합니다.",
         providerSettingsForm: {
           placeholder: "~/.codex-t3/personal",
           clearWhenEmpty: "omit",
@@ -301,8 +313,8 @@ export const CodexSettings = makeProviderSettingsSchema(
     launchArgs: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Launch arguments",
-        description: "Additional CLI arguments passed to codex app-server on session start.",
+        title: "실행 인수",
+        description: "세션 시작 시 codex app-server에 전달할 추가 CLI 인수입니다.",
       }),
     ),
     customModels: Schema.Array(Schema.String).pipe(
@@ -324,17 +336,17 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
     binaryPath: makeBinaryPathSetting("claude").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Claude binary used by this instance.",
+        title: "실행 파일 경로",
+        description: "이 계정에서 사용할 Claude 실행 파일 경로입니다.",
         providerSettingsForm: { placeholder: "claude", clearWhenEmpty: "omit" },
       }),
     ),
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "CLAUDE_CONFIG_DIR path",
+        title: "CLAUDE_CONFIG_DIR 경로",
         description:
-          "Custom Claude home and config directory. Keeps .claude.json and .claude separate.",
+          "사용자 지정 Claude 홈 및 설정 디렉터리입니다. .claude.json과 .claude를 계정별로 분리합니다.",
         providerSettingsForm: { placeholder: "~/.claude", clearWhenEmpty: "omit" },
       }),
     ),
@@ -345,10 +357,10 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     launchArgs: Schema.String.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Launch arguments",
-        description: "Additional CLI arguments passed on session start.",
+        title: "실행 인수",
+        description: "세션 시작 시 전달할 추가 CLI 인수입니다.",
         providerSettingsForm: {
-          placeholder: "e.g. --chrome",
+          placeholder: "예: --chrome",
           clearWhenEmpty: "omit",
         },
       }),
@@ -368,16 +380,16 @@ export const CursorSettings = makeProviderSettingsSchema(
     ),
     binaryPath: makeBinaryPathSetting("cursor-agent").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Cursor agent binary.",
+        title: "실행 파일 경로",
+        description: "Cursor 에이전트 실행 파일 경로입니다.",
         providerSettingsForm: { placeholder: "cursor-agent", clearWhenEmpty: "omit" },
       }),
     ),
     apiEndpoint: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "API endpoint",
-        description: "Override the Cursor API endpoint for this instance.",
+        title: "API 엔드포인트",
+        description: "이 계정에서 사용할 Cursor API 엔드포인트를 지정합니다.",
         providerSettingsForm: {
           placeholder: "https://...",
           clearWhenEmpty: "omit",
@@ -403,8 +415,8 @@ export const GrokSettings = makeProviderSettingsSchema(
     ),
     binaryPath: makeBinaryPathSetting("grok").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Grok CLI binary.",
+        title: "실행 파일 경로",
+        description: "Grok CLI 실행 파일 경로입니다.",
         providerSettingsForm: { placeholder: "grok", clearWhenEmpty: "omit" },
       }),
     ),
@@ -427,8 +439,8 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     ),
     binaryPath: makeBinaryPathSetting("opencode").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the OpenCode binary.",
+        title: "실행 파일 경로",
+        description: "OpenCode 실행 파일 경로입니다.",
         providerSettingsForm: {
           placeholder: "opencode",
           clearWhenEmpty: "omit",
@@ -438,8 +450,8 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     serverUrl: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        title: "서버 URL",
+        description: "비워 두면 필요할 때 T3 Code가 서버를 실행합니다.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -449,11 +461,11 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     serverPassword: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Server password",
-        description: "Stored in plain text on disk.",
+        title: "서버 비밀번호",
+        description: "디스크에 일반 텍스트로 저장됩니다.",
         providerSettingsForm: {
           control: "password",
-          placeholder: "Optional",
+          placeholder: "선택 사항",
           clearWhenEmpty: "omit",
         },
       }),
@@ -609,6 +621,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  workspaceProgramPermissions: WorkspaceProgramPermissions.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -733,6 +748,15 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  workspaceProgramPermissions: Schema.optionalKey(
+    Schema.Struct({
+      manualControl: Schema.optionalKey(Schema.Boolean),
+      collectLogs: Schema.optionalKey(Schema.Boolean),
+      autoStart: Schema.optionalKey(Schema.Boolean),
+      autoDiagnosis: Schema.optionalKey(Schema.Boolean),
+      autoRestartAfterRepair: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   providers: Schema.optionalKey(

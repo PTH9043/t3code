@@ -191,6 +191,16 @@ export const DesktopRuntimeInfoSchema = Schema.Struct({
   runningUnderArm64Translation: Schema.Boolean,
 });
 
+export interface DesktopUpdateAutomationPermissions {
+  autoDownload: boolean;
+  autoInstall: boolean;
+}
+
+export const DesktopUpdateAutomationPermissionsSchema = Schema.Struct({
+  autoDownload: Schema.Boolean,
+  autoInstall: Schema.Boolean,
+});
+
 export interface DesktopUpdateState {
   enabled: boolean;
   status: DesktopUpdateStatus;
@@ -1051,9 +1061,15 @@ export interface DesktopBridge {
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getWindowFullscreenState: () => boolean;
+  /** Toggle the native main window between maximized and restored bounds. */
+  toggleWindowMaximized?: () => Promise<boolean>;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
+  getUpdateAutomationPermissions: () => Promise<DesktopUpdateAutomationPermissions>;
+  setUpdateAutomationPermissions: (
+    permissions: DesktopUpdateAutomationPermissions,
+  ) => Promise<DesktopUpdateAutomationPermissions>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;

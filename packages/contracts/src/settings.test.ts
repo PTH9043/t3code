@@ -179,6 +179,29 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings Workspace program permissions", () => {
+  it("keeps manual control and diagnosis available while risky automation defaults off", () => {
+    expect(decodeServerSettings({}).workspaceProgramPermissions).toEqual({
+      manualControl: true,
+      collectLogs: true,
+      autoStart: false,
+      autoDiagnosis: true,
+      autoRestartAfterRepair: false,
+    });
+  });
+
+  it("accepts a nested permission patch without requiring unrelated settings", () => {
+    expect(
+      decodeServerSettingsPatch({
+        workspaceProgramPermissions: {
+          autoStart: true,
+          autoRestartAfterRepair: true,
+        },
+      }).workspaceProgramPermissions,
+    ).toEqual({ autoStart: true, autoRestartAfterRepair: true });
+  });
+});
+
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it("defaults all style settings for legacy configs", () => {
     const settings = decodeServerSettings({});

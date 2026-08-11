@@ -23,6 +23,10 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  WorkspaceCollaborationRun,
+  WorkspaceProgram,
+  WorkspaceProgramHealthCheck,
+  WorkspaceTaskGraph,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -53,6 +57,213 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeWorkspaceProgramHealthCheck = Schema.decodeUnknownEffect(WorkspaceProgramHealthCheck);
+const decodeWorkspaceProgram = Schema.decodeUnknownEffect(WorkspaceProgram);
+const decodeWorkspaceCollaborationRun = Schema.decodeUnknownEffect(WorkspaceCollaborationRun);
+const decodeWorkspaceTaskGraph = Schema.decodeUnknownEffect(WorkspaceTaskGraph);
+
+it.effect("defaults existing program records to disabled integrity convergence", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeWorkspaceProgram({
+      id: "web",
+      projectId: "project-a",
+      name: "Web",
+      command: "vp run dev",
+      relativeDirectory: "",
+      environmentVariableNames: [],
+      startPolicy: "manual",
+      healthCheck: null,
+      errorPatterns: [],
+      enabled: true,
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(parsed.integrity, {
+      enabled: false,
+      validationCommands: [],
+      requiredCleanPasses: 2,
+      status: "disabled",
+      cycle: 0,
+      consecutiveCleanPasses: 0,
+      activeRunId: null,
+      lastRunId: null,
+      summary: null,
+      startedAt: null,
+      convergedAt: null,
+      updatedAt: null,
+    });
+  }),
+);
+
+it.effect("defaults legacy collaboration runs to no task graph", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeWorkspaceCollaborationRun({
+      id: "run-legacy",
+      projectId: "project-a",
+      source: "user",
+      scheduleId: null,
+      incidentId: null,
+      task: "Legacy task",
+      status: "queued",
+      steps: [],
+      finalOutput: null,
+      error: null,
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.graph, null);
+  }),
+);
+
+it.effect("decodes structured Workspace task graphs", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeWorkspaceTaskGraph({
+      revision: 1,
+      status: "executing",
+      nodes: [
+        {
+          id: "research-market",
+          order: 0,
+          kind: "research",
+          agent: "grok",
+          role: "researcher",
+          title: "시장 조사",
+          handoff: {
+            task: "최신 시장 자료를 조사한다.",
+            goal: "구현 결정을 위한 검증 자료를 만든다.",
+            context: "이 워크스페이스의 현재 목표",
+            input: "사용자 요청",
+            constraints: ["원출처를 우선한다."],
+            expectedOutput: "출처와 날짜가 있는 조사 결과",
+            successCriteria: ["주요 주장마다 근거가 있다."],
+          },
+          dependsOn: [],
+          validationTargetId: null,
+          priority: 0,
+          status: "queued",
+          maxAttempts: 2,
+          attempts: [],
+          output: null,
+          error: null,
+          failureClassification: null,
+          confidence: null,
+          validation: null,
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
+      changes: [
+        {
+          revision: 1,
+          reason: "initial-plan",
+          summary: "Fable이 초기 그래프를 만들었다.",
+          addedNodeIds: ["research-market"],
+          supersededNodeIds: [],
+          occurredAt: "2026-08-09T00:00:00.000Z",
+        },
+      ],
+      nextAction: "독립 조사 노드를 실행한다.",
+      overallConfidence: null,
+      repairApproved: null,
+      memoryCandidates: [],
+    });
+    assert.strictEqual(parsed.nodes[0]?.agent, "grok");
+    assert.strictEqual(parsed.changes[0]?.reason, "initial-plan");
+  }),
+);
+
+it.effect("rejects graph nodes whose retry bound exceeds the orchestration limit", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeWorkspaceTaskGraph({
+        revision: 0,
+        status: "planning",
+        nodes: [
+          {
+            id: "plan",
+            order: 0,
+            kind: "orchestration",
+            agent: "fable",
+            role: "coordinator",
+            title: "계획",
+            handoff: {
+              task: "계획",
+              goal: "그래프 작성",
+              context: "",
+              input: "요청",
+              constraints: [],
+              expectedOutput: "그래프",
+              successCriteria: ["유효한 DAG"],
+            },
+            dependsOn: [],
+            validationTargetId: null,
+            priority: 0,
+            status: "queued",
+            maxAttempts: 4,
+            attempts: [],
+            output: null,
+            error: null,
+            failureClassification: null,
+            confidence: null,
+            validation: null,
+            startedAt: null,
+            completedAt: null,
+          },
+        ],
+        changes: [],
+        nextAction: "계획",
+        overallConfidence: null,
+        repairApproved: null,
+        memoryCandidates: [],
+      }),
+    );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("accepts bounded HTTP Workspace program health checks", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeWorkspaceProgramHealthCheck({
+      kind: "http",
+      url: "http://127.0.0.1:3000/health",
+      expectedStatusMin: 200,
+      expectedStatusMax: 399,
+      intervalSeconds: 30,
+      timeoutSeconds: 5,
+      failureThreshold: 3,
+    });
+    assert.strictEqual(parsed.kind, "http");
+  }),
+);
+
+it.effect("rejects non-HTTP URLs and reversed status ranges for program health checks", () =>
+  Effect.gen(function* () {
+    const wrongProtocol = yield* Effect.exit(
+      decodeWorkspaceProgramHealthCheck({
+        kind: "http",
+        url: "file:///tmp/health",
+        expectedStatusMin: 200,
+        expectedStatusMax: 399,
+        intervalSeconds: 30,
+        timeoutSeconds: 5,
+        failureThreshold: 3,
+      }),
+    );
+    const reversedRange = yield* Effect.exit(
+      decodeWorkspaceProgramHealthCheck({
+        kind: "http",
+        url: "https://example.com/health",
+        expectedStatusMin: 500,
+        expectedStatusMax: 200,
+        intervalSeconds: 30,
+        timeoutSeconds: 5,
+        failureThreshold: 3,
+      }),
+    );
+    assert.strictEqual(wrongProtocol._tag, "Failure");
+    assert.strictEqual(reversedRange._tag, "Failure");
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
@@ -169,10 +380,19 @@ it.effect("decodes historical project.created payloads with a default provider",
         model: "gpt-5.4",
       },
       scripts: [],
+      workspaceControl: {
+        isolationMode: "strict",
+        longTermMemoryRoot: null,
+      },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.defaultModelSelection?.instanceId, "codex");
+    assert.deepStrictEqual(parsed.workspaceControl?.conversationRag, {
+      enabled: true,
+      redactSensitiveData: true,
+      maxInputChars: 24_000,
+    });
   }),
 );
 
