@@ -10,6 +10,7 @@ import {
   useMeetingComposerStore,
   type MeetingComposerSeat,
 } from "./meetingComposerStore";
+import { useWorkspaceTabStore, type WorkspaceTab } from "./workspaceTabStore";
 
 function seat(instanceId: string, displayName: string): MeetingComposerSeat {
   return {
@@ -20,8 +21,25 @@ function seat(instanceId: string, displayName: string): MeetingComposerSeat {
   };
 }
 
+function tab(id: string): WorkspaceTab {
+  return {
+    id,
+    view: { kind: "thread", environmentId: "env-1", threadId: `thread-${id}` },
+    lastActivatedAt: 0,
+    projectKey: null,
+  };
+}
+
+function activateTab(id: string) {
+  useWorkspaceTabStore.setState((state) => ({
+    tabs: state.tabs.some((entry) => entry.id === id) ? state.tabs : [...state.tabs, tab(id)],
+    activeTabId: id,
+  }));
+}
+
 beforeEach(() => {
-  useMeetingComposerStore.setState({ config: DEFAULT_MEETING_COMPOSER_CONFIG });
+  useMeetingComposerStore.setState({ configsByTabId: {} });
+  useWorkspaceTabStore.setState({ tabs: [tab("tab-1")], activeTabId: "tab-1" });
 });
 
 describe("meetingComposerStore", () => {
@@ -55,13 +73,32 @@ describe("meetingComposerStore", () => {
     expect(readMeetingComposerConfig().seats).toHaveLength(8);
   });
 
-  it("keeps one app-wide config: arming once stays armed everywhere", () => {
-    // Meeting mode is a switch the person turns off, not per-conversation
-    // state — the same config answers no matter which surface asks.
+  it("keeps each tab's meeting room to itself", () => {
     toggleMeetingComposerSeat(seat("claude-a", "Claude"));
     updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
+
+    // Another tab: pristine config, arming it touches only that tab.
+    activateTab("tab-2");
+    expect(readMeetingComposerConfig()).toEqual(DEFAULT_MEETING_COMPOSER_CONFIG);
+    toggleMeetingComposerSeat(seat("codex-a", "Codex"));
+
+    // Back on the first tab: its armed roster is exactly as it was left.
+    activateTab("tab-1");
     expect(readMeetingComposerConfig().enabled).toBe(true);
-    expect(readMeetingComposerConfig().seats).toHaveLength(1);
+    expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
+  });
+
+  it("takes a closed tab's meeting room with it", () => {
+    updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
+    activateTab("tab-2");
+    updateMeetingComposerConfig((config) => ({ ...config, maxRounds: 5 }));
+
+    // Closing tab-1 drops its config; tab-2 keeps its own.
+    useWorkspaceTabStore.setState((state) => ({
+      tabs: state.tabs.filter((entry) => entry.id !== "tab-1"),
+    }));
+    expect(useMeetingComposerStore.getState().configsByTabId["tab-1"]).toBeUndefined();
+    expect(readMeetingComposerConfig().maxRounds).toBe(5);
   });
 
   it("screens seat ids into the server's participant-id shape", () => {

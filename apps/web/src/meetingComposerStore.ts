@@ -4,12 +4,13 @@ import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import type { DraftId } from "./composerDraftStore";
+import { useWorkspaceTabStore } from "./workspaceTabStore";
 
 /**
- * The composer surface a meeting send goes out from. The value no longer
- * scopes the settings — meeting mode is one app-wide switch — but pickers
- * still pass it so only the chat composer's picker (never a settings picker)
- * shows the meeting UI.
+ * The composer surface a meeting send goes out from. The value does not scope
+ * the settings — those live per workspace TAB — but pickers still pass it so
+ * only the chat composer's picker (never a settings picker) shows the
+ * meeting UI.
  */
 export type MeetingComposerTarget = ScopedThreadRef | DraftId;
 
@@ -50,46 +51,80 @@ export function meetingSeatId(instanceId: string): string {
   return (cleaned.length > 0 ? cleaned : "seat").slice(0, 64);
 }
 
+/** Settings written before any tab exists land here and stay readable. */
+const NO_TAB_KEY = "__no-tab__";
+
+function activeMeetingScopeKey(): string {
+  return useWorkspaceTabStore.getState().activeTabId ?? NO_TAB_KEY;
+}
+
 interface MeetingComposerState {
-  readonly config: MeetingComposerConfig;
-  readonly updateConfig: (update: (config: MeetingComposerConfig) => MeetingComposerConfig) => void;
+  readonly configsByTabId: Readonly<Record<string, MeetingComposerConfig>>;
+  readonly updateConfig: (
+    tabId: string,
+    update: (config: MeetingComposerConfig) => MeetingComposerConfig,
+  ) => void;
+  readonly dropTabs: (keepTabIds: ReadonlySet<string>) => void;
 }
 
 /**
- * ONE config for the whole app, persisted: meeting mode is a switch the
- * person turns off, not per-conversation state. Armed once, it stays armed
- * across conversations, folders, tabs and app restarts until they turn it
- * off — the roster travels with them.
+ * One meeting setup PER WORKSPACE TAB, persisted: each tab is its own meeting
+ * room. Arming a roster in one tab never leaks into another, and within a tab
+ * the switch stays on — across conversations and app restarts — until the
+ * person turns it off there.
  */
 export const useMeetingComposerStore = create<MeetingComposerState>()(
   persist(
     (set) => ({
-      config: DEFAULT_MEETING_COMPOSER_CONFIG,
-      updateConfig: (update) =>
+      configsByTabId: {},
+      updateConfig: (tabId, update) =>
         set((state) => {
-          const next = update(state.config);
-          return next === state.config ? state : { config: next };
+          const current = state.configsByTabId[tabId] ?? DEFAULT_MEETING_COMPOSER_CONFIG;
+          const next = update(current);
+          if (next === current) return state;
+          return { configsByTabId: { ...state.configsByTabId, [tabId]: next } };
+        }),
+      dropTabs: (keepTabIds) =>
+        set((state) => {
+          const entries = Object.entries(state.configsByTabId).filter(
+            ([tabId]) => tabId === NO_TAB_KEY || keepTabIds.has(tabId),
+          );
+          if (entries.length === Object.keys(state.configsByTabId).length) return state;
+          return { configsByTabId: Object.fromEntries(entries) };
         }),
     }),
     {
-      name: "t3.meeting-composer.v1",
-      partialize: (state) => ({ config: state.config }),
+      name: "t3.meeting-composer.v2",
+      partialize: (state) => ({ configsByTabId: state.configsByTabId }),
     },
   ),
 );
 
+// A closed tab takes its meeting room with it; without this the persisted map
+// would keep growing with configs no tab can ever read again.
+useWorkspaceTabStore.subscribe((state, previous) => {
+  if (state.tabs === previous.tabs) return;
+  useMeetingComposerStore.getState().dropTabs(new Set(state.tabs.map((tab) => tab.id)));
+});
+
 export function readMeetingComposerConfig(): MeetingComposerConfig {
-  return useMeetingComposerStore.getState().config;
+  return (
+    useMeetingComposerStore.getState().configsByTabId[activeMeetingScopeKey()] ??
+    DEFAULT_MEETING_COMPOSER_CONFIG
+  );
 }
 
 export function useMeetingComposerConfig(): MeetingComposerConfig {
-  return useMeetingComposerStore(useShallow((state) => state.config));
+  const activeTabId = useWorkspaceTabStore((state) => state.activeTabId) ?? NO_TAB_KEY;
+  return useMeetingComposerStore(
+    useShallow((state) => state.configsByTabId[activeTabId] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
+  );
 }
 
 export function updateMeetingComposerConfig(
   update: (config: MeetingComposerConfig) => MeetingComposerConfig,
 ): void {
-  useMeetingComposerStore.getState().updateConfig(update);
+  useMeetingComposerStore.getState().updateConfig(activeMeetingScopeKey(), update);
 }
 
 /** The server's roster cap; a ninth checkbox is refused here rather than at send. */
