@@ -87,10 +87,16 @@ function buildRepositoryIdentity(input: {
   };
 }
 
+interface RepositoryRootResolution {
+  readonly cacheKey: string;
+  readonly fromGit: boolean;
+}
+
 const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.resolveCacheKey")(
-  function* (cwd: string) {
+  function* (
+    cwd: string,
+  ): Effect.fn.Return<RepositoryRootResolution, never, ProcessRunner.ProcessRunner> {
     const processRunner = yield* ProcessRunner.ProcessRunner;
-    let cacheKey = cwd;
 
     // git is a real executable on every platform — no cmd.exe shell mode, which
     // would split paths containing spaces during cmd's re-tokenization.
@@ -102,15 +108,13 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
       })
       .pipe(Effect.option);
     if (topLevelResult._tag === "None" || topLevelResult.value.code !== 0) {
-      return cacheKey;
+      return { cacheKey: cwd, fromGit: false };
     }
 
     const candidate = topLevelResult.value.stdout.trim();
-    if (candidate.length > 0) {
-      cacheKey = candidate;
-    }
-
-    return cacheKey;
+    return candidate.length > 0
+      ? { cacheKey: candidate, fromGit: true }
+      : { cacheKey: cwd, fromGit: false };
   },
 );
 
@@ -157,12 +161,31 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     },
   );
 
+  // The cwd → repository-root mapping is cached under the same TTL policy as
+  // the identity itself: `resolve` sits on snapshot hot paths, and running
+  // `git rev-parse` per call blocks the event loop for the whole process
+  // spawn on Windows.
+  const repositoryRootCache = yield* Cache.makeWith<string, RepositoryRootResolution>(
+    (cwd) =>
+      resolveRepositoryIdentityCacheKey(cwd).pipe(
+        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+      ),
+    {
+      capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
+      timeToLive: Exit.match({
+        onSuccess: (resolution) =>
+          resolution.fromGit
+            ? (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL)
+            : (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL),
+        onFailure: () => Duration.zero,
+      }),
+    },
+  );
+
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fn(
     "RepositoryIdentityResolver.resolve",
   )(function* (cwd) {
-    const cacheKey = yield* resolveRepositoryIdentityCacheKey(cwd).pipe(
-      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-    );
+    const { cacheKey } = yield* Cache.get(repositoryRootCache, cwd);
     return yield* Cache.get(repositoryIdentityCache, cacheKey);
   });
 
