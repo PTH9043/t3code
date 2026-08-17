@@ -21,25 +21,27 @@ function seat(instanceId: string, displayName: string): MeetingComposerSeat {
   };
 }
 
-function tab(id: string): WorkspaceTab {
+function tab(id: string, folderKey: string | null): WorkspaceTab {
   return {
     id,
     view: { kind: "thread", environmentId: "env-1", threadId: `thread-${id}` },
     lastActivatedAt: 0,
-    projectKey: null,
+    projectKey: folderKey,
   };
 }
 
-function activateTab(id: string) {
+function showFolder(tabId: string, folderKey: string | null) {
   useWorkspaceTabStore.setState((state) => ({
-    tabs: state.tabs.some((entry) => entry.id === id) ? state.tabs : [...state.tabs, tab(id)],
-    activeTabId: id,
+    tabs: state.tabs.some((entry) => entry.id === tabId)
+      ? state.tabs
+      : [...state.tabs, tab(tabId, folderKey)],
+    activeTabId: tabId,
   }));
 }
 
 beforeEach(() => {
-  useMeetingComposerStore.setState({ configsByTabId: {} });
-  useWorkspaceTabStore.setState({ tabs: [tab("tab-1")], activeTabId: "tab-1" });
+  useMeetingComposerStore.setState({ configsByFolder: {} });
+  useWorkspaceTabStore.setState({ tabs: [tab("tab-1", "env-1:folder-a")], activeTabId: "tab-1" });
 });
 
 describe("meetingComposerStore", () => {
@@ -73,32 +75,60 @@ describe("meetingComposerStore", () => {
     expect(readMeetingComposerConfig().seats).toHaveLength(8);
   });
 
-  it("keeps each tab's meeting room to itself", () => {
+  it("keeps each folder's meeting room to itself", () => {
     toggleMeetingComposerSeat(seat("claude-a", "Claude"));
     updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
 
-    // Another tab: pristine config, arming it touches only that tab.
-    activateTab("tab-2");
+    // Another folder: pristine config, arming it touches only that folder.
+    showFolder("tab-2", "env-1:folder-b");
     expect(readMeetingComposerConfig()).toEqual(DEFAULT_MEETING_COMPOSER_CONFIG);
     toggleMeetingComposerSeat(seat("codex-a", "Codex"));
 
-    // Back on the first tab: its armed roster is exactly as it was left.
-    activateTab("tab-1");
+    // Back in folder-a: its armed roster is exactly as it was left.
+    showFolder("tab-1", "env-1:folder-a");
     expect(readMeetingComposerConfig().enabled).toBe(true);
     expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
   });
 
-  it("takes a closed tab's meeting room with it", () => {
+  it("survives the tab closing and the folder reopening in a fresh tab", () => {
+    // The regression that kept biting: settings keyed to a tab id died with
+    // the tab. The folder is the identity that survives.
     updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
-    activateTab("tab-2");
-    updateMeetingComposerConfig((config) => ({ ...config, maxRounds: 5 }));
+    toggleMeetingComposerSeat(seat("claude-a", "Claude"));
 
-    // Closing tab-1 drops its config; tab-2 keeps its own.
-    useWorkspaceTabStore.setState((state) => ({
-      tabs: state.tabs.filter((entry) => entry.id !== "tab-1"),
-    }));
-    expect(useMeetingComposerStore.getState().configsByTabId["tab-1"]).toBeUndefined();
+    useWorkspaceTabStore.setState({ tabs: [], activeTabId: null });
+    showFolder("tab-99", "env-1:folder-a");
+
+    expect(readMeetingComposerConfig().enabled).toBe(true);
+    expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
+  });
+
+  it("keeps the meeting's rounds when switching styles back and forth", () => {
+    updateMeetingComposerConfig((config) => ({ ...config, maxRounds: 5 }));
+    updateMeetingComposerConfig((config) => ({ ...config, style: "collaboration" }));
+    expect(readMeetingComposerConfig().style).toBe("collaboration");
     expect(readMeetingComposerConfig().maxRounds).toBe(5);
+    updateMeetingComposerConfig((config) => ({ ...config, style: "meeting" }));
+    expect(readMeetingComposerConfig().style).toBe("meeting");
+    expect(readMeetingComposerConfig().maxRounds).toBe(5);
+  });
+
+  it("folds a legacy zero-round entry into the collaboration style", () => {
+    // The first cut of 협업 was persisted as maxRounds 0 with no style field;
+    // it must read back as style=collaboration with the meeting rounds
+    // restored to the default.
+    const { style: _legacyHadNoStyle, ...legacyEntry } = {
+      ...DEFAULT_MEETING_COMPOSER_CONFIG,
+      enabled: true,
+      maxRounds: 0,
+    };
+    useMeetingComposerStore.setState({
+      configsByFolder: { "env-1:folder-a": legacyEntry as never },
+    });
+    const config = readMeetingComposerConfig();
+    expect(config.style).toBe("collaboration");
+    expect(config.maxRounds).toBe(DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds);
+    expect(config.enabled).toBe(true);
   });
 
   it("screens seat ids into the server's participant-id shape", () => {

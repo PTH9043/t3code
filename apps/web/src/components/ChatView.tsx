@@ -5388,7 +5388,9 @@ function ChatViewContent(props: ChatViewProps) {
                 meetingDraft.chairSeatId === null
                   ? null
                   : WorkspaceMeetingParticipantId.make(meetingDraft.chairSeatId),
-              maxRounds: meetingDraft.maxRounds,
+              // 협업 is a zero-round meeting on the wire; the stored round
+              // count stays untouched for when the person switches back.
+              maxRounds: meetingDraft.style === "collaboration" ? 0 : meetingDraft.maxRounds,
               userInLoop: meetingDraft.userInLoop,
               ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },
@@ -5415,11 +5417,13 @@ function ChatViewContent(props: ChatViewProps) {
           stackedThreadToast({
             type: "success",
             title:
-              meetingDraft.maxRounds === 0 ? "AI 협업을 시작했습니다" : "AI 회의를 시작했습니다",
+              meetingDraft.style === "collaboration"
+                ? "AI 협업을 시작했습니다"
+                : "AI 회의를 시작했습니다",
             description:
               meetingThreadId !== undefined
                 ? `${meetingDraft.seats.map((seat) => seat.displayName).join(", ")} — ${
-                    meetingDraft.maxRounds === 0
+                    meetingDraft.style === "collaboration"
                       ? "계획 수립 후 분담 실행이 이 대화창에서 진행됩니다."
                       : "논의가 이 대화창에서 실시간으로 진행됩니다."
                   }`

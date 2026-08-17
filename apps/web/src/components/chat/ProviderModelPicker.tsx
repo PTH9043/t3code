@@ -175,7 +175,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 <TooltipTrigger
                   render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}
                 >
-                  {meetingConfig.maxRounds === 0 ? "AI 협업" : "AI 회의"}
+                  {meetingConfig.style === "collaboration" ? "AI 협업" : "AI 회의"}
                   {meetingConfig.seats.length > 0 ? ` · ${meetingConfig.seats.length}명` : ""}
                 </TooltipTrigger>
                 <TooltipPopup side="top">

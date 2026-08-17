@@ -27,8 +27,12 @@ export interface MeetingComposerSeat {
   readonly options?: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>;
 }
 
+/** 회의 debates first; 협업 skips discussion and goes straight to the plan. */
+export type MeetingComposerStyle = "meeting" | "collaboration";
+
 export interface MeetingComposerConfig {
   readonly enabled: boolean;
+  readonly style: MeetingComposerStyle;
   readonly mode: WorkspaceMeetingMode;
   readonly maxRounds: number;
   readonly userInLoop: boolean;
@@ -39,12 +43,36 @@ export interface MeetingComposerConfig {
 
 export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   enabled: false,
+  style: "meeting",
   mode: "fixed-rounds",
   maxRounds: 2,
   userInLoop: false,
   chairSeatId: null,
   seats: [],
 };
+
+/**
+ * The style is its own field so 회의 and 협업 never overwrite each other's
+ * settings: switching styles must not touch the meeting's round count. The
+ * short-lived first cut encoded 협업 as maxRounds 0 — fold those entries
+ * forward and give the meeting side its rounds back.
+ */
+function normalizeMeetingComposerConfig(
+  config: MeetingComposerConfig | (Omit<MeetingComposerConfig, "style"> & { style?: unknown }),
+): MeetingComposerConfig {
+  const style: MeetingComposerStyle =
+    config.style === "collaboration" || config.style === "meeting"
+      ? config.style
+      : config.maxRounds === 0
+        ? "collaboration"
+        : "meeting";
+  return {
+    ...config,
+    style,
+    maxRounds:
+      config.maxRounds === 0 ? DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds : config.maxRounds,
+  };
+}
 
 /**
  * A seat id doubles as the server-side participant id, which only accepts
@@ -90,7 +118,9 @@ export const useMeetingComposerStore = create<MeetingComposerState>()(
       configsByFolder: {},
       updateConfig: (folderKey, update) =>
         set((state) => {
-          const current = state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG;
+          const current = normalizeMeetingComposerConfig(
+            state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG,
+          );
           const next = update(current);
           if (next === current) return state;
           return { configsByFolder: { ...state.configsByFolder, [folderKey]: next } };
@@ -131,9 +161,9 @@ try {
 }
 
 export function readMeetingComposerConfig(): MeetingComposerConfig {
-  return (
+  return normalizeMeetingComposerConfig(
     useMeetingComposerStore.getState().configsByFolder[activeFolderKey()] ??
-    DEFAULT_MEETING_COMPOSER_CONFIG
+      DEFAULT_MEETING_COMPOSER_CONFIG,
   );
 }
 
@@ -143,7 +173,11 @@ export function useMeetingComposerConfig(): MeetingComposerConfig {
     return active?.projectKey ?? NO_FOLDER_KEY;
   });
   return useMeetingComposerStore(
-    useShallow((state) => state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
+    useShallow((state) =>
+      normalizeMeetingComposerConfig(
+        state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG,
+      ),
+    ),
   );
 }
 

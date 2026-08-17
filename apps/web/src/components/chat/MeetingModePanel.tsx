@@ -50,9 +50,10 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   const config = useMeetingComposerConfig();
   const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
-  // Zero rounds is the direct-collaboration style: no discussion, the chair
-  // plans straight away and the seats split the work.
-  const isDirectCollaboration = config.maxRounds === 0;
+  // 협업 skips discussion: the chair plans straight away and the seats split
+  // the work. The style is its own field, so picking it never touches the
+  // meeting side's rounds or mode.
+  const isDirectCollaboration = config.style === "collaboration";
 
   // Self-heal selections a past bug stored as display LABELS ("Extra High")
   // instead of choice ids ("xhigh"): remap by label once, idempotently.
@@ -89,7 +90,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           type="button"
           onClick={() =>
             updateMeetingComposerConfig((current) =>
-              current.maxRounds === 0 ? { ...current, maxRounds: 2 } : current,
+              current.style === "meeting" ? current : { ...current, style: "meeting" },
             )
           }
           className={cn(
@@ -106,7 +107,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           type="button"
           onClick={() =>
             updateMeetingComposerConfig((current) =>
-              current.maxRounds === 0 ? current : { ...current, maxRounds: 0, userInLoop: false },
+              current.style === "collaboration" ? current : { ...current, style: "collaboration" },
             )
           }
           className={cn(
@@ -331,7 +332,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
           : isDirectCollaboration
-            ? "입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다."
+            ? "입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정도 8회에서 멈추므로 무한히 돌지 않습니다."
             : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 회의 모드는 끌 때까지 유지됩니다."}
       </p>
     </div>
