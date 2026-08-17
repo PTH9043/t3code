@@ -1224,6 +1224,9 @@ function ChatViewContent(props: ChatViewProps) {
       reportFailure: false,
     },
   );
+  const answerMeetingRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
+    reportFailure: false,
+  });
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
@@ -5003,7 +5006,59 @@ function ChatViewContent(props: ChatViewProps) {
                 run.status === "running" ||
                 run.status === "cancel-requested"),
           );
-    if (liveMeetingRunHere !== undefined && !directAnnotation) {
+    // A meeting whose projection stopped moving is dead weight, not a live
+    // discussion — it must never hold the conversation hostage. A run parked
+    // on a question is WAITING, not stale: silence is its normal state.
+    const meetingRunStale =
+      liveMeetingRunHere !== undefined &&
+      (liveMeetingRunHere.meeting?.pendingQuestion ?? null) === null &&
+      Date.now() - Date.parse(liveMeetingRunHere.updatedAt) > 10 * 60_000;
+    if (liveMeetingRunHere !== undefined && !meetingRunStale && !directAnnotation) {
+      const meetingPendingQuestion = liveMeetingRunHere.meeting?.pendingQuestion ?? null;
+      if (meetingPendingQuestion !== null) {
+        // The run is parked on a question for the person; a message typed
+        // into its own conversation IS the answer — send it as one so the
+        // meeting wakes up, instead of an interjection it would never read.
+        const answerText = promptForSend.trim().slice(0, 8_000);
+        if (answerText.length === 0) return;
+        sendInFlightRef.current = true;
+        try {
+          const answered = await answerMeetingRun({
+            environmentId,
+            input: {
+              runId: liveMeetingRunHere.id,
+              projectId: liveMeetingRunHere.projectId,
+              question: meetingPendingQuestion.question,
+              answer: answerText,
+            },
+          });
+          if (answered._tag === "Failure") {
+            if (!isAtomCommandInterrupted(answered)) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "회의 질문에 답변을 보내지 못했습니다",
+                  description: "연결 상태를 확인하고 다시 시도하세요.",
+                }),
+              );
+            }
+            return;
+          }
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+          toastManager.add(
+            stackedThreadToast({
+              type: "success",
+              title: "회의 질문에 답변했습니다",
+              description: "답변을 반영해 회의가 이어집니다.",
+            }),
+          );
+        } finally {
+          sendInFlightRef.current = false;
+        }
+        return;
+      }
       if (liveMeetingRunHere.meeting?.phase === "executing") {
         toastManager.add(
           stackedThreadToast({
