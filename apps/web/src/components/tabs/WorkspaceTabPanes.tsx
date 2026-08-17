@@ -1,7 +1,7 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { BrainCircuitIcon, FolderXIcon } from "lucide-react";
-import { useEffect } from "react";
+import { Activity, useEffect } from "react";
 
 import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
@@ -40,33 +40,38 @@ import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 /**
- * The keep-alive body of one workspace tab. Background tabs stay mounted with
- * `display: none` — switching back is instant and their scroll, expansions,
- * streams and composer state all survive — so anything here that navigates or
- * grabs window-level input must first check `active`.
+ * The keep-alive body of one workspace tab, held in React's `<Activity>`.
+ * A hidden tab keeps its state and DOM — switching back is instant, scroll
+ * and composer drafts survive — but its effects (atom subscriptions, window
+ * listeners) are unmounted, so a turn streaming into a background tab costs
+ * nothing on the main thread. The live screen never fights the one you type
+ * in; badges keep working because the tab BAR subscribes outside Activity.
+ * Anything here that navigates must still check `active`.
  */
 export function WorkspaceTabPane({ tab, active }: { tab: WorkspaceTab; active: boolean }) {
   const view = tab.view;
   return (
-    <div className={active ? "flex h-full min-h-0 min-w-0 flex-1 flex-col" : "hidden"}>
-      {view.kind === "thread" ? (
-        <ThreadTabPane
-          key={`${view.environmentId}:${view.threadId}`}
-          environmentId={view.environmentId as EnvironmentId}
-          threadId={view.threadId as ThreadId}
-          active={active}
-        />
-      ) : view.kind === "draft" ? (
-        <DraftTabPane key={view.draftId} draftId={DraftId.make(view.draftId)} active={active} />
-      ) : (
-        <ControlCenterTabPane
-          key={`${view.environmentId}:${view.projectId}`}
-          environmentId={view.environmentId}
-          projectId={view.projectId}
-          active={active}
-        />
-      )}
-    </div>
+    <Activity mode={active ? "visible" : "hidden"}>
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+        {view.kind === "thread" ? (
+          <ThreadTabPane
+            key={`${view.environmentId}:${view.threadId}`}
+            environmentId={view.environmentId as EnvironmentId}
+            threadId={view.threadId as ThreadId}
+            active={active}
+          />
+        ) : view.kind === "draft" ? (
+          <DraftTabPane key={view.draftId} draftId={DraftId.make(view.draftId)} active={active} />
+        ) : (
+          <ControlCenterTabPane
+            key={`${view.environmentId}:${view.projectId}`}
+            environmentId={view.environmentId}
+            projectId={view.projectId}
+            active={active}
+          />
+        )}
+      </div>
+    </Activity>
   );
 }
 
