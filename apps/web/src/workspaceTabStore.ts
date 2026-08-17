@@ -16,6 +16,13 @@ export interface WorkspaceTab {
   readonly id: string;
   readonly view: WorkspaceTabView;
   readonly lastActivatedAt: number;
+  /**
+   * The folder this tab is working in (`environmentId:projectId`), null until
+   * the screen's project is known. Navigation that crosses this boundary
+   * opens a new tab instead of retargeting — a tab is a folder workspace the
+   * person set up, not just a page.
+   */
+  readonly projectKey: string | null;
 }
 
 /**
@@ -44,13 +51,22 @@ interface WorkspaceTabState {
   readonly tabs: ReadonlyArray<WorkspaceTab>;
   readonly activeTabId: string | null;
   /**
-   * Route → tabs sync. Called by the (thin) route components: makes the
-   * active tab show `view`. If another tab already shows it, that tab becomes
-   * active instead — one screen never lives in two tabs at once.
+   * Route → tabs sync. Called by the (thin) route components: shows `view`
+   * in the right tab. Same-folder navigation retargets the current tab; a
+   * view already open elsewhere activates that tab; and navigation into a
+   * DIFFERENT folder reuses that folder's tab or opens a new one, so the tab
+   * the person was on survives (folder-per-tab). Past the cap it falls back
+   * to retargeting rather than losing the navigation.
    */
-  readonly syncRouteView: (view: WorkspaceTabView) => void;
+  readonly syncRouteView: (
+    view: WorkspaceTabView,
+    options?: { readonly projectKey?: string | null },
+  ) => void;
   /** Open `view` in a background tab. Returns false when the cap refuses it. */
-  readonly openBackgroundTab: (view: WorkspaceTabView) => boolean;
+  readonly openBackgroundTab: (
+    view: WorkspaceTabView,
+    options?: { readonly projectKey?: string | null },
+  ) => boolean;
   readonly activateTab: (tabId: string) => void;
   /** Returns the tab to navigate to next (the neighbor), if any. */
   readonly closeTab: (tabId: string) => WorkspaceTab | null;
@@ -72,36 +88,80 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       tabs: [],
       activeTabId: null,
 
-      syncRouteView: (view) => {
+      syncRouteView: (view, options) => {
         const key = workspaceTabViewKey(view);
+        const projectKey = options?.projectKey ?? null;
         const { tabs, activeTabId } = get();
-        const existing = tabs.find((tab) => workspaceTabViewKey(tab.view) === key);
-        if (existing) {
-          if (existing.id === activeTabId && existing.view === view) return;
+        const retarget = (tabId: string, activate: boolean) =>
           set({
-            activeTabId: existing.id,
+            ...(activate ? { activeTabId: tabId } : {}),
             tabs: tabs.map((tab) =>
-              tab.id === existing.id ? { ...tab, view, lastActivatedAt: Date.now() } : tab,
+              tab.id === tabId
+                ? {
+                    ...tab,
+                    view,
+                    lastActivatedAt: Date.now(),
+                    projectKey: projectKey ?? tab.projectKey,
+                  }
+                : tab,
             ),
           });
+
+        const existing = tabs.find((tab) => workspaceTabViewKey(tab.view) === key);
+        if (existing) {
+          if (
+            existing.id === activeTabId &&
+            existing.view === view &&
+            (projectKey === null || existing.projectKey === projectKey)
+          ) {
+            return;
+          }
+          retarget(existing.id, true);
           return;
         }
         const active = tabs.find((tab) => tab.id === activeTabId);
-        if (active) {
-          // Plain navigation retargets the current tab, the way a browser
-          // click navigates the page you are on.
-          set({
-            tabs: tabs.map((tab) =>
-              tab.id === active.id ? { ...tab, view, lastActivatedAt: Date.now() } : tab,
-            ),
-          });
+        if (!active) {
+          const tab: WorkspaceTab = {
+            id: makeTabId(),
+            view,
+            lastActivatedAt: Date.now(),
+            projectKey,
+          };
+          set({ tabs: [...tabs, tab], activeTabId: tab.id });
           return;
         }
-        const tab: WorkspaceTab = { id: makeTabId(), view, lastActivatedAt: Date.now() };
+        const sameFolder =
+          projectKey === null || active.projectKey === null || active.projectKey === projectKey;
+        if (sameFolder) {
+          // Same-folder navigation stays in the tab, the way a browser click
+          // navigates the page you are on.
+          retarget(active.id, false);
+          return;
+        }
+        // Crossing a folder boundary must not eat the tab the person was on:
+        // reuse the most recent tab already working in that folder, or open a
+        // new one. Only the cap forces a retarget.
+        const folderTab = tabs
+          .filter((tab) => tab.projectKey === projectKey)
+          .sort((left, right) => right.lastActivatedAt - left.lastActivatedAt)[0];
+        if (folderTab) {
+          retarget(folderTab.id, true);
+          return;
+        }
+        if (tabs.length >= MAX_WORKSPACE_TABS) {
+          retarget(active.id, false);
+          return;
+        }
+        const tab: WorkspaceTab = {
+          id: makeTabId(),
+          view,
+          lastActivatedAt: Date.now(),
+          projectKey,
+        };
         set({ tabs: [...tabs, tab], activeTabId: tab.id });
       },
 
-      openBackgroundTab: (view) => {
+      openBackgroundTab: (view, options) => {
         const key = workspaceTabViewKey(view);
         const { tabs } = get();
         if (tabs.some((tab) => workspaceTabViewKey(tab.view) === key)) {
@@ -110,7 +170,12 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
         if (tabs.length >= MAX_WORKSPACE_TABS) {
           return false;
         }
-        const tab: WorkspaceTab = { id: makeTabId(), view, lastActivatedAt: 0 };
+        const tab: WorkspaceTab = {
+          id: makeTabId(),
+          view,
+          lastActivatedAt: 0,
+          projectKey: options?.projectKey ?? null,
+        };
         set({ tabs: [...tabs, tab] });
         return true;
       },
@@ -191,6 +256,21 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
     {
       name: "t3.workspace-tabs.v1",
       partialize: (state) => ({ tabs: state.tabs, activeTabId: state.activeTabId }),
+      // Tabs persisted before projectKey existed rehydrate with it undefined;
+      // normalize to null so folder-boundary checks stay two-valued.
+      merge: (persisted, current) => {
+        const stored = persisted as
+          | { tabs?: ReadonlyArray<WorkspaceTab>; activeTabId?: string | null }
+          | undefined;
+        return {
+          ...current,
+          tabs: (stored?.tabs ?? []).map((tab) => ({
+            ...tab,
+            projectKey: tab.projectKey ?? null,
+          })),
+          activeTabId: stored?.activeTabId ?? null,
+        };
+      },
     },
   ),
 );

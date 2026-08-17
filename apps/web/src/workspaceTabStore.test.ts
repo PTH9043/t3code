@@ -96,6 +96,69 @@ describe("workspaceTabStore", () => {
     expect(useWorkspaceTabStore.getState().tabs[0]?.view).toEqual(threadView("thread-z"));
   });
 
+  it("opens a new tab when navigation crosses a folder boundary", () => {
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a"), { projectKey: "env-1:folder-a" });
+    const firstTabId = useWorkspaceTabStore.getState().activeTabId;
+
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-b"), { projectKey: "env-1:folder-b" });
+    let state = useWorkspaceTabStore.getState();
+    expect(state.tabs).toHaveLength(2);
+    // The tab the person was on survived, showing what it showed.
+    expect(state.tabs.find((tab) => tab.id === firstTabId)?.view).toEqual(threadView("thread-a"));
+    expect(state.activeTabId).not.toBe(firstTabId);
+
+    // Back into folder-a: its existing tab is reused, not a third tab.
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a2"), { projectKey: "env-1:folder-a" });
+    state = useWorkspaceTabStore.getState();
+    expect(state.tabs).toHaveLength(2);
+    expect(state.activeTabId).toBe(firstTabId);
+    expect(state.tabs.find((tab) => tab.id === firstTabId)?.view).toEqual(threadView("thread-a2"));
+  });
+
+  it("stays in the tab for same-folder or unknown-folder navigation", () => {
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a"), { projectKey: "env-1:folder-a" });
+    const tabId = useWorkspaceTabStore.getState().activeTabId;
+
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a2"), { projectKey: "env-1:folder-a" });
+    expect(useWorkspaceTabStore.getState().tabs).toHaveLength(1);
+
+    // A screen whose folder is not known yet must not spawn tabs.
+    useWorkspaceTabStore.getState().syncRouteView(threadView("thread-x"));
+    const state = useWorkspaceTabStore.getState();
+    expect(state.tabs).toHaveLength(1);
+    expect(state.activeTabId).toBe(tabId);
+  });
+
+  it("falls back to retargeting at the cap instead of losing the navigation", () => {
+    for (let index = 0; index < MAX_WORKSPACE_TABS; index += 1) {
+      useWorkspaceTabStore
+        .getState()
+        .openBackgroundTab(threadView(`thread-${index}`), { projectKey: `env-1:folder-${index}` });
+    }
+    useWorkspaceTabStore.getState().activateTab(useWorkspaceTabStore.getState().tabs[0]!.id);
+    const activeTabId = useWorkspaceTabStore.getState().activeTabId;
+
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-new"), { projectKey: "env-1:folder-new" });
+    const state = useWorkspaceTabStore.getState();
+    expect(state.tabs).toHaveLength(MAX_WORKSPACE_TABS);
+    expect(state.activeTabId).toBe(activeTabId);
+    expect(state.tabs.find((tab) => tab.id === activeTabId)?.view).toEqual(
+      threadView("thread-new"),
+    );
+  });
+
   it("drops every tab that shows a deleted view", () => {
     useWorkspaceTabStore.getState().syncRouteView(threadView("thread-a"));
     useWorkspaceTabStore.getState().openBackgroundTab(threadView("thread-b"));

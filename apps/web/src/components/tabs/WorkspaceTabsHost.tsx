@@ -1,6 +1,10 @@
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useLocation } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 
+import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { useThreadShell } from "../../state/entities";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   useActiveWorkspaceTabId,
   useWorkspaceTabStore,
@@ -35,19 +39,45 @@ function pathnameMatchesView(pathname: string, view: WorkspaceTabView): boolean 
 
 /**
  * Route components call this instead of rendering: the URL names the screen,
- * the tab layer owns showing it. Plain navigation retargets the current tab;
- * a view already open in another tab activates that tab instead.
+ * the tab layer owns showing it. Same-folder navigation retargets the current
+ * tab; a view already open elsewhere activates that tab; crossing into a
+ * different folder reuses that folder's tab or opens a new one, so the tab
+ * the person was on survives.
  */
 export function useSyncWorkspaceTabRoute(view: WorkspaceTabView | null): void {
   const syncRouteView = useWorkspaceTabStore((state) => state.syncRouteView);
   const viewKey = view === null ? null : workspaceTabViewKey(view);
+
+  // Which folder the screen belongs to. Hooks must run unconditionally, so
+  // each source is probed with a null request when the view is another kind.
+  const threadRef =
+    view?.kind === "thread"
+      ? scopeThreadRef(view.environmentId as EnvironmentId, view.threadId as ThreadId)
+      : null;
+  const threadShell = useThreadShell(threadRef);
+  const draftSession = useComposerDraftStore((store) =>
+    view?.kind === "draft" ? store.getDraftSession(DraftId.make(view.draftId)) : null,
+  );
+  const projectKey =
+    view === null
+      ? null
+      : view.kind === "control-center"
+        ? `${view.environmentId}:${view.projectId}`
+        : view.kind === "thread"
+          ? threadShell === null
+            ? null
+            : `${threadShell.environmentId}:${threadShell.projectId}`
+          : draftSession === null
+            ? null
+            : `${draftSession.environmentId}:${draftSession.projectId}`;
+
   useEffect(() => {
     if (view !== null) {
-      syncRouteView(view);
+      syncRouteView(view, { projectKey });
     }
     // The key captures the view's identity; the object is rebuilt per render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewKey, syncRouteView]);
+  }, [viewKey, projectKey, syncRouteView]);
 }
 
 /**

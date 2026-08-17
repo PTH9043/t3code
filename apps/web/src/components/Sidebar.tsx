@@ -2199,11 +2199,14 @@ export default function Sidebar() {
         );
         return;
       }
-      const opened = useWorkspaceTabStore.getState().openBackgroundTab({
-        kind: "thread",
-        environmentId: nextThread.environmentId,
-        threadId: nextThread.id,
-      });
+      const opened = useWorkspaceTabStore.getState().openBackgroundTab(
+        {
+          kind: "thread",
+          environmentId: nextThread.environmentId,
+          threadId: nextThread.id,
+        },
+        { projectKey: `${nextThread.environmentId}:${nextThread.projectId}` },
+      );
       if (!opened) {
         toastManager.add(
           stackedThreadToast({
@@ -2318,11 +2321,22 @@ export default function Sidebar() {
       // (Ctrl/⌘+click is taken: it toggles multi-selection below.)
       if (event.button === 1) {
         event.preventDefault();
-        const opened = useWorkspaceTabStore.getState().openBackgroundTab({
-          kind: "thread",
-          environmentId: threadRef.environmentId,
-          threadId: threadRef.threadId,
-        });
+        const clickedThread = threads.find(
+          (thread) =>
+            thread.environmentId === threadRef.environmentId && thread.id === threadRef.threadId,
+        );
+        const opened = useWorkspaceTabStore.getState().openBackgroundTab(
+          {
+            kind: "thread",
+            environmentId: threadRef.environmentId,
+            threadId: threadRef.threadId,
+          },
+          {
+            projectKey: clickedThread
+              ? `${clickedThread.environmentId}:${clickedThread.projectId}`
+              : null,
+          },
+        );
         if (!opened) {
           toastManager.add(
             stackedThreadToast({
@@ -2352,7 +2366,7 @@ export default function Sidebar() {
       }
       navigateToThread(threadRef);
     },
-    [navigateToThread, rangeSelectTo, toggleThreadSelection],
+    [navigateToThread, rangeSelectTo, threads, toggleThreadSelection],
   );
 
   // A settle per thread at a time: double clicks and repeated menu picks
