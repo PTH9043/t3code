@@ -268,6 +268,29 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       ) : null}
 
       <div className="mt-3 grid gap-2">
+        {isDirectCollaboration ? (
+          <label className="flex items-center justify-between gap-2 text-xs font-medium">
+            <span>
+              수정 한도
+              <span className="ml-1 font-normal text-muted-foreground">
+                실패 복구·재계획 총 횟수
+              </span>
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={config.maxRevisions}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.currentTarget.value, 10);
+                if (!Number.isInteger(parsed)) return;
+                const maxRevisions = Math.min(8, Math.max(1, parsed));
+                updateMeetingComposerConfig((current) => ({ ...current, maxRevisions }));
+              }}
+              className={cn(SELECT_CLASS, "w-16 text-center")}
+            />
+          </label>
+        ) : null}
         {!isDirectCollaboration ? (
           <>
             <label className="flex items-center justify-between gap-2 text-xs font-medium">
@@ -332,7 +355,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
           : isDirectCollaboration
-            ? "입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정도 8회에서 멈추므로 무한히 돌지 않습니다."
+            ? `입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정은 ${config.maxRevisions}회에서 멈추므로 무한히 돌지 않습니다.`
             : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 회의 모드는 끌 때까지 유지됩니다."}
       </p>
     </div>

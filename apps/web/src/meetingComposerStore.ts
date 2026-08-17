@@ -35,6 +35,8 @@ export interface MeetingComposerConfig {
   readonly style: MeetingComposerStyle;
   readonly mode: WorkspaceMeetingMode;
   readonly maxRounds: number;
+  /** 협업의 횟수 제한: 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
+  readonly maxRevisions: number;
   readonly userInLoop: boolean;
   /** Null elects the first seat, mirroring the server's chair election. */
   readonly chairSeatId: string | null;
@@ -46,6 +48,7 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   style: "meeting",
   mode: "fixed-rounds",
   maxRounds: 2,
+  maxRevisions: 8,
   userInLoop: false,
   chairSeatId: null,
   seats: [],
@@ -58,7 +61,12 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
  * forward and give the meeting side its rounds back.
  */
 function normalizeMeetingComposerConfig(
-  config: MeetingComposerConfig | (Omit<MeetingComposerConfig, "style"> & { style?: unknown }),
+  config:
+    | MeetingComposerConfig
+    | (Omit<MeetingComposerConfig, "style" | "maxRevisions"> & {
+        style?: unknown;
+        maxRevisions?: unknown;
+      }),
 ): MeetingComposerConfig {
   const style: MeetingComposerStyle =
     config.style === "collaboration" || config.style === "meeting"
@@ -71,6 +79,13 @@ function normalizeMeetingComposerConfig(
     style,
     maxRounds:
       config.maxRounds === 0 ? DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds : config.maxRounds,
+    maxRevisions:
+      typeof config.maxRevisions === "number" &&
+      Number.isInteger(config.maxRevisions) &&
+      config.maxRevisions >= 1 &&
+      config.maxRevisions <= 8
+        ? config.maxRevisions
+        : DEFAULT_MEETING_COMPOSER_CONFIG.maxRevisions,
   };
 }
 

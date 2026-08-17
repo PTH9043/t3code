@@ -96,6 +96,13 @@ class WorkspaceCollaborationExecutionError extends Data.TaggedError(
 
 const MAX_PARALLEL_GRAPH_NODES = 3;
 const MAX_GRAPH_REVISIONS = 8;
+
+/**
+ * A run's revision budget: the person's 협업 한도 when they set one, always
+ * bounded by the global ceiling so no setup can extend a run past it.
+ */
+const graphRevisionCap = (meeting: { readonly maxRevisions?: number | undefined } | null): number =>
+  Math.min(meeting?.maxRevisions ?? MAX_GRAPH_REVISIONS, MAX_GRAPH_REVISIONS);
 const MAX_AGENT_RESPONSE_CHARS = 160_000;
 const MAX_NODE_HANDOFF_CHARS = 100_000;
 
@@ -1440,6 +1447,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     readonly error: string;
     readonly classification: WorkspaceFailureClassification;
     readonly completedAt: string;
+    readonly revisionCap: number;
   }): WorkspaceTaskGraph => {
     const error = input.error.slice(0, 6_000);
     const failedAttemptNode = updateLastAttempt(input.node, (attempt) => ({
@@ -1452,7 +1460,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }));
     const mayRetry =
       failedAttemptNode.attempts.length < failedAttemptNode.maxAttempts &&
-      input.graph.revision < MAX_GRAPH_REVISIONS;
+      input.graph.revision < input.revisionCap;
     const node: WorkspaceTaskNode = {
       ...failedAttemptNode,
       status: mayRetry ? "queued" : "failed",
@@ -1463,7 +1471,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       validation: null,
       completedAt: mayRetry ? null : input.completedAt,
     };
-    const revision = Math.min(input.graph.revision + 1, MAX_GRAPH_REVISIONS);
+    const revision = Math.min(input.graph.revision + 1, input.revisionCap);
     return refreshWorkspaceTaskGraphQueue({
       ...replaceGraphNode(input.graph, String(node.id), node),
       revision,
@@ -1498,12 +1506,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     readonly nextAction: string;
     readonly occurredAt: string;
   }): WorkspaceTaskGraph => {
+    const revisionCap = graphRevisionCap(input.run.meeting);
     const revision = input.graph.revision + 1;
-    if (revision > MAX_GRAPH_REVISIONS) {
+    if (revision > revisionCap) {
       return {
         ...input.graph,
         status: "failed",
-        nextAction: "동적 그래프 개정 한도에 도달해 사용자 판단이 필요합니다.",
+        nextAction: `그래프 수정 한도(${revisionCap}회)에 도달해 사용자 판단이 필요합니다.`,
       };
     }
     const descendants = new Set(descendantNodeIds(input.graph, String(input.validationNode.id)));
@@ -1582,6 +1591,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       let finalOutput = input.run.finalOutput;
       let meeting = input.run.meeting;
       const planContext = meeting === null ? null : meetingPlanContext(meeting);
+      const revisionCap = graphRevisionCap(meeting);
 
       for (const result of input.results) {
         const current = graph.nodes.find((node) => node.id === result.nodeId);
@@ -1594,6 +1604,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             error: result.error,
             classification: "tool",
             completedAt,
+            revisionCap,
           });
           continue;
         }
@@ -1608,9 +1619,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         const graphBeforeResult = graph;
         try {
           if (current.kind === "orchestration") {
-            if (graph.revision >= MAX_GRAPH_REVISIONS) {
+            if (graph.revision >= revisionCap) {
               throw new WorkspaceTaskGraphError(
-                `Task graph revision limit ${MAX_GRAPH_REVISIONS} has been reached.`,
+                `Task graph revision limit ${revisionCap} has been reached.`,
               );
             }
             const proposal = parseWorkspaceTaskGraphProposal(result.output, planContext);
@@ -1716,9 +1727,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               };
               graph = replaceGraphNode(graph, String(target.id), failedTarget);
               if (decision.followUpNodes.length > 0) {
-                if (graph.revision >= MAX_GRAPH_REVISIONS) {
+                if (graph.revision >= revisionCap) {
                   throw new WorkspaceTaskGraphError(
-                    `Task graph revision limit ${MAX_GRAPH_REVISIONS} has been reached.`,
+                    `Task graph revision limit ${revisionCap} has been reached.`,
                   );
                 }
                 if (
@@ -1905,6 +1916,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             error: message,
             classification: "validation",
             completedAt,
+            revisionCap,
           });
         }
       }

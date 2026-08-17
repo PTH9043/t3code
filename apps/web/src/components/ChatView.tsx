@@ -5389,8 +5389,12 @@ function ChatViewContent(props: ChatViewProps) {
                   ? null
                   : WorkspaceMeetingParticipantId.make(meetingDraft.chairSeatId),
               // 협업 is a zero-round meeting on the wire; the stored round
-              // count stays untouched for when the person switches back.
+              // count stays untouched for when the person switches back, and
+              // the person's revision cap rides along as the 횟수 제한.
               maxRounds: meetingDraft.style === "collaboration" ? 0 : meetingDraft.maxRounds,
+              ...(meetingDraft.style === "collaboration"
+                ? { maxRevisions: meetingDraft.maxRevisions }
+                : {}),
               userInLoop: meetingDraft.userInLoop,
               ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },

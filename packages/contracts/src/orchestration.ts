@@ -808,6 +808,11 @@ export const WorkspaceMeeting = Schema.Struct({
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
   /** 0 rounds is direct collaboration: no discussion, straight to the plan. */
   maxRounds: NonNegativeInt.check(Schema.isLessThanOrEqualTo(10)),
+  /**
+   * The person's cap on execution-graph revisions (retries, follow-up work,
+   * replans) for this run. Absent falls back to the server ceiling.
+   */
+  maxRevisions: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(8))),
   userInLoop: Schema.Boolean,
   rounds: Schema.Array(WorkspaceMeetingRound),
   pendingQuestion: Schema.NullOr(WorkspaceMeetingQuestion),
@@ -845,6 +850,8 @@ export const WorkspaceMeetingSetup = Schema.Struct({
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
   /** 0 rounds is direct collaboration: no discussion, straight to the plan. */
   maxRounds: NonNegativeInt.check(Schema.isLessThanOrEqualTo(10)),
+  /** Caps execution-graph revisions (retries, follow-ups, replans) for the run. */
+  maxRevisions: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(8))),
   userInLoop: Schema.Boolean,
   /**
    * The conversation the meeting should happen in — the thread the person was
