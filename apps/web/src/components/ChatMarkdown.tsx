@@ -9,6 +9,7 @@ import {
   WrapTextIcon,
 } from "lucide-react";
 import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import { formatMeetingProtocolText } from "../meetingProtocolText";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -1251,7 +1252,7 @@ function areMarkdownFileLinkPropsEqual(
 }
 
 function ChatMarkdown({
-  text,
+  text: rawText,
   cwd,
   threadRef,
   onTaskListChange,
@@ -1260,6 +1261,9 @@ function ChatMarkdown({
   className,
   lineBreaks = false,
 }: ChatMarkdownProps) {
+  // Meeting protocol tags (<t3_chair_verdict> etc.) are machine payloads the
+  // reactor parses; render their human reading instead of raw JSON.
+  const text = useMemo(() => formatMeetingProtocolText(rawText), [rawText]);
   const { resolvedTheme } = useTheme();
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
