@@ -1694,12 +1694,12 @@ function ChatViewContent(props: ChatViewProps) {
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
   const activeProject = useProject(activeProjectRef);
-  // The meeting toggle stays armed until the person turns it off, so an armed
-  // composer must know whether this conversation already hosts a live meeting:
-  // a second topic sent mid-meeting would tangle two runs in one thread.
-  const meetingComposerArmed = useMeetingComposerConfig().enabled;
+  // Whether this conversation hosts a live meeting must be known on EVERY
+  // send, not just armed ones: a plain turn started into a meeting thread
+  // replaces the seat's turn mid-flight and kills the run ("Collaboration
+  // turn was replaced before its result was collected").
   const meetingRunsQuery = useEnvironmentQuery(
-    meetingComposerArmed && activeProject
+    isServerThread && activeProject
       ? orchestrationEnvironment.workspaceCollaborationRuns({
           environmentId,
           input: { projectId: activeProject.id },
@@ -4987,6 +4987,74 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
+    // A live meeting in THIS conversation claims every send, whether or not
+    // meeting mode is armed: a plain turn started into the meeting thread
+    // would replace the seat's in-flight turn and kill the run. During the
+    // discussion the text becomes the person's interjection; during
+    // execution it is refused with the cancel path.
+    const meetingThreadId = isServerThread && activeThread ? activeThread.id : undefined;
+    const liveMeetingRunHere =
+      meetingThreadId === undefined
+        ? undefined
+        : (meetingRunsQuery.data?.runs ?? []).find(
+            (run) =>
+              run.meeting?.threadId === meetingThreadId &&
+              (run.status === "queued" ||
+                run.status === "running" ||
+                run.status === "cancel-requested"),
+          );
+    if (liveMeetingRunHere !== undefined && !directAnnotation) {
+      if (liveMeetingRunHere.meeting?.phase === "executing") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "회의가 이미 실행 단계입니다",
+            description:
+              "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 제어 센터에서 실행을 취소하세요.",
+          }),
+        );
+        return;
+      }
+      const interjectionText = promptForSend.trim().slice(0, 8_000);
+      if (interjectionText.length === 0) return;
+      sendInFlightRef.current = true;
+      try {
+        const interjected = await interjectMeetingRun({
+          environmentId,
+          input: {
+            runId: liveMeetingRunHere.id,
+            projectId: liveMeetingRunHere.projectId,
+            text: interjectionText,
+          },
+        });
+        if (interjected._tag === "Failure") {
+          if (!isAtomCommandInterrupted(interjected)) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "회의에 발언을 전달하지 못했습니다",
+                description: "연결 상태를 확인하고 다시 시도하세요.",
+              }),
+            );
+          }
+          return;
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        toastManager.add(
+          stackedThreadToast({
+            type: "success",
+            title: "회의에 발언을 전달했습니다",
+            description: "다음 발언자부터 즉시 반영됩니다.",
+          }),
+        );
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
+
     // An armed meeting turns the composer text into a collaboration-run topic:
     // the roster discusses it, agrees a plan, and executes it — no thread turn
     // is started, so this leaves the current conversation untouched.
@@ -5010,74 +5078,6 @@ function ChatViewContent(props: ChatViewProps) {
             description: "모델 선택기의 회의 모드에서 참가자를 2명 이상 선택하세요.",
           }),
         );
-        return;
-      }
-      // The meeting runs in THIS conversation when it already exists on the
-      // server; only a draft with no thread yet opens a fresh one.
-      const meetingThreadId = isServerThread && activeThread ? activeThread.id : undefined;
-      const liveMeetingRunHere =
-        meetingThreadId === undefined
-          ? undefined
-          : (meetingRunsQuery.data?.runs ?? []).find(
-              (run) =>
-                run.meeting?.threadId === meetingThreadId &&
-                (run.status === "queued" ||
-                  run.status === "running" ||
-                  run.status === "cancel-requested"),
-            );
-      if (liveMeetingRunHere !== undefined) {
-        // A live meeting turns the composer into the person's voice at the
-        // table: the text is interjected into the transcript and the next
-        // seat to speak must address it. Execution is the exception — a plan
-        // being carried out no longer takes mid-flight redirection.
-        if (liveMeetingRunHere.meeting?.phase === "executing") {
-          toastManager.add(
-            stackedThreadToast({
-              type: "warning",
-              title: "회의가 이미 실행 단계입니다",
-              description:
-                "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 제어 센터에서 실행을 취소하세요.",
-            }),
-          );
-          return;
-        }
-        const interjectionText = promptForSend.trim().slice(0, 8_000);
-        if (interjectionText.length === 0) return;
-        sendInFlightRef.current = true;
-        try {
-          const interjected = await interjectMeetingRun({
-            environmentId,
-            input: {
-              runId: liveMeetingRunHere.id,
-              projectId: liveMeetingRunHere.projectId,
-              text: interjectionText,
-            },
-          });
-          if (interjected._tag === "Failure") {
-            if (!isAtomCommandInterrupted(interjected)) {
-              toastManager.add(
-                stackedThreadToast({
-                  type: "error",
-                  title: "회의에 발언을 전달하지 못했습니다",
-                  description: "연결 상태를 확인하고 다시 시도하세요.",
-                }),
-              );
-            }
-            return;
-          }
-          promptRef.current = "";
-          clearComposerDraftContent(composerDraftTarget);
-          composerRef.current?.resetCursorState();
-          toastManager.add(
-            stackedThreadToast({
-              type: "success",
-              title: "회의에 발언을 전달했습니다",
-              description: "다음 발언자부터 즉시 반영됩니다.",
-            }),
-          );
-        } finally {
-          sendInFlightRef.current = false;
-        }
         return;
       }
       const meetingTopic = appendReviewCommentsToPrompt(
@@ -5110,7 +5110,13 @@ function ChatViewContent(props: ChatViewProps) {
               participants: meetingDraft.seats.map((seat) => ({
                 id: WorkspaceMeetingParticipantId.make(seat.id),
                 displayName: seat.displayName,
-                modelSelection: { instanceId: seat.instanceId, model: seat.model },
+                modelSelection: {
+                  instanceId: seat.instanceId,
+                  model: seat.model,
+                  // Per-seat effort (and any other provider option) rides the
+                  // same options field a plain turn's model selection uses.
+                  ...(seat.options && seat.options.length > 0 ? { options: seat.options } : {}),
+                },
               })),
               chairParticipantId:
                 meetingDraft.chairSeatId === null

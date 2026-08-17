@@ -8,9 +8,8 @@ import { useWorkspaceTabStore } from "./workspaceTabStore";
 
 /**
  * The composer surface a meeting send goes out from. The value does not scope
- * the settings — those live per workspace TAB — but pickers still pass it so
- * only the chat composer's picker (never a settings picker) shows the
- * meeting UI.
+ * the settings — those live per FOLDER — but pickers still pass it so only
+ * the chat composer's picker (never a settings picker) shows the meeting UI.
  */
 export type MeetingComposerTarget = ScopedThreadRef | DraftId;
 
@@ -20,6 +19,12 @@ export interface MeetingComposerSeat {
   readonly instanceId: ProviderInstanceId;
   readonly model: string;
   readonly displayName: string;
+  /**
+   * Provider option selections for this seat's turns — effort above all.
+   * Same shape ModelSelection.options carries, so the server forwards them
+   * to the seat's session untouched.
+   */
+  readonly options?: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>;
 }
 
 export interface MeetingComposerConfig {
@@ -51,80 +56,101 @@ export function meetingSeatId(instanceId: string): string {
   return (cleaned.length > 0 ? cleaned : "seat").slice(0, 64);
 }
 
-/** Settings written before any tab exists land here and stay readable. */
-const NO_TAB_KEY = "__no-tab__";
+/** Settings written before the screen's folder is known land here. */
+const NO_FOLDER_KEY = "__no-folder__";
 
-function activeMeetingScopeKey(): string {
-  return useWorkspaceTabStore.getState().activeTabId ?? NO_TAB_KEY;
+/**
+ * The folder the person is working in = the active tab's folder. Tab ids
+ * come and go (tabs close, folder navigation recreates them) — the folder is
+ * the identity that survives, which is why it scopes the meeting room.
+ */
+function activeFolderKey(): string {
+  const state = useWorkspaceTabStore.getState();
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+  return active?.projectKey ?? NO_FOLDER_KEY;
 }
 
 interface MeetingComposerState {
-  readonly configsByTabId: Readonly<Record<string, MeetingComposerConfig>>;
+  readonly configsByFolder: Readonly<Record<string, MeetingComposerConfig>>;
   readonly updateConfig: (
-    tabId: string,
+    folderKey: string,
     update: (config: MeetingComposerConfig) => MeetingComposerConfig,
   ) => void;
-  readonly dropTabs: (keepTabIds: ReadonlySet<string>) => void;
 }
 
 /**
- * One meeting setup PER WORKSPACE TAB, persisted: each tab is its own meeting
- * room. Arming a roster in one tab never leaks into another, and within a tab
- * the switch stays on — across conversations and app restarts — until the
- * person turns it off there.
+ * One meeting setup PER FOLDER, persisted: each folder is its own meeting
+ * room. Arming a roster in one folder never leaks into another, and within a
+ * folder the switch stays on — across conversations, tabs, tab re-creations
+ * and app restarts — until the person turns it off there.
  */
 export const useMeetingComposerStore = create<MeetingComposerState>()(
   persist(
     (set) => ({
-      configsByTabId: {},
-      updateConfig: (tabId, update) =>
+      configsByFolder: {},
+      updateConfig: (folderKey, update) =>
         set((state) => {
-          const current = state.configsByTabId[tabId] ?? DEFAULT_MEETING_COMPOSER_CONFIG;
+          const current = state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG;
           const next = update(current);
           if (next === current) return state;
-          return { configsByTabId: { ...state.configsByTabId, [tabId]: next } };
-        }),
-      dropTabs: (keepTabIds) =>
-        set((state) => {
-          const entries = Object.entries(state.configsByTabId).filter(
-            ([tabId]) => tabId === NO_TAB_KEY || keepTabIds.has(tabId),
-          );
-          if (entries.length === Object.keys(state.configsByTabId).length) return state;
-          return { configsByTabId: Object.fromEntries(entries) };
+          return { configsByFolder: { ...state.configsByFolder, [folderKey]: next } };
         }),
     }),
     {
-      name: "t3.meeting-composer.v2",
-      partialize: (state) => ({ configsByTabId: state.configsByTabId }),
+      name: "t3.meeting-composer.v3",
+      partialize: (state) => ({ configsByFolder: state.configsByFolder }),
     },
   ),
 );
 
-// A closed tab takes its meeting room with it; without this the persisted map
-// would keep growing with configs no tab can ever read again.
-useWorkspaceTabStore.subscribe((state, previous) => {
-  if (state.tabs === previous.tabs) return;
-  useMeetingComposerStore.getState().dropTabs(new Set(state.tabs.map((tab) => tab.id)));
-});
+// One-shot rescue of the short-lived per-tab store (v2): remap each tab's
+// config onto the folder that tab was working in, so nobody re-arms a roster
+// they already built.
+try {
+  const rawV2 = globalThis.localStorage?.getItem("t3.meeting-composer.v2");
+  if (rawV2) {
+    const configsByTabId = (
+      JSON.parse(rawV2) as {
+        state?: { configsByTabId?: Record<string, MeetingComposerConfig> };
+      }
+    ).state?.configsByTabId;
+    if (configsByTabId) {
+      const tabs = useWorkspaceTabStore.getState().tabs;
+      const { configsByFolder, updateConfig } = useMeetingComposerStore.getState();
+      for (const [tabId, config] of Object.entries(configsByTabId)) {
+        const folderKey = tabs.find((tab) => tab.id === tabId)?.projectKey;
+        if (folderKey && configsByFolder[folderKey] === undefined) {
+          updateConfig(folderKey, () => config);
+        }
+      }
+    }
+    globalThis.localStorage?.removeItem("t3.meeting-composer.v2");
+  }
+} catch {
+  // A malformed leftover must never break the composer.
+}
 
 export function readMeetingComposerConfig(): MeetingComposerConfig {
   return (
-    useMeetingComposerStore.getState().configsByTabId[activeMeetingScopeKey()] ??
+    useMeetingComposerStore.getState().configsByFolder[activeFolderKey()] ??
     DEFAULT_MEETING_COMPOSER_CONFIG
   );
 }
 
 export function useMeetingComposerConfig(): MeetingComposerConfig {
-  const activeTabId = useWorkspaceTabStore((state) => state.activeTabId) ?? NO_TAB_KEY;
+  const folderKey = useWorkspaceTabStore((state) => {
+    const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+    return active?.projectKey ?? NO_FOLDER_KEY;
+  });
   return useMeetingComposerStore(
-    useShallow((state) => state.configsByTabId[activeTabId] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
+    useShallow((state) => state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
   );
 }
 
 export function updateMeetingComposerConfig(
   update: (config: MeetingComposerConfig) => MeetingComposerConfig,
 ): void {
-  useMeetingComposerStore.getState().updateConfig(activeMeetingScopeKey(), update);
+  useMeetingComposerStore.getState().updateConfig(activeFolderKey(), update);
 }
 
 /** The server's roster cap; a ninth checkbox is refused here rather than at send. */
@@ -155,5 +181,24 @@ export function setMeetingComposerSeatModel(seatId: string, model: string): void
   updateMeetingComposerConfig((config) => ({
     ...config,
     seats: config.seats.map((seat) => (seat.id === seatId ? { ...seat, model } : seat)),
+  }));
+}
+
+/** Set one provider option (effort above all) on one seat's turns. */
+export function setMeetingComposerSeatOption(
+  seatId: string,
+  optionId: string,
+  value: string | boolean,
+): void {
+  updateMeetingComposerConfig((config) => ({
+    ...config,
+    seats: config.seats.map((seat) => {
+      if (seat.id !== seatId) return seat;
+      const options = [
+        ...(seat.options ?? []).filter((option) => option.id !== optionId),
+        { id: optionId, value },
+      ];
+      return { ...seat, options };
+    }),
   }));
 }

@@ -16,10 +16,13 @@ import {
   MAX_MEETING_SEATS,
   meetingSeatId,
   setMeetingComposerSeatModel,
+  setMeetingComposerSeatOption,
   toggleMeetingComposerSeat,
   updateMeetingComposerConfig,
   useMeetingComposerConfig,
 } from "../../meetingComposerStore";
+import { getProviderOptionCurrentValue, getProviderOptionDescriptors } from "@t3tools/shared/model";
+import { getProviderModelCapabilities } from "../../providerModels";
 
 const MODE_LABELS: ReadonlyArray<{ mode: WorkspaceMeetingMode; label: string; hint: string }> = [
   { mode: "fixed-rounds", label: "고정 라운드", hint: "정해진 횟수만큼 토론 후 계획" },
@@ -65,7 +68,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             <div
               key={entry.instanceId}
               className={cn(
-                "flex items-center gap-2 rounded-md px-1.5 py-1",
+                "flex flex-wrap items-center gap-2 rounded-md px-1.5 py-1",
                 ready ? "hover:bg-muted/50" : "opacity-45",
               )}
             >
@@ -114,6 +117,49 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                   ))}
                 </select>
               ) : null}
+              {seat !== undefined
+                ? // The same option descriptors the composer's effort picker
+                  // reads — so each seat's turns run at the effort chosen
+                  // here, not whatever the composer happens to be set to.
+                  getProviderOptionDescriptors({
+                    caps: getProviderModelCapabilities(entry.models, seat.model, entry.driverKind),
+                    selections: seat.options ?? null,
+                  })
+                    .filter((descriptor) => descriptor.type === "select")
+                    .map((descriptor) => {
+                      const currentValue = getProviderOptionCurrentValue(descriptor);
+                      // Nothing chosen yet shows the provider's own default,
+                      // not whatever option happens to be listed first.
+                      const shownValue =
+                        typeof currentValue === "string"
+                          ? currentValue
+                          : (descriptor.options.find((choice) => choice.isDefault)?.value ??
+                            descriptor.options[0]?.value ??
+                            "");
+                      return (
+                        <select
+                          key={descriptor.id}
+                          className={cn(SELECT_CLASS, "max-w-28 shrink-0")}
+                          value={shownValue}
+                          aria-label={`${entry.displayName} ${descriptor.label}`}
+                          title={descriptor.label}
+                          onChange={(event) =>
+                            setMeetingComposerSeatOption(
+                              seatId,
+                              descriptor.id,
+                              event.currentTarget.value,
+                            )
+                          }
+                        >
+                          {descriptor.options.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label ?? choice.value}
+                            </option>
+                          ))}
+                        </select>
+                      );
+                    })
+                : null}
             </div>
           );
         })}
