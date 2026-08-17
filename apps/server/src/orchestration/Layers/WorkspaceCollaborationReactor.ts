@@ -938,100 +938,87 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           case "collect-statements": {
             const roundIndex = step.roundIndex;
             const currentRun = run;
-            const results = yield* Effect.forEach(
-              step.speakers,
-              (participantId) =>
-                Effect.gen(function* () {
-                  const route = meetingAssignmentRoute(meeting, participantId);
-                  // Reload between seats: an interjection the person made while
-                  // the previous seat was speaking (and a cancel) must reach the
-                  // very next speaker, not the next round.
-                  const liveRun = yield* requireRunContinuable(input.runRef);
-                  const liveMeeting = liveRun.meeting ?? meeting;
-                  const turn = yield* dispatchMeetingTurn({
-                    run: currentRun,
-                    route,
-                    threadId: meetingThreadId,
-                    title: `AI 회의: ${currentRun.task}`,
-                    prompt: buildMeetingStatementPrompt({
-                      // Later rounds argue over the transcript; only the opening
-                      // round pays for the full Workspace corpus.
-                      workspacePrompt: roundIndex === 0 ? input.workspacePrompt : null,
-                      task: currentRun.task,
-                      meeting: { ...meeting, interjections: liveMeeting.interjections },
-                      participantId,
-                      roundIndex,
-                    }),
-                  });
-                  return { kind: "spoke" as const, participantId, ...turn };
-                }).pipe(
-                  Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
-                    Effect.succeed({
-                      kind: "failed" as const,
-                      participantId,
-                      message: error.message,
-                    }),
-                  ),
+            // One shared conversation runs one turn at a time — the seats
+            // speak in order, the way a table actually talks — and every
+            // statement is persisted THE MOMENT it lands. A later seat's
+            // failure or a restart must re-prompt only seats that never
+            // actually spoke; batching the round used to replay the whole
+            // table again and again.
+            for (const participantId of step.speakers) {
+              const route = meetingAssignmentRoute(meeting, participantId);
+              // Reload between seats: an interjection the person made while
+              // the previous seat was speaking (and a cancel) must reach the
+              // very next speaker, not the next round.
+              const liveRun = yield* requireRunContinuable(input.runRef);
+              const liveMeeting = liveRun.meeting ?? meeting;
+              const result = yield* dispatchMeetingTurn({
+                run: currentRun,
+                route,
+                threadId: meetingThreadId,
+                title: `AI 회의: ${currentRun.task}`,
+                prompt: buildMeetingStatementPrompt({
+                  // Later rounds argue over the transcript; only the opening
+                  // round pays for the full Workspace corpus.
+                  workspacePrompt: roundIndex === 0 ? input.workspacePrompt : null,
+                  task: currentRun.task,
+                  meeting: { ...meeting, interjections: liveMeeting.interjections },
+                  participantId,
+                  roundIndex,
+                }),
+              }).pipe(
+                Effect.map((turn) => ({ kind: "spoke" as const, ...turn })),
+                Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                  Effect.succeed({ kind: "failed" as const, message: error.message }),
                 ),
-              // One shared conversation runs one turn at a time: the seats
-              // speak in order, the way a table actually talks.
-              { concurrency: 1 },
-            );
-
-            const recordedAt = yield* nowIso;
-            const spoke = results.flatMap((result) => (result.kind === "spoke" ? [result] : []));
-            const statements: WorkspaceMeetingStatement[] = spoke.map((result) => ({
-              participantId: result.participantId,
-              content: result.output.slice(0, MAX_MEETING_STATEMENT_CHARS),
-              respondsTo: parseStatementRespondsTo(result.output, meeting, result.participantId),
-              threadId: result.threadId,
-              recordedAt,
-            }));
-            const raised = spoke
-              .map((result) => ({
-                participantId: result.participantId,
-                question: parseMeetingQuestion(result.output),
-              }))
-              .find(
-                (
-                  candidate,
-                ): candidate is {
-                  participantId: WorkspaceMeetingParticipantId;
-                  question: WorkspaceMeetingRaisedQuestion;
-                } => candidate.question !== null,
               );
-            if (statements.length > 0 || raised !== undefined) {
-              run = yield* persistRun({
-                ...run,
+              if (result.kind === "failed") {
+                yield* recordTurnFailure(
+                  `statement:${roundIndex}:${participantId}`,
+                  `Meeting statement turn for seat '${participantId}' failed: ${result.message}`,
+                );
+                continue;
+              }
+              const recordedAt = yield* nowIso;
+              const freshRun = yield* requireRunContinuable(input.runRef);
+              const freshMeeting = freshRun.meeting;
+              if (freshMeeting === null) {
+                return yield* executionError("Meeting run lost its meeting state.");
+              }
+              const statement: WorkspaceMeetingStatement = {
+                participantId,
+                content: result.output.slice(0, MAX_MEETING_STATEMENT_CHARS),
+                respondsTo: parseStatementRespondsTo(result.output, freshMeeting, participantId),
+                threadId: result.threadId,
+                recordedAt,
+              };
+              const raised: WorkspaceMeetingRaisedQuestion | null = parseMeetingQuestion(
+                result.output,
+              );
+              yield* persistRun({
+                ...freshRun,
                 meeting: {
-                  ...meeting,
-                  rounds: meeting.rounds.map((candidate) =>
+                  ...freshMeeting,
+                  rounds: freshMeeting.rounds.map((candidate) =>
                     candidate.index === roundIndex
-                      ? { ...candidate, statements: [...candidate.statements, ...statements] }
+                      ? { ...candidate, statements: [...candidate.statements, statement] }
                       : candidate,
                   ),
                   pendingQuestion:
-                    raised === undefined
-                      ? meeting.pendingQuestion
+                    raised === null
+                      ? freshMeeting.pendingQuestion
                       : {
-                          askedByParticipantId: raised.participantId,
-                          question: raised.question.question,
-                          options: raised.question.options,
-                          context: raised.question.context,
+                          askedByParticipantId: participantId,
+                          question: raised.question,
+                          options: raised.options,
+                          context: raised.context,
                           askedAt: recordedAt,
                         },
                 },
                 updatedAt: recordedAt,
               });
-            }
-            // Failures are counted after the successes are safely persisted, so a
-            // seat that gives up cannot take the round's statements down with it.
-            for (const result of results) {
-              if (result.kind !== "failed") continue;
-              yield* recordTurnFailure(
-                `statement:${roundIndex}:${result.participantId}`,
-                `Meeting statement turn for seat '${result.participantId}' failed: ${result.message}`,
-              );
+              // A seat that asks the person parks the meeting right here; the
+              // seats still owing a statement speak after the answer arrives.
+              if (raised !== null) break;
             }
             continue;
           }
