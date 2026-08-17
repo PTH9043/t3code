@@ -168,6 +168,7 @@ import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../pr
 import { primaryServerProvidersAtom } from "../state/server";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+import { MAX_WORKSPACE_TABS, useWorkspaceTabStore } from "../workspaceTabStore";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -906,6 +907,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
+                onAuxClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
                 onContextMenu={handleContextMenu}
@@ -1052,6 +1054,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
               onClick={handleClick}
+              onAuxClick={handleClick}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
               onContextMenu={handleContextMenu}
@@ -2254,6 +2257,26 @@ export default function Sidebar() {
 
   const handleThreadClick = useCallback(
     (event: ReactMouseEvent, threadRef: ScopedThreadRef) => {
+      // Middle click opens a background workspace tab, the browser way.
+      // (Ctrl/⌘+click is taken: it toggles multi-selection below.)
+      if (event.button === 1) {
+        event.preventDefault();
+        const opened = useWorkspaceTabStore.getState().openBackgroundTab({
+          kind: "thread",
+          environmentId: threadRef.environmentId,
+          threadId: threadRef.threadId,
+        });
+        if (!opened) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: `탭은 ${MAX_WORKSPACE_TABS}개까지입니다`,
+              description: "오래 보지 않은 탭을 닫고 다시 열어주세요.",
+            }),
+          );
+        }
+        return;
+      }
       const isMac = isMacPlatform(navigator.platform);
       const isModClick = isMac ? event.metaKey : event.ctrlKey;
       const threadKey = scopedThreadKey(threadRef);

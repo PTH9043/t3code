@@ -501,6 +501,12 @@ type ChatViewProps =
       threadSyncPhase?: ThreadSyncPhase | null;
       routeKind: "server";
       draftId?: never;
+      /**
+       * False when this view lives in a background workspace tab. Kept
+       * mounted for instant switching, but window-level listeners must stand
+       * down — ten hidden ChatViews all answering one shortcut would be chaos.
+       */
+      isForeground?: boolean;
     }
   | {
       environmentId: EnvironmentId;
@@ -511,6 +517,7 @@ type ChatViewProps =
       threadSyncPhase?: never;
       routeKind: "draft";
       draftId: DraftId;
+      isForeground?: boolean;
     };
 
 interface TerminalLaunchContext {
@@ -1191,6 +1198,7 @@ function ChatViewContent(props: ChatViewProps) {
     onDiffPanelOpen,
     reserveTitleBarControlInset = true,
     forceExpandedMobileComposer = false,
+    isForeground = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const threadSyncPhase = routeKind === "server" ? (props.threadSyncPhase ?? null) : null;
@@ -4610,6 +4618,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
 
   useEffect(() => {
+    if (!isForeground) return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
         event.stopPropagation();
@@ -4752,6 +4761,7 @@ function ChatViewContent(props: ChatViewProps) {
     splitTerminal,
     splitPanelTerminal,
     keybindings,
+    isForeground,
     onToggleDiff,
     toggleRightPanel,
     toggleTerminalVisibility,
