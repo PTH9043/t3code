@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "~/lib/utils";
+import ChatMarkdown from "../ChatMarkdown";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -399,9 +400,9 @@ function AttemptHistory({
                 </p>
               ) : null}
               {attempt.output ? (
-                <p className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded-md bg-muted/35 p-2 text-xs leading-relaxed">
-                  {attempt.output}
-                </p>
+                <div className="mt-2 max-h-36 overflow-auto rounded-md bg-muted/35 p-2 text-xs leading-relaxed">
+                  <ChatMarkdown text={attempt.output} cwd={undefined} />
+                </div>
               ) : null}
               {attempt.error ? (
                 <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-destructive-foreground">
@@ -449,9 +450,9 @@ function NodeResult({
       </summary>
       <div className="grid gap-2 border-t border-border/50 p-2.5">
         {output ? (
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 font-sans text-xs leading-relaxed">
-            {output}
-          </pre>
+          <div className="max-h-64 overflow-auto rounded-md bg-muted/30 p-2 text-xs leading-relaxed">
+            <ChatMarkdown text={output} cwd={undefined} />
+          </div>
         ) : null}
         {error ? (
           <p className="whitespace-pre-wrap rounded-md bg-destructive/6 p-2 text-xs leading-relaxed text-destructive-foreground">

@@ -6,6 +6,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { cn } from "~/lib/utils";
+import { formatMeetingProtocolText } from "~/meetingProtocolText";
 
 const MODE_LABELS: Record<WorkspaceMeeting["mode"], string> = {
   "fixed-rounds": "고정 라운드",
@@ -193,7 +194,7 @@ export function WorkspaceMeetingView(props: {
                         ) : null}
                       </p>
                       <p className="mt-0.5 line-clamp-6 whitespace-pre-wrap leading-relaxed">
-                        {entry.statement.content}
+                        {formatMeetingProtocolText(entry.statement.content)}
                       </p>
                     </div>
                   ) : (

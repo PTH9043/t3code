@@ -60,6 +60,7 @@ import { useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useServerConfigs } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import ChatMarkdown from "../ChatMarkdown";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardAction, CardDescription, CardHeader, CardPanel, CardTitle } from "../ui/card";
@@ -1593,9 +1594,9 @@ function CollaborationSection({ project }: { project: EnvironmentProject }) {
                 {run.finalOutput ? (
                   <div>
                     <h4 className="mb-1 text-xs font-semibold">최종 통합 결과</h4>
-                    <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/40 p-3 font-sans text-xs leading-relaxed">
-                      {run.finalOutput}
-                    </pre>
+                    <div className="max-h-96 overflow-auto rounded-lg bg-muted/40 p-3 text-xs leading-relaxed">
+                      <ChatMarkdown text={run.finalOutput} cwd={undefined} />
+                    </div>
                   </div>
                 ) : null}
                 {run.error ? <p className="text-xs text-destructive">{run.error}</p> : null}
