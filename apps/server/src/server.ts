@@ -54,6 +54,7 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { SessionRecoveryReactorLive } from "./orchestration/Layers/SessionRecoveryReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
@@ -247,6 +248,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
+  Layer.provideMerge(SessionRecoveryReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(WorkspaceKnowledgeReactorLive),
   Layer.provideMerge(WorkspaceCollaborationReactorLive),

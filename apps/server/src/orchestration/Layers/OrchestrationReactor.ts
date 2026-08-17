@@ -13,6 +13,7 @@ import { WorkspaceKnowledgeReactor } from "../Services/WorkspaceKnowledgeReactor
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
 import { WorkspaceSchedulerReactor } from "../Services/WorkspaceSchedulerReactor.ts";
 import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
+import { SessionRecoveryReactor } from "../Services/SessionRecoveryReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
@@ -24,6 +25,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const workspaceCollaborationReactor = yield* WorkspaceCollaborationReactor;
   const workspaceSchedulerReactor = yield* WorkspaceSchedulerReactor;
   const workspaceProgramSupervisor = yield* Effect.serviceOption(WorkspaceProgramSupervisor);
+  const sessionRecoveryReactor = yield* Effect.serviceOption(SessionRecoveryReactor);
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
@@ -36,6 +38,11 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* workspaceSchedulerReactor.start();
     if (workspaceProgramSupervisor._tag === "Some") {
       yield* workspaceProgramSupervisor.value.start();
+    }
+    // After the reactors above: the recovery turns it dispatches need the
+    // command reactor's subscriptions live to reach a provider.
+    if (sessionRecoveryReactor._tag === "Some") {
+      yield* sessionRecoveryReactor.value.start();
     }
     yield* agentAwarenessRelay.start();
   });
