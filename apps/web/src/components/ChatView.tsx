@@ -1815,7 +1815,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     if (wasEnabled) pendingMeetingModeCancelRef.current = true;
     if (!pendingMeetingModeCancelRef.current) return;
-    if (meetingRunsQuery.data === undefined) {
+    if (meetingRunsQuery.data == null) {
       meetingRunsQuery.refresh();
       return;
     }
