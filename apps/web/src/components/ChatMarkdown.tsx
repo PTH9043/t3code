@@ -1279,11 +1279,15 @@ function ChatMarkdown({
     serverConfig?.availableEditors ?? [],
   );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
+  // File-link metadata costs two full-text scans plus per-link resolution.
+  // Running that on every streamed chunk taxes the main thread exactly when
+  // the person is trying to type; links light up once the message completes.
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
+    if (isStreaming) return metaByHref;
     for (const href of extractMarkdownLinkHrefs(text)) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
@@ -1293,9 +1297,10 @@ function ChatMarkdown({
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [cwd, isStreaming, text]);
   const inlineCodeFileLinkMetaByText = useMemo(() => {
     const metaByText = new Map<string, MarkdownFileLinkMeta>();
+    if (isStreaming) return metaByText;
     for (const span of extractInlineCodeSpans(text)) {
       if (metaByText.has(span)) continue;
       const meta = resolveInlineCodeFileLinkMeta(span, cwd);
@@ -1304,7 +1309,7 @@ function ChatMarkdown({
       }
     }
     return metaByText;
-  }, [cwd, text]);
+  }, [cwd, isStreaming, text]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [
       ...[...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath),
