@@ -1,5 +1,5 @@
 import type { ProviderInstanceId, WorkspaceMeetingMode } from "@t3tools/contracts";
-import { memo } from "react";
+import { memo, useEffect } from "react";
 import { CrownIcon } from "lucide-react";
 
 import { Checkbox } from "../ui/checkbox";
@@ -50,6 +50,31 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   const config = useMeetingComposerConfig();
   const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
+
+  // Self-heal selections a past bug stored as display LABELS ("Extra High")
+  // instead of choice ids ("xhigh"): remap by label once, idempotently.
+  useEffect(() => {
+    for (const entry of visibleEntries) {
+      const seatId = meetingSeatId(entry.instanceId);
+      const seat = seatById.get(seatId);
+      if (!seat?.options?.length) continue;
+      const descriptors = getProviderOptionDescriptors({
+        caps: getProviderModelCapabilities(entry.models, seat.model, entry.driverKind),
+      });
+      for (const stored of seat.options) {
+        if (typeof stored.value !== "string") continue;
+        const descriptor = descriptors.find(
+          (candidate) => candidate.id === stored.id && candidate.type === "select",
+        );
+        if (!descriptor || descriptor.type !== "select") continue;
+        if (descriptor.options.some((choice) => choice.id === stored.value)) continue;
+        const byLabel = descriptor.options.find((choice) => choice.label === stored.value);
+        if (byLabel) {
+          setMeetingComposerSeatOption(seatId, stored.id, byLabel.id);
+        }
+      }
+    }
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2.5 text-sm">
@@ -127,14 +152,16 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                   })
                     .filter((descriptor) => descriptor.type === "select")
                     .map((descriptor) => {
+                      // A choice's VALUE is its id ("high"); the label is
+                      // display only. The descriptor already folded the
+                      // seat's stored selection into currentValue.
                       const currentValue = getProviderOptionCurrentValue(descriptor);
-                      // Nothing chosen yet shows the provider's own default,
-                      // not whatever option happens to be listed first.
                       const shownValue =
-                        typeof currentValue === "string"
+                        typeof currentValue === "string" &&
+                        descriptor.options.some((choice) => choice.id === currentValue)
                           ? currentValue
-                          : (descriptor.options.find((choice) => choice.isDefault)?.value ??
-                            descriptor.options[0]?.value ??
+                          : (descriptor.options.find((choice) => choice.isDefault)?.id ??
+                            descriptor.options[0]?.id ??
                             "");
                       return (
                         <select
@@ -152,8 +179,8 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                           }
                         >
                           {descriptor.options.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label ?? choice.value}
+                            <option key={choice.id} value={choice.id}>
+                              {choice.label}
                             </option>
                           ))}
                         </select>

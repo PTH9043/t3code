@@ -94,6 +94,7 @@ import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { setAskFirstEnabled, useAskFirstEnabled } from "../../askFirstStore";
+import { useMeetingComposerConfig } from "../../meetingComposerStore";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
@@ -1250,6 +1251,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     prompt,
     onPromptChange: setPromptFromTraits,
   });
+  // An armed meeting swaps the single-model effort picker for a per-seat
+  // entry point (see the footer controls below).
+  const meetingArmedForControls = useMeetingComposerConfig().enabled;
   const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -3202,7 +3206,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 ) : (
                   <>
-                    {providerTraitsPicker ? (
+                    {meetingArmedForControls ? (
+                      // An armed meeting runs each seat at ITS OWN effort, so
+                      // the single-model effort picker would mislead here (and
+                      // vanishes entirely when the thread's last speaker has
+                      // no effort options). One stable control opens the
+                      // panel that owns the per-seat settings instead.
+                      <>
+                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <ComposerControl
+                                className="shrink-0 whitespace-nowrap text-secondary-label hover:text-foreground"
+                                type="button"
+                                onClick={() => setIsComposerModelPickerOpen(true)}
+                                aria-label="참가자별 노력 설정"
+                                data-meeting-seat-effort="true"
+                              />
+                            }
+                          >
+                            <ComposerControlIcon icon={PencilRulerIcon} />
+                            <span className="sr-only sm:not-sr-only">좌석 노력</span>
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">
+                            회의 참가자마다 노력을 따로 씁니다. 눌러서 참가자별 노력을 설정하세요.
+                          </TooltipPopup>
+                        </Tooltip>
+                      </>
+                    ) : providerTraitsPicker ? (
                       <>
                         <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
                         {providerTraitsPicker}
