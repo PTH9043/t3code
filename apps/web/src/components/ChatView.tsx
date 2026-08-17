@@ -202,6 +202,11 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import { readMeetingComposerConfig, useMeetingComposerConfig } from "../meetingComposerStore";
+import {
+  ASK_FIRST_MEETING_PREFIX,
+  ASK_FIRST_TASK_PREFIX,
+  readAskFirstEnabled,
+} from "../askFirstStore";
 import { orchestrationEnvironment } from "../state/orchestration";
 import {
   appendTerminalContextsToPrompt,
@@ -5075,7 +5080,7 @@ function ChatViewContent(props: ChatViewProps) {
         }
         return;
       }
-      const meetingTask = appendReviewCommentsToPrompt(
+      const meetingTopic = appendReviewCommentsToPrompt(
         composerPreviewAnnotations.reduce(
           (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
           appendElementContextsToPrompt(
@@ -5084,10 +5089,14 @@ function ChatViewContent(props: ChatViewProps) {
           ),
         ),
         composerReviewComments,
-      )
-        .trim()
-        .slice(0, 20_000);
-      if (meetingTask.length === 0) return;
+      ).trim();
+      if (meetingTopic.length === 0) return;
+      // "질문 먼저": the first seat raises its clarifying questions via
+      // <t3_question> — the server already parks the run on them — before
+      // the actual discussion begins.
+      const meetingTask = (
+        readAskFirstEnabled() ? ASK_FIRST_MEETING_PREFIX + meetingTopic : meetingTopic
+      ).slice(0, 20_000);
       sendInFlightRef.current = true;
       try {
         const result = await requestMeetingRun({
@@ -5199,10 +5208,16 @@ function ChatViewContent(props: ChatViewProps) {
       (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
       messageTextWithContexts,
     );
-    const messageTextForSend = appendReviewCommentsToPrompt(
+    const assembledMessageText = appendReviewCommentsToPrompt(
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
     );
+    // "질문 먼저": the AI must answer with its plan and questions and wait,
+    // instead of starting work. Rides inside the message with user authority.
+    const messageTextForSend =
+      readAskFirstEnabled() && assembledMessageText.trim().length > 0
+        ? ASK_FIRST_TASK_PREFIX + assembledMessageText
+        : assembledMessageText;
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({

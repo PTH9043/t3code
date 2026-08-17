@@ -93,6 +93,7 @@ import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
+import { setAskFirstEnabled, useAskFirstEnabled } from "../../askFirstStore";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
@@ -194,6 +195,7 @@ import { toastManager } from "../ui/toast";
 import {
   BotIcon,
   CircleAlertIcon,
+  MessageCircleQuestionIcon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -440,6 +442,47 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
       />
     </>
+  );
+});
+
+/**
+ * "질문 먼저" — checked, every send from this tab (a task or a meeting topic)
+ * makes the AI come back with its plan and clarifying questions and WAIT,
+ * instead of starting work. Per-tab, persisted until turned off.
+ */
+const AskFirstToggle = memo(function AskFirstToggle() {
+  const enabled = useAskFirstEnabled();
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <ComposerControl
+            className={cn(
+              "shrink-0 whitespace-nowrap",
+              enabled
+                ? "bg-accent text-accent-foreground hover:bg-accent/80"
+                : "text-secondary-label hover:text-foreground",
+            )}
+            type="button"
+            onClick={() => setAskFirstEnabled(!enabled)}
+            aria-label="질문 먼저"
+            aria-pressed={enabled}
+            data-ask-first-toggle="true"
+          />
+        }
+      >
+        <ComposerControlIcon
+          icon={MessageCircleQuestionIcon}
+          className={enabled ? "text-current opacity-100" : undefined}
+        />
+        <span className="sr-only sm:not-sr-only">질문 먼저</span>
+      </TooltipTrigger>
+      <TooltipPopup side="top">
+        {enabled
+          ? "켜짐: 회의든 작업이든 시작 전에 계획과 질문을 먼저 물어봅니다."
+          : "켜면 회의·작업을 시작하기 전에 반드시 나에게 먼저 물어봅니다."}
+      </TooltipPopup>
+    </Tooltip>
   );
 });
 
@@ -3174,6 +3217,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     />
                   </>
                 )}
+                <AskFirstToggle />
               </div>
 
               {/* Right side: send / stop button */}
