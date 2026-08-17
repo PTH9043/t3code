@@ -19,6 +19,11 @@ import * as Stream from "effect/Stream";
 import { expect, it } from "@effect/vitest";
 
 import {
+  ProjectionTurnRepository,
+  type ProjectionTurnById,
+  type ProjectionTurnRepositoryShape,
+} from "../../persistence/Services/ProjectionTurns.ts";
+import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
@@ -32,15 +37,43 @@ import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 const projectId = ProjectId.make("project-turn-wait");
 const threadId = ThreadId.make("thread-turn-wait");
 const at = "2026-08-10T00:00:00.000Z";
+const later = "2026-08-10T00:00:05.000Z";
 
-function latestTurn(id: string, state: OrchestrationLatestTurn["state"]): OrchestrationLatestTurn {
+function latestTurn(
+  id: string,
+  state: OrchestrationLatestTurn["state"],
+  requestedAt: string = at,
+): OrchestrationLatestTurn {
   return {
     turnId: TurnId.make(id),
     state,
-    requestedAt: at,
-    startedAt: at,
-    completedAt: state === "running" ? null : at,
+    requestedAt,
+    startedAt: requestedAt,
+    completedAt: state === "running" ? null : requestedAt,
     assistantMessageId: null,
+  };
+}
+
+function turnRow(
+  id: string,
+  state: ProjectionTurnById["state"],
+  requestedAt: string,
+): ProjectionTurnById {
+  return {
+    threadId,
+    turnId: TurnId.make(id),
+    pendingMessageId: null,
+    sourceProposedPlanThreadId: null,
+    sourceProposedPlanId: null,
+    assistantMessageId: null,
+    state,
+    requestedAt,
+    startedAt: requestedAt,
+    completedAt: state === "running" || state === "pending" ? null : requestedAt,
+    checkpointTurnCount: null,
+    checkpointRef: null,
+    checkpointStatus: null,
+    checkpointFiles: [],
   };
 }
 
@@ -94,10 +127,14 @@ function domainEvent(input: {
   } as OrchestrationEvent;
 }
 
-const createSystem = (initial: OrchestrationThread) =>
+const createSystem = (
+  initial: OrchestrationThread,
+  turnRows: ReadonlyArray<ProjectionTurnById> = [],
+) =>
   Effect.gen(function* () {
     const events = yield* Queue.unbounded<OrchestrationEvent>();
     const threadRef = yield* Ref.make(initial);
+    const turnRowsRef = yield* Ref.make(new Map(turnRows.map((row) => [row.turnId, row])));
     const firstRead = yield* Deferred.make<void>();
     const engine = {
       readEvents: () => Stream.empty,
@@ -112,12 +149,19 @@ const createSystem = (initial: OrchestrationThread) =>
           Effect.map(Option.some),
         ),
     } as unknown as ProjectionSnapshotQueryShape;
+    const turnRepository = {
+      getByTurnId: (input: { readonly turnId: TurnId }) =>
+        Ref.get(turnRowsRef).pipe(
+          Effect.map((rows) => Option.fromNullishOr(rows.get(input.turnId))),
+        ),
+    } as unknown as ProjectionTurnRepositoryShape;
     const dependencies = Layer.mergeAll(
       Layer.succeed(OrchestrationEngineService, engine),
       Layer.succeed(ProjectionSnapshotQuery, query),
+      Layer.succeed(ProjectionTurnRepository, turnRepository),
     );
     const layer = OrchestrationTurnWaitLive.pipe(Layer.provide(dependencies));
-    return { events, firstRead, layer, threadRef };
+    return { events, firstRead, layer, threadRef, turnRowsRef };
   });
 
 it.effect("settles only after a committed event wakes the pinned turn", () =>
@@ -178,6 +222,81 @@ it.effect("rejects a replacement turn instead of satisfying the original wait", 
       expect(error.expectedTurnId).toBe(TurnId.make("turn-original"));
       expect(error.actualTurnId).toBe(TurnId.make("turn-replacement"));
     }
+  }),
+);
+
+it.effect("keeps waiting when the pointer rewinds to an older turn", () =>
+  Effect.gen(function* () {
+    const system = yield* createSystem(thread(latestTurn("turn-next", "running", later)), [
+      turnRow("turn-next", "running", later),
+    ]);
+
+    const result = yield* Effect.gen(function* () {
+      const wait = yield* Effect.service(OrchestrationTurnWait);
+      const fiber = yield* wait
+        .waitForSettledTurn({ threadId, expectedProjectId: projectId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(system.firstRead);
+      // A late diff completion for the previous turn rewinds latestTurn — the
+      // wait must ride it out instead of declaring its turn replaced.
+      yield* Ref.set(system.threadRef, thread(latestTurn("turn-old", "completed", at)));
+      yield* Queue.offer(
+        system.events,
+        domainEvent({
+          sequence: 4,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          type: "thread.turn-diff-completed",
+          payload: {},
+        }),
+      );
+      yield* Ref.set(system.threadRef, thread(latestTurn("turn-next", "completed", later)));
+      yield* Queue.offer(
+        system.events,
+        domainEvent({
+          sequence: 5,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          type: "thread.session-set",
+          payload: {},
+        }),
+      );
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(system.layer), Effect.scoped);
+
+    expect(result.turn.turnId).toBe(TurnId.make("turn-next"));
+    expect(result.turn.state).toBe("completed");
+  }),
+);
+
+it.effect("settles the pinned turn from the turn table while the pointer is stale", () =>
+  Effect.gen(function* () {
+    const system = yield* createSystem(thread(latestTurn("turn-next", "running", later)), [
+      turnRow("turn-next", "completed", later),
+    ]);
+
+    const result = yield* Effect.gen(function* () {
+      const wait = yield* Effect.service(OrchestrationTurnWait);
+      const fiber = yield* wait
+        .waitForSettledTurn({ threadId, expectedProjectId: projectId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(system.firstRead);
+      yield* Ref.set(system.threadRef, thread(latestTurn("turn-old", "completed", at)));
+      yield* Queue.offer(
+        system.events,
+        domainEvent({
+          sequence: 6,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          type: "thread.turn-diff-completed",
+          payload: {},
+        }),
+      );
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(system.layer), Effect.scoped);
+
+    expect(result.turn.turnId).toBe(TurnId.make("turn-next"));
+    expect(result.turn.state).toBe("completed");
   }),
 );
 

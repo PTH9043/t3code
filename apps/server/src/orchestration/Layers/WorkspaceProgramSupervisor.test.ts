@@ -22,6 +22,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { expect, it } from "@effect/vitest";
 
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionWorkspaceAgentRoleRepository } from "../../persistence/Services/ProjectionWorkspaceAgentRoles.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import { ProjectionWorkspaceProgramRepository } from "../../persistence/Services/ProjectionWorkspacePrograms.ts";
@@ -336,7 +337,14 @@ function supervisorHarness(input: {
   );
   return Layer.effect(WorkspaceProgramSupervisor, makeWorkspaceProgramSupervisor).pipe(
     Layer.provide(OrchestrationTurnWaitLive),
-    Layer.provide(base),
+    Layer.provide(
+      Layer.mergeAll(
+        base,
+        Layer.succeed(ProjectionTurnRepository, {
+          getByTurnId: () => Effect.succeed(Option.none()),
+        } as unknown as ProjectionTurnRepository["Service"]),
+      ),
+    ),
   );
 }
 

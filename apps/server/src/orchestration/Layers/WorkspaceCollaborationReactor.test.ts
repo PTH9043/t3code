@@ -18,6 +18,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { expect, it } from "@effect/vitest";
 
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
@@ -474,6 +475,11 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
       Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
       Layer.provideMerge(Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, repository)),
+      Layer.provideMerge(
+        Layer.succeed(ProjectionTurnRepository, {
+          getByTurnId: () => Effect.succeed(Option.none()),
+        } as unknown as ProjectionTurnRepository["Service"]),
+      ),
       Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
       Layer.provideMerge(NodeServices.layer),
     );

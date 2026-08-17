@@ -6,6 +6,7 @@ import {
   type OrchestrationSessionStatus,
   type ProjectId,
   ThreadId,
+  type TurnId,
   type WorkspaceConversationRagSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -515,6 +516,35 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
+
+    /**
+     * latest_turn_id only moves forward in request time. Turn bookkeeping can
+     * land out of order — a diff completing after the next turn already
+     * started, an overlapping session's status write — and rewinding the
+     * pointer makes a live turn wait believe its turn was replaced.
+     */
+    const advanceLatestTurnId = (
+      threadId: ThreadId,
+      currentTurnId: TurnId | null,
+      candidateTurnId: TurnId,
+    ) =>
+      Effect.gen(function* () {
+        if (currentTurnId === null || currentTurnId === candidateTurnId) return candidateTurnId;
+        const current = yield* projectionTurnRepository.getByTurnId({
+          threadId,
+          turnId: currentTurnId,
+        });
+        if (Option.isNone(current)) return candidateTurnId;
+        const candidate = yield* projectionTurnRepository.getByTurnId({
+          threadId,
+          turnId: candidateTurnId,
+        });
+        // A candidate without a row yet is new work being born, not history.
+        if (Option.isNone(candidate)) return candidateTurnId;
+        return candidate.value.requestedAt >= current.value.requestedAt
+          ? candidateTurnId
+          : currentTurnId;
+      });
 
     const makeConversationProjectionState = () => ({
       projectSettings: new Map<string, WorkspaceConversationRagSettings>(),
@@ -1378,10 +1408,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const activeTurnId = event.payload.session.activeTurnId ?? null;
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             // activeTurnId describes current work; a terminal session must not erase history.
-            latestTurnId: event.payload.session.activeTurnId ?? existingRow.value.latestTurnId,
+            latestTurnId:
+              activeTurnId === null
+                ? existingRow.value.latestTurnId
+                : yield* advanceLatestTurnId(
+                    event.payload.threadId,
+                    existingRow.value.latestTurnId,
+                    activeTurnId,
+                  ),
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
@@ -1397,7 +1435,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.turnId,
+            latestTurnId: yield* advanceLatestTurnId(
+              event.payload.threadId,
+              existingRow.value.latestTurnId,
+              event.payload.turnId,
+            ),
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
