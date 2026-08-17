@@ -2,6 +2,7 @@ import {
   WorkspaceTaskNodeId,
   type WorkspaceAgentRoleBinding,
   type WorkspaceFailureClassification,
+  type WorkspaceMeetingParticipantId,
   type WorkspaceMemoryCandidate,
   type WorkspaceOrchestrationAgent,
   type WorkspaceTaskGraph,
@@ -14,7 +15,11 @@ import {
 const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_PLAN_NODES = 24;
 const MAX_FOLLOW_UP_NODES = 8;
-const MAX_MEMORY_CANDIDATES = 12;
+// Full agent output is captured separately as searchable knowledge, so this cap
+// only bounds a single model response. It stays generous rather than tight: a
+// rejected payload fails the whole synthesis, and losing a run's conclusions to
+// an off-by-one item is worse than storing a few more.
+const MAX_MEMORY_CANDIDATES = 64;
 const MAX_SHORT_TEXT = 4_000;
 const MAX_CONTEXT_TEXT = 20_000;
 
@@ -43,6 +48,8 @@ export interface WorkspaceTaskPlanNodeProposal {
   readonly id: string;
   readonly kind: (typeof TASK_NODE_KINDS)[number];
   readonly agent: WorkspaceOrchestrationAgent;
+  /** Set on meeting plans, where the roster — not the agent whitelist — assigns work. */
+  readonly participantId: WorkspaceMeetingParticipantId | null;
   readonly title: string;
   readonly task: string;
   readonly goal: string;
@@ -53,6 +60,16 @@ export interface WorkspaceTaskPlanNodeProposal {
   readonly successCriteria: ReadonlyArray<string>;
   readonly dependsOn: ReadonlyArray<string>;
   readonly priority: number;
+}
+
+/**
+ * The roster facts a meeting plan is validated against. Plain data rather than
+ * the full meeting so this module stays independent of the meeting state
+ * machine: parsing needs to know who is seated and who chairs, nothing else.
+ */
+export interface WorkspaceMeetingPlanContext {
+  readonly participantIds: ReadonlyArray<WorkspaceMeetingParticipantId>;
+  readonly chairParticipantId: WorkspaceMeetingParticipantId;
 }
 
 export interface WorkspaceTaskPlanProposal {
@@ -171,20 +188,41 @@ function expectedAgentForKind(
   return "fable";
 }
 
-function parsePlanNode(value: unknown, path: string): WorkspaceTaskPlanNodeProposal {
+function parsePlanNode(
+  value: unknown,
+  path: string,
+  meeting: WorkspaceMeetingPlanContext | null,
+): WorkspaceTaskPlanNodeProposal {
   const source = record(value, path);
   const id = text(source.id, `${path}.id`, 64);
   if (!NODE_ID_PATTERN.test(id)) return fail(`${path}.id is not a valid node slug.`);
   const kind = oneOf(source.kind, TASK_NODE_KINDS, `${path}.kind`);
-  const agent = oneOf(source.agent, ORCHESTRATION_AGENTS, `${path}.agent`);
-  const expectedAgent = expectedAgentForKind(kind);
-  if (agent !== expectedAgent) {
-    return fail(`${path} routes ${kind} to ${agent}; it must route to ${expectedAgent}.`);
+  let agent: WorkspaceOrchestrationAgent;
+  let participantId: WorkspaceMeetingParticipantId | null;
+  if (meeting === null) {
+    agent = oneOf(source.agent, ORCHESTRATION_AGENTS, `${path}.agent`);
+    const expectedAgent = expectedAgentForKind(kind);
+    if (agent !== expectedAgent) {
+      return fail(`${path} routes ${kind} to ${agent}; it must route to ${expectedAgent}.`);
+    }
+    participantId = null;
+  } else {
+    // On a meeting plan the roster is the whitelist. `agent` is derived from the
+    // kind rather than read, so downstream kind-based recovery rules keep their
+    // meaning while the seat alone decides which account executes.
+    const raw = text(source.participantId, `${path}.participantId`, 64);
+    const seated = meeting.participantIds.find((candidate) => candidate === raw);
+    if (seated === undefined) {
+      return fail(`${path}.participantId '${raw}' is not a meeting seat.`);
+    }
+    agent = expectedAgentForKind(kind);
+    participantId = seated;
   }
   return {
     id,
     kind,
     agent,
+    participantId,
     title: text(source.title, `${path}.title`, 200),
     task: text(source.task, `${path}.task`),
     goal: text(source.goal, `${path}.goal`),
@@ -259,27 +297,34 @@ function parsePlanNodes(
   path: string,
   maximum: number,
   allowExternalDependencies: boolean,
+  meeting: WorkspaceMeetingPlanContext | null,
 ): ReadonlyArray<WorkspaceTaskPlanNodeProposal> {
   const values = array(value, path);
   if (values.length === 0) return fail(`${path} must contain at least one node.`);
   if (values.length > maximum) return fail(`${path} exceeds the ${maximum}-node limit.`);
-  const nodes = values.map((node, index) => parsePlanNode(node, `${path}[${index}]`));
+  const nodes = values.map((node, index) => parsePlanNode(node, `${path}[${index}]`, meeting));
   validateNodeIdsAndDependencies(nodes, allowExternalDependencies);
   return nodes;
 }
 
-/** Decode and validate one Fable graph proposal. */
-export function parseWorkspaceTaskGraphProposal(output: string): WorkspaceTaskPlanProposal {
+/** Decode and validate one graph proposal — Fable's, or the meeting chair's when `meeting` is set. */
+export function parseWorkspaceTaskGraphProposal(
+  output: string,
+  meeting: WorkspaceMeetingPlanContext | null = null,
+): WorkspaceTaskPlanProposal {
   const source = record(extractTaggedJson(output, "t3_task_graph"), "taskGraph");
   return {
     summary: text(source.summary, "taskGraph.summary", 8_000),
     nextAction: text(source.nextAction, "taskGraph.nextAction"),
-    nodes: parsePlanNodes(source.nodes, "taskGraph.nodes", MAX_PLAN_NODES, false),
+    nodes: parsePlanNodes(source.nodes, "taskGraph.nodes", MAX_PLAN_NODES, false, meeting),
   };
 }
 
-/** Decode one independent Fable validation receipt. */
-export function parseWorkspaceValidationDecision(output: string): WorkspaceValidationDecision {
+/** Decode one independent validation receipt. */
+export function parseWorkspaceValidationDecision(
+  output: string,
+  meeting: WorkspaceMeetingPlanContext | null = null,
+): WorkspaceValidationDecision {
   const source = record(extractTaggedJson(output, "t3_validation"), "validation");
   return {
     verdict: oneOf(source.verdict, VALIDATION_VERDICTS, "validation.verdict"),
@@ -300,6 +345,7 @@ export function parseWorkspaceValidationDecision(output: string): WorkspaceValid
             "validation.followUpNodes",
             MAX_FOLLOW_UP_NODES,
             true,
+            meeting,
           ),
   };
 }
@@ -372,6 +418,7 @@ function emptyNode(input: {
   readonly validationTargetId?: string | null;
   readonly priority: number;
   readonly status: WorkspaceTaskNode["status"];
+  readonly participantId?: WorkspaceMeetingParticipantId | null;
 }): WorkspaceTaskNode {
   return {
     id: WorkspaceTaskNodeId.make(input.id),
@@ -379,6 +426,7 @@ function emptyNode(input: {
     kind: input.kind,
     agent: input.agent,
     role: input.role,
+    participantId: input.participantId ?? null,
     title: input.title,
     handoff: {
       task: input.task,
@@ -448,6 +496,45 @@ export function buildInitialWorkspaceTaskGraph(task: string): WorkspaceTaskGraph
   };
 }
 
+/**
+ * The completed root a meeting graph anchors on.
+ *
+ * A role-bound run earns its "plan" node by executing the coordinator; a
+ * meeting earns it by discussing. The agreement is stored as the node's output
+ * so every root node the chair proposes inherits it as dependency context,
+ * exactly the way a coordinator's plan hands off.
+ */
+export function buildMeetingSeededTaskGraph(input: {
+  readonly task: string;
+  readonly agreement: string;
+  readonly chairParticipantId: WorkspaceMeetingParticipantId;
+  readonly occurredAt: string;
+}): WorkspaceTaskGraph {
+  const base = buildInitialWorkspaceTaskGraph(input.task);
+  const plan = base.nodes[0]!;
+  return {
+    ...base,
+    nodes: [
+      {
+        ...plan,
+        title: "회의 합의 계획",
+        participantId: input.chairParticipantId,
+        handoff: {
+          ...plan.handoff,
+          task: "회의에서 합의한 계획을 실행 가능한 작업 그래프로 확정한다.",
+          context: "참가자들이 회의에서 직접 합의한 내용이다.",
+          constraints: [],
+        },
+        status: "completed",
+        output: input.agreement.slice(0, 40_000),
+        startedAt: input.occurredAt,
+        completedAt: input.occurredAt,
+      },
+    ],
+    nextAction: "회의 합의를 작업 그래프로 실행합니다.",
+  };
+}
+
 function roleForAgent(agent: WorkspaceOrchestrationAgent): WorkspaceTaskNode["role"] {
   if (agent === "codex") return "implementer";
   if (agent === "grok") return "researcher";
@@ -481,20 +568,25 @@ function uniqueNodeId(preferred: string, used: Set<string>): string {
   return fail(`Could not allocate a unique node id for '${preferred}'.`);
 }
 
-/** Materialize Fable's proposal, inserting validation gates and one terminal synthesis node. */
+/** Materialize a validated proposal, inserting validation gates and one terminal synthesis node. */
 export function materializeWorkspaceTaskGraphPlan(input: {
   readonly graph: WorkspaceTaskGraph;
   readonly proposal: WorkspaceTaskPlanProposal;
   readonly bindings: ReadonlyArray<WorkspaceAgentRoleBinding>;
+  /** Set on meeting runs, whose gates and synthesis run on the chair's seat, not role bindings. */
+  readonly meeting?: WorkspaceMeetingPlanContext | null;
   readonly occurredAt: string;
   readonly anchorNodeId?: string;
   readonly changeReason?: WorkspaceTaskGraph["changes"][number]["reason"];
   readonly supersededNodeIds?: ReadonlyArray<WorkspaceTaskNodeId>;
 }): WorkspaceTaskGraph {
-  for (const agent of new Set(input.proposal.nodes.map((node) => node.agent))) {
-    requireBinding(input.bindings, agent);
+  const meeting = input.meeting ?? null;
+  if (meeting === null) {
+    for (const agent of new Set(input.proposal.nodes.map((node) => node.agent))) {
+      requireBinding(input.bindings, agent);
+    }
+    requireBinding(input.bindings, "fable");
   }
-  requireBinding(input.bindings, "fable");
 
   const existingIds = new Set(input.graph.nodes.map((node) => String(node.id)));
   const collidingId = input.proposal.nodes.find((node) => existingIds.has(node.id));
@@ -538,6 +630,7 @@ export function materializeWorkspaceTaskGraphPlan(input: {
         kind: "validation",
         agent: "fable",
         role: "coordinator",
+        participantId: meeting?.chairParticipantId ?? null,
         title: `${proposal.title} 검증`,
         task: `${proposal.title}의 결과를 독립적으로 검증한다.`,
         goal: proposal.goal,
@@ -574,6 +667,7 @@ export function materializeWorkspaceTaskGraphPlan(input: {
     kind: "synthesis",
     agent: "fable",
     role: "coordinator",
+    participantId: meeting?.chairParticipantId ?? null,
     title: "검증 결과 종합과 다음 행동 결정",
     task: "검증을 통과한 결과만 하나의 최종 응답으로 종합한다.",
     goal: input.graph.nodes[0]?.handoff.goal ?? "사용자 목표 달성",

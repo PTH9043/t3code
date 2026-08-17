@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   MessageId,
   ThreadId,
   WorkspaceKnowledgeItemId,
@@ -12,6 +13,9 @@ import {
   type WorkspaceCollaborationRunId,
   type WorkspaceCollaborationStep,
   type WorkspaceFailureClassification,
+  type WorkspaceMeeting,
+  type WorkspaceMeetingParticipantId,
+  type WorkspaceMeetingStatement,
   type WorkspaceTaskAttempt,
   type WorkspaceTaskGraph,
   type WorkspaceTaskNode,
@@ -24,6 +28,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
@@ -32,6 +37,22 @@ import * as TxRef from "effect/TxRef";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
 import { forkParked } from "../../serverActivation.ts";
+import { toAgentKnowledgeCaptures } from "../workspaceAgentKnowledge.ts";
+import {
+  buildMeetingChairClosePrompt,
+  buildMeetingPlanPrompt,
+  buildMeetingStatementPrompt,
+  meetingAssignmentRoute,
+  nextMeetingStep,
+  parseChairVerdict,
+  parseMeetingQuestion,
+  parseStatementRespondsTo,
+  renderMeetingTranscript,
+  resolveChairParticipantId,
+  resolveNodeAssignmentRoute,
+  type WorkspaceAssignmentRoute,
+  type WorkspaceMeetingRaisedQuestion,
+} from "../workspaceMeeting.ts";
 import {
   buildWorkspaceCollaborationStepPrompt,
   buildWorkspaceCollaborationSteps,
@@ -40,6 +61,7 @@ import {
 } from "../workspaceCollaboration.ts";
 import {
   buildInitialWorkspaceTaskGraph,
+  buildMeetingSeededTaskGraph,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -47,6 +69,7 @@ import {
   readyWorkspaceTaskNodes,
   refreshWorkspaceTaskGraphQueue,
   WorkspaceTaskGraphError,
+  type WorkspaceMeetingPlanContext,
 } from "../workspaceTaskGraph.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
@@ -76,6 +99,24 @@ const MAX_GRAPH_REVISIONS = 8;
 const MAX_AGENT_RESPONSE_CHARS = 160_000;
 const MAX_NODE_HANDOFF_CHARS = 40_000;
 const MAX_ATTEMPT_RECORD_CHARS = 8_000;
+/** A meeting turn (statement, chair close, plan) is retried once before the run fails. */
+const MAX_MEETING_TURN_ATTEMPTS = 2;
+const MAX_MEETING_STATEMENT_CHARS = 20_000;
+const MAX_MEETING_SUMMARY_CHARS = 20_000;
+
+/** Kinds whose output is a structured payload with its own escalation channel. */
+const STRUCTURED_NODE_KINDS: ReadonlyArray<WorkspaceTaskNode["kind"]> = [
+  "orchestration",
+  "validation",
+  "synthesis",
+];
+
+function meetingPlanContext(meeting: WorkspaceMeeting): WorkspaceMeetingPlanContext {
+  return {
+    participantIds: meeting.participants.map((participant) => participant.id),
+    chairParticipantId: resolveChairParticipantId(meeting),
+  };
+}
 
 function replaceStep(
   run: WorkspaceCollaborationRun,
@@ -121,14 +162,19 @@ function graphNodeStepStatus(
 function graphCompatibilitySteps(
   graph: WorkspaceTaskGraph,
   bindings: ReadonlyArray<WorkspaceAgentRoleBinding>,
+  meeting: WorkspaceMeeting | null,
 ): ReadonlyArray<WorkspaceCollaborationStep> {
   return graph.nodes
     .toSorted((left, right) => left.order - right.order || left.id.localeCompare(right.id))
     .map((node, index) => {
       const attempt = node.attempts.at(-1);
-      const binding = roleBinding(bindings, node.role);
-      if (attempt === undefined && binding === undefined) {
-        throw new WorkspaceTaskGraphError(`Missing enabled binding for role '${node.role}'.`);
+      const route = resolveNodeAssignmentRoute({ node, meeting, bindings });
+      if (attempt === undefined && route === null) {
+        throw new WorkspaceTaskGraphError(
+          node.participantId === null
+            ? `Missing enabled binding for role '${node.role}'.`
+            : `Missing meeting participant '${node.participantId}'.`,
+        );
       }
       return {
         index,
@@ -139,11 +185,11 @@ function graphCompatibilitySteps(
               ? "kickoff"
               : "contribution",
         role: node.role,
-        displayName: binding?.displayName ?? node.title,
-        modelSelection: attempt?.modelSelection ?? binding!.modelSelection,
-        runtimeMode: attempt?.runtimeMode ?? binding!.runtimeMode,
-        interactionMode: attempt?.interactionMode ?? binding!.interactionMode,
-        instructions: binding?.instructions ?? "",
+        displayName: route?.displayName ?? node.title,
+        modelSelection: attempt?.modelSelection ?? route!.modelSelection,
+        runtimeMode: attempt?.runtimeMode ?? route!.runtimeMode,
+        interactionMode: attempt?.interactionMode ?? route!.interactionMode,
+        instructions: route?.instructions ?? "",
         threadId: attempt?.threadId ?? null,
         status: graphNodeStepStatus(node.status),
         output: node.output,
@@ -226,6 +272,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   const randomUUID = crypto.randomUUIDv4;
   const workspaceLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
   const claimedRunsRef = yield* SynchronizedRef.make(new Set<string>());
+  // Wake-ups that arrived while the run was claimed. A parked meeting run can
+  // release its claim just after an answer or cancel event was dropped as a
+  // duplicate; replaying the wake-up on release closes that window.
+  const rerunRequestsRef = yield* SynchronizedRef.make(new Map<string, RunRef>());
   const outstanding = yield* TxRef.make(0);
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -290,10 +340,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     return result;
   });
 
-  const interruptStepThread = (runRef: RunRef, step: WorkspaceCollaborationStep) =>
-    step.threadId === null
+  const interruptThreadTurn = (runRef: RunRef, threadId: ThreadId | null) =>
+    threadId === null
       ? Effect.void
-      : loadThread(runRef, step.threadId).pipe(
+      : loadThread(runRef, threadId).pipe(
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.void,
@@ -304,7 +354,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                       yield* orchestrationEngine.dispatch({
                         type: "thread.turn.interrupt",
                         commandId: CommandId.make(yield* randomUUID),
-                        threadId: step.threadId!,
+                        threadId,
                         turnId: thread.latestTurn?.turnId,
                         createdAt: yield* nowIso,
                       });
@@ -313,7 +363,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                         Effect.logWarning("Failed to interrupt cancelled collaboration turn", {
                           projectId: runRef.projectId,
                           runId: runRef.runId,
-                          threadId: step.threadId,
+                          threadId,
                           cause: conciseCause(cause),
                         }),
                       ),
@@ -324,7 +374,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             Effect.logWarning("Failed to inspect cancelled collaboration turn", {
               projectId: runRef.projectId,
               runId: runRef.runId,
-              threadId: step.threadId,
+              threadId,
               cause: conciseCause(cause),
             }),
           ),
@@ -392,6 +442,15 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly prompt: string;
       readonly title: string;
       readonly expectedAgent?: "fable" | "codex" | "grok";
+      /**
+       * The turn this call awaits must have been requested at or after this
+       * instant. On a reused thread (a meeting seat's single conversation) it
+       * separates this attempt's turn from the turns already in the window: an
+       * older latest turn means ours has not started yet, a newer one is ours
+       * being resumed. Absent on fresh-thread paths, where "no turn yet" is
+       * the only signal needed.
+       */
+      readonly turnAfter?: string;
     }) {
       const runRef = { projectId: input.run.projectId, runId: input.run.id };
       if (input.step.threadId === null) {
@@ -438,8 +497,31 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           `Collaboration thread '${input.step.threadId}' was not projected after creation.`,
         );
       }
-      let requestedAtOrAfter: string | undefined;
-      if (thread.value.latestTurn === null) {
+      const latestTurn = thread.value.latestTurn;
+      // `<=` on the boundary: a latest turn stamped in the same millisecond as
+      // this attempt cannot be proven to be ours, and re-dispatching a turn is
+      // recoverable while awaiting someone else's settled turn is not.
+      const mustStartTurn =
+        latestTurn === null ||
+        (input.turnAfter !== undefined && latestTurn.requestedAt <= input.turnAfter);
+      let requestedAtOrAfter = input.turnAfter;
+      if (mustStartTurn) {
+        const session = thread.value.session;
+        if (
+          session !== null &&
+          session.status !== "stopped" &&
+          session.providerName !== null &&
+          session.providerName !== instance.driverKind
+        ) {
+          // The conversation is handed to a different provider: release the
+          // live session so the runtime starts a fresh one for this turn.
+          yield* orchestrationEngine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make(yield* randomUUID),
+            threadId: input.step.threadId,
+            createdAt: yield* nowIso,
+          });
+        }
         const createdAt = yield* nowIso;
         yield* orchestrationEngine.dispatch({
           type: "thread.turn.start",
@@ -459,9 +541,116 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         });
         requestedAtOrAfter = createdAt;
       }
-      return yield* awaitStepOutput(runRef, input.step.threadId, requestedAtOrAfter);
+      const threadId = input.step.threadId;
+      // A collapsing wait (cancel, sibling failure) must not leave this turn
+      // running unattended — doubly so now that a seat's thread is a visible
+      // conversation window.
+      return yield* awaitStepOutput(runRef, threadId, requestedAtOrAfter).pipe(
+        Effect.onExit((exit) =>
+          exit._tag === "Failure" ? interruptThreadTurn(runRef, threadId) : Effect.void,
+        ),
+      );
     },
   );
+
+  /**
+   * Read the project's capture settings from the lightweight command read model.
+   * A project that predates the setting decodes to the schema default, so an
+   * unavailable or unknown project falls back to the same default rather than
+   * silently dropping everything the agents produced.
+   */
+  const resolveAgentKnowledgeSettings = (projectId: ProjectId) =>
+    projectionSnapshotQuery.getCommandReadModel().pipe(
+      Effect.map((readModel) => {
+        const project = readModel.projects.find((candidate) => candidate.id === projectId);
+        return (
+          project?.workspaceControl?.agentKnowledge ??
+          DEFAULT_WORKSPACE_CONTROL_SETTINGS.agentKnowledge
+        );
+      }),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Falling back to default agent knowledge capture settings", {
+          projectId,
+          cause: conciseCause(cause),
+        }).pipe(Effect.as(DEFAULT_WORKSPACE_CONTROL_SETTINGS.agentKnowledge)),
+      ),
+    );
+
+  /**
+   * Register every graph node output as searchable knowledge. Memory candidates
+   * above are what Fable judged worth keeping; this is the unfiltered record of
+   * what the agents actually produced.
+   */
+  const captureAgentKnowledge = (run: WorkspaceCollaborationRun) =>
+    Effect.gen(function* () {
+      if (run.graph === null) return;
+      const settings = yield* resolveAgentKnowledgeSettings(run.projectId);
+      if (!settings.enabled) return;
+      const captures = toAgentKnowledgeCaptures({
+        run,
+        settings,
+        capturedAt: run.updatedAt,
+      });
+      if (captures.length === 0) return;
+      yield* Effect.forEach(
+        captures,
+        (capture) =>
+          Effect.gen(function* () {
+            yield* orchestrationEngine.dispatch({
+              type: "project.knowledge.item.upsert",
+              commandId: CommandId.make(yield* randomUUID),
+              projectId: run.projectId,
+              itemId: capture.item.id,
+              kind: capture.item.kind,
+              title: capture.item.title,
+              content: capture.item.content,
+              status: capture.item.status,
+              origin: capture.item.origin,
+              relativeFolder: capture.item.relativeFolder,
+              tags: capture.item.tags,
+              originalChars: capture.originalChars,
+              storedChars: capture.storedChars,
+              createdAt: capture.item.createdAt,
+            });
+          }),
+        { concurrency: 1, discard: true },
+      );
+      yield* Effect.logDebug("Captured Workspace agent outputs as knowledge", {
+        projectId: run.projectId,
+        runId: run.id,
+        capturedNodes: captures.length,
+      });
+    });
+
+  /**
+   * Count the knowledge that actually reached a model. `sourceItemIds` is what
+   * the composer wrote into the prompt — including RAG matches it appended — so
+   * it is the honest measure, unlike the candidate set the search returned.
+   *
+   * Failures are logged and swallowed: a run must not die because a usage
+   * counter could not be written.
+   */
+  const recordPromptUsage = (input: {
+    readonly projectId: ProjectId;
+    readonly sourceItemIds: ReadonlyArray<WorkspaceKnowledgeItemId>;
+  }) =>
+    Effect.gen(function* () {
+      if (input.sourceItemIds.length === 0) return;
+      yield* orchestrationEngine.dispatch({
+        type: "project.knowledge.usage.record",
+        commandId: CommandId.make(yield* randomUUID),
+        projectId: input.projectId,
+        itemIds: input.sourceItemIds,
+        usedAt: yield* nowIso,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to record Workspace knowledge prompt usage", {
+          projectId: input.projectId,
+          cause: conciseCause(cause),
+        }),
+      ),
+    );
 
   const captureRunMemory = (run: WorkspaceCollaborationRun) =>
     Effect.gen(function* () {
@@ -510,6 +699,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           }),
         { concurrency: 1, discard: true },
       );
+      yield* captureAgentKnowledge(run);
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to capture Workspace collaboration run memory", {
@@ -522,13 +712,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
 
   const loadGraphBindings = Effect.fn("WorkspaceCollaborationReactor.loadGraphBindings")(function* (
     projectId: ProjectId,
+    meeting: WorkspaceMeeting | null,
   ) {
     const listRoles = projectionSnapshotQuery.listWorkspaceAgentRoles;
     if (listRoles === undefined) {
       return yield* executionError("Workspace role projection is unavailable.");
     }
     const result = yield* listRoles({ projectId });
-    if (roleBinding(result.roles, "coordinator") === undefined) {
+    // A meeting supplies its own chair and executors, so the project's role
+    // bindings are optional there. They are still loaded: a meeting graph may
+    // carry an unseated node, and that node still resolves through them.
+    if (meeting === null && roleBinding(result.roles, "coordinator") === undefined) {
       return yield* executionError(
         "An enabled Fable coordinator role is required before a task graph can start.",
       );
@@ -548,20 +742,510 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       ...run,
       ...update,
       graph,
-      steps: graphCompatibilitySteps(graph, bindings),
+      steps: graphCompatibilitySteps(graph, bindings, run.meeting),
     });
 
+  /**
+   * One meeting turn in the meeting's single conversation.
+   *
+   * Every seat speaks in the same thread; each turn runs on that seat's own
+   * provider session. When the previous turn belonged to a different provider,
+   * its session is released first so the runtime starts a fresh one — the
+   * transcript context every prompt carries is what keeps the discussion
+   * coherent across sessions.
+   */
+  const dispatchMeetingTurn = Effect.fn("WorkspaceCollaborationReactor.dispatchMeetingTurn")(
+    function* (input: {
+      readonly run: WorkspaceCollaborationRun;
+      readonly route: WorkspaceAssignmentRoute;
+      readonly threadId: ThreadId;
+      readonly title: string;
+      readonly prompt: string;
+    }) {
+      const runRef = { projectId: input.run.projectId, runId: input.run.id };
+      const instance = yield* providerInstanceRegistry.getInstance(
+        input.route.modelSelection.instanceId,
+      );
+      if (instance === undefined) {
+        return yield* executionError(
+          `Provider instance '${input.route.modelSelection.instanceId}' for meeting seat '${input.route.displayName}' is unavailable.`,
+        );
+      }
+      const threadId = input.threadId;
+      const existing = yield* loadThread(runRef, threadId);
+      const createdAt = yield* nowIso;
+      if (Option.isNone(existing)) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(yield* randomUUID),
+          threadId,
+          projectId: input.run.projectId,
+          title: input.title.replace(/\s+/g, " ").trim().slice(0, 80),
+          modelSelection: input.route.modelSelection,
+          runtimeMode: input.route.runtimeMode,
+          interactionMode: input.route.interactionMode,
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+      } else {
+        const session = existing.value.session;
+        if (
+          session !== null &&
+          session.status !== "stopped" &&
+          session.providerName !== null &&
+          session.providerName !== instance.driverKind
+        ) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make(yield* randomUUID),
+            threadId,
+            createdAt,
+          });
+        }
+      }
+      yield* orchestrationEngine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(yield* randomUUID),
+        threadId,
+        message: {
+          messageId: MessageId.make(yield* randomUUID),
+          role: "user",
+          text: input.prompt,
+          attachments: [],
+        },
+        inputOrigin: "automation",
+        modelSelection: input.route.modelSelection,
+        runtimeMode: input.route.runtimeMode,
+        interactionMode: input.route.interactionMode,
+        createdAt,
+      });
+      // A wave that collapses — a cancel, a sibling seat failing the run — must
+      // not leave this seat's provider turn running unattended.
+      const output = yield* awaitStepOutput(runRef, threadId, createdAt).pipe(
+        Effect.onExit((exit) =>
+          exit._tag === "Failure" ? interruptThreadTurn(runRef, threadId) : Effect.void,
+        ),
+      );
+      return { threadId, output } as const;
+    },
+  );
+
+  /**
+   * Drives a meeting run until the discussion has become an executable graph.
+   *
+   * `nextMeetingStep` owns every transition; this loop only performs the I/O the
+   * step asks for and persists what came back, so a crash resumes by replaying
+   * the same decision against the stored meeting. Returns false when the run is
+   * parked on a question for the person — the answer event re-enqueues it.
+   */
+  const runMeetingPhase = Effect.fn("WorkspaceCollaborationReactor.runMeetingPhase")(
+    function* (input: {
+      readonly runRef: RunRef;
+      readonly bindings: ReadonlyArray<WorkspaceAgentRoleBinding>;
+      readonly workspacePrompt: string;
+    }) {
+      // Failures are counted per seat and step, in memory only: a retry after a
+      // server restart gets a fresh budget, which errs toward finishing meetings.
+      const failures = new Map<string, number>();
+      const recordTurnFailure = (key: string, message: string) =>
+        Effect.gen(function* () {
+          const count = (failures.get(key) ?? 0) + 1;
+          failures.set(key, count);
+          if (count >= MAX_MEETING_TURN_ATTEMPTS) {
+            return yield* executionError(message);
+          }
+          yield* Effect.logWarning("Meeting turn failed; retrying", {
+            projectId: input.runRef.projectId,
+            runId: input.runRef.runId,
+            step: key,
+            error: message,
+          });
+        });
+
+      while (true) {
+        let run = yield* requireRunContinuable(input.runRef);
+        const meeting = run.meeting;
+        if (meeting === null) {
+          return yield* executionError("Meeting run lost its meeting state.");
+        }
+        if (run.status === "queued") {
+          run = yield* persistRun({
+            ...run,
+            status: "running",
+            error: null,
+            updatedAt: yield* nowIso,
+          });
+          continue;
+        }
+        if (meeting.threadId === null) {
+          // The id is persisted before the thread exists; creation is deferred
+          // to the first turn and is idempotent, so a crash between the two
+          // cannot strand an unrecorded window.
+          yield* persistRun({
+            ...run,
+            meeting: { ...meeting, threadId: ThreadId.make(yield* randomUUID) },
+            updatedAt: yield* nowIso,
+          });
+          continue;
+        }
+        const meetingThreadId = meeting.threadId;
+
+        let step = nextMeetingStep(meeting);
+        if (step.kind === "handoff" && step.phase === "planning") {
+          // The run stopped between entering planning and materializing the
+          // graph; the chair simply plans again.
+          step = { kind: "plan" };
+        }
+
+        switch (step.kind) {
+          case "awaiting-user":
+            return false;
+          case "handoff":
+            return true;
+
+          case "open-round": {
+            yield* persistRun({
+              ...run,
+              meeting: {
+                ...meeting,
+                rounds: [
+                  ...meeting.rounds,
+                  {
+                    index: step.roundIndex,
+                    statements: [],
+                    chairSummary: null,
+                    consensusReached: null,
+                  },
+                ],
+              },
+              updatedAt: yield* nowIso,
+            });
+            continue;
+          }
+
+          case "collect-statements": {
+            const roundIndex = step.roundIndex;
+            const currentRun = run;
+            const results = yield* Effect.forEach(
+              step.speakers,
+              (participantId) =>
+                Effect.gen(function* () {
+                  const route = meetingAssignmentRoute(meeting, participantId);
+                  const turn = yield* dispatchMeetingTurn({
+                    run: currentRun,
+                    route,
+                    threadId: meetingThreadId,
+                    title: `AI 회의: ${currentRun.task}`,
+                    prompt: buildMeetingStatementPrompt({
+                      // Later rounds argue over the transcript; only the opening
+                      // round pays for the full Workspace corpus.
+                      workspacePrompt: roundIndex === 0 ? input.workspacePrompt : null,
+                      task: currentRun.task,
+                      meeting,
+                      participantId,
+                      roundIndex,
+                    }),
+                  });
+                  return { kind: "spoke" as const, participantId, ...turn };
+                }).pipe(
+                  Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                    Effect.succeed({
+                      kind: "failed" as const,
+                      participantId,
+                      message: error.message,
+                    }),
+                  ),
+                ),
+              // One shared conversation runs one turn at a time: the seats
+              // speak in order, the way a table actually talks.
+              { concurrency: 1 },
+            );
+
+            const recordedAt = yield* nowIso;
+            const spoke = results.flatMap((result) => (result.kind === "spoke" ? [result] : []));
+            const statements: WorkspaceMeetingStatement[] = spoke.map((result) => ({
+              participantId: result.participantId,
+              content: result.output.slice(0, MAX_MEETING_STATEMENT_CHARS),
+              respondsTo: parseStatementRespondsTo(result.output, meeting, result.participantId),
+              threadId: result.threadId,
+              recordedAt,
+            }));
+            const raised = spoke
+              .map((result) => ({
+                participantId: result.participantId,
+                question: parseMeetingQuestion(result.output),
+              }))
+              .find(
+                (
+                  candidate,
+                ): candidate is {
+                  participantId: WorkspaceMeetingParticipantId;
+                  question: WorkspaceMeetingRaisedQuestion;
+                } => candidate.question !== null,
+              );
+            if (statements.length > 0 || raised !== undefined) {
+              run = yield* persistRun({
+                ...run,
+                meeting: {
+                  ...meeting,
+                  rounds: meeting.rounds.map((candidate) =>
+                    candidate.index === roundIndex
+                      ? { ...candidate, statements: [...candidate.statements, ...statements] }
+                      : candidate,
+                  ),
+                  pendingQuestion:
+                    raised === undefined
+                      ? meeting.pendingQuestion
+                      : {
+                          askedByParticipantId: raised.participantId,
+                          question: raised.question.question,
+                          options: raised.question.options,
+                          context: raised.question.context,
+                          askedAt: recordedAt,
+                        },
+                },
+                updatedAt: recordedAt,
+              });
+            }
+            // Failures are counted after the successes are safely persisted, so a
+            // seat that gives up cannot take the round's statements down with it.
+            for (const result of results) {
+              if (result.kind !== "failed") continue;
+              yield* recordTurnFailure(
+                `statement:${roundIndex}:${result.participantId}`,
+                `Meeting statement turn for seat '${result.participantId}' failed: ${result.message}`,
+              );
+            }
+            continue;
+          }
+
+          case "close-round": {
+            const roundIndex = step.roundIndex;
+            const failureKey = `close:${roundIndex}`;
+            const chairId = resolveChairParticipantId(meeting);
+            const route = meetingAssignmentRoute(meeting, chairId);
+            const turn = yield* dispatchMeetingTurn({
+              run,
+              route,
+              threadId: meetingThreadId,
+              title: `AI 회의: ${run.task}`,
+              prompt: buildMeetingChairClosePrompt({ task: run.task, meeting, roundIndex }),
+            }).pipe(
+              Effect.map((value) => ({ ok: true as const, ...value })),
+              Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                Effect.succeed({ ok: false as const, message: error.message }),
+              ),
+            );
+            if (!turn.ok) {
+              yield* recordTurnFailure(failureKey, `Meeting chair close failed: ${turn.message}`);
+              continue;
+            }
+            let verdict;
+            try {
+              verdict = parseChairVerdict(turn.output);
+            } catch (error) {
+              yield* recordTurnFailure(
+                failureKey,
+                `Meeting chair verdict was malformed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              continue;
+            }
+            const closedAt = yield* nowIso;
+            // The nomination rides inside the stored summary because
+            // `plannedSpeakers` re-derives it from there on resume.
+            const nomination =
+              meeting.mode === "free-form" && verdict.nextSpeakerId !== null
+                ? `\n\n<t3_next_speaker>${verdict.nextSpeakerId}</t3_next_speaker>`
+                : "";
+            const chairSummary =
+              verdict.summary.slice(0, MAX_MEETING_SUMMARY_CHARS - nomination.length) + nomination;
+            run = yield* persistRun({
+              ...run,
+              meeting: {
+                ...meeting,
+                rounds: meeting.rounds.map((candidate) =>
+                  candidate.index === roundIndex
+                    ? {
+                        ...candidate,
+                        chairSummary,
+                        consensusReached:
+                          meeting.mode === "until-consensus" ? verdict.consensusReached : null,
+                      }
+                    : candidate,
+                ),
+                pendingQuestion:
+                  verdict.question === null
+                    ? null
+                    : {
+                        askedByParticipantId: chairId,
+                        question: verdict.question.question,
+                        options: verdict.question.options,
+                        context: verdict.question.context,
+                        askedAt: closedAt,
+                      },
+              },
+              updatedAt: closedAt,
+            });
+            continue;
+          }
+
+          case "ask-round-check-in": {
+            const askedAt = yield* nowIso;
+            const round = meeting.rounds.find((candidate) => candidate.index === step.roundIndex);
+            run = yield* persistRun({
+              ...run,
+              meeting: {
+                ...meeting,
+                pendingQuestion: {
+                  askedByParticipantId: null,
+                  question: step.question,
+                  options: ["계속 진행", "방향 수정"],
+                  context: round?.chairSummary ?? "",
+                  askedAt,
+                },
+              },
+              updatedAt: askedAt,
+            });
+            continue;
+          }
+
+          case "plan": {
+            if (meeting.phase === "discussing") {
+              // Entering planning is persisted on its own so a crash mid-plan
+              // resumes as "plan again" rather than replaying the discussion.
+              run = yield* persistRun({
+                ...run,
+                meeting: { ...meeting, phase: "planning" },
+                updatedAt: yield* nowIso,
+              });
+              continue;
+            }
+            const chairId = resolveChairParticipantId(meeting);
+            const route = meetingAssignmentRoute(meeting, chairId);
+            const turn = yield* dispatchMeetingTurn({
+              run,
+              route,
+              threadId: meetingThreadId,
+              title: `AI 회의: ${run.task}`,
+              prompt: buildMeetingPlanPrompt({
+                workspacePrompt: input.workspacePrompt,
+                task: run.task,
+                meeting,
+              }),
+            }).pipe(
+              Effect.map((value) => ({ ok: true as const, ...value })),
+              Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                Effect.succeed({ ok: false as const, message: error.message }),
+              ),
+            );
+            if (!turn.ok) {
+              yield* recordTurnFailure("plan", `Meeting planning turn failed: ${turn.message}`);
+              continue;
+            }
+            const raised = parseMeetingQuestion(turn.output);
+            if (raised !== null && !turn.output.includes("<t3_task_graph>")) {
+              const askedAt = yield* nowIso;
+              run = yield* persistRun({
+                ...run,
+                meeting: {
+                  ...meeting,
+                  pendingQuestion: {
+                    askedByParticipantId: chairId,
+                    question: raised.question,
+                    options: raised.options,
+                    context: raised.context,
+                    askedAt,
+                  },
+                },
+                updatedAt: askedAt,
+              });
+              continue;
+            }
+            const occurredAt = yield* nowIso;
+            let graph: WorkspaceTaskGraph;
+            try {
+              const planContext = meetingPlanContext(meeting);
+              const proposal = parseWorkspaceTaskGraphProposal(turn.output, planContext);
+              const finalRound = meeting.rounds.at(-1);
+              const agreement = [
+                "## 회의 합의",
+                proposal.summary,
+                ...(finalRound?.chairSummary == null
+                  ? []
+                  : ["", "## 마지막 의장 정리", finalRound.chairSummary]),
+                "",
+                "## 회의 전문",
+                renderMeetingTranscript(meeting),
+              ].join("\n");
+              graph = materializeWorkspaceTaskGraphPlan({
+                graph: buildMeetingSeededTaskGraph({
+                  task: run.task,
+                  agreement,
+                  chairParticipantId: chairId,
+                  occurredAt,
+                }),
+                proposal,
+                bindings: input.bindings,
+                meeting: planContext,
+                occurredAt,
+              });
+            } catch (error) {
+              yield* recordTurnFailure(
+                "plan",
+                `Meeting plan was rejected: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              continue;
+            }
+            run = yield* persistGraphRun(
+              { ...run, meeting: { ...meeting, phase: "executing" } },
+              graph,
+              input.bindings,
+              { status: "running", error: null, updatedAt: occurredAt },
+            );
+            continue;
+          }
+        }
+      }
+    },
+  );
+
   const chooseAttemptRoute = Effect.fn("WorkspaceCollaborationReactor.chooseAttemptRoute")(
-    function* (node: WorkspaceTaskNode, bindings: ReadonlyArray<WorkspaceAgentRoleBinding>) {
-      const binding = roleBinding(bindings, node.role);
-      if (binding === undefined) {
-        return yield* executionError(`Enabled role '${node.role}' is required for '${node.id}'.`);
+    function* (
+      node: WorkspaceTaskNode,
+      bindings: ReadonlyArray<WorkspaceAgentRoleBinding>,
+      meeting: WorkspaceMeeting | null,
+    ) {
+      const route = resolveNodeAssignmentRoute({ node, meeting, bindings });
+      if (route === null) {
+        return yield* executionError(
+          node.participantId === null
+            ? `Enabled role '${node.role}' is required for '${node.id}'.`
+            : `Meeting participant '${node.participantId}' is required for '${node.id}'.`,
+        );
       }
       if (node.attempts.length === 0) {
         return {
-          binding,
-          modelSelection: binding.modelSelection,
+          route,
+          modelSelection: route.modelSelection,
           strategy: "Primary role route selected by the validated task graph.",
+        } as const;
+      }
+
+      // A seat is an account the person named. Retrying it on a *different*
+      // account would silently execute as someone they did not pick, so a
+      // meeting node re-runs on its own seat with a changed approach instead.
+      if (node.participantId !== null) {
+        const previous = node.attempts.at(-1);
+        return {
+          route,
+          modelSelection: route.modelSelection,
+          // A completed previous attempt means the node parked on a question
+          // rather than failing; the re-run applies the person's answer.
+          strategy:
+            previous?.status === "completed"
+              ? "Resume after the user's answer. Apply the recorded user decisions and finish the node."
+              : `Previous attempt failed (${previous?.failureClassification ?? "unknown"}). Stay on this participant's account and use a materially different method, verifying the failure cause first.`,
         } as const;
       }
 
@@ -570,7 +1254,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         node.attempts.map((attempt) => attempt.modelSelection.instanceId),
       );
       const primary = instances.find(
-        (instance) => instance.instanceId === binding.modelSelection.instanceId,
+        (instance) => instance.instanceId === route.modelSelection.instanceId,
       );
       const expectedDriver =
         node.agent === "codex" ? "codex" : node.agent === "grok" ? "grok" : primary?.driverKind;
@@ -583,11 +1267,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       );
       const previous = node.attempts.at(-1);
       return {
-        binding,
+        route,
         modelSelection:
           alternative === undefined
-            ? binding.modelSelection
-            : { ...binding.modelSelection, instanceId: alternative.instanceId },
+            ? route.modelSelection
+            : { ...route.modelSelection, instanceId: alternative.instanceId },
         strategy:
           alternative === undefined
             ? `Previous attempt failed (${previous?.failureClassification ?? "unknown"}). Keep the configured account but use a materially different method and verify the failure cause first.`
@@ -603,21 +1287,29 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly nodes: ReadonlyArray<WorkspaceTaskNode>;
     }) {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
+      const meeting = input.run.meeting;
+      // A meeting is one shared conversation, and one conversation runs one
+      // turn at a time — its waves take a single node and leave the rest for
+      // the next wave. Role-bound runs keep their parallel per-attempt threads.
+      const waveNodes =
+        meeting === null ? input.nodes.slice(0, MAX_PARALLEL_GRAPH_NODES) : input.nodes.slice(0, 1);
       const startedNodes = yield* Effect.forEach(
-        input.nodes.slice(0, MAX_PARALLEL_GRAPH_NODES),
+        waveNodes,
         (node) =>
           Effect.gen(function* () {
-            const route = yield* chooseAttemptRoute(node, input.bindings);
+            const route = yield* chooseAttemptRoute(node, input.bindings, input.run.meeting);
             const startedAt = yield* nowIso;
+            const meetingThreadId =
+              meeting !== null && node.participantId !== null ? meeting.threadId : null;
             const attempt: WorkspaceTaskAttempt = {
               number: node.attempts.length + 1,
               agent: node.agent,
               role: node.role,
               modelSelection: route.modelSelection,
-              runtimeMode: route.binding.runtimeMode,
-              interactionMode: route.binding.interactionMode,
+              runtimeMode: route.route.runtimeMode,
+              interactionMode: route.route.interactionMode,
               strategy: route.strategy,
-              threadId: ThreadId.make(yield* randomUUID),
+              threadId: meetingThreadId ?? ThreadId.make(yield* randomUUID),
               status: "running",
               output: null,
               error: null,
@@ -666,16 +1358,30 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
       const graph = input.run.graph;
       const running = graph.nodes.filter((node) => node.status === "running");
-      const compatibilitySteps = graphCompatibilitySteps(graph, input.bindings);
-      const availableAgents = input.bindings
-        .filter(
-          (binding) =>
-            binding.enabled && ["coordinator", "implementer", "researcher"].includes(binding.role),
-        )
-        .map(
-          (binding) =>
-            `${binding.role}: ${binding.displayName} -> ${binding.modelSelection.instanceId} / ${binding.modelSelection.model}`,
-        );
+      const compatibilitySteps = graphCompatibilitySteps(graph, input.bindings, input.run.meeting);
+      // On a meeting run the roster is the cast; the project's role bindings are
+      // not consulted and must not be advertised as available executors.
+      const availableAgents =
+        input.run.meeting !== null
+          ? input.run.meeting.participants.map(
+              (participant) =>
+                `${participant.id}: ${participant.displayName} -> ${participant.modelSelection.instanceId} / ${participant.modelSelection.model}`,
+            )
+          : input.bindings
+              .filter(
+                (binding) =>
+                  binding.enabled &&
+                  ["coordinator", "implementer", "researcher"].includes(binding.role),
+              )
+              .map(
+                (binding) =>
+                  `${binding.role}: ${binding.displayName} -> ${binding.modelSelection.instanceId} / ${binding.modelSelection.model}`,
+              );
+      // Steps mirror the nodes in (order, id) order; matching by position keeps
+      // the lookup exact even when several nodes share one seat thread.
+      const sortedNodeIds = graph.nodes
+        .toSorted((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+        .map((node) => String(node.id));
       return yield* Effect.forEach(
         running,
         (node) => {
@@ -686,9 +1392,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               error: `Running node '${node.id}' has no attempt.`,
             });
           }
-          const step = compatibilitySteps.find(
-            (candidate) => candidate.threadId === attempt.threadId,
-          );
+          const step = compatibilitySteps[sortedNodeIds.indexOf(String(node.id))];
           if (step === undefined) {
             return Effect.succeed({
               nodeId: String(node.id),
@@ -704,9 +1408,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               graph,
               node,
               availableAgents,
+              meeting: input.run.meeting,
             }),
-            title: `${node.agent.toUpperCase()}: ${node.title}`,
-            expectedAgent: node.agent,
+            title:
+              node.participantId === null
+                ? `${node.agent.toUpperCase()}: ${node.title}`
+                : node.title,
+            // A seat's account is whatever the person picked; only role-bound
+            // nodes pin the provider driver to the agent.
+            ...(node.participantId === null ? { expectedAgent: node.agent } : {}),
+            // Anchors this attempt's turn inside the seat's reused conversation.
+            turnAfter: attempt.startedAt,
           }).pipe(
             Effect.map((output) => ({ nodeId: String(node.id), output })),
             Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
@@ -818,6 +1530,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       ...base,
       id: WorkspaceTaskNodeId.make(id),
       order: Math.max(...nodes.map((node) => node.order), 0) + 1,
+      // On a meeting run the chair, not a role binding, redesigns the graph.
+      participantId:
+        input.run.meeting === null ? null : resolveChairParticipantId(input.run.meeting),
       title: `${input.targetNode.title} 실패 복구 그래프 설계`,
       handoff: {
         ...base.handoff,
@@ -862,6 +1577,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
       let graph = input.run.graph;
       let finalOutput = input.run.finalOutput;
+      let meeting = input.run.meeting;
+      const planContext = meeting === null ? null : meetingPlanContext(meeting);
 
       for (const result of input.results) {
         const current = graph.nodes.find((node) => node.id === result.nodeId);
@@ -893,7 +1610,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 `Task graph revision limit ${MAX_GRAPH_REVISIONS} has been reached.`,
               );
             }
-            const proposal = parseWorkspaceTaskGraphProposal(result.output);
+            const proposal = parseWorkspaceTaskGraphProposal(result.output, planContext);
             if (
               current.failureClassification === "information" &&
               !proposal.nodes.some((node) => node.kind === "research")
@@ -932,6 +1649,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               graph,
               proposal,
               bindings: input.bindings,
+              meeting: planContext,
               occurredAt: completedAt,
               anchorNodeId: result.nodeId,
               ...(current.failureClassification === null
@@ -942,7 +1660,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           }
 
           if (current.kind === "validation") {
-            const decision = parseWorkspaceValidationDecision(result.output);
+            const decision = parseWorkspaceValidationDecision(result.output, planContext);
             if (current.validationTargetId === null) {
               throw new WorkspaceTaskGraphError(`Validation node '${current.id}' has no target.`);
             }
@@ -1064,6 +1782,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                     nodes: decision.followUpNodes,
                   },
                   bindings: input.bindings,
+                  meeting: planContext,
                   occurredAt: completedAt,
                   anchorNodeId: String(validationNode.id),
                   changeReason: failureChangeReason(classification),
@@ -1133,6 +1852,40 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             continue;
           }
 
+          // A meeting seat may pause its node on a question for the person. The
+          // attempt itself completed; the node re-queues once the answer lands.
+          if (
+            meeting !== null &&
+            current.participantId !== null &&
+            !STRUCTURED_NODE_KINDS.includes(current.kind)
+          ) {
+            const raised = parseMeetingQuestion(result.output);
+            if (raised !== null) {
+              graph = replaceGraphNode(graph, result.nodeId, {
+                ...withCompletedAttempt,
+                status: "awaiting-user",
+                output: null,
+                error: null,
+                completedAt: null,
+              });
+              // First asker wins the single question slot; later askers stay
+              // parked and can re-raise on their re-run.
+              if (meeting.pendingQuestion === null) {
+                meeting = {
+                  ...meeting,
+                  pendingQuestion: {
+                    askedByParticipantId: current.participantId,
+                    question: raised.question,
+                    options: raised.options,
+                    context: raised.context,
+                    askedAt: completedAt,
+                  },
+                };
+              }
+              continue;
+            }
+          }
+
           const completedNode: WorkspaceTaskNode = {
             ...withCompletedAttempt,
             status: current.agent === "fable" ? "completed" : "awaiting-validation",
@@ -1178,7 +1931,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           : graph.status === "failed"
             ? "failed"
             : "running";
-      return yield* persistGraphRun(input.run, graph, input.bindings, {
+      if (status === "completed" && meeting !== null) {
+        meeting = { ...meeting, phase: "done" };
+      }
+      return yield* persistGraphRun({ ...input.run, meeting }, graph, input.bindings, {
         status,
         finalOutput: status === "completed" ? finalOutput : null,
         error: status === "failed" ? graph.nextAction : null,
@@ -1191,7 +1947,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     runRef: RunRef,
   ) {
     let run = yield* getRun(runRef);
-    const bindings = yield* loadGraphBindings(run.projectId);
+    const bindings = yield* loadGraphBindings(run.projectId, run.meeting);
     if (
       run.source === "schedule" &&
       bindings.some(
@@ -1218,7 +1974,31 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       ragLimit: 12,
       maxContextChars: 40_000,
     });
+    yield* recordPromptUsage({
+      projectId: run.projectId,
+      sourceItemIds: workspacePrompt.sourceItemIds,
+    });
+
+    // A meeting is the run's leading phase: the seats discuss and the chair
+    // plans before any graph exists. Parked means the person owes an answer;
+    // the answered event re-enqueues the run.
+    if (
+      run.meeting !== null &&
+      (run.meeting.phase === "discussing" || run.meeting.phase === "planning")
+    ) {
+      const proceeded = yield* runMeetingPhase({
+        runRef,
+        bindings,
+        workspacePrompt: workspacePrompt.prompt,
+      });
+      if (!proceeded) return;
+      run = yield* getRun(runRef);
+    }
+
     if (run.graph === null) {
+      if (run.meeting !== null) {
+        return yield* executionError("Meeting run reached execution without a task graph.");
+      }
       const graph = buildInitialWorkspaceTaskGraph(run.task);
       run = yield* persistGraphRun(run, graph, bindings, {
         status: "running",
@@ -1230,6 +2010,21 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
 
     while (run.graph !== null && !["completed", "failed"].includes(run.graph.status)) {
       yield* requireRunContinuable(runRef);
+      if (run.meeting !== null) {
+        if (run.meeting.pendingQuestion !== null) return;
+        if (run.graph.nodes.some((node) => node.status === "awaiting-user")) {
+          // The person answered; parked seats rejoin the queue and re-run with
+          // the recorded decision in their prompt.
+          const graph = refreshWorkspaceTaskGraphQueue({
+            ...run.graph,
+            nodes: run.graph.nodes.map((node) =>
+              node.status === "awaiting-user" ? { ...node, status: "queued" as const } : node,
+            ),
+          });
+          run = yield* persistGraphRun(run, graph, bindings, { updatedAt: yield* nowIso });
+          continue;
+        }
+      }
       let running = run.graph.nodes.filter((node) => node.status === "running");
       if (running.length === 0) {
         const ready = readyWorkspaceTaskNodes(run.graph);
@@ -1310,6 +2105,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       includeLongTermMemory: true,
       ragLimit: 12,
       maxContextChars: 40_000,
+    });
+    yield* recordPromptUsage({
+      projectId: run.projectId,
+      sourceItemIds: workspacePrompt.sourceItemIds,
     });
 
     for (let index = 0; index < run.steps.length; index += 1) {
@@ -1412,7 +2211,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const settledAt = yield* nowIso;
       yield* Effect.forEach(
         run.steps.filter((step) => step.status === "running"),
-        (step) => interruptStepThread(runRef, step),
+        (step) => interruptThreadTurn(runRef, step.threadId),
         { concurrency: 1, discard: true },
       );
       const steps = run.steps.map((step) =>
@@ -1437,7 +2236,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 if (
                   node.status !== "running" &&
                   node.status !== "queued" &&
-                  node.status !== "awaiting-validation"
+                  node.status !== "awaiting-validation" &&
+                  node.status !== "awaiting-user"
                 ) {
                   return node;
                 }
@@ -1496,9 +2296,28 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const next = new Set(current);
       next.delete(key);
       return next;
-    }).pipe(Effect.andThen(TxRef.update(outstanding, (count) => count - 1).pipe(Effect.tx)));
+    }).pipe(
+      Effect.andThen(TxRef.update(outstanding, (count) => count - 1).pipe(Effect.tx)),
+      Effect.andThen(
+        SynchronizedRef.modify(rerunRequestsRef, (current) => {
+          const requested = current.get(key);
+          if (requested === undefined) return [undefined, current] as const;
+          const next = new Map(current);
+          next.delete(key);
+          return [requested, next] as const;
+        }).pipe(
+          Effect.flatMap((requested) =>
+            // Re-entering a settled run is a cheap no-op, so replaying is
+            // always safe; dropping a wake-up is not.
+            requested === undefined ? Effect.void : enqueue(requested),
+          ),
+        ),
+      ),
+    );
 
-  const enqueue = Effect.fn("WorkspaceCollaborationReactor.enqueue")(function* (runRef: RunRef) {
+  const enqueue: (runRef: RunRef) => Effect.Effect<void, never, Scope.Scope> = Effect.fn(
+    "WorkspaceCollaborationReactor.enqueue",
+  )(function* (runRef: RunRef) {
     const key = runKey(runRef);
     const claimed = yield* SynchronizedRef.modify(claimedRunsRef, (current) => {
       if (current.has(key)) return [false, current] as const;
@@ -1506,7 +2325,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       next.add(key);
       return [true, next] as const;
     });
-    if (!claimed) return;
+    if (!claimed) {
+      yield* SynchronizedRef.update(rerunRequestsRef, (current) => {
+        const next = new Map(current);
+        next.set(key, runRef);
+        return next;
+      });
+      return;
+    }
     yield* TxRef.update(outstanding, (count) => count + 1).pipe(Effect.tx);
     yield* forkParked(
       getWorkspaceSemaphore(runRef.projectId).pipe(
@@ -1579,6 +2405,16 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     if (event.type === "project.collaboration-run-requested") {
       return enqueueRequestedRun(event.payload.run, event.payload.preempt);
     }
+    if (event.type === "project.collaboration-run-answered") {
+      // The projection has already folded the answer in (projections apply
+      // before events are published), so re-entering the run sees it.
+      return enqueue({ projectId: event.payload.projectId, runId: event.payload.runId });
+    }
+    if (event.type === "project.collaboration-run-cancel-requested") {
+      // An actively executing run notices this through its own wait interrupts;
+      // a run parked on a question has no fiber, so the event must finalize it.
+      return enqueue({ projectId: event.payload.projectId, runId: event.payload.runId });
+    }
     if (event.type === "project.deleted") {
       return cancelProjectRuns(event.payload.projectId).pipe(
         Effect.catchCause((cause) =>
@@ -1617,7 +2453,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   );
 
   const start: WorkspaceCollaborationReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent));
+    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent), {
+      startImmediately: true,
+    });
     yield* enqueueStartupRuns;
   });
 

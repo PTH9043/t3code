@@ -67,10 +67,12 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "project.runtime.view":
     case "project.knowledge.item.upsert":
     case "project.knowledge.item.archive":
+    case "project.knowledge.usage.record":
     case "project.agent-role.upsert":
     case "project.agent-role.remove":
     case "project.collaboration.run.request":
     case "project.collaboration.run.cancel":
+    case "project.collaboration.run.answer":
     case "project.collaboration.run.schedule":
     case "project.schedule.upsert":
     case "project.schedule.remove":

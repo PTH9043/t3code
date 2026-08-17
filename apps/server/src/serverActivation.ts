@@ -8,19 +8,29 @@ export class ServerActivation extends Context.Reference<Effect.Effect<void> | un
   { defaultValue: () => undefined },
 ) {}
 
-/** Forks a long-running root before commit and proves it is parked at the activation boundary. */
+/**
+ * Forks a long-running root before commit and proves it is parked at the
+ * activation boundary.
+ *
+ * `startImmediately` runs the child synchronously up to its first suspension
+ * before this returns. An event-stream consumer needs it: its subscription is
+ * only established once the fiber runs, and events published before that are
+ * silently lost to it.
+ */
 export const forkParked = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
+  options?: { readonly startImmediately?: boolean },
 ): Effect.Effect<void, never, Scope.Scope | R> =>
   Effect.gen(function* () {
     const activation = yield* ServerActivation;
     if (activation === undefined) {
-      yield* Effect.forkScoped(effect);
+      yield* Effect.forkScoped(effect, options);
       return;
     }
     const parked = yield* Deferred.make<void>();
     yield* Effect.forkScoped(
       Deferred.succeed(parked, undefined).pipe(Effect.andThen(activation), Effect.andThen(effect)),
+      options,
     );
     yield* Deferred.await(parked);
   });

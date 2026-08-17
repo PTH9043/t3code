@@ -1634,6 +1634,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           ),
         ),
       ),
+      { startImmediately: true },
     );
     const integrityPrograms = yield* programRepository.listIntegrityPrograms().pipe(
       Effect.catchCause((cause) =>

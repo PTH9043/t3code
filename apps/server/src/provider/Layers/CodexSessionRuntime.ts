@@ -64,6 +64,13 @@ export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | un
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
 
+export function shouldReloadConfiguredMcpServerBeforeTurn(input: {
+  readonly appServerArgs: ReadonlyArray<string> | undefined;
+  readonly hasStartedTurn: boolean;
+}): boolean {
+  return input.hasStartedTurn && hasConfiguredMcpServer(input.appServerArgs);
+}
+
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
 });
@@ -1622,6 +1629,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
+    const hasStartedTurnRef = yield* Ref.make(false);
     yield* child.stderr.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
@@ -1749,7 +1757,13 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          if (hasConfiguredMcpServer(options.appServerArgs)) {
+          const hasStartedTurn = yield* Ref.getAndSet(hasStartedTurnRef, true);
+          if (
+            shouldReloadConfiguredMcpServerBeforeTurn({
+              appServerArgs: options.appServerArgs,
+              hasStartedTurn,
+            })
+          ) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
               Effect.catch((cause) =>
                 Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {

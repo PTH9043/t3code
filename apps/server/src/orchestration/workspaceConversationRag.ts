@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   WorkspaceKnowledgeItemId,
@@ -24,7 +24,7 @@ export interface ConversationRagCompaction {
 }
 
 function digest(value: string, length: number): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, length);
+  return NodeCrypto.createHash("sha256").update(value).digest("hex").slice(0, length);
 }
 
 function replaceSensitive(
@@ -119,18 +119,28 @@ function boundCompactedContent(
   };
 }
 
-export function compactConversationRagInput(
+/**
+ * Compaction limits without the conversation-specific setting names, so agent
+ * output capture reuses the same normalize → redact → deduplicate → bound
+ * pipeline instead of growing a second implementation that drifts from it.
+ */
+export interface KnowledgeCompactionLimits {
+  readonly redactSensitiveData: boolean;
+  readonly maxChars: number;
+}
+
+export function compactKnowledgeContent(
   input: string,
-  settings: WorkspaceConversationRagSettings,
+  limits: KnowledgeCompactionLimits,
 ): ConversationRagCompaction | null {
   const originalChars = input.length;
   const normalized = normalizeConversationInput(input);
   if (normalized.length === 0) return null;
-  const redacted = settings.redactSensitiveData
+  const redacted = limits.redactSensitiveData
     ? redactConversationRagSensitiveData(normalized)
     : { content: normalized, redactionCount: 0 };
   const deduplicated = deduplicateBlocks(redacted.content);
-  const bounded = boundCompactedContent(deduplicated.content, settings.maxInputChars);
+  const bounded = boundCompactedContent(deduplicated.content, limits.maxChars);
   if (bounded.content.length === 0) return null;
   return {
     content: bounded.content,
@@ -141,6 +151,20 @@ export function compactConversationRagInput(
     truncated: bounded.truncated,
     contentHash: digest(bounded.content, 32),
   };
+}
+
+export function knowledgeContentDigest(value: string, length: number): string {
+  return digest(value, length);
+}
+
+export function compactConversationRagInput(
+  input: string,
+  settings: WorkspaceConversationRagSettings,
+): ConversationRagCompaction | null {
+  return compactKnowledgeContent(input, {
+    redactSensitiveData: settings.redactSensitiveData,
+    maxChars: settings.maxInputChars,
+  });
 }
 
 function attachmentContext(attachments: ReadonlyArray<ChatAttachment>): string {
@@ -208,6 +232,10 @@ export function toConversationRagKnowledgeItem(input: {
         : []),
       ...(compacted.truncated ? ["bounded"] : []),
     ],
+    originalChars: compacted.originalChars,
+    storedChars: compacted.compactedChars,
+    promptUses: 0,
+    lastUsedAt: null,
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
   };

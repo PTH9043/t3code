@@ -26,12 +26,24 @@ export const ArchiveProjectionWorkspaceKnowledgeInput = Schema.Struct({
 export type ArchiveProjectionWorkspaceKnowledgeInput =
   typeof ArchiveProjectionWorkspaceKnowledgeInput.Type;
 
+export const RecordProjectionWorkspaceKnowledgeUsageInput = Schema.Struct({
+  projectId: ProjectId,
+  itemIds: Schema.Array(WorkspaceKnowledgeItemId),
+  usedAt: IsoDateTime,
+});
+export type RecordProjectionWorkspaceKnowledgeUsageInput =
+  typeof RecordProjectionWorkspaceKnowledgeUsageInput.Type;
+
 export interface ProjectionWorkspaceKnowledgeRepositoryShape {
   readonly upsert: (
     item: ProjectionWorkspaceKnowledgeItem,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly archive: (
     input: ArchiveProjectionWorkspaceKnowledgeInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+  /** Count one prompt composition against each item that went into it. */
+  readonly recordUsage: (
+    input: RecordProjectionWorkspaceKnowledgeUsageInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
   /** Remove derived conversation RAG copies while leaving canonical thread messages untouched. */
   readonly removeConversationInputs: (input: {

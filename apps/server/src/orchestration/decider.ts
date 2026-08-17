@@ -16,6 +16,7 @@ import {
   listThreadsByProjectId,
   requireActiveLongTermMemoryRootNonOverlapping,
   requireActiveProjectWorkspaceRootAbsent,
+  requireCoherentMeetingSetup,
   requireProject,
   requireProjectAbsent,
   requireThread,
@@ -267,6 +268,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             longTermMemoryRoot: command.longTermMemoryRoot ?? null,
             conversationRag:
               command.conversationRag ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+            agentKnowledge:
+              command.agentKnowledge ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS.agentKnowledge,
           },
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
@@ -342,6 +345,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               command.conversationRag ??
               project.workspaceControl?.conversationRag ??
               DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+            agentKnowledge:
+              command.agentKnowledge ??
+              project.workspaceControl?.agentKnowledge ??
+              DEFAULT_WORKSPACE_CONTROL_SETTINGS.agentKnowledge,
           },
           updatedAt: occurredAt,
         },
@@ -399,6 +406,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           origin: command.origin,
           relativeFolder: command.relativeFolder,
           tags: command.tags,
+          originalChars: command.originalChars ?? null,
+          storedChars: command.storedChars ?? null,
           updatedAt: command.createdAt,
         },
       };
@@ -422,6 +431,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           itemId: command.itemId,
           archivedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.knowledge.usage.record": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.usedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.knowledge-usage-recorded",
+        payload: {
+          projectId: command.projectId,
+          // Duplicates would double-count a single composition; the projection
+          // adds one use per item per event.
+          itemIds: [...new Set(command.itemIds)],
+          usedAt: command.usedAt,
         },
       };
     }
@@ -482,6 +515,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
+      if (command.meeting !== undefined) {
+        yield* requireCoherentMeetingSetup({
+          commandType: command.type,
+          participantIds: command.meeting.participants.map((participant) => participant.id),
+          chairParticipantId: command.meeting.chairParticipantId,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "project",
@@ -501,6 +541,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             status: "queued",
             steps: [],
             graph: null,
+            // The setup is the roster and the rules; everything the meeting
+            // accumulates starts empty and is server-owned from here on.
+            meeting:
+              command.meeting === undefined
+                ? null
+                : {
+                    ...command.meeting,
+                    phase: "discussing",
+                    threadId: null,
+                    rounds: [],
+                    pendingQuestion: null,
+                    answers: [],
+                  },
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -538,11 +591,37 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             status: "queued",
             steps: [],
             graph: null,
+            // Schedules carry no roster: nobody is at the keyboard to pick one.
+            meeting: null,
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
           },
+        },
+      };
+    }
+
+    case "project.collaboration.run.answer": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-answered",
+        payload: {
+          projectId: command.projectId,
+          runId: command.runId,
+          question: command.question,
+          answer: command.answer,
+          answeredAt: command.createdAt,
         },
       };
     }
@@ -860,6 +939,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             status: "queued",
             steps: [],
             graph: null,
+            // Incident repair is started by the integrity loop, not a person.
+            meeting: null,
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,

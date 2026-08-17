@@ -287,7 +287,9 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
   );
 
   const start: WorkspaceSchedulerReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent));
+    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent), {
+      startImmediately: true,
+    });
     yield* enqueueStartupReconciliation;
     yield* reconciliationWorker.drain;
     yield* forkParked(Effect.forever(tick.pipe(Effect.andThen(Effect.sleep(TICK_INTERVAL)))));

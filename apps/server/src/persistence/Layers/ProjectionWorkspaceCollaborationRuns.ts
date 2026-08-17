@@ -3,6 +3,7 @@ import {
   WorkspaceCollaborationRun,
   WorkspaceCollaborationRunId,
   WorkspaceCollaborationStep,
+  WorkspaceMeeting,
   WorkspaceTaskGraph,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -18,10 +19,12 @@ import {
   type ProjectionWorkspaceCollaborationRunRepositoryShape,
 } from "../Services/ProjectionWorkspaceCollaborationRuns.ts";
 
+const MeetingColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceMeeting));
 const DbRow = WorkspaceCollaborationRun.mapFields(
   Struct.assign({
     steps: Schema.fromJsonString(Schema.Array(WorkspaceCollaborationStep)),
     graph: Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
+    meeting: MeetingColumn,
   }),
 );
 const RunLookup = Schema.Struct({ projectId: ProjectId, runId: WorkspaceCollaborationRunId });
@@ -32,6 +35,8 @@ const encodeSteps = Schema.encodeUnknownSync(
 const encodeGraph = Schema.encodeUnknownSync(
   Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
 );
+const encodeMeeting = Schema.encodeUnknownSync(MeetingColumn);
+const decodeMeeting = Schema.decodeUnknownSync(MeetingColumn);
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -45,6 +50,7 @@ const make = Effect.gen(function* () {
     status,
     steps_json AS steps,
     graph_json AS graph,
+    meeting_json AS meeting,
     final_output AS "finalOutput",
     error,
     created_at AS "createdAt",
@@ -84,10 +90,11 @@ const make = Effect.gen(function* () {
     sql`
       INSERT INTO projection_workspace_collaboration_runs (
         run_id, project_id, source, schedule_id, incident_id, task, status, steps_json, graph_json,
-        final_output, error, created_at, updated_at
+        meeting_json, final_output, error, created_at, updated_at
       ) VALUES (
         ${run.id}, ${run.projectId}, ${run.source}, ${run.scheduleId}, ${run.incidentId},
         ${run.task}, ${run.status}, ${encodeSteps(run.steps)}, ${encodeGraph(run.graph)},
+        ${encodeMeeting(run.meeting)},
         ${run.finalOutput}, ${run.error}, ${run.createdAt}, ${run.updatedAt}
       )
       ON CONFLICT(run_id) DO UPDATE SET
@@ -98,6 +105,7 @@ const make = Effect.gen(function* () {
         status = excluded.status,
         steps_json = excluded.steps_json,
         graph_json = excluded.graph_json,
+        meeting_json = excluded.meeting_json,
         final_output = excluded.final_output,
         error = excluded.error,
         updated_at = excluded.updated_at
@@ -147,6 +155,55 @@ const make = Effect.gen(function* () {
       ? toPersistenceDecodeError(`${operation}:decode`)(cause)
       : toPersistenceSqlError(`${operation}:query`)(cause);
 
+  /**
+   * Clears the question the run is parked on and appends the person's answer.
+   *
+   * Read-modify-write rather than a `json_set` expression: the answer has to be
+   * matched against the question actually pending, so a client that was showing
+   * a superseded question cannot answer the one that replaced it. A mismatch is
+   * a no-op, not an error — the run has already moved on.
+   */
+  const recordAnswer: ProjectionWorkspaceCollaborationRunRepositoryShape["recordAnswer"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        readonly meeting: string | null;
+      }>`SELECT meeting_json AS meeting FROM projection_workspace_collaboration_runs
+         WHERE project_id = ${input.projectId} AND run_id = ${input.runId} LIMIT 1`.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordAnswer:select"),
+        ),
+      );
+      const raw = rows[0]?.meeting;
+      if (raw === undefined || raw === null) return;
+
+      const meeting = yield* Effect.try({
+        try: () => decodeMeeting(raw),
+        catch: decodeError("ProjectionWorkspaceCollaborationRuns.recordAnswer"),
+      });
+      if (meeting === null || meeting.pendingQuestion?.question !== input.question) return;
+
+      const next = {
+        ...meeting,
+        pendingQuestion: null,
+        answers: [
+          ...meeting.answers,
+          { question: input.question, answer: input.answer, answeredAt: input.answeredAt },
+        ],
+      };
+      yield* sql`
+        UPDATE projection_workspace_collaboration_runs
+        SET meeting_json = ${encodeMeeting(next)}, updated_at = ${input.answeredAt}
+        WHERE project_id = ${input.projectId} AND run_id = ${input.runId}
+      `.pipe(
+        Effect.asVoid,
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordAnswer:update"),
+        ),
+      );
+    });
+
   const getById: ProjectionWorkspaceCollaborationRunRepositoryShape["getById"] = (input) =>
     getRow(input).pipe(
       Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.getById")),
@@ -170,6 +227,7 @@ const make = Effect.gen(function* () {
   return ProjectionWorkspaceCollaborationRunRepository.of({
     upsert,
     requestCancel,
+    recordAnswer,
     getById,
     list,
     listResumable,

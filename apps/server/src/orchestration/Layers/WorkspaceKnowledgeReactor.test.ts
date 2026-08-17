@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   EventId,
   ProjectId,
@@ -36,6 +37,10 @@ const item: WorkspaceKnowledgeItem = {
   origin: "user",
   relativeFolder: null,
   tags: [],
+  originalChars: null,
+  storedChars: null,
+  promptUses: 0,
+  lastUsedAt: null,
   createdAt: now,
   updatedAt: now,
 };
@@ -49,6 +54,7 @@ const project: OrchestrationProjectShell = {
     isolationMode: "strict",
     longTermMemoryRoot: "F:/NewAutoUsage/workspaces/workspace-a/memory/long-term",
     conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+    agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   },
   createdAt: now,
   updatedAt: now,
@@ -74,6 +80,8 @@ const upserted: OrchestrationEvent = {
     origin: item.origin,
     relativeFolder: item.relativeFolder,
     tags: item.tags,
+    originalChars: null,
+    storedChars: null,
     updatedAt: now,
   },
 };

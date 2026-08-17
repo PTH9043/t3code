@@ -574,7 +574,11 @@ const make = Effect.gen(function* () {
         createdAt,
       });
     }
-    if (thread.session !== null) {
+    // Only a LIVE session binds the thread to its provider. A stopped or dead
+    // session releases the binding: the next turn's model selection starts a
+    // fresh session, which is how a meeting thread hands the same conversation
+    // from one seat's provider to the next.
+    if (activeThreadSession !== null) {
       yield* rejectStartedThreadModelChangeIfRequired({
         threadId,
         currentModelSelection:
@@ -589,7 +593,7 @@ const make = Effect.gen(function* () {
       });
     }
     if (
-      thread.session !== null &&
+      activeThreadSession !== null &&
       requestedModelSelection !== undefined &&
       requestedModelSelection.instanceId !== currentInstanceId
     ) {
@@ -1413,7 +1417,9 @@ const make = Effect.gen(function* () {
       }
     });
 
-    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent));
+    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent), {
+      startImmediately: true,
+    });
 
     // The domain event stream is hot, so work pending before this reactor
     // starts cannot be resumed. Correlated completions only clear the request

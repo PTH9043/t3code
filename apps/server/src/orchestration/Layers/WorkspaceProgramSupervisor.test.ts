@@ -311,6 +311,7 @@ function supervisorHarness(input: {
     Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, {
       upsert: () => Effect.void,
       requestCancel: () => Effect.void,
+      recordAnswer: () => Effect.void,
       getById: () => Effect.succeed(Option.none()),
       list: () => Effect.succeed([]),
       listResumable: () => Effect.succeed([]),

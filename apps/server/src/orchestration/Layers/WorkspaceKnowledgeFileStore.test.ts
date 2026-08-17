@@ -38,6 +38,10 @@ function memoryItem(input: {
     origin: "user",
     relativeFolder: input.relativeFolder ?? null,
     tags: ["workspace-only"],
+    originalChars: null,
+    storedChars: null,
+    promptUses: 0,
+    lastUsedAt: null,
     createdAt: "2026-08-08T00:00:00.000Z",
     updatedAt: input.updatedAt ?? "2026-08-08T01:00:00.000Z",
   };

@@ -1,8 +1,9 @@
-import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { ProjectId, ProviderInstanceId, WorkspaceMeetingParticipantId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildInitialWorkspaceTaskGraph,
+  buildMeetingSeededTaskGraph,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -137,5 +138,93 @@ describe("Workspace task graph", () => {
     expect(synthesis.memoryCandidates).toHaveLength(1);
     expect(synthesis.confidence).toBe("high");
     expect(synthesis).toMatchObject({ conflictDetected: false, nextAction: "완료" });
+  });
+});
+
+describe("Workspace meeting task graph", () => {
+  const seats = {
+    participantIds: [
+      WorkspaceMeetingParticipantId.make("p1"),
+      WorkspaceMeetingParticipantId.make("p2"),
+    ],
+    chairParticipantId: WorkspaceMeetingParticipantId.make("p1"),
+  };
+
+  it("validates plan assignments against the roster instead of the agent whitelist", () => {
+    const proposal = parseWorkspaceTaskGraphProposal(
+      taggedPlan([node({ id: "build", kind: "implementation", participantId: "p2" })]),
+      seats,
+    );
+    // The chair names a seat; the agent is derived from the kind so the
+    // kind-based recovery rules keep their meaning.
+    expect(proposal.nodes[0]).toMatchObject({ participantId: "p2", agent: "codex" });
+
+    expect(() =>
+      parseWorkspaceTaskGraphProposal(
+        taggedPlan([node({ id: "build", kind: "implementation", participantId: "ghost" })]),
+        seats,
+      ),
+    ).toThrow(/not a meeting seat/);
+    expect(() =>
+      parseWorkspaceTaskGraphProposal(
+        taggedPlan([node({ id: "build", kind: "implementation" })]),
+        seats,
+      ),
+    ).toThrow(/participantId/);
+  });
+
+  it("materializes a meeting plan without role bindings and seats the chair on the gates", () => {
+    const seeded = buildMeetingSeededTaskGraph({
+      task: "기능 구현",
+      agreement: "## 회의 합의\n서버에 구현한다.",
+      chairParticipantId: seats.chairParticipantId,
+      occurredAt: "2026-08-17T00:00:00.000Z",
+    });
+    expect(seeded.nodes).toHaveLength(1);
+    expect(seeded.nodes[0]).toMatchObject({
+      id: "plan",
+      status: "completed",
+      participantId: "p1",
+      output: "## 회의 합의\n서버에 구현한다.",
+    });
+
+    const graph = materializeWorkspaceTaskGraphPlan({
+      graph: seeded,
+      proposal: parseWorkspaceTaskGraphProposal(
+        taggedPlan([
+          node({ id: "research", kind: "research", participantId: "p1" }),
+          node({ id: "build", kind: "implementation", participantId: "p2" }),
+        ]),
+        seats,
+      ),
+      bindings: [],
+      meeting: seats,
+      occurredAt: "2026-08-17T00:00:00.000Z",
+    });
+    expect(readyWorkspaceTaskNodes(graph).map((item) => item.id)).toEqual(["research", "build"]);
+    expect(graph.nodes.find((item) => item.id === "build")?.participantId).toBe("p2");
+    const gates = graph.nodes.filter((item) => item.kind === "validation");
+    expect(gates).toHaveLength(2);
+    expect(gates.every((item) => item.participantId === "p1")).toBe(true);
+    expect(graph.nodes.find((item) => item.kind === "synthesis")?.participantId).toBe("p1");
+  });
+
+  it("keeps requiring role bindings when no meeting is attached", () => {
+    const planned = {
+      ...buildInitialWorkspaceTaskGraph("기능 구현"),
+      nodes: buildInitialWorkspaceTaskGraph("기능 구현").nodes.map((item) => ({
+        ...item,
+        status: "completed" as const,
+        output: "계획",
+      })),
+    };
+    expect(() =>
+      materializeWorkspaceTaskGraphPlan({
+        graph: planned,
+        proposal: parseWorkspaceTaskGraphProposal(taggedPlan([node({ id: "research" })])),
+        bindings: [],
+        occurredAt: "2026-08-17T00:00:00.000Z",
+      }),
+    ).toThrow(/binding/);
   });
 });

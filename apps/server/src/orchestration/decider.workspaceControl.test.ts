@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   ProjectId,
   type OrchestrationEvent,
@@ -47,6 +48,7 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
         isolationMode: "strict",
         longTermMemoryRoot: "F:/NewAutoUsage/workspaces/workspace-a/memory/long-term",
         conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+        agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
       });
     }),
   );
@@ -100,6 +102,44 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
           enabled: false,
           redactSensitiveData: true,
           maxInputChars: 12_000,
+        },
+        agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+      });
+
+      // A later update that only touches agent capture must not reset the
+      // conversation settings the previous update established.
+      const agentUpdated = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.workspace-control.update",
+            commandId: CommandId.make("update-workspace-a-agent-knowledge"),
+            projectId,
+            longTermMemoryRoot: "F:/LongMemory/workspace-a",
+            agentKnowledge: {
+              enabled: false,
+              redactSensitiveData: false,
+              maxOutputChars: 60_000,
+            },
+          },
+          readModel: updatedModel,
+        }),
+      );
+      const agentUpdatedModel = yield* projectEvent(updatedModel, {
+        ...agentUpdated,
+        sequence: 3,
+      } as OrchestrationEvent);
+      expect(agentUpdatedModel.projects[0]?.workspaceControl).toEqual({
+        isolationMode: "strict",
+        longTermMemoryRoot: "F:/LongMemory/workspace-a",
+        conversationRag: {
+          enabled: false,
+          redactSensitiveData: true,
+          maxInputChars: 12_000,
+        },
+        agentKnowledge: {
+          enabled: false,
+          redactSensitiveData: false,
+          maxOutputChars: 60_000,
         },
       });
     }),

@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   EventId,
   MessageId,
   ProjectId,
@@ -243,6 +244,7 @@ layer("automatic conversation RAG projection", (it) => {
               redactSensitiveData: true,
               maxInputChars: 24_000,
             },
+            agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
           },
           updatedAt: now,
         },

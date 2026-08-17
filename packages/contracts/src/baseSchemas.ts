@@ -68,6 +68,16 @@ export const WorkspaceTaskNodeId = TrimmedNonEmptyString.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
 ).pipe(Schema.brand("WorkspaceTaskNodeId"));
 export type WorkspaceTaskNodeId = typeof WorkspaceTaskNodeId.Type;
+/**
+ * A seat at a meeting, not a provider. Two participants can share one provider
+ * instance (the same account brought in twice under different remits), so the
+ * roster — never the instance id — is what a task node is assigned to.
+ */
+export const WorkspaceMeetingParticipantId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+).pipe(Schema.brand("WorkspaceMeetingParticipantId"));
+export type WorkspaceMeetingParticipantId = typeof WorkspaceMeetingParticipantId.Type;
 export const WorkspaceScheduleId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(64),
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),

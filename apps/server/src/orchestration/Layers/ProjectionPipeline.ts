@@ -760,6 +760,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             origin: event.payload.origin,
             relativeFolder: event.payload.relativeFolder,
             tags: event.payload.tags,
+            originalChars: event.payload.originalChars,
+            storedChars: event.payload.storedChars,
+            // An upsert must not disturb the usage counters: re-registering an
+            // item the agents keep producing would otherwise reset the very
+            // measure of whether it is worth keeping.
+            promptUses: 0,
+            lastUsedAt: null,
             createdAt: event.payload.updatedAt,
             updatedAt: event.payload.updatedAt,
           });
@@ -770,6 +777,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             itemId: event.payload.itemId,
             archivedAt: event.payload.archivedAt,
+          });
+          return;
+
+        case "project.knowledge-usage-recorded":
+          yield* projectionWorkspaceKnowledgeRepository.recordUsage({
+            projectId: event.payload.projectId,
+            itemIds: event.payload.itemIds,
+            usedAt: event.payload.usedAt,
           });
           return;
 
@@ -844,6 +859,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             content: event.payload.content,
             status: event.payload.status,
             origin: event.payload.origin,
+            // The RAG index chunks text; usage counters and compaction sizes
+            // live on the knowledge projection and are not part of the search.
+            originalChars: null,
+            storedChars: null,
+            promptUses: 0,
+            lastUsedAt: null,
             relativeFolder: event.payload.relativeFolder,
             tags: event.payload.tags,
             createdAt: event.payload.updatedAt,
@@ -938,6 +959,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             runId: event.payload.runId,
             cancelledAt: event.payload.cancelledAt,
+          });
+          return;
+        case "project.collaboration-run-answered":
+          yield* projectionWorkspaceCollaborationRunRepository.recordAnswer({
+            projectId: event.payload.projectId,
+            runId: event.payload.runId,
+            question: event.payload.question,
+            answer: event.payload.answer,
+            answeredAt: event.payload.answeredAt,
           });
           return;
         default:

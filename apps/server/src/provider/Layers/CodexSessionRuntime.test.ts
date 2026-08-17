@@ -19,6 +19,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  shouldReloadConfiguredMcpServerBeforeTurn,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -314,6 +315,37 @@ describe("hasConfiguredMcpServer", () => {
     NodeAssert.equal(
       hasConfiguredMcpServer(["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"']),
       true,
+    );
+  });
+});
+
+describe("shouldReloadConfiguredMcpServerBeforeTurn", () => {
+  const appServerArgs = ["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"'];
+
+  it("does not interrupt MCP startup before the first turn", () => {
+    NodeAssert.equal(
+      shouldReloadConfiguredMcpServerBeforeTurn({
+        appServerArgs,
+        hasStartedTurn: false,
+      }),
+      false,
+    );
+  });
+
+  it("refreshes configured MCP servers before later turns", () => {
+    NodeAssert.equal(
+      shouldReloadConfiguredMcpServerBeforeTurn({
+        appServerArgs,
+        hasStartedTurn: true,
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      shouldReloadConfiguredMcpServerBeforeTurn({
+        appServerArgs: undefined,
+        hasStartedTurn: true,
+      }),
+      false,
     );
   });
 });

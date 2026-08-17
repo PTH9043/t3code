@@ -22,6 +22,7 @@ import {
   TurnId,
   WorkspaceKnowledgeItemId,
   WorkspaceCollaborationRunId,
+  WorkspaceMeetingParticipantId,
   WorkspaceTaskNodeId,
   WorkspaceScheduleId,
   WorkspaceProgramId,
@@ -250,11 +251,34 @@ export const DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS: WorkspaceConversationR
   maxInputChars: 24_000,
 };
 
+/**
+ * Capture of what the agents themselves produced during a collaboration run.
+ *
+ * Conversation RAG stores what the user typed; this stores every graph node
+ * output the agents returned, so research findings and implementation evidence
+ * become searchable material instead of living only inside the run record.
+ */
+export const WorkspaceAgentKnowledgeSettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  redactSensitiveData: Schema.Boolean,
+  maxOutputChars: Schema.Int.check(Schema.isBetween({ minimum: 2_000, maximum: 120_000 })),
+});
+export type WorkspaceAgentKnowledgeSettings = typeof WorkspaceAgentKnowledgeSettings.Type;
+
+export const DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS: WorkspaceAgentKnowledgeSettings = {
+  enabled: true,
+  redactSensitiveData: true,
+  maxOutputChars: 24_000,
+};
+
 export const WorkspaceControlSettings = Schema.Struct({
   isolationMode: Schema.Literal("strict"),
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
   conversationRag: WorkspaceConversationRagSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS)),
+  ),
+  agentKnowledge: WorkspaceAgentKnowledgeSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS)),
   ),
 });
 export type WorkspaceControlSettings = typeof WorkspaceControlSettings.Type;
@@ -263,6 +287,7 @@ export const DEFAULT_WORKSPACE_CONTROL_SETTINGS: WorkspaceControlSettings = {
   isolationMode: "strict",
   longTermMemoryRoot: null,
   conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+  agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
 };
 
 export const WorkspaceKnowledgeKind = Schema.Literals([
@@ -311,6 +336,24 @@ export const WorkspaceKnowledgeItem = Schema.Struct({
   origin: WorkspaceKnowledgeOrigin,
   relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
   tags: Schema.Array(TrimmedNonEmptyString),
+  /**
+   * How many agent prompts this item was actually composed into, and when it
+   * last happened. Automatic capture makes knowledge cheap to accumulate, so
+   * without this a project cannot tell durable material apart from noise that
+   * has never once reached a model.
+   */
+  promptUses: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  lastUsedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /**
+   * Characters before and after automatic compaction. Null for items a user
+   * wrote directly, which were never compacted. These were previously encoded
+   * as `original-chars-N` tags, which display fine but cannot be summed,
+   * sorted or compared — the dashboard needs numbers.
+   */
+  originalChars: Schema.NullOr(NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  storedChars: Schema.NullOr(NonNegativeInt).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -426,6 +469,11 @@ export const WorkspaceTaskNodeStatus = Schema.Literals([
   "queued",
   "running",
   "awaiting-validation",
+  /**
+   * Parked on a question only the person can settle. Distinct from `blocked`,
+   * which waits on another node: nothing the graph does on its own clears this.
+   */
+  "awaiting-user",
   "completed",
   "failed",
   "cancelled",
@@ -542,6 +590,15 @@ export const WorkspaceTaskNode = Schema.Struct({
   kind: WorkspaceTaskNodeKind,
   agent: WorkspaceOrchestrationAgent,
   role: WorkspaceAgentRole,
+  /**
+   * Set on meeting runs, where the person picked the roster and the seats —
+   * not the project's role bindings — decide who executes. Null on role-bound
+   * runs, including every run recorded before meetings existed, so `agent` and
+   * `role` remain the assignment of record there.
+   */
+  participantId: Schema.NullOr(WorkspaceMeetingParticipantId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   handoff: WorkspaceTaskHandoff,
   dependsOn: Schema.Array(WorkspaceTaskNodeId),
@@ -650,6 +707,125 @@ export const WorkspaceCollaborationRunSource = Schema.Literals([
 ]);
 export type WorkspaceCollaborationRunSource = typeof WorkspaceCollaborationRunSource.Type;
 
+/**
+ * How a meeting decides it is finished. Orthogonal to the chair and to
+ * user-in-the-loop, which are settings rather than modes: every one of the
+ * three can run with or without either.
+ */
+export const WorkspaceMeetingMode = Schema.Literals([
+  /** Exactly `maxRounds` rounds, then plan. Predictable cost. */
+  "fixed-rounds",
+  /** Chair judges each round; stops early on agreement, capped at `maxRounds`. */
+  "until-consensus",
+  /** Chair nominates the next speaker instead of running everyone each round. */
+  "free-form",
+]);
+export type WorkspaceMeetingMode = typeof WorkspaceMeetingMode.Type;
+
+export const WorkspaceMeetingPhase = Schema.Literals([
+  "discussing",
+  "planning",
+  "executing",
+  "done",
+]);
+export type WorkspaceMeetingPhase = typeof WorkspaceMeetingPhase.Type;
+
+/**
+ * One seat. `modelSelection` is captured when the run starts so a meeting
+ * already under way is not re-routed by a later settings change.
+ */
+export const WorkspaceMeetingParticipant = Schema.Struct({
+  id: WorkspaceMeetingParticipantId,
+  displayName: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  modelSelection: ModelSelection,
+});
+export type WorkspaceMeetingParticipant = typeof WorkspaceMeetingParticipant.Type;
+
+export const WorkspaceMeetingStatement = Schema.Struct({
+  participantId: WorkspaceMeetingParticipantId,
+  content: Schema.String.check(Schema.isMaxLength(20_000)),
+  /** Seats this statement argues with. Empty in round 1, where nobody has spoken yet. */
+  respondsTo: Schema.Array(WorkspaceMeetingParticipantId),
+  threadId: Schema.NullOr(ThreadId),
+  recordedAt: IsoDateTime,
+});
+export type WorkspaceMeetingStatement = typeof WorkspaceMeetingStatement.Type;
+
+export const WorkspaceMeetingRound = Schema.Struct({
+  index: NonNegativeInt,
+  statements: Schema.Array(WorkspaceMeetingStatement),
+  /** Null until the chair has closed the round. */
+  chairSummary: Schema.NullOr(Schema.String.check(Schema.isMaxLength(20_000))),
+  /** Only `until-consensus` sets this; the other modes leave it null. */
+  consensusReached: Schema.NullOr(Schema.Boolean),
+});
+export type WorkspaceMeetingRound = typeof WorkspaceMeetingRound.Type;
+
+/**
+ * A question that stops the run until the person answers. One shape serves both
+ * triggers — the per-round check-in that `userInLoop` schedules, and an agent
+ * hitting something it cannot settle — because the run pauses identically for
+ * both and resuming is the same command.
+ */
+export const WorkspaceMeetingQuestion = Schema.Struct({
+  /** Null when the server raised the round check-in rather than a seat asking. */
+  askedByParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
+  question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  /** Suggested answers. Free text is always allowed, so this may be empty. */
+  options: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))),
+  context: Schema.String.check(Schema.isMaxLength(20_000)),
+  askedAt: IsoDateTime,
+});
+export type WorkspaceMeetingQuestion = typeof WorkspaceMeetingQuestion.Type;
+
+export const WorkspaceMeeting = Schema.Struct({
+  mode: WorkspaceMeetingMode,
+  phase: WorkspaceMeetingPhase,
+  participants: Schema.Array(WorkspaceMeetingParticipant).check(
+    Schema.isMinLength(2),
+    Schema.isMaxLength(8),
+  ),
+  /**
+   * The one conversation window the whole meeting lives in. Every turn —
+   * statements, chair duties, the seats' share of execution — runs in this
+   * thread, each on its own provider session. Null decodes runs recorded
+   * before the field existed; the reactor assigns it on first use.
+   */
+  threadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Null means elect one — the reactor takes the first seat. */
+  chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
+  maxRounds: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
+  userInLoop: Schema.Boolean,
+  rounds: Schema.Array(WorkspaceMeetingRound),
+  pendingQuestion: Schema.NullOr(WorkspaceMeetingQuestion),
+  /** Answers already given, oldest first, so a resumed run keeps the person's steer. */
+  answers: Schema.Array(
+    Schema.Struct({
+      question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+      answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+      answeredAt: IsoDateTime,
+    }),
+  ),
+});
+export type WorkspaceMeeting = typeof WorkspaceMeeting.Type;
+
+/**
+ * What a client sends to open a meeting: the roster and the rules, with none of
+ * the transcript. Everything else on `WorkspaceMeeting` is server-owned state,
+ * so a client cannot inject rounds or pre-answer its own questions.
+ */
+export const WorkspaceMeetingSetup = Schema.Struct({
+  mode: WorkspaceMeetingMode,
+  participants: Schema.Array(WorkspaceMeetingParticipant).check(
+    Schema.isMinLength(2),
+    Schema.isMaxLength(8),
+  ),
+  chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
+  maxRounds: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
+  userInLoop: Schema.Boolean,
+});
+export type WorkspaceMeetingSetup = typeof WorkspaceMeetingSetup.Type;
+
 export const WorkspaceCollaborationRun = Schema.Struct({
   id: WorkspaceCollaborationRunId,
   projectId: ProjectId,
@@ -662,6 +838,12 @@ export const WorkspaceCollaborationRun = Schema.Struct({
   status: WorkspaceCollaborationRunStatus,
   steps: Schema.Array(WorkspaceCollaborationStep),
   graph: Schema.NullOr(WorkspaceTaskGraph).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /**
+   * Set only on runs the person started from the model picker. Null decodes the
+   * role-bound path — every run recorded before meetings existed, plus schedule
+   * and integrity runs, which have no roster to speak of.
+   */
+  meeting: Schema.NullOr(WorkspaceMeeting).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   finalOutput: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
   createdAt: IsoDateTime,
@@ -1457,6 +1639,7 @@ export const ProjectCreateCommand = Schema.Struct({
   longTermMemoryRoot: Schema.optional(TrimmedNonEmptyString),
   createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
   conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
+  agentKnowledge: Schema.optionalKey(WorkspaceAgentKnowledgeSettings),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   createdAt: IsoDateTime,
 });
@@ -1477,6 +1660,7 @@ const ProjectWorkspaceControlUpdateCommand = Schema.Struct({
   projectId: ProjectId,
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
   conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
+  agentKnowledge: Schema.optionalKey(WorkspaceAgentKnowledgeSettings),
   createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
 });
 
@@ -1500,6 +1684,9 @@ const ProjectKnowledgeItemUpsertCommand = Schema.Struct({
   origin: WorkspaceKnowledgeOrigin,
   relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
   tags: Schema.Array(TrimmedNonEmptyString),
+  /** Set by automatic capture; omitted for material a user wrote directly. */
+  originalChars: Schema.optionalKey(NonNegativeInt),
+  storedChars: Schema.optionalKey(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 
@@ -1509,6 +1696,19 @@ const ProjectKnowledgeItemArchiveCommand = Schema.Struct({
   projectId: ProjectId,
   itemId: WorkspaceKnowledgeItemId,
   createdAt: IsoDateTime,
+});
+
+/**
+ * Recorded when knowledge is composed into a prompt an agent actually runs.
+ * Deliberately not emitted for the control center's prompt preview: the point
+ * is to measure what reached a model, not what a user looked at.
+ */
+const ProjectKnowledgeUsageRecordCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.usage.record"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  itemIds: Schema.Array(WorkspaceKnowledgeItemId),
+  usedAt: IsoDateTime,
 });
 
 const ProjectAgentRoleUpsertCommand = Schema.Struct({
@@ -1546,6 +1746,27 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
    * true for a person's request, false for anything the server starts on its own.
    */
   preempt: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Present when the person opened this from the model picker's meeting mode.
+   * Absent keeps the role-bound path, which is what schedules and the integrity
+   * loop send.
+   */
+  meeting: Schema.optionalKey(WorkspaceMeetingSetup),
+  createdAt: IsoDateTime,
+});
+
+/**
+ * Settles the run's `pendingQuestion` and lets it continue. Carries the question
+ * text it answers so a stale client cannot answer a question that has already
+ * been superseded.
+ */
+const ProjectCollaborationRunAnswerCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.answer"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  projectId: ProjectId,
+  question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   createdAt: IsoDateTime,
 });
 
@@ -1920,10 +2141,12 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectRuntimeViewCommand,
   ProjectKnowledgeItemUpsertCommand,
   ProjectKnowledgeItemArchiveCommand,
+  ProjectKnowledgeUsageRecordCommand,
   ProjectAgentRoleUpsertCommand,
   ProjectAgentRoleRemoveCommand,
   ProjectCollaborationRunRequestCommand,
   ProjectCollaborationRunCancelCommand,
+  ProjectCollaborationRunAnswerCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
   ProjectProgramUpsertCommand,
@@ -1967,10 +2190,12 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectRuntimeViewCommand,
   ProjectKnowledgeItemUpsertCommand,
   ProjectKnowledgeItemArchiveCommand,
+  ProjectKnowledgeUsageRecordCommand,
   ProjectAgentRoleUpsertCommand,
   ProjectAgentRoleRemoveCommand,
   ProjectCollaborationRunRequestCommand,
   ProjectCollaborationRunCancelCommand,
+  ProjectCollaborationRunAnswerCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
   ProjectProgramUpsertCommand,
@@ -2169,11 +2394,13 @@ export const OrchestrationEventType = Schema.Literals([
   "project.runtime-viewed",
   "project.knowledge-item-upserted",
   "project.knowledge-item-archived",
+  "project.knowledge-usage-recorded",
   "project.agent-role-upserted",
   "project.agent-role-removed",
   "project.collaboration-run-requested",
   "project.collaboration-run-cancel-requested",
   "project.collaboration-run-upserted",
+  "project.collaboration-run-answered",
   "project.schedule-upserted",
   "project.schedule-removed",
   "project.schedule-runtime-updated",
@@ -2268,6 +2495,10 @@ export const ProjectKnowledgeItemUpsertedPayload = Schema.Struct({
   origin: WorkspaceKnowledgeOrigin,
   relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
   tags: Schema.Array(TrimmedNonEmptyString),
+  originalChars: Schema.NullOr(NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  storedChars: Schema.NullOr(NonNegativeInt).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   updatedAt: IsoDateTime,
 });
 
@@ -2275,6 +2506,12 @@ export const ProjectKnowledgeItemArchivedPayload = Schema.Struct({
   projectId: ProjectId,
   itemId: WorkspaceKnowledgeItemId,
   archivedAt: IsoDateTime,
+});
+
+export const ProjectKnowledgeUsageRecordedPayload = Schema.Struct({
+  projectId: ProjectId,
+  itemIds: Schema.Array(WorkspaceKnowledgeItemId),
+  usedAt: IsoDateTime,
 });
 
 export const ProjectAgentRoleUpsertedPayload = WorkspaceAgentRoleBinding;
@@ -2303,6 +2540,14 @@ export const ProjectCollaborationRunCancelRequestedPayload = Schema.Struct({
 
 export const ProjectCollaborationRunUpsertedPayload = Schema.Struct({
   run: WorkspaceCollaborationRun,
+});
+
+export const ProjectCollaborationRunAnsweredPayload = Schema.Struct({
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  answeredAt: IsoDateTime,
 });
 
 export const ProjectScheduleUpsertedPayload = Schema.Struct({
@@ -2644,6 +2889,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("project.knowledge-usage-recorded"),
+    payload: ProjectKnowledgeUsageRecordedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("project.agent-role-upserted"),
     payload: ProjectAgentRoleUpsertedPayload,
   }),
@@ -2666,6 +2916,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.collaboration-run-upserted"),
     payload: ProjectCollaborationRunUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-answered"),
+    payload: ProjectCollaborationRunAnsweredPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

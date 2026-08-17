@@ -88,6 +88,7 @@ const make = Effect.gen(function* () {
         }
         return worker.enqueue(event);
       }),
+      { startImmediately: true },
     );
   });
 

@@ -210,6 +210,42 @@ export function requireThreadAbsent(input: {
   );
 }
 
+/**
+ * A meeting roster has to be internally consistent before a run is admitted:
+ * the seat count and round cap are already bounded by the schema, but duplicate
+ * seat ids and a chair who is not at the table are not.
+ *
+ * Both are rejected here rather than in the reactor because a run that cannot
+ * resolve its own assignments should never reach the event log at all.
+ */
+export function requireCoherentMeetingSetup(input: {
+  readonly commandType: OrchestrationCommand["type"];
+  readonly participantIds: ReadonlyArray<string>;
+  readonly chairParticipantId: string | null;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const seen = new Set<string>();
+  for (const participantId of input.participantIds) {
+    if (seen.has(participantId)) {
+      return Effect.fail(
+        invariantError(
+          input.commandType,
+          `Meeting participant '${participantId}' is listed more than once.`,
+        ),
+      );
+    }
+    seen.add(participantId);
+  }
+  if (input.chairParticipantId !== null && !seen.has(input.chairParticipantId)) {
+    return Effect.fail(
+      invariantError(
+        input.commandType,
+        `Meeting chair '${input.chairParticipantId}' is not one of the participants.`,
+      ),
+    );
+  }
+  return Effect.void;
+}
+
 export function requireNonNegativeInteger(input: {
   readonly commandType: OrchestrationCommand["type"];
   readonly field: string;

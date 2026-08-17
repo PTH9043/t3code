@@ -17,6 +17,7 @@ import {
   ListProjectionWorkspaceKnowledgeInput,
   ProjectionWorkspaceKnowledgeItem,
   ProjectionWorkspaceKnowledgeRepository,
+  RecordProjectionWorkspaceKnowledgeUsageInput,
   type ProjectionWorkspaceKnowledgeRepositoryShape,
 } from "../Services/ProjectionWorkspaceKnowledge.ts";
 
@@ -45,6 +46,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         origin,
         relative_folder,
         tags_json,
+        original_chars,
+        stored_chars,
         created_at,
         updated_at
       ) VALUES (
@@ -57,6 +60,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         ${item.origin},
         ${item.relativeFolder},
         ${JSON.stringify(item.tags)},
+        ${item.originalChars},
+        ${item.storedChars},
         ${item.createdAt},
         ${item.updatedAt}
       )
@@ -69,7 +74,27 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         origin = excluded.origin,
         relative_folder = excluded.relative_folder,
         tags_json = excluded.tags_json,
+        original_chars = excluded.original_chars,
+        stored_chars = excluded.stored_chars,
         updated_at = excluded.updated_at
+    `,
+  });
+
+  // Counted per event rather than per item id so a composition that pulled the
+  // same item through two paths still counts once. `last_used_at` only moves
+  // forward, keeping a replay of older events from rewriting a newer timestamp.
+  const recordUsageRows = SqlSchema.void({
+    Request: RecordProjectionWorkspaceKnowledgeUsageInput,
+    execute: ({ projectId, itemIds, usedAt }) => sql`
+      UPDATE projection_workspace_knowledge_items
+      SET
+        prompt_uses = prompt_uses + 1,
+        last_used_at = CASE
+          WHEN last_used_at IS NULL OR last_used_at < ${usedAt} THEN ${usedAt}
+          ELSE last_used_at
+        END
+      WHERE project_id = ${projectId}
+        AND item_id IN ${sql.in(itemIds)}
     `,
   });
 
@@ -96,6 +121,10 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         origin,
         relative_folder AS "relativeFolder",
         tags_json AS "tags",
+        original_chars AS "originalChars",
+        stored_chars AS "storedChars",
+        prompt_uses AS "promptUses",
+        last_used_at AS "lastUsedAt",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
       FROM projection_workspace_knowledge_items
@@ -108,6 +137,13 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
     upsertRow(item).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.upsert:query")),
     );
+  const recordUsage: ProjectionWorkspaceKnowledgeRepositoryShape["recordUsage"] = (input) =>
+    input.itemIds.length === 0
+      ? Effect.void
+      : recordUsageRows(input).pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.recordUsage:query")),
+        );
+
   const archive: ProjectionWorkspaceKnowledgeRepositoryShape["archive"] = (input) =>
     archiveRow(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.archive:query")),
@@ -147,6 +183,7 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
   return {
     upsert,
     archive,
+    recordUsage,
     removeConversationInputs,
     listByProjectId,
   } satisfies ProjectionWorkspaceKnowledgeRepositoryShape;

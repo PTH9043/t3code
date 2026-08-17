@@ -60,6 +60,10 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
         origin: "user",
         relativeFolder: null,
         tags: ["priority"],
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
         createdAt: "2026-08-08T01:00:00.000Z",
         updatedAt: "2026-08-08T01:00:00.000Z",
       });
@@ -73,6 +77,10 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
         origin: "user",
         relativeFolder: null,
         tags: [],
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
         createdAt: "2026-08-08T02:00:00.000Z",
         updatedAt: "2026-08-08T02:00:00.000Z",
       });
@@ -122,6 +130,10 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
         origin: "agent" as const,
         relativeFolder: null,
         tags: [],
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
         createdAt: "2026-08-08T01:00:00.000Z",
         updatedAt: "2026-08-08T01:00:00.000Z",
       };
@@ -130,6 +142,10 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
         ...base,
         content: "Revised",
         status: "active",
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
         createdAt: "2026-08-08T02:00:00.000Z",
         updatedAt: "2026-08-08T02:00:00.000Z",
       });
@@ -139,6 +155,90 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
       assert.strictEqual(item?.status, "active");
       assert.strictEqual(item?.createdAt, "2026-08-08T01:00:00.000Z");
       assert.strictEqual(item?.updatedAt, "2026-08-08T02:00:00.000Z");
+    }),
+  );
+
+  it.effect("counts one prompt use per composition and never lets an upsert reset it", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectionWorkspaceKnowledgeRepository;
+      const projectId = ProjectId.make("workspace-usage");
+      const usedId = WorkspaceKnowledgeItemId.make("used-item");
+      const unusedId = WorkspaceKnowledgeItemId.make("unused-item");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, workspace_control_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${projectId}, 'Workspace', 'D:/workspace-usage', NULL, '[]',
+          '{"isolationMode":"strict","longTermMemoryRoot":null}',
+          '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z', NULL
+        )
+      `;
+      const base = {
+        projectId,
+        kind: "long-term-memory" as const,
+        content: "body",
+        status: "active" as const,
+        origin: "agent" as const,
+        relativeFolder: null,
+        tags: [],
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
+        createdAt: "2026-08-08T01:00:00.000Z",
+        updatedAt: "2026-08-08T01:00:00.000Z",
+      };
+      yield* repository.upsert({ ...base, id: usedId, title: "Used" });
+      yield* repository.upsert({ ...base, id: unusedId, title: "Unused" });
+
+      yield* repository.recordUsage({
+        projectId,
+        itemIds: [usedId],
+        usedAt: "2026-08-09T00:00:00.000Z",
+      });
+      yield* repository.recordUsage({
+        projectId,
+        itemIds: [usedId],
+        usedAt: "2026-08-10T00:00:00.000Z",
+      });
+      // An older replay must not drag the last-used timestamp backwards.
+      yield* repository.recordUsage({
+        projectId,
+        itemIds: [usedId],
+        usedAt: "2026-08-01T00:00:00.000Z",
+      });
+
+      // Re-registering the item, which automatic capture does on every run,
+      // must leave the measure of its worth intact.
+      yield* repository.upsert({
+        ...base,
+        id: usedId,
+        title: "Used",
+        content: "revised",
+        updatedAt: "2026-08-11T00:00:00.000Z",
+      });
+
+      const items = yield* repository.listByProjectId({ projectId });
+      const used = items.find((item) => item.id === usedId);
+      const unused = items.find((item) => item.id === unusedId);
+      assert.strictEqual(used?.promptUses, 3);
+      assert.strictEqual(used?.lastUsedAt, "2026-08-10T00:00:00.000Z");
+      assert.strictEqual(used?.content, "revised");
+      assert.strictEqual(unused?.promptUses, 0);
+      assert.strictEqual(unused?.lastUsedAt, null);
+    }),
+  );
+
+  it.effect("ignores a composition that used no stored knowledge", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionWorkspaceKnowledgeRepository;
+      yield* repository.recordUsage({
+        projectId: ProjectId.make("workspace-empty"),
+        itemIds: [],
+        usedAt: "2026-08-09T00:00:00.000Z",
+      });
     }),
   );
 });

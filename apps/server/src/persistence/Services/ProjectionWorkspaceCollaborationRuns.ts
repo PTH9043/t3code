@@ -19,6 +19,17 @@ export interface ProjectionWorkspaceCollaborationRunRepositoryShape {
     readonly runId: WorkspaceCollaborationRunId;
     readonly cancelledAt: string;
   }) => Effect.Effect<void, ProjectionRepositoryError>;
+  /**
+   * Settles the meeting's pending question. A no-op when the run has no meeting,
+   * is not parked, or is parked on a different question than the one answered.
+   */
+  readonly recordAnswer: (input: {
+    readonly projectId: ProjectId;
+    readonly runId: WorkspaceCollaborationRunId;
+    readonly question: string;
+    readonly answer: string;
+    readonly answeredAt: string;
+  }) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly getById: (input: {
     readonly projectId: ProjectId;
     readonly runId: WorkspaceCollaborationRunId;

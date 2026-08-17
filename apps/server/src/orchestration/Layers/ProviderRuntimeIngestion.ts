@@ -2038,10 +2038,13 @@ const make = Effect.gen(function* () {
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
+      // Subscriptions must exist before start() returns, or events published
+      // in the gap are lost to this consumer.
       yield* forkParked(
         Stream.runForEach(providerService.streamEvents, (event) =>
           worker.enqueue({ source: "runtime", event }),
         ),
+        { startImmediately: true },
       );
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
@@ -2050,6 +2053,7 @@ const make = Effect.gen(function* () {
           }
           return worker.enqueue({ source: "domain", event });
         }),
+        { startImmediately: true },
       );
     });
 

@@ -113,7 +113,9 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
   );
 
   const start: WorkspaceKnowledgeReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent));
+    yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent), {
+      startImmediately: true,
+    });
     yield* enqueueStartupReconciliation;
   });
 
