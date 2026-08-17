@@ -63,12 +63,13 @@ export const GlassOpacity = Schema.Int.check(
 export type GlassOpacity = typeof GlassOpacity.Type;
 export const DEFAULT_GLASS_OPACITY: GlassOpacity = 80;
 /**
- * Font size preferences, in CSS pixels. The ranges are deliberately narrow:
- * the interface size scales every rem-based dimension in the app, so the
- * bounds keep layouts intact rather than offering unusable extremes.
+ * Font size preferences, in CSS pixels. The upper bounds reach well past a
+ * comfortable reading size so low-vision and high-DPI setups are usable. The
+ * interface size scales every rem-based dimension, so the largest values do
+ * trade layout density for legibility — that is the user's call, not a limit.
  */
 export const MIN_INTERFACE_FONT_SIZE = 12;
-export const MAX_INTERFACE_FONT_SIZE = 20;
+export const MAX_INTERFACE_FONT_SIZE = 32;
 export const InterfaceFontSize = Schema.Int.check(
   Schema.isBetween({ minimum: MIN_INTERFACE_FONT_SIZE, maximum: MAX_INTERFACE_FONT_SIZE }),
 );
@@ -76,7 +77,7 @@ export type InterfaceFontSize = typeof InterfaceFontSize.Type;
 export const DEFAULT_INTERFACE_FONT_SIZE: InterfaceFontSize = 16;
 
 export const MIN_PROMPT_FONT_SIZE = 12;
-export const MAX_PROMPT_FONT_SIZE = 20;
+export const MAX_PROMPT_FONT_SIZE = 32;
 export const PromptFontSize = Schema.Int.check(
   Schema.isBetween({ minimum: MIN_PROMPT_FONT_SIZE, maximum: MAX_PROMPT_FONT_SIZE }),
 );
@@ -84,7 +85,7 @@ export type PromptFontSize = typeof PromptFontSize.Type;
 export const DEFAULT_PROMPT_FONT_SIZE: PromptFontSize = 14;
 
 export const MIN_CODE_FONT_SIZE = 10;
-export const MAX_CODE_FONT_SIZE = 18;
+export const MAX_CODE_FONT_SIZE = 32;
 export const CodeFontSize = Schema.Int.check(
   Schema.isBetween({ minimum: MIN_CODE_FONT_SIZE, maximum: MAX_CODE_FONT_SIZE }),
 );
@@ -92,7 +93,7 @@ export type CodeFontSize = typeof CodeFontSize.Type;
 export const DEFAULT_CODE_FONT_SIZE: CodeFontSize = 13;
 
 export const MIN_TERMINAL_FONT_SIZE = 8;
-export const MAX_TERMINAL_FONT_SIZE = 20;
+export const MAX_TERMINAL_FONT_SIZE = 32;
 export const TerminalFontSize = Schema.Int.check(
   Schema.isBetween({ minimum: MIN_TERMINAL_FONT_SIZE, maximum: MAX_TERMINAL_FONT_SIZE }),
 );

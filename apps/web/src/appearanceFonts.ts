@@ -28,6 +28,33 @@ export const DEFAULT_CODE_FONT_STACK =
 export const TYPOGRAPHY_ADVANCED_STORAGE_KEY = "t3code:typography-advanced";
 
 /**
+ * Families the app ships as webfonts (see the `@font-face` rules in
+ * `index.css`). They are not in the OS font list, so every surface that offers
+ * or validates a family has to merge them in explicitly — otherwise a bundled
+ * face renders correctly when typed by hand but never appears in the picker.
+ */
+export const BUNDLED_FONT_FAMILIES = ["NanumSquare"] as const;
+
+export function isBundledFontFamily(family: string): boolean {
+  const bare = family.trim().replace(/^(['"])(.*)\1$/u, "$2");
+  return BUNDLED_FONT_FAMILIES.some((name) => name.toLowerCase() === bare.toLowerCase());
+}
+
+/**
+ * Installed families with the bundled ones merged in, sorted the same way the
+ * enumeration sorts, so the picker shows one coherent list.
+ */
+export function withBundledFontFamilies(families: readonly string[]): readonly string[] {
+  const merged = new Set<string>(families);
+  for (const family of BUNDLED_FONT_FAMILIES) {
+    if (![...merged].some((name) => name.toLowerCase() === family.toLowerCase())) {
+      merged.add(family);
+    }
+  }
+  return [...merged].sort((left, right) => left.localeCompare(right));
+}
+
+/**
  * Simple typography treats the terminal as another monospace surface. In
  * Advanced mode an empty terminal preference means the terminal default,
  * keeping later code-font changes isolated to code surfaces.
@@ -176,6 +203,10 @@ function probeWidth(fontList: string): number | null {
 export function isFontFamilyAvailable(family: string): boolean {
   const families = cssFontFamilies(family);
   if (families === null) return false;
+  // A bundled face may not have finished loading when this is called, and
+  // `font-display: swap` would make the probe measure the fallback and report
+  // it missing. The app ships the file, so availability is not in question.
+  if (isBundledFontFamily(family)) return true;
   if (/^(system-ui|sans-serif|serif|monospace|ui-monospace)$/i.test(families)) return true;
   try {
     for (const generic of ["monospace", "serif", "sans-serif"]) {

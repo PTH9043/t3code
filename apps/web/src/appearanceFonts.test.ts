@@ -1,7 +1,9 @@
+import { MAX_INTERFACE_FONT_SIZE, MAX_PROMPT_FONT_SIZE } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   areFontAdvancesMonospace,
+  BUNDLED_FONT_FAMILIES,
   clampCodeFontSize,
   clampInterfaceFontSize,
   clampPromptFontSize,
@@ -9,9 +11,11 @@ import {
   DEFAULT_SANS_FONT_STACK,
   appearanceFontStack,
   cssFontFamilies,
+  isBundledFontFamily,
   resolveDefaultFamilyLabel,
   resolveTerminalFontPreference,
   resolveTerminalFontSizePreference,
+  withBundledFontFamilies,
 } from "./appearanceFonts";
 
 describe("areFontAdvancesMonospace", () => {
@@ -112,14 +116,45 @@ describe("font size clamping", () => {
   it("keeps sizes inside the ranges the UI can absorb", () => {
     expect(clampInterfaceFontSize(16)).toBe(16);
     expect(clampInterfaceFontSize(2)).toBe(12);
-    expect(clampInterfaceFontSize(96)).toBe(20);
-    expect(clampPromptFontSize(40)).toBe(20);
+    expect(clampInterfaceFontSize(96)).toBe(MAX_INTERFACE_FONT_SIZE);
+    expect(clampPromptFontSize(40)).toBe(MAX_PROMPT_FONT_SIZE);
     expect(clampCodeFontSize(1)).toBe(10);
+  });
+
+  it("allows sizes well past the former 20px ceiling", () => {
+    expect(clampInterfaceFontSize(28)).toBe(28);
+    expect(clampPromptFontSize(24)).toBe(24);
+    expect(clampCodeFontSize(26)).toBe(26);
   });
 
   it("rounds fractional values and falls back for unusable input", () => {
     expect(clampCodeFontSize(13.4)).toBe(13);
     expect(clampInterfaceFontSize(Number.NaN)).toBe(16);
     expect(clampPromptFontSize(Number.POSITIVE_INFINITY)).toBe(14);
+  });
+});
+
+describe("bundled font families", () => {
+  it("ships NanumSquare so a Korean face is selectable without installing it", () => {
+    expect(BUNDLED_FONT_FAMILIES).toContain("NanumSquare");
+  });
+
+  it("recognizes a bundled family regardless of quoting or casing", () => {
+    expect(isBundledFontFamily("NanumSquare")).toBe(true);
+    expect(isBundledFontFamily('"NanumSquare"')).toBe(true);
+    expect(isBundledFontFamily("  nanumsquare  ")).toBe(true);
+    expect(isBundledFontFamily("Nanum Gothic")).toBe(false);
+  });
+
+  it("merges bundled families into the installed list and keeps it sorted", () => {
+    expect(withBundledFontFamilies(["Arial", "Zapfino"])).toEqual([
+      "Arial",
+      "NanumSquare",
+      "Zapfino",
+    ]);
+  });
+
+  it("does not duplicate a bundled family the machine also has installed", () => {
+    expect(withBundledFontFamilies(["Arial", "NanumSquare"])).toEqual(["Arial", "NanumSquare"]);
   });
 });

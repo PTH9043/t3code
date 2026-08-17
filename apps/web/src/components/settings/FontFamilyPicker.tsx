@@ -1,7 +1,11 @@
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { CheckIcon, ChevronDownIcon, SearchIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { isMonospaceFamily, queryInstalledFontFamilies } from "../../appearanceFonts";
+import {
+  isMonospaceFamily,
+  queryInstalledFontFamilies,
+  withBundledFontFamilies,
+} from "../../appearanceFonts";
 import {
   Combobox,
   ComboboxEmpty,
@@ -140,7 +144,10 @@ export function FontFamilyPicker({
 
   const families = useMemo(() => {
     if (enumeration.status !== "granted") return [];
-    return requireMonospace ? enumeration.families.filter(isMonospaceFamily) : enumeration.families;
+    // Bundled webfonts are not in the OS list the enumeration returns, so they
+    // are merged in here; the monospace filter still applies to them.
+    const all = withBundledFontFamilies(enumeration.families);
+    return requireMonospace ? all.filter(isMonospaceFamily) : all;
   }, [enumeration, requireMonospace]);
 
   const items = useMemo(() => {

@@ -1,6 +1,46 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
+
+/* Bundled families. The font picker can only enumerate what the OS has
+   installed, so a Korean face nobody installed is unreachable no matter what
+   the user types. Shipping the webfont makes it selectable everywhere the app
+   runs — desktop, browser and remote — instead of only on machines that
+   happen to have it. Keep the family names in sync with
+   `BUNDLED_FONT_FAMILIES` in `appearanceFonts.ts`.
+   NanumSquare (c) NAVER Corp., free to redistribute under the Nanum Font
+   license: https://hangeul.naver.com/font */
+@font-face {
+  font-family: "NanumSquare";
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url("./fonts/NanumSquareL.woff") format("woff");
+}
+
+@font-face {
+  font-family: "NanumSquare";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/NanumSquareR.woff") format("woff");
+}
+
+@font-face {
+  font-family: "NanumSquare";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/NanumSquareB.woff") format("woff");
+}
+
+@font-face {
+  font-family: "NanumSquare";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("./fonts/NanumSquareEB.woff") format("woff");
+}
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));
 
