@@ -806,7 +806,8 @@ export const WorkspaceMeeting = Schema.Struct({
   threadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   /** Null means elect one — the reactor takes the first seat. */
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
-  maxRounds: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
+  /** 0 rounds is direct collaboration: no discussion, straight to the plan. */
+  maxRounds: NonNegativeInt.check(Schema.isLessThanOrEqualTo(10)),
   userInLoop: Schema.Boolean,
   rounds: Schema.Array(WorkspaceMeetingRound),
   pendingQuestion: Schema.NullOr(WorkspaceMeetingQuestion),
@@ -842,7 +843,8 @@ export const WorkspaceMeetingSetup = Schema.Struct({
     Schema.isMaxLength(8),
   ),
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
-  maxRounds: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
+  /** 0 rounds is direct collaboration: no discussion, straight to the plan. */
+  maxRounds: NonNegativeInt.check(Schema.isLessThanOrEqualTo(10)),
   userInLoop: Schema.Boolean,
   /**
    * The conversation the meeting should happen in — the thread the person was

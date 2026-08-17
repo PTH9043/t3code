@@ -4599,6 +4599,8 @@ function ChatViewContent(props: ChatViewProps) {
   const meetingRunBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (liveMeetingRun === undefined) return null;
     const cancelling = liveMeetingRun.status === "cancel-requested";
+    const isDirectCollaboration = liveMeetingRun.meeting?.maxRounds === 0;
+    const kindLabel = isDirectCollaboration ? "AI 협업" : "AI 회의";
     const phaseLabel = cancelling
       ? "중지 중"
       : liveMeetingRun.meeting?.phase === "executing"
@@ -4607,16 +4609,20 @@ function ChatViewContent(props: ChatViewProps) {
           ? "답변 대기"
           : liveMeetingRun.status === "queued"
             ? "시작 대기"
-            : "논의 진행 중";
+            : isDirectCollaboration
+              ? "계획 수립 중"
+              : "논의 진행 중";
     return {
       id: `meeting-run:${liveMeetingRun.id}`,
       variant: "info",
       icon: <UsersIcon />,
       title: (
         <span className="flex min-w-0 items-baseline gap-1.5">
-          <span className="shrink-0 font-medium">AI 회의 · {phaseLabel}</span>
+          <span className="shrink-0 font-medium">
+            {kindLabel} · {phaseLabel}
+          </span>
           <span className="min-w-0 truncate font-normal text-muted-foreground">
-            보내는 메시지는 회의로 전달됩니다
+            보내는 메시지는 {isDirectCollaboration ? "협업으로" : "회의로"} 전달됩니다
           </span>
         </span>
       ),
@@ -5408,12 +5414,15 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: "AI 회의를 시작했습니다",
+            title:
+              meetingDraft.maxRounds === 0 ? "AI 협업을 시작했습니다" : "AI 회의를 시작했습니다",
             description:
               meetingThreadId !== undefined
-                ? `${meetingDraft.seats
-                    .map((seat) => seat.displayName)
-                    .join(", ")} — 논의가 이 대화창에서 실시간으로 진행됩니다.`
+                ? `${meetingDraft.seats.map((seat) => seat.displayName).join(", ")} — ${
+                    meetingDraft.maxRounds === 0
+                      ? "계획 수립 후 분담 실행이 이 대화창에서 진행됩니다."
+                      : "논의가 이 대화창에서 실시간으로 진행됩니다."
+                  }`
                 : `${meetingDraft.seats
                     .map((seat) => seat.displayName)
                     .join(", ")} — 새 대화창에서 진행됩니다. 제어 센터에서도 볼 수 있습니다.`,

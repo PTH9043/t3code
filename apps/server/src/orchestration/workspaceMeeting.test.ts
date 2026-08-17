@@ -100,6 +100,26 @@ describe("nextMeetingStep", () => {
     expect(nextMeetingStep(meeting())).toEqual({ kind: "open-round", roundIndex: 0 });
   });
 
+  it("plans immediately when zero rounds make it a direct collaboration", () => {
+    expect(nextMeetingStep(meeting({ maxRounds: 0 }))).toEqual({ kind: "plan" });
+  });
+
+  it("still parks a direct collaboration on a pending question", () => {
+    const step = nextMeetingStep(
+      meeting({
+        maxRounds: 0,
+        pendingQuestion: {
+          askedByParticipantId: seat("p1"),
+          question: "범위를 정해줄래요?",
+          options: [],
+          context: "",
+          askedAt: "2026-08-18T00:00:00.000Z",
+        },
+      }),
+    );
+    expect(step).toEqual({ kind: "awaiting-user" });
+  });
+
   it("collects only the seats that still owe a statement", () => {
     const step = nextMeetingStep(meeting({ rounds: [round({ index: 0, spoke: ["p1"] })] }));
     expect(step).toEqual({ kind: "collect-statements", roundIndex: 0, speakers: [seat("p2")] });

@@ -955,7 +955,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 run: currentRun,
                 route,
                 threadId: meetingThreadId,
-                title: `AI 회의: ${currentRun.task}`,
+                title: `${meeting.maxRounds === 0 ? "AI 협업" : "AI 회의"}: ${currentRun.task}`,
                 prompt: buildMeetingStatementPrompt({
                   // Later rounds argue over the transcript; only the opening
                   // round pays for the full Workspace corpus.
@@ -1032,7 +1032,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               run,
               route,
               threadId: meetingThreadId,
-              title: `AI 회의: ${run.task}`,
+              title: `${meeting.maxRounds === 0 ? "AI 협업" : "AI 회의"}: ${run.task}`,
               prompt: buildMeetingChairClosePrompt({ task: run.task, meeting, roundIndex }),
             }).pipe(
               Effect.map((value) => ({ ok: true as const, ...value })),
@@ -1130,7 +1130,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               run,
               route,
               threadId: meetingThreadId,
-              title: `AI 회의: ${run.task}`,
+              title: `${meeting.maxRounds === 0 ? "AI 협업" : "AI 회의"}: ${run.task}`,
               prompt: buildMeetingPlanPrompt({
                 workspacePrompt: input.workspacePrompt,
                 task: run.task,

@@ -50,6 +50,9 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   const config = useMeetingComposerConfig();
   const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
+  // Zero rounds is the direct-collaboration style: no discussion, the chair
+  // plans straight away and the seats split the work.
+  const isDirectCollaboration = config.maxRounds === 0;
 
   // Self-heal selections a past bug stored as display LABELS ("Extra High")
   // instead of choice ids ("xhigh"): remap by label once, idempotently.
@@ -79,6 +82,46 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2.5 text-sm">
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        작업 방식
+      </div>
+      <div className="mt-1.5 grid grid-cols-2 gap-1">
+        <button
+          type="button"
+          onClick={() =>
+            updateMeetingComposerConfig((current) =>
+              current.maxRounds === 0 ? { ...current, maxRounds: 2 } : current,
+            )
+          }
+          className={cn(
+            "rounded-md border px-2 py-1.5 text-left text-xs",
+            !isDirectCollaboration
+              ? "border-primary/50 bg-primary/8 font-medium"
+              : "border-transparent hover:bg-muted/50",
+          )}
+        >
+          <span className="block">회의</span>
+          <span className="block font-normal text-muted-foreground">토론으로 합의 후 실행</span>
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            updateMeetingComposerConfig((current) =>
+              current.maxRounds === 0 ? current : { ...current, maxRounds: 0, userInLoop: false },
+            )
+          }
+          className={cn(
+            "rounded-md border px-2 py-1.5 text-left text-xs",
+            isDirectCollaboration
+              ? "border-primary/50 bg-primary/8 font-medium"
+              : "border-transparent hover:bg-muted/50",
+          )}
+        >
+          <span className="block">협업</span>
+          <span className="block font-normal text-muted-foreground">토론 없이 바로 분담 실행</span>
+        </button>
+      </div>
+
+      <div className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         참가자 {config.seats.length > 0 ? `· ${config.seats.length}명` : ""}{" "}
         <span className="font-normal normal-case">(2–{MAX_MEETING_SEATS}명)</span>
       </div>
@@ -197,59 +240,67 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         ) : null}
       </div>
 
-      <div className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        진행 방식
-      </div>
-      <div className="mt-1.5 grid gap-1">
-        {MODE_LABELS.map(({ mode, label, hint }) => (
-          <button
-            key={mode}
-            type="button"
-            onClick={() => updateMeetingComposerConfig((current) => ({ ...current, mode }))}
-            className={cn(
-              "flex items-baseline gap-2 rounded-md border px-2 py-1.5 text-left text-xs",
-              config.mode === mode
-                ? "border-primary/50 bg-primary/8 font-medium"
-                : "border-transparent hover:bg-muted/50",
-            )}
-          >
-            <span className="shrink-0">{label}</span>
-            <span className="min-w-0 truncate font-normal text-muted-foreground">{hint}</span>
-          </button>
-        ))}
-      </div>
+      {!isDirectCollaboration ? (
+        <>
+          <div className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            진행 방식
+          </div>
+          <div className="mt-1.5 grid gap-1">
+            {MODE_LABELS.map(({ mode, label, hint }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => updateMeetingComposerConfig((current) => ({ ...current, mode }))}
+                className={cn(
+                  "flex items-baseline gap-2 rounded-md border px-2 py-1.5 text-left text-xs",
+                  config.mode === mode
+                    ? "border-primary/50 bg-primary/8 font-medium"
+                    : "border-transparent hover:bg-muted/50",
+                )}
+              >
+                <span className="shrink-0">{label}</span>
+                <span className="min-w-0 truncate font-normal text-muted-foreground">{hint}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
 
       <div className="mt-3 grid gap-2">
-        <label className="flex items-center justify-between gap-2 text-xs font-medium">
-          최대 라운드
-          <input
-            type="number"
-            min={1}
-            max={10}
-            value={config.maxRounds}
-            onChange={(event) => {
-              const parsed = Number.parseInt(event.currentTarget.value, 10);
-              if (!Number.isInteger(parsed)) return;
-              const maxRounds = Math.min(10, Math.max(1, parsed));
-              updateMeetingComposerConfig((current) => ({ ...current, maxRounds }));
-            }}
-            className={cn(SELECT_CLASS, "w-16 text-center")}
-          />
-        </label>
-        <label className="flex items-center justify-between gap-2 text-xs font-medium">
-          <span>
-            라운드마다 확인
-            <span className="ml-1 font-normal text-muted-foreground">
-              각 라운드 후 진행 여부를 물어봄
-            </span>
-          </span>
-          <Switch
-            checked={config.userInLoop}
-            onCheckedChange={(userInLoop) =>
-              updateMeetingComposerConfig((current) => ({ ...current, userInLoop }))
-            }
-          />
-        </label>
+        {!isDirectCollaboration ? (
+          <>
+            <label className="flex items-center justify-between gap-2 text-xs font-medium">
+              최대 라운드
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={config.maxRounds}
+                onChange={(event) => {
+                  const parsed = Number.parseInt(event.currentTarget.value, 10);
+                  if (!Number.isInteger(parsed)) return;
+                  const maxRounds = Math.min(10, Math.max(1, parsed));
+                  updateMeetingComposerConfig((current) => ({ ...current, maxRounds }));
+                }}
+                className={cn(SELECT_CLASS, "w-16 text-center")}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-2 text-xs font-medium">
+              <span>
+                라운드마다 확인
+                <span className="ml-1 font-normal text-muted-foreground">
+                  각 라운드 후 진행 여부를 물어봄
+                </span>
+              </span>
+              <Switch
+                checked={config.userInLoop}
+                onCheckedChange={(userInLoop) =>
+                  updateMeetingComposerConfig((current) => ({ ...current, userInLoop }))
+                }
+              />
+            </label>
+          </>
+        ) : null}
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span className="flex items-center gap-1">
             <CrownIcon className="size-3.5 text-muted-foreground" />
@@ -279,7 +330,9 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       <p className="mt-3 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
-          : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 회의 모드는 끌 때까지 유지됩니다."}
+          : isDirectCollaboration
+            ? "입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다."
+            : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 회의 모드는 끌 때까지 유지됩니다."}
       </p>
     </div>
   );

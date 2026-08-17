@@ -616,7 +616,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const meetingToggleRow = !meetingSurface ? null : (
     <div className="flex items-center gap-2 border-b border-border/70 bg-muted/30 px-3 py-2">
       <UsersIcon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium">AI 회의 모드</span>
+      <span className="min-w-0 flex-1 truncate text-xs font-medium">AI 회의·협업 모드</span>
       {meetingConfig.seats.length > 0 ? (
         <span className="text-[11px] text-muted-foreground">{meetingConfig.seats.length}명</span>
       ) : null}
