@@ -160,6 +160,8 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
+  SquareIcon,
+  UsersIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex, randomUUID } from "~/lib/utils";
@@ -1227,6 +1229,9 @@ function ChatViewContent(props: ChatViewProps) {
   const answerMeetingRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
     reportFailure: false,
   });
+  const cancelMeetingRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
+    reportFailure: false,
+  });
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
@@ -1709,6 +1714,52 @@ function ChatViewContent(props: ChatViewProps) {
         })
       : null,
   );
+  // The meeting run that owns THIS conversation, if any. It drives the stop
+  // banner above the composer and claims the send path further below.
+  const liveMeetingRun = useMemo(() => {
+    if (!isServerThread || !activeThread) return undefined;
+    return (meetingRunsQuery.data?.runs ?? []).find(
+      (run) =>
+        run.meeting?.threadId === activeThread.id &&
+        (run.status === "queued" || run.status === "running" || run.status === "cancel-requested"),
+    );
+  }, [activeThread, isServerThread, meetingRunsQuery.data]);
+  const handleStopMeetingRun = useCallback(async () => {
+    if (liveMeetingRun === undefined) return;
+    if (liveMeetingRun.status === "cancel-requested") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "이미 중지 요청이 전달됐습니다",
+          description: "진행 중인 발언이 끊기는 대로 회의가 종료됩니다.",
+        }),
+      );
+      return;
+    }
+    const cancelled = await cancelMeetingRun({
+      environmentId,
+      input: { projectId: liveMeetingRun.projectId, runId: liveMeetingRun.id },
+    });
+    if (cancelled._tag === "Failure") {
+      if (!isAtomCommandInterrupted(cancelled)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "회의를 중지하지 못했습니다",
+            description: "연결 상태를 확인하고 다시 시도하세요.",
+          }),
+        );
+      }
+      return;
+    }
+    toastManager.add(
+      stackedThreadToast({
+        type: "success",
+        title: "회의를 중지합니다",
+        description: "진행 중인 발언을 끊고 실행을 취소합니다.",
+      }),
+    );
+  }, [cancelMeetingRun, environmentId, liveMeetingRun]);
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
@@ -4469,11 +4520,52 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
+  // A live meeting owns this conversation: say so, and give the person the
+  // stop control right where they are typing — "멈추라면 멈춰야지".
+  const meetingRunBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (liveMeetingRun === undefined) return null;
+    const cancelling = liveMeetingRun.status === "cancel-requested";
+    const phaseLabel = cancelling
+      ? "중지 중"
+      : liveMeetingRun.meeting?.phase === "executing"
+        ? "실행 단계"
+        : liveMeetingRun.meeting?.pendingQuestion
+          ? "답변 대기"
+          : liveMeetingRun.status === "queued"
+            ? "시작 대기"
+            : "논의 진행 중";
+    return {
+      id: `meeting-run:${liveMeetingRun.id}`,
+      variant: "info",
+      icon: <UsersIcon />,
+      title: (
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="shrink-0 font-medium">AI 회의 · {phaseLabel}</span>
+          <span className="min-w-0 truncate font-normal text-muted-foreground">
+            보내는 메시지는 회의로 전달됩니다
+          </span>
+        </span>
+      ),
+      className: "dark:shadow-none",
+      actions: (
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={cancelling}
+          onClick={() => void handleStopMeetingRun()}
+        >
+          <SquareIcon />
+          {cancelling ? "중지 중..." : "회의 중지"}
+        </Button>
+      ),
+    };
+  }, [handleStopMeetingRun, liveMeetingRun]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const isUrgentSystemItem = (item: ComposerBannerStackItem) =>
       item.urgent === true || item.variant === "error" || item.variant === "warning";
     const urgentSystemItems = systemComposerBannerItems.filter(isUrgentSystemItem);
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
+    const meetingRunItems = meetingRunBannerItem === null ? [] : [meetingRunBannerItem];
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -4481,6 +4573,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
+        ...meetingRunItems,
         ...backgroundLivenessItems,
         ...calmSystemItems,
         ...wokeThreadItems,
@@ -4489,6 +4582,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [
       ...urgentSystemItems,
+      ...meetingRunItems,
       ...backgroundLivenessItems,
       ...calmSystemItems,
       ...wokeThreadItems,
@@ -4541,6 +4635,7 @@ function ChatViewContent(props: ChatViewProps) {
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
+    meetingRunBannerItem,
     parkedThreadBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
@@ -4992,28 +5087,25 @@ function ChatViewContent(props: ChatViewProps) {
 
     // A live meeting in THIS conversation claims every send, whether or not
     // meeting mode is armed: a plain turn started into the meeting thread
-    // would replace the seat's in-flight turn and kill the run. During the
-    // discussion the text becomes the person's interjection; during
-    // execution it is refused with the cancel path.
+    // would replace the seat's in-flight turn and kill the run. A run that is
+    // queued or running IS live no matter how long it has been silent — a
+    // long seat turn is not a dead meeting, and falling through to a plain
+    // send would spawn a NEW meeting out of the person's message.
     const meetingThreadId = isServerThread && activeThread ? activeThread.id : undefined;
-    const liveMeetingRunHere =
-      meetingThreadId === undefined
-        ? undefined
-        : (meetingRunsQuery.data?.runs ?? []).find(
-            (run) =>
-              run.meeting?.threadId === meetingThreadId &&
-              (run.status === "queued" ||
-                run.status === "running" ||
-                run.status === "cancel-requested"),
-          );
-    // A meeting whose projection stopped moving is dead weight, not a live
-    // discussion — it must never hold the conversation hostage. A run parked
-    // on a question is WAITING, not stale: silence is its normal state.
-    const meetingRunStale =
-      liveMeetingRunHere !== undefined &&
-      (liveMeetingRunHere.meeting?.pendingQuestion ?? null) === null &&
-      Date.now() - Date.parse(liveMeetingRunHere.updatedAt) > 10 * 60_000;
-    if (liveMeetingRunHere !== undefined && !meetingRunStale && !directAnnotation) {
+    const liveMeetingRunHere = liveMeetingRun;
+    if (liveMeetingRunHere !== undefined && !directAnnotation) {
+      // "멈춰"/"중지" typed at the meeting IS the stop command — never a new
+      // meeting, never a mere interjection the next speaker debates.
+      const stopIntentText = promptForSend.trim().replace(/[\s.!?~…ㅋㅎ;,]+$/g, "");
+      const stopIntentPattern =
+        /^(애|얘|야)?\s*(회의|미팅)?\s*(멈춰|멈춰라|멈춰줘|멈추라고|중지|중지해|중지해줘|중단|중단해|중단해줘|그만|그만해|그만해라|스탑|스톱|stop|cancel)$/i;
+      if (stopIntentPattern.test(stopIntentText)) {
+        await handleStopMeetingRun();
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        return;
+      }
       const meetingPendingQuestion = liveMeetingRunHere.meeting?.pendingQuestion ?? null;
       if (meetingPendingQuestion !== null) {
         // The run is parked on a question for the person; a message typed
@@ -5065,7 +5157,7 @@ function ChatViewContent(props: ChatViewProps) {
             type: "warning",
             title: "회의가 이미 실행 단계입니다",
             description:
-              "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 제어 센터에서 실행을 취소하세요.",
+              "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 위의 '회의 중지' 버튼을 누르거나 '멈춰'라고 보내세요.",
           }),
         );
         return;
