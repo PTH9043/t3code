@@ -100,7 +100,7 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
-  it.effect("defaults packaged Windows storage to the NewAutoUsage F drive", () =>
+  it.effect("defaults packaged Windows storage to the NewAutoUsage E drive", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({
         platform: "win32",
@@ -108,11 +108,11 @@ describe("DesktopEnvironment", () => {
       });
 
       assert.equal(environment.baseDir, DesktopEnvironment.DEFAULT_PACKAGED_WINDOWS_HOME);
-      assert.equal(environment.stateDir.replaceAll("\\", "/"), "F:/NewAutoUsage/userdata");
+      assert.equal(environment.stateDir.replaceAll("\\", "/"), "E:/NewAutoUsage/userdata");
     }),
   );
 
-  it.effect("keeps an explicit packaged Windows home above the F drive default", () =>
+  it.effect("keeps an explicit packaged Windows home above the E drive default", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
         {

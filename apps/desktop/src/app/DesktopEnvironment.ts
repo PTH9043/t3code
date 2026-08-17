@@ -80,7 +80,7 @@ export class DesktopEnvironment extends Context.Service<
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
 const APP_BASE_NAME = "NewAutoUsage AI 제어센터";
-export const DEFAULT_PACKAGED_WINDOWS_HOME = "F:/NewAutoUsage";
+export const DEFAULT_PACKAGED_WINDOWS_HOME = "E:/NewAutoUsage";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;

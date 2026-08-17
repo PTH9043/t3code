@@ -143,7 +143,7 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
-  it.effect("stores the packaged Windows Electron profile under the F drive state root", () =>
+  it.effect("stores the packaged Windows Electron profile under the E drive state root", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
@@ -151,7 +151,7 @@ describe("DesktopAppIdentity", () => {
 
         assert.equal(
           userDataPath.replaceAll("\\", "/"),
-          "F:/NewAutoUsage/userdata/desktop-profile",
+          "E:/NewAutoUsage/userdata/desktop-profile",
         );
       }),
       {
