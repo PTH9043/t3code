@@ -1,14 +1,15 @@
 import type { ProviderInstanceId, ScopedThreadRef, WorkspaceMeetingMode } from "@t3tools/contracts";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import type { DraftId } from "./composerDraftStore";
 
 /**
- * The composer surface a meeting draft belongs to — the same identity the
- * composer draft store uses, so a meeting armed on a draft follows that draft
- * and a meeting armed on a thread stays with the thread.
+ * The composer surface a meeting send goes out from. The value no longer
+ * scopes the settings — meeting mode is one app-wide switch — but pickers
+ * still pass it so only the chat composer's picker (never a settings picker)
+ * shows the meeting UI.
  */
 export type MeetingComposerTarget = ScopedThreadRef | DraftId;
 
@@ -39,10 +40,6 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   seats: [],
 };
 
-export function meetingComposerKey(target: MeetingComposerTarget): string {
-  return typeof target === "string" ? `draft:${target}` : scopedThreadKey(target);
-}
-
 /**
  * A seat id doubles as the server-side participant id, which only accepts
  * `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. Instance ids are slugs already; this
@@ -54,56 +51,45 @@ export function meetingSeatId(instanceId: string): string {
 }
 
 interface MeetingComposerState {
-  readonly configs: Readonly<Record<string, MeetingComposerConfig>>;
-  readonly updateConfig: (
-    target: MeetingComposerTarget,
-    update: (config: MeetingComposerConfig) => MeetingComposerConfig,
-  ) => void;
+  readonly config: MeetingComposerConfig;
+  readonly updateConfig: (update: (config: MeetingComposerConfig) => MeetingComposerConfig) => void;
 }
 
-export const useMeetingComposerStore = create<MeetingComposerState>((set) => ({
-  configs: {},
-  updateConfig: (target, update) =>
-    set((state) => {
-      const key = meetingComposerKey(target);
-      const current = state.configs[key] ?? DEFAULT_MEETING_COMPOSER_CONFIG;
-      const next = update(current);
-      if (next === current) return state;
-      return { configs: { ...state.configs, [key]: next } };
+/**
+ * ONE config for the whole app, persisted: meeting mode is a switch the
+ * person turns off, not per-conversation state. Armed once, it stays armed
+ * across conversations, folders, tabs and app restarts until they turn it
+ * off — the roster travels with them.
+ */
+export const useMeetingComposerStore = create<MeetingComposerState>()(
+  persist(
+    (set) => ({
+      config: DEFAULT_MEETING_COMPOSER_CONFIG,
+      updateConfig: (update) =>
+        set((state) => {
+          const next = update(state.config);
+          return next === state.config ? state : { config: next };
+        }),
     }),
-}));
+    {
+      name: "t3.meeting-composer.v1",
+      partialize: (state) => ({ config: state.config }),
+    },
+  ),
+);
 
-export function readMeetingComposerConfig(target: MeetingComposerTarget): MeetingComposerConfig {
-  return (
-    useMeetingComposerStore.getState().configs[meetingComposerKey(target)] ??
-    DEFAULT_MEETING_COMPOSER_CONFIG
-  );
+export function readMeetingComposerConfig(): MeetingComposerConfig {
+  return useMeetingComposerStore.getState().config;
 }
 
-export function useMeetingComposerConfig(target: MeetingComposerTarget): MeetingComposerConfig {
-  const key = meetingComposerKey(target);
-  return useMeetingComposerStore(
-    useShallow((state) => state.configs[key] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
-  );
-}
-
-/** Same as `useMeetingComposerConfig`, for surfaces where meeting mode may be absent. */
-export function useOptionalMeetingComposerConfig(
-  target: MeetingComposerTarget | null,
-): MeetingComposerConfig | null {
-  const key = target === null ? null : meetingComposerKey(target);
-  return useMeetingComposerStore(
-    useShallow((state) =>
-      key === null ? null : (state.configs[key] ?? DEFAULT_MEETING_COMPOSER_CONFIG),
-    ),
-  );
+export function useMeetingComposerConfig(): MeetingComposerConfig {
+  return useMeetingComposerStore(useShallow((state) => state.config));
 }
 
 export function updateMeetingComposerConfig(
-  target: MeetingComposerTarget,
   update: (config: MeetingComposerConfig) => MeetingComposerConfig,
 ): void {
-  useMeetingComposerStore.getState().updateConfig(target, update);
+  useMeetingComposerStore.getState().updateConfig(update);
 }
 
 /** The server's roster cap; a ninth checkbox is refused here rather than at send. */
@@ -114,11 +100,8 @@ export const MAX_MEETING_SEATS = 8;
  * whose seat is removed falls back to automatic election rather than pointing
  * at an account that is no longer at the table.
  */
-export function toggleMeetingComposerSeat(
-  target: MeetingComposerTarget,
-  seat: MeetingComposerSeat,
-): void {
-  updateMeetingComposerConfig(target, (config) => {
+export function toggleMeetingComposerSeat(seat: MeetingComposerSeat): void {
+  updateMeetingComposerConfig((config) => {
     const existing = config.seats.find((candidate) => candidate.id === seat.id);
     if (existing === undefined && config.seats.length >= MAX_MEETING_SEATS) return config;
     const seats =
@@ -133,12 +116,8 @@ export function toggleMeetingComposerSeat(
   });
 }
 
-export function setMeetingComposerSeatModel(
-  target: MeetingComposerTarget,
-  seatId: string,
-  model: string,
-): void {
-  updateMeetingComposerConfig(target, (config) => ({
+export function setMeetingComposerSeatModel(seatId: string, model: string): void {
+  updateMeetingComposerConfig((config) => ({
     ...config,
     seats: config.seats.map((seat) => (seat.id === seatId ? { ...seat, model } : seat)),
   }));

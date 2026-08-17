@@ -1692,7 +1692,7 @@ function ChatViewContent(props: ChatViewProps) {
   // The meeting toggle stays armed until the person turns it off, so an armed
   // composer must know whether this conversation already hosts a live meeting:
   // a second topic sent mid-meeting would tangle two runs in one thread.
-  const meetingComposerArmed = useMeetingComposerConfig(composerDraftTarget).enabled;
+  const meetingComposerArmed = useMeetingComposerConfig().enabled;
   const meetingRunsQuery = useEnvironmentQuery(
     meetingComposerArmed && activeProject
       ? orchestrationEnvironment.workspaceCollaborationRuns({
@@ -4985,7 +4985,7 @@ function ChatViewContent(props: ChatViewProps) {
     // An armed meeting turns the composer text into a collaboration-run topic:
     // the roster discusses it, agrees a plan, and executes it — no thread turn
     // is started, so this leaves the current conversation untouched.
-    const meetingDraft = readMeetingComposerConfig(composerDraftTarget);
+    const meetingDraft = readMeetingComposerConfig();
     if (meetingDraft.enabled && !directAnnotation) {
       if (composerImages.length > 0) {
         toastManager.add(

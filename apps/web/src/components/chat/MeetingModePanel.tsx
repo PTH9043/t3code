@@ -19,7 +19,6 @@ import {
   toggleMeetingComposerSeat,
   updateMeetingComposerConfig,
   useMeetingComposerConfig,
-  type MeetingComposerTarget,
 } from "../../meetingComposerStore";
 
 const MODE_LABELS: ReadonlyArray<{ mode: WorkspaceMeetingMode; label: string; hint: string }> = [
@@ -42,11 +41,10 @@ function defaultSeatModel(options: ReadonlyArray<ModelEsque> | undefined): strin
  * and sent like any other message.
  */
 export const MeetingModePanel = memo(function MeetingModePanel(props: {
-  readonly target: MeetingComposerTarget;
   readonly instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   readonly modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
 }) {
-  const config = useMeetingComposerConfig(props.target);
+  const config = useMeetingComposerConfig();
   const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
 
@@ -78,7 +76,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                 onCheckedChange={() => {
                   const model = seat?.model ?? defaultSeatModel(options);
                   if (model === null) return;
-                  toggleMeetingComposerSeat(props.target, {
+                  toggleMeetingComposerSeat({
                     id: seatId,
                     instanceId: entry.instanceId,
                     model,
@@ -106,7 +104,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                   value={seat.model}
                   aria-label={`${entry.displayName} 모델`}
                   onChange={(event) =>
-                    setMeetingComposerSeatModel(props.target, seatId, event.currentTarget.value)
+                    setMeetingComposerSeatModel(seatId, event.currentTarget.value)
                   }
                 >
                   {options.map((option) => (
@@ -134,9 +132,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           <button
             key={mode}
             type="button"
-            onClick={() =>
-              updateMeetingComposerConfig(props.target, (current) => ({ ...current, mode }))
-            }
+            onClick={() => updateMeetingComposerConfig((current) => ({ ...current, mode }))}
             className={cn(
               "flex items-baseline gap-2 rounded-md border px-2 py-1.5 text-left text-xs",
               config.mode === mode
@@ -162,7 +158,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
               const parsed = Number.parseInt(event.currentTarget.value, 10);
               if (!Number.isInteger(parsed)) return;
               const maxRounds = Math.min(10, Math.max(1, parsed));
-              updateMeetingComposerConfig(props.target, (current) => ({ ...current, maxRounds }));
+              updateMeetingComposerConfig((current) => ({ ...current, maxRounds }));
             }}
             className={cn(SELECT_CLASS, "w-16 text-center")}
           />
@@ -177,7 +173,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           <Switch
             checked={config.userInLoop}
             onCheckedChange={(userInLoop) =>
-              updateMeetingComposerConfig(props.target, (current) => ({ ...current, userInLoop }))
+              updateMeetingComposerConfig((current) => ({ ...current, userInLoop }))
             }
           />
         </label>
@@ -191,7 +187,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             value={config.chairSeatId ?? ""}
             onChange={(event) => {
               const chairSeatId = event.currentTarget.value || null;
-              updateMeetingComposerConfig(props.target, (current) => ({
+              updateMeetingComposerConfig((current) => ({
                 ...current,
                 chairSeatId,
               }));

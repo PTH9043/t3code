@@ -18,10 +18,7 @@ import {
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
 import type { ProviderInstanceEntry } from "../../providerInstances";
-import {
-  useOptionalMeetingComposerConfig,
-  type MeetingComposerTarget,
-} from "../../meetingComposerStore";
+import { useMeetingComposerConfig, type MeetingComposerTarget } from "../../meetingComposerStore";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
@@ -53,8 +50,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
-  const meetingConfig = useOptionalMeetingComposerConfig(props.meetingTarget ?? null);
-  const meetingArmed = meetingConfig?.enabled === true;
+  const meetingConfig = useMeetingComposerConfig();
+  const meetingArmed = (props.meetingTarget ?? null) !== null && meetingConfig.enabled;
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected

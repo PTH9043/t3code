@@ -43,7 +43,7 @@ import {
 } from "../../providerInstances";
 import {
   updateMeetingComposerConfig,
-  useOptionalMeetingComposerConfig,
+  useMeetingComposerConfig,
   type MeetingComposerTarget,
 } from "../../meetingComposerStore";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
@@ -608,26 +608,27 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     };
   }, [filteredItemKeys, updateModelListScrollFades]);
 
-  const meetingTarget = props.meetingTarget ?? null;
-  const meetingConfig = useOptionalMeetingComposerConfig(meetingTarget);
-  const meetingEnabled = meetingTarget !== null && meetingConfig?.enabled === true;
-  const meetingToggleRow =
-    meetingTarget === null ? null : (
-      <div className="flex items-center gap-2 border-b border-border/70 bg-muted/30 px-3 py-2">
-        <UsersIcon className="size-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">AI 회의 모드</span>
-        {meetingConfig !== null && meetingConfig.seats.length > 0 ? (
-          <span className="text-[11px] text-muted-foreground">{meetingConfig.seats.length}명</span>
-        ) : null}
-        <Switch
-          checked={meetingEnabled}
-          aria-label="AI 회의 모드"
-          onCheckedChange={(enabled) =>
-            updateMeetingComposerConfig(meetingTarget, (current) => ({ ...current, enabled }))
-          }
-        />
-      </div>
-    );
+  // The prop only marks this picker as a composer surface; the config itself
+  // is app-wide, so the armed roster follows the person everywhere.
+  const meetingSurface = (props.meetingTarget ?? null) !== null;
+  const meetingConfig = useMeetingComposerConfig();
+  const meetingEnabled = meetingSurface && meetingConfig.enabled;
+  const meetingToggleRow = !meetingSurface ? null : (
+    <div className="flex items-center gap-2 border-b border-border/70 bg-muted/30 px-3 py-2">
+      <UsersIcon className="size-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium">AI 회의 모드</span>
+      {meetingConfig.seats.length > 0 ? (
+        <span className="text-[11px] text-muted-foreground">{meetingConfig.seats.length}명</span>
+      ) : null}
+      <Switch
+        checked={meetingEnabled}
+        aria-label="AI 회의 모드"
+        onCheckedChange={(enabled) =>
+          updateMeetingComposerConfig((current) => ({ ...current, enabled }))
+        }
+      />
+    </div>
+  );
 
   return (
     <TooltipProvider delay={0}>
@@ -636,9 +637,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         data-model-picker-content="true"
       >
         {meetingToggleRow}
-        {meetingEnabled && meetingTarget !== null ? (
+        {meetingEnabled ? (
           <MeetingModePanel
-            target={meetingTarget}
             instanceEntries={instanceEntries}
             modelOptionsByInstance={modelOptionsByInstance}
           />
