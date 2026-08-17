@@ -45,6 +45,7 @@ import {
   FolderPlusIcon,
   GitBranchIcon,
   EllipsisIcon,
+  ExternalLinkIcon,
   MessageSquareIcon,
   PinIcon,
   PlusIcon,
@@ -2169,6 +2170,62 @@ export default function Sidebar() {
     ],
   );
 
+  // "새 탭에서 열기" on a scope-menu row: the current tab keeps its screen and
+  // the picked folder's most recent conversation opens as a background tab —
+  // the side-by-side flow the tab bar exists for.
+  const openProjectScopeInNewTab = useCallback(
+    (scopeKey: string) => {
+      const projectGroup = projectGroups.find((project) => project.projectKey === scopeKey);
+      if (!projectGroup) return;
+      const memberKeys = new Set(
+        projectGroup.memberProjectRefs.map(
+          (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+        ),
+      );
+      const nextThread = sortThreadsForSidebar(
+        threads.filter(
+          (thread) =>
+            thread.archivedAt === null &&
+            memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+        ),
+      )[0];
+      if (!nextThread) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: "이 폴더에는 아직 대화가 없습니다",
+            description: "폴더를 선택해 첫 대화를 시작한 뒤 탭으로 열 수 있어요.",
+          }),
+        );
+        return;
+      }
+      const opened = useWorkspaceTabStore.getState().openBackgroundTab({
+        kind: "thread",
+        environmentId: nextThread.environmentId,
+        threadId: nextThread.id,
+      });
+      if (!opened) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: `탭은 ${MAX_WORKSPACE_TABS}개까지입니다`,
+            description: "오래 보지 않은 탭을 닫고 다시 열어주세요.",
+          }),
+        );
+        return;
+      }
+      setProjectScopeMenuOpen(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: `${projectGroup.displayName}을(를) 새 탭으로 열었습니다`,
+          description: "상단 탭에서 전환할 수 있습니다.",
+        }),
+      );
+    },
+    [projectGroups, threads],
+  );
+
   const clearThreadSearch = useCallback(() => {
     setThreadSearchQuery("");
     setActiveSearchResultIndex(0);
@@ -3261,9 +3318,22 @@ export default function Sidebar() {
                             <span className="min-w-0 truncate text-sm">{project.displayName}</span>
                             <button
                               type="button"
+                              aria-label={`${project.displayName} 새 탭에서 열기`}
+                              title="새 탭에서 열기"
+                              className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openProjectScopeInNewTab(project.projectKey);
+                              }}
+                            >
+                              <ExternalLinkIcon className="size-3.5" />
+                            </button>
+                            <button
+                              type="button"
                               aria-label={`${project.displayName} 프로젝트 작업`}
                               title={`${project.displayName} 프로젝트 작업`}
-                              className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                              className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                               onPointerDown={(event) => event.stopPropagation()}
                               onClick={(event) => {
                                 void handleProjectActions(event, project);
