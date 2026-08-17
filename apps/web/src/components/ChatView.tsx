@@ -1725,8 +1725,11 @@ function ChatViewContent(props: ChatViewProps) {
   // send, not just armed ones: a plain turn started into a meeting thread
   // replaces the seat's turn mid-flight and kills the run ("Collaboration
   // turn was replaced before its result was collected").
+  // Loaded for every folder surface (drafts included): the meeting-mode-off
+  // cancellation must reach the folder's live runs no matter which pane the
+  // switch was flipped from.
   const meetingRunsQuery = useEnvironmentQuery(
-    isServerThread && activeProject
+    activeProject
       ? orchestrationEnvironment.workspaceCollaborationRuns({
           environmentId,
           input: { projectId: activeProject.id },
@@ -1799,11 +1802,25 @@ function ChatViewContent(props: ChatViewProps) {
   // the mode shows off yet seats keep talking and sends keep routing to them.
   const meetingModeEnabledHere = useMeetingComposerConfig().enabled;
   const previousMeetingModeEnabledRef = useRef(meetingModeEnabledHere);
+  // Survives the moment the runs query has no data yet: the off-flip marks a
+  // pending cancel, and the effect completes it as soon as data arrives
+  // instead of missing the transition tick forever.
+  const pendingMeetingModeCancelRef = useRef(false);
   useEffect(() => {
     const wasEnabled = previousMeetingModeEnabledRef.current;
     previousMeetingModeEnabledRef.current = meetingModeEnabledHere;
-    if (!wasEnabled || meetingModeEnabledHere) return;
-    const liveFolderMeetings = (meetingRunsQuery.data?.runs ?? []).filter(
+    if (meetingModeEnabledHere) {
+      pendingMeetingModeCancelRef.current = false;
+      return;
+    }
+    if (wasEnabled) pendingMeetingModeCancelRef.current = true;
+    if (!pendingMeetingModeCancelRef.current) return;
+    if (meetingRunsQuery.data === undefined) {
+      meetingRunsQuery.refresh();
+      return;
+    }
+    pendingMeetingModeCancelRef.current = false;
+    const liveFolderMeetings = meetingRunsQuery.data.runs.filter(
       (run) => run.meeting !== null && (run.status === "queued" || run.status === "running"),
     );
     if (liveFolderMeetings.length === 0) return;
@@ -1833,7 +1850,13 @@ function ChatViewContent(props: ChatViewProps) {
             }),
       );
     })();
-  }, [cancelMeetingRun, environmentId, meetingModeEnabledHere, meetingRunsQuery.data]);
+  }, [
+    cancelMeetingRun,
+    environmentId,
+    meetingModeEnabledHere,
+    meetingRunsQuery.data,
+    meetingRunsQuery.refresh,
+  ]);
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
