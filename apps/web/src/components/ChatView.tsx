@@ -5166,6 +5166,19 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     if (liveMeetingRunHere !== undefined && !directAnnotation) {
+      // A dying meeting must not swallow the person's words: while the cancel
+      // is settling, hold the message instead of filing it as an interjection
+      // nobody will ever read.
+      if (liveMeetingRunHere.status === "cancel-requested") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "회의를 중지하는 중입니다",
+            description: "중지가 끝난 뒤 다시 보내면 일반 메시지로 전달됩니다.",
+          }),
+        );
+        return;
+      }
       const meetingPendingQuestion = liveMeetingRunHere.meeting?.pendingQuestion ?? null;
       if (meetingPendingQuestion !== null) {
         // The run is parked on a question for the person; a message typed
@@ -5269,13 +5282,15 @@ function ChatViewContent(props: ChatViewProps) {
     if (meetingDraft.enabled && !directAnnotation) {
       // Never convene a meeting while this conversation's meeting state is
       // still unknown — a moment of unloaded query data must not turn a
-      // message meant for a live meeting into a brand-new one.
+      // message meant for a live meeting into a brand-new one. Refresh so an
+      // errored query cannot leave the composer blocked forever.
       if (isServerThread && meetingRunsQuery.data === undefined) {
+        meetingRunsQuery.refresh();
         toastManager.add(
           stackedThreadToast({
             type: "warning",
             title: "회의 상태를 확인하는 중입니다",
-            description: "이 대화의 기존 회의를 확인한 뒤 다시 보내세요.",
+            description: "잠시 후 다시 보내면 전달됩니다.",
           }),
         );
         return;
