@@ -96,7 +96,12 @@ function isLegacyTurnCompletedEvent(
 }
 
 function createProviderServiceHarness() {
-  const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+  // Replay buffer: the ingestion subscription is established on a forked
+  // fiber, so an emit racing ahead of it would otherwise be lost and the test
+  // would wait forever on state that can no longer arrive.
+  const runtimeEventPubSub = Effect.runSync(
+    PubSub.unbounded<ProviderRuntimeEvent>({ replay: 256 }),
+  );
   const runtimeSessions: ProviderSession[] = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
@@ -179,12 +184,21 @@ async function waitForThread(
   const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
   const poll = async (): Promise<ProviderRuntimeTestThread> => {
     const snapshot = await readModel();
+    const snapshotSequence = snapshot.snapshotSequence;
     const thread = snapshot.threads.find((entry) => entry.id === threadId);
     if (thread && predicate(thread)) {
       return thread;
     }
     if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
-      throw new Error("Timed out waiting for thread state");
+      throw new Error(
+        `Timed out waiting for thread state: ${JSON.stringify({
+          snapshotSequence,
+          hasThread: thread !== undefined,
+          session: thread?.session,
+          messageCount: thread?.messages.length,
+          activityKinds: thread?.activities.map((activity) => activity.kind),
+        })}`,
+      );
     }
     await Effect.runPromise(Effect.yieldNow);
     return poll();
@@ -224,21 +238,28 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    // Stubbed: the live resolver shells out to git on snapshot reads, and on
+    // Windows each process spawn blocks the event loop long enough to starve
+    // the polling assertions. These tests never assert repository identity.
+    const repositoryIdentityResolverStub = Layer.succeed(
+      RepositoryIdentityResolver.RepositoryIdentityResolver,
+      RepositoryIdentityResolver.RepositoryIdentityResolver.of({
+        resolve: () => Effect.succeed(null),
+      }),
+    );
+    // provideMerge (not provide) for the snapshot query: the test must read
+    // through the SAME instance the engine projects into — a second build of
+    // the layer would sit on its own storage and never see the writes.
     const orchestrationLayer = OrchestrationEngineLive.pipe(
-      Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+      Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provide(RepositoryIdentityResolver.layer),
-      Layer.provide(SqlitePersistenceMemory),
-    );
-    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
-      Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(repositoryIdentityResolverStub),
       Layer.provide(SqlitePersistenceMemory),
     );
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
-      Layer.provideMerge(projectionSnapshotLayer),
       // Single shared liveness instance across ingestion (writer), the
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
@@ -254,8 +275,10 @@ describe("ProviderRuntimeIngestion", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
     scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
-    const drain = () => Effect.runPromise(ingestion.drain);
+    // Everything runs on the harness runtime: the ingestion worker loop lives
+    // there, and transactional wake-ups between runtimes are not guaranteed.
+    await runtime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
+    const drain = () => runtime!.runPromise(ingestion.drain);
 
     const createdAt = "2026-01-01T00:00:00.000Z";
     await Effect.runPromise(
@@ -318,7 +341,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     return {
       engine,
-      readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readModel: () => runtime!.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,

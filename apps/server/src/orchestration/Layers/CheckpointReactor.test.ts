@@ -212,6 +212,10 @@ function createGitRepository() {
   runGit(cwd, ["init", "--initial-branch=main"]);
   runGit(cwd, ["config", "user.email", "test@example.com"]);
   runGit(cwd, ["config", "user.name", "Test User"]);
+  // Byte-exact round-trips regardless of the machine's git install: Git for
+  // Windows ships core.autocrlf=true system-wide, which would rewrite the
+  // checked-out files to CRLF and break content assertions.
+  runGit(cwd, ["config", "core.autocrlf", "false"]);
   NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v1\n", "utf8");
   runGit(cwd, ["add", "."]);
   runGit(cwd, ["commit", "-m", "Initial"]);
