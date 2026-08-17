@@ -521,6 +521,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           participantIds: command.meeting.participants.map((participant) => participant.id),
           chairParticipantId: command.meeting.chairParticipantId,
         });
+        if (command.meeting.threadId !== undefined) {
+          const meetingThread = yield* requireThreadNotArchived({
+            readModel,
+            command,
+            threadId: command.meeting.threadId,
+          });
+          if (meetingThread.projectId !== command.projectId) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Thread '${command.meeting.threadId}' belongs to another project; a meeting can only run in a conversation of its own project.`,
+            });
+          }
+        }
       }
       return {
         ...(yield* withEventBase({
@@ -549,7 +562,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 : {
                     ...command.meeting,
                     phase: "discussing",
-                    threadId: null,
+                    threadId: command.meeting.threadId ?? null,
                     rounds: [],
                     pendingQuestion: null,
                     answers: [],

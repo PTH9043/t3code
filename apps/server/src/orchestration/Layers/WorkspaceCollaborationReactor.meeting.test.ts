@@ -443,6 +443,66 @@ it.effect("runs the meeting, plans onto the roster, and executes with the same s
   }),
 );
 
+it.effect("holds the meeting in the conversation the person sent it from", () =>
+  Effect.gen(function* () {
+    const existingThreadId = ThreadId.make("thread-existing");
+    const harness = yield* makeHarness({
+      run: meetingRun({ threadId: existingThreadId }),
+      respond: respondForMeetingPrompt,
+    });
+    // The person's conversation predates the meeting; its title is theirs.
+    yield* Ref.update(harness.threadsRef, (current) => {
+      const next = new Map(current);
+      next.set(existingThreadId, {
+        id: existingThreadId,
+        projectId,
+        title: "내 원래 대화",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claude-a"),
+          model: "claude-fable",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: at,
+        updatedAt: at,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+        session: null,
+      } as unknown as OrchestrationThread);
+      return next;
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("completed");
+      expect(run.meeting?.threadId).toBe(existingThreadId);
+
+      const threads = yield* Ref.get(harness.threadsRef);
+      // No fresh thread was opened, and the person's title survived.
+      expect(threads.size).toBe(1);
+      expect(threads.get(existingThreadId)?.title).toBe("내 원래 대화");
+      expect(
+        run.meeting?.rounds[0]?.statements.every(
+          (statement) => statement.threadId === existingThreadId,
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
 it.effect("parks on the round check-in and resumes when the person answers", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness({

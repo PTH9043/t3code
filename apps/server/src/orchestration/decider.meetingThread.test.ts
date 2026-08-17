@@ -1,0 +1,181 @@
+import {
+  CommandId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  WorkspaceCollaborationRunId,
+  WorkspaceMeetingParticipantId,
+  type OrchestrationEvent,
+  type WorkspaceMeetingSetup,
+} from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+
+import { decideOrchestrationCommand } from "./decider.ts";
+import { createEmptyReadModel, projectEvent } from "./projector.ts";
+
+const now = "2026-08-17T00:00:00.000Z";
+const projectId = ProjectId.make("workspace-a");
+const threadId = ThreadId.make("thread-a");
+
+function asSingleEvent(
+  result:
+    | Omit<OrchestrationEvent, "sequence">
+    | ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
+) {
+  const event = Array.isArray(result) ? result[0] : result;
+  if (!event) throw new Error("Expected one orchestration event");
+  return event;
+}
+
+const meetingSetup = (setupThreadId?: ThreadId): WorkspaceMeetingSetup => ({
+  mode: "fixed-rounds",
+  participants: [
+    {
+      id: WorkspaceMeetingParticipantId.make("p1"),
+      displayName: "Claude",
+      modelSelection: { instanceId: ProviderInstanceId.make("claude-a"), model: "claude-fable" },
+    },
+    {
+      id: WorkspaceMeetingParticipantId.make("p2"),
+      displayName: "Codex",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex-a"), model: "gpt-5" },
+    },
+  ],
+  chairParticipantId: null,
+  maxRounds: 1,
+  userInLoop: false,
+  ...(setupThreadId !== undefined ? { threadId: setupThreadId } : {}),
+});
+
+const requestCommand = (setupThreadId?: ThreadId) =>
+  ({
+    type: "project.collaboration.run.request",
+    commandId: CommandId.make("request-meeting"),
+    runId: WorkspaceCollaborationRunId.make("run-a"),
+    projectId,
+    task: "서버 기능 구현",
+    meeting: meetingSetup(setupThreadId),
+    createdAt: now,
+  }) as const;
+
+function seedReadModel() {
+  return Effect.gen(function* () {
+    let readModel = createEmptyReadModel(now);
+    const created = asSingleEvent(
+      yield* decideOrchestrationCommand({
+        command: {
+          type: "project.create",
+          commandId: CommandId.make("create-workspace-a"),
+          projectId,
+          title: "Workspace A",
+          workspaceRoot: "D:/work/workspace-a",
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+    readModel = yield* projectEvent(readModel, { ...created, sequence: 1 } as OrchestrationEvent);
+    const threadCreated = asSingleEvent(
+      yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.create",
+          commandId: CommandId.make("create-thread-a"),
+          threadId,
+          projectId,
+          title: "내 원래 대화",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claude-a"),
+            model: "claude-fable",
+          },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+    return yield* projectEvent(readModel, {
+      ...threadCreated,
+      sequence: 2,
+    } as OrchestrationEvent);
+  });
+}
+
+it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
+  it.effect("seeds the meeting with the conversation the person sent it from", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const event = asSingleEvent(
+        yield* decideOrchestrationCommand({ command: requestCommand(threadId), readModel }),
+      );
+
+      expect(event.type).toBe("project.collaboration-run-requested");
+      if (event.type !== "project.collaboration-run-requested") return;
+      expect(event.payload.run.meeting?.threadId).toBe(threadId);
+    }),
+  );
+
+  it.effect("still opens a fresh thread when the request names none", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const event = asSingleEvent(
+        yield* decideOrchestrationCommand({ command: requestCommand(), readModel }),
+      );
+
+      expect(event.type).toBe("project.collaboration-run-requested");
+      if (event.type !== "project.collaboration-run-requested") return;
+      expect(event.payload.run.meeting?.threadId).toBeNull();
+    }),
+  );
+
+  it.effect("rejects a meeting aimed at a conversation that does not exist", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const error = yield* decideOrchestrationCommand({
+        command: requestCommand(ThreadId.make("thread-missing")),
+        readModel,
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("rejects a meeting aimed at another project's conversation", () =>
+    Effect.gen(function* () {
+      let readModel = yield* seedReadModel();
+      const otherProjectId = ProjectId.make("workspace-b");
+      const otherCreated = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.create",
+            commandId: CommandId.make("create-workspace-b"),
+            projectId: otherProjectId,
+            title: "Workspace B",
+            workspaceRoot: "D:/work/workspace-b",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      readModel = yield* projectEvent(readModel, {
+        ...otherCreated,
+        sequence: 3,
+      } as OrchestrationEvent);
+
+      const error = yield* decideOrchestrationCommand({
+        command: {
+          ...requestCommand(threadId),
+          projectId: otherProjectId,
+          runId: WorkspaceCollaborationRunId.make("run-b"),
+        },
+        readModel,
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+});

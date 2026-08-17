@@ -823,6 +823,12 @@ export const WorkspaceMeetingSetup = Schema.Struct({
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
   maxRounds: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
   userInLoop: Schema.Boolean,
+  /**
+   * The conversation the meeting should happen in — the thread the person was
+   * looking at when they sent the topic. Omitted opens a fresh thread instead
+   * (a draft composer has no thread yet, and schedules never had one).
+   */
+  threadId: Schema.optionalKey(ThreadId),
 });
 export type WorkspaceMeetingSetup = typeof WorkspaceMeetingSetup.Type;
 

@@ -210,7 +210,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       <p className="mt-3 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
-          : "입력창에 주제를 쓰고 보내면 회의가 시작됩니다. 진행은 프로젝트 제어 센터에서 볼 수 있습니다."}
+          : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 회의 모드는 끌 때까지 유지됩니다."}
       </p>
     </div>
   );

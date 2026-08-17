@@ -201,7 +201,8 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
-import { readMeetingComposerConfig, updateMeetingComposerConfig } from "../meetingComposerStore";
+import { readMeetingComposerConfig, useMeetingComposerConfig } from "../meetingComposerStore";
+import { orchestrationEnvironment } from "../state/orchestration";
 import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
@@ -1674,6 +1675,18 @@ function ChatViewContent(props: ChatViewProps) {
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
   const activeProject = useProject(activeProjectRef);
+  // The meeting toggle stays armed until the person turns it off, so an armed
+  // composer must know whether this conversation already hosts a live meeting:
+  // a second topic sent mid-meeting would tangle two runs in one thread.
+  const meetingComposerArmed = useMeetingComposerConfig(composerDraftTarget).enabled;
+  const meetingRunsQuery = useEnvironmentQuery(
+    meetingComposerArmed && activeProject
+      ? orchestrationEnvironment.workspaceCollaborationRuns({
+          environmentId,
+          input: { projectId: activeProject.id },
+        })
+      : null,
+  );
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
@@ -4978,6 +4991,29 @@ function ChatViewContent(props: ChatViewProps) {
         );
         return;
       }
+      // The meeting runs in THIS conversation when it already exists on the
+      // server; only a draft with no thread yet opens a fresh one.
+      const meetingThreadId = isServerThread && activeThread ? activeThread.id : undefined;
+      const meetingRunActiveHere =
+        meetingThreadId !== undefined &&
+        (meetingRunsQuery.data?.runs ?? []).some(
+          (run) =>
+            run.meeting?.threadId === meetingThreadId &&
+            (run.status === "queued" ||
+              run.status === "running" ||
+              run.status === "cancel-requested"),
+        );
+      if (meetingRunActiveHere) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "이 대화창에서 회의가 진행 중입니다",
+            description:
+              "회의가 끝난 뒤 새 주제를 보내세요. 의장이 질문을 올리면 제어 센터에서 답할 수 있습니다.",
+          }),
+        );
+        return;
+      }
       const meetingTask = appendReviewCommentsToPrompt(
         composerPreviewAnnotations.reduce(
           (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
@@ -5012,6 +5048,7 @@ function ChatViewContent(props: ChatViewProps) {
                   : WorkspaceMeetingParticipantId.make(meetingDraft.chairSeatId),
               maxRounds: meetingDraft.maxRounds,
               userInLoop: meetingDraft.userInLoop,
+              ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },
           },
         });
@@ -5030,17 +5067,20 @@ function ChatViewContent(props: ChatViewProps) {
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
         composerRef.current?.resetCursorState();
-        updateMeetingComposerConfig(composerDraftTarget, (config) => ({
-          ...config,
-          enabled: false,
-        }));
+        // The toggle survives the send: meeting mode is a state the person
+        // turns off, not a one-shot — the next topic goes to the same table.
         toastManager.add(
           stackedThreadToast({
             type: "success",
             title: "AI 회의를 시작했습니다",
-            description: `${meetingDraft.seats
-              .map((seat) => seat.displayName)
-              .join(", ")} — 진행은 프로젝트 제어 센터의 실행 이력에서 볼 수 있습니다.`,
+            description:
+              meetingThreadId !== undefined
+                ? `${meetingDraft.seats
+                    .map((seat) => seat.displayName)
+                    .join(", ")} — 논의가 이 대화창에서 실시간으로 진행됩니다.`
+                : `${meetingDraft.seats
+                    .map((seat) => seat.displayName)
+                    .join(", ")} — 새 대화창에서 진행됩니다. 제어 센터에서도 볼 수 있습니다.`,
           }),
         );
       } finally {
