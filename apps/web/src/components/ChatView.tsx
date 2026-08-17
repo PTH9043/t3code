@@ -1775,6 +1775,46 @@ function ChatViewContent(props: ChatViewProps) {
           }),
     );
   }, [cancelMeetingRun, environmentId, liveMeetingRuns]);
+  // Off means OFF: flipping the folder's meeting mode off also stops every
+  // live meeting run in the folder. Without this the switch reads as broken —
+  // the mode shows off yet seats keep talking and sends keep routing to them.
+  const meetingModeEnabledHere = useMeetingComposerConfig().enabled;
+  const previousMeetingModeEnabledRef = useRef(meetingModeEnabledHere);
+  useEffect(() => {
+    const wasEnabled = previousMeetingModeEnabledRef.current;
+    previousMeetingModeEnabledRef.current = meetingModeEnabledHere;
+    if (!wasEnabled || meetingModeEnabledHere) return;
+    const liveFolderMeetings = (meetingRunsQuery.data?.runs ?? []).filter(
+      (run) => run.meeting !== null && (run.status === "queued" || run.status === "running"),
+    );
+    if (liveFolderMeetings.length === 0) return;
+    void (async () => {
+      let failed = false;
+      for (const run of liveFolderMeetings) {
+        const cancelled = await cancelMeetingRun({
+          environmentId,
+          input: { projectId: run.projectId, runId: run.id },
+        });
+        if (cancelled._tag === "Failure" && !isAtomCommandInterrupted(cancelled)) failed = true;
+      }
+      toastManager.add(
+        failed
+          ? stackedThreadToast({
+              type: "error",
+              title: "회의 모드는 껐지만 일부 회의를 중지하지 못했습니다",
+              description: "제어 센터에서 남은 실행을 취소하세요.",
+            })
+          : stackedThreadToast({
+              type: "success",
+              title:
+                liveFolderMeetings.length > 1
+                  ? `회의 모드 종료 — 진행 중이던 회의 ${liveFolderMeetings.length}건을 중지합니다`
+                  : "회의 모드 종료 — 진행 중이던 회의를 중지합니다",
+              description: "회의 모드를 끄면 이 폴더의 회의도 함께 멈춥니다.",
+            }),
+      );
+    })();
+  }, [cancelMeetingRun, environmentId, meetingModeEnabledHere, meetingRunsQuery.data]);
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
