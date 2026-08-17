@@ -122,9 +122,23 @@ describe("formatMeetingProtocolText", () => {
     expect(output).toContain("다음: 교차 검증 노드 실행");
   });
 
-  it("keeps a still-streaming tag as-is until it completes", () => {
-    const streaming = '분석 중이다. <t3_chair_verdict>{"summary":"아직';
-    expect(formatMeetingProtocolText(streaming)).toBe(streaming);
+  it("renders a still-streaming tag as a live block instead of raw JSON", () => {
+    const streaming =
+      '분석 중이다. <t3_chair_verdict>{"summary":"아직 정리 중인 합의안이며 \\"인용\\"도 섞';
+    const output = formatMeetingProtocolText(streaming);
+    expect(output).toContain("분석 중이다.");
+    expect(output).not.toContain("<t3_chair_verdict>");
+    expect(output).not.toContain('"summary"');
+    expect(output).toContain("👑 의장 정리");
+    expect(output).toContain("작성 중");
+    expect(output).toContain('아직 정리 중인 합의안이며 "인용"도 섞');
+  });
+
+  it("shows a bare streaming block before any payload text arrives", () => {
+    const output = formatMeetingProtocolText('<t3_validation>{"verd');
+    expect(output).not.toContain("<t3_validation>");
+    expect(output).toContain("🔍 검증");
+    expect(output).toContain("작성 중");
   });
 
   it("falls back to a fenced block when the payload is not JSON", () => {

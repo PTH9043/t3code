@@ -169,6 +169,39 @@ function renderSynthesis(body: string): string {
   return blockquote(lines);
 }
 
+const TAG_TITLES: Record<string, string> = {
+  t3_chair_verdict: "👑 의장 정리",
+  t3_question: "❓ 사용자에게 질문",
+  t3_task_graph: "📋 실행 계획",
+  t3_validation: "🔍 검증",
+  t3_synthesis: "🏁 최종 결과",
+};
+
+/** Best-effort read of one string field out of a JSON payload still streaming in. */
+function extractPartialString(body: string, field: string): string | null {
+  const match = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`).exec(body);
+  if (!match || match[1] === undefined) return null;
+  const value = match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\").trim();
+  return value.length > 0 ? value : null;
+}
+
+/**
+ * A tag still being written out must not sit on screen as raw JSON for the
+ * seconds (or minutes) the model spends typing it. Show a live block with
+ * whatever readable text has arrived; the completed render replaces it.
+ */
+function renderStreamingTag(tag: string, body: string): string {
+  if (tag === "t3_responds_to") return "";
+  const title = TAG_TITLES[tag] ?? "회의 메시지";
+  const partial =
+    extractPartialString(body, "summary") ??
+    extractPartialString(body, "question") ??
+    extractPartialString(body, "finalOutput");
+  const lines = [`**${title}** _(작성 중…)_`];
+  if (partial) lines.push(partial);
+  return blockquote(lines);
+}
+
 function renderRespondsTo(body: string): string {
   const targets = body
     .split(",")
@@ -179,13 +212,13 @@ function renderRespondsTo(body: string): string {
 }
 
 /**
- * Rewrite every COMPLETED protocol tag into readable Markdown. A tag still
- * streaming in (no closing tag yet) is left alone and converts on the next
- * render once it completes.
+ * Rewrite every COMPLETED protocol tag into readable Markdown, and render a
+ * tag still streaming in (no closing tag yet) as a live "작성 중" block so raw
+ * JSON never sits on screen while the model types it out.
  */
 export function formatMeetingProtocolText(text: string): string {
   if (!text.includes("<t3_")) return text;
-  return text.replace(PROTOCOL_TAG_PATTERN, (_match, tag: string, body: string) => {
+  const completed = text.replace(PROTOCOL_TAG_PATTERN, (_match, tag: string, body: string) => {
     switch (tag) {
       case "t3_chair_verdict":
         return renderChairVerdict(body);
@@ -203,4 +236,9 @@ export function formatMeetingProtocolText(text: string): string {
         return "";
     }
   });
+  return completed.replace(
+    /<(t3_chair_verdict|t3_question|t3_task_graph|t3_validation|t3_synthesis|t3_responds_to)>([\s\S]*)$/,
+    (match, tag: string, body: string) =>
+      body.includes(`</${tag}>`) ? match : renderStreamingTag(tag, body),
+  );
 }
