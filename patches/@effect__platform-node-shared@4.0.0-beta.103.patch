@@ -1,0 +1,32 @@
+diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
+index 29b02311c2101b01e5ad991f2e9375e699f2340c..5e19b628af40e377e89ab96eb663b4e65019dcd0 100644
+--- a/dist/NodeChildProcessSpawner.js
++++ b/dist/NodeChildProcessSpawner.js
+@@ -274,9 +274,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+   };
+   const killProcessGroupOnExit = (childProcess, signal) => {
+     if (globalThis.process.platform === "win32") {
+-      NodeChildProcess.exec(`taskkill /pid ${childProcess.pid} /T /F`, () => {
+-        // ignore errors during best-effort cleanup
+-      });
++      // PATCHED: the only caller runs after the child has already exited. On
++      // Windows a dead root pid cannot enumerate its tree, so `taskkill /T`
++      // never finds grandchildren — it only spawns cmd.exe+taskkill.exe
++      // (~700ms each, one per non-zero-exit child) and, worst case, kills an
++      // unrelated process that reused the pid. Skip it entirely.
+       return;
+     }
+     try {
+@@ -349,7 +351,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+             if (exited) {
+               // Process already exited, check if children need cleanup
+               const [code] = yield* Deferred.await(exitSignal);
+-              if (code !== 0 && Predicate.isNotNull(code)) {
++              // PATCHED: skip on win32 — a dead root pid cannot enumerate its
++              // tree, so `taskkill /T` on it never reaps grandchildren; it
++              // costs a cmd.exe+taskkill spawn (~700ms) per non-zero exit and
++              // may hit an unrelated process that reused the pid.
++              if (code !== 0 && Predicate.isNotNull(code) && globalThis.process.platform !== "win32") {
+                 // Non-zero exit code ,attempt to clean up process group
+                 return yield* Effect.ignore(killWithTimeout(killProcessGroup));
+               }
