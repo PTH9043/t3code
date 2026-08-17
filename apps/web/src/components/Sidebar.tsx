@@ -3296,7 +3296,9 @@ export default function Sidebar() {
                     </span>
                     <ChevronDownIcon className="-mr-px size-4 shrink-0" />
                   </MenuTrigger>
-                  <MenuPopup align="start" className="w-(--anchor-width)">
+                  {/* Wider than the (narrow) trigger so folder names stay
+                      readable next to the two row actions. */}
+                  <MenuPopup align="start" className="min-w-(--anchor-width) max-w-80">
                     <MenuRadioGroup
                       value={effectiveProjectScopeKey ?? ""}
                       onValueChange={(value) => handleProjectScopeChange(value as string)}
