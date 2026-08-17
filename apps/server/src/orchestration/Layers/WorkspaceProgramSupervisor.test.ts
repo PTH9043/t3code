@@ -312,6 +312,7 @@ function supervisorHarness(input: {
       upsert: () => Effect.void,
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
+      recordInterjection: () => Effect.void,
       getById: () => Effect.succeed(Option.none()),
       list: () => Effect.succeed([]),
       listResumable: () => Effect.succeed([]),

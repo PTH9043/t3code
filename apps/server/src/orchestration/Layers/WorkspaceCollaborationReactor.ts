@@ -932,6 +932,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               (participantId) =>
                 Effect.gen(function* () {
                   const route = meetingAssignmentRoute(meeting, participantId);
+                  // Reload between seats: an interjection the person made while
+                  // the previous seat was speaking (and a cancel) must reach the
+                  // very next speaker, not the next round.
+                  const liveRun = yield* requireRunContinuable(input.runRef);
+                  const liveMeeting = liveRun.meeting ?? meeting;
                   const turn = yield* dispatchMeetingTurn({
                     run: currentRun,
                     route,
@@ -942,7 +947,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                       // round pays for the full Workspace corpus.
                       workspacePrompt: roundIndex === 0 ? input.workspacePrompt : null,
                       task: currentRun.task,
-                      meeting,
+                      meeting: { ...meeting, interjections: liveMeeting.interjections },
                       participantId,
                       roundIndex,
                     }),

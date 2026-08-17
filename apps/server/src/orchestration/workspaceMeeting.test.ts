@@ -74,6 +74,7 @@ function meeting(overrides: Partial<WorkspaceMeeting> = {}): WorkspaceMeeting {
     rounds: [],
     pendingQuestion: null,
     answers: [],
+    interjections: [],
     ...overrides,
   };
 }
@@ -466,6 +467,37 @@ describe("renderMeetingTranscript", () => {
     expect(transcript).toContain("B안으로");
     // Seat ids stay out of the prose the models read.
     expect(transcript).not.toContain("p1");
+  });
+
+  it("weaves the person's interjections into the order they arrived", () => {
+    const transcript = renderMeetingTranscript(
+      meeting({
+        rounds: [round({ index: 0, spoke: ["p1", "p2"] })],
+        interjections: [
+          { text: "시작 전 당부", roundIndex: 0, afterStatements: 0, saidAt: at },
+          { text: "첫 발언에 대한 이견", roundIndex: 0, afterStatements: 1, saidAt: at },
+        ],
+      }),
+    );
+    const order = [
+      transcript.indexOf("시작 전 당부"),
+      transcript.indexOf("1번째 의견"),
+      transcript.indexOf("첫 발언에 대한 이견"),
+      transcript.indexOf("2번째 의견"),
+    ];
+    expect(order.every((position) => position >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(transcript).toContain("### 사용자 (개입)");
+  });
+
+  it("keeps an interjection whose round never opened", () => {
+    const transcript = renderMeetingTranscript(
+      meeting({
+        interjections: [{ text: "라운드 전 당부", roundIndex: 0, afterStatements: 0, saidAt: at }],
+      }),
+    );
+    expect(transcript).toContain("## 사용자 개입");
+    expect(transcript).toContain("라운드 전 당부");
   });
 });
 

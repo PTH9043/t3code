@@ -4,10 +4,12 @@ import {
   WorkspaceCollaborationRunId,
   WorkspaceCollaborationStep,
   WorkspaceMeeting,
+  WorkspaceMeetingInterjection,
   WorkspaceTaskGraph,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -71,6 +73,36 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId}
           ORDER BY created_at DESC, run_id DESC`,
   });
+  // Interjections live in their own table (see migration 055): the reactor
+  // rewrites meeting_json wholesale from its own snapshot, so the person's
+  // remarks are stored out of its reach and grafted back on every read. The
+  // copy inside meeting_json is ignored.
+  const listInterjectionRows = SqlSchema.findAll({
+    Request: RunLookup,
+    Result: WorkspaceMeetingInterjection,
+    execute: ({ projectId, runId }) =>
+      sql`SELECT
+            text,
+            round_index AS "roundIndex",
+            after_statements AS "afterStatements",
+            said_at AS "saidAt"
+          FROM projection_workspace_collaboration_interjections
+          WHERE project_id = ${projectId} AND run_id = ${runId}
+          ORDER BY id ASC`,
+  });
+  const hydrateInterjections = (run: WorkspaceCollaborationRun) => {
+    const meeting = run.meeting;
+    if (meeting === null) return Effect.succeed(run);
+    return listInterjectionRows({ projectId: run.projectId, runId: run.id }).pipe(
+      Effect.map(
+        (interjections): WorkspaceCollaborationRun => ({
+          ...run,
+          meeting: { ...meeting, interjections },
+        }),
+      ),
+    );
+  };
+
   const listResumableRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: DbRow,
@@ -204,8 +236,60 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * Appends the person's remark, anchored to the transcript position the
+   * stored snapshot shows. The anchor can trail the live discussion by the
+   * turn in flight — close enough for "said around here" — but the row itself
+   * can never be lost to the reactor's wholesale meeting_json rewrites.
+   */
+  const recordInterjection: ProjectionWorkspaceCollaborationRunRepositoryShape["recordInterjection"] =
+    (input) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly meeting: string | null;
+          readonly status: string;
+        }>`SELECT meeting_json AS meeting, status FROM projection_workspace_collaboration_runs
+           WHERE project_id = ${input.projectId} AND run_id = ${input.runId} LIMIT 1`.pipe(
+          Effect.mapError(
+            toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordInterjection:select"),
+          ),
+        );
+        const row = rows[0];
+        if (row === undefined || row.meeting === null) return;
+        if (!["queued", "running", "cancel-requested"].includes(row.status)) return;
+
+        const meeting = yield* Effect.try({
+          try: () => decodeMeeting(row.meeting),
+          catch: decodeError("ProjectionWorkspaceCollaborationRuns.recordInterjection"),
+        });
+        if (meeting === null || meeting.phase === "done") return;
+
+        const openRound = meeting.rounds.at(-1);
+        yield* sql`
+          INSERT INTO projection_workspace_collaboration_interjections (
+            project_id, run_id, text, round_index, after_statements, said_at
+          ) VALUES (
+            ${input.projectId}, ${input.runId}, ${input.text},
+            ${openRound?.index ?? meeting.rounds.length},
+            ${openRound?.statements.length ?? 0},
+            ${input.interjectedAt}
+          )
+        `.pipe(
+          Effect.asVoid,
+          Effect.mapError(
+            toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordInterjection:insert"),
+          ),
+        );
+      });
+
   const getById: ProjectionWorkspaceCollaborationRunRepositoryShape["getById"] = (input) =>
     getRow(input).pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.succeedNone,
+          onSome: (run) => hydrateInterjections(run).pipe(Effect.map(Option.some)),
+        }),
+      ),
       Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.getById")),
     );
 
@@ -216,11 +300,13 @@ const make = Effect.gen(function* () {
         const statuses = new Set(input.statuses);
         return runs.filter((run) => statuses.has(run.status));
       }),
+      Effect.flatMap((runs) => Effect.forEach(runs, hydrateInterjections)),
       Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.list")),
     );
 
   const listResumable: ProjectionWorkspaceCollaborationRunRepositoryShape["listResumable"] = () =>
     listResumableRows(undefined).pipe(
+      Effect.flatMap((runs) => Effect.forEach(runs, hydrateInterjections)),
       Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.listResumable")),
     );
 
@@ -228,6 +314,7 @@ const make = Effect.gen(function* () {
     upsert,
     requestCancel,
     recordAnswer,
+    recordInterjection,
     getById,
     list,
     listResumable,

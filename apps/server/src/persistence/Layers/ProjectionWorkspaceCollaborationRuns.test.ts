@@ -1,7 +1,9 @@
 import {
   ProjectId,
+  ProviderInstanceId,
   WorkspaceCollaborationRunId,
   WorkspaceIncidentId,
+  WorkspaceMeetingParticipantId,
   type WorkspaceTaskGraph,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -280,6 +282,113 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         WHERE project_id = ${workspaceA}
       `;
       expect(yield* repository.listResumable()).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps interjections through the reactor's wholesale meeting rewrites", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectionWorkspaceCollaborationRunRepository;
+      const projectId = ProjectId.make("workspace-i");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, workspace_control_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${projectId}, ${projectId}, ${`D:/${projectId}`}, NULL, '[]',
+          '{"isolationMode":"strict","longTermMemoryRoot":null}',
+          '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z', NULL
+        )
+      `;
+
+      const runId = WorkspaceCollaborationRunId.make("run-i");
+      const meeting = {
+        mode: "fixed-rounds",
+        phase: "discussing",
+        threadId: null,
+        participants: [
+          {
+            id: WorkspaceMeetingParticipantId.make("p1"),
+            displayName: "Claude",
+            modelSelection: { instanceId: ProviderInstanceId.make("claude-a"), model: "m" },
+          },
+          {
+            id: WorkspaceMeetingParticipantId.make("p2"),
+            displayName: "Codex",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex-a"), model: "m" },
+          },
+        ],
+        chairParticipantId: null,
+        maxRounds: 1,
+        userInLoop: false,
+        rounds: [],
+        pendingQuestion: null,
+        answers: [],
+        interjections: [],
+      } as const;
+      const run = {
+        id: runId,
+        projectId,
+        source: "user",
+        scheduleId: null,
+        incidentId: null,
+        task: "회의 주제",
+        status: "running",
+        steps: [],
+        graph: null,
+        meeting,
+        finalOutput: null,
+        error: null,
+        createdAt: "2026-08-17T01:00:00.000Z",
+        updatedAt: "2026-08-17T01:00:00.000Z",
+      } as const;
+      yield* repository.upsert(run);
+
+      yield* repository.recordInterjection({
+        projectId,
+        runId,
+        text: "예산은 무료 티어로",
+        interjectedAt: "2026-08-17T01:10:00.000Z",
+      });
+
+      const afterRecord = Option.getOrThrow(yield* repository.getById({ projectId, runId }));
+      expect(afterRecord.meeting?.interjections).toEqual([
+        {
+          text: "예산은 무료 티어로",
+          roundIndex: 0,
+          afterStatements: 0,
+          saidAt: "2026-08-17T01:10:00.000Z",
+        },
+      ]);
+
+      // The reactor persists from its own snapshot, which never saw the
+      // interjection — the rewrite must not eat it.
+      yield* repository.upsert({ ...run, updatedAt: "2026-08-17T01:20:00.000Z" });
+      const afterRewrite = Option.getOrThrow(yield* repository.getById({ projectId, runId }));
+      expect(afterRewrite.meeting?.interjections).toHaveLength(1);
+
+      // A finished run no longer takes remarks.
+      yield* repository.upsert({
+        ...run,
+        status: "completed",
+        updatedAt: "2026-08-17T02:00:00.000Z",
+      });
+      yield* repository.recordInterjection({
+        projectId,
+        runId,
+        text: "끝난 뒤의 말",
+        interjectedAt: "2026-08-17T02:10:00.000Z",
+      });
+      const afterDone = Option.getOrThrow(yield* repository.getById({ projectId, runId }));
+      expect(afterDone.meeting?.interjections).toHaveLength(1);
+
+      expect(yield* repository.list({ projectId })).toEqual([
+        expect.objectContaining({
+          meeting: expect.objectContaining({
+            interjections: [expect.objectContaining({ text: "예산은 무료 티어로" })],
+          }),
+        }),
+      ]);
     }),
   );
 });

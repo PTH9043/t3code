@@ -34,6 +34,8 @@ import {
   type ResolveWorkspaceIncidentInput,
   answerWorkspaceCollaborationRun,
   archiveWorkspaceKnowledgeItem,
+  interjectWorkspaceCollaborationRun,
+  type InterjectWorkspaceCollaborationRunInput,
   cancelWorkspaceCollaborationRun,
   createProject,
   deleteProject,
@@ -70,6 +72,7 @@ export type {
   RequestWorkspaceCollaborationRunInput,
   CancelWorkspaceCollaborationRunInput,
   AnswerWorkspaceCollaborationRunInput,
+  InterjectWorkspaceCollaborationRunInput,
   UpsertWorkspaceScheduleInput,
   RemoveWorkspaceScheduleInput,
   UpsertWorkspaceProgramInput,
@@ -193,6 +196,13 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:commands:project:answer-workspace-collaboration-run",
       execute: (input: AnswerWorkspaceCollaborationRunInput) =>
         answerWorkspaceCollaborationRun(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    interjectWorkspaceCollaborationRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:interject-workspace-collaboration-run",
+      execute: (input: InterjectWorkspaceCollaborationRunInput) =>
+        interjectWorkspaceCollaborationRun(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),

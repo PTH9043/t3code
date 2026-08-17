@@ -77,6 +77,7 @@ function meetingRun(meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollabora
       rounds: [],
       pendingQuestion: null,
       answers: [],
+      interjections: [],
       ...meeting,
     },
     finalOutput: null,
@@ -151,8 +152,19 @@ function respondForMeetingPrompt(prompt: string): string {
 function makeHarness(input: {
   readonly run: WorkspaceCollaborationRun;
   readonly respond: (prompt: string) => string;
+  /**
+   * Mutable on purpose: the projection writes interjections outside the run
+   * snapshot, so the fake mirrors that by grafting this array onto every read.
+   * A test pushes into it from `respond` to interject mid-round.
+   */
+  readonly liveInterjections?: WorkspaceMeeting["interjections"][number][];
 }) {
   return Effect.gen(function* () {
+    const liveInterjections = input.liveInterjections ?? [];
+    const withLiveInterjections = (run: WorkspaceCollaborationRun): WorkspaceCollaborationRun =>
+      run.meeting === null
+        ? run
+        : { ...run, meeting: { ...run.meeting, interjections: [...liveInterjections] } };
     const runRef = yield* Ref.make(input.run);
     const threadsRef = yield* Ref.make(new Map<string, OrchestrationThread>());
     const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -287,11 +299,12 @@ function makeHarness(input: {
       upsert: (run: WorkspaceCollaborationRun) => Ref.set(runRef, run),
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
+      recordInterjection: () => Effect.void,
       getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
         Ref.get(runRef).pipe(
           Effect.map((run) =>
             run.projectId === requestedProjectId && run.id === requestedRunId
-              ? Option.some(run)
+              ? Option.some(withLiveInterjections(run))
               : Option.none(),
           ),
         ),
@@ -499,6 +512,48 @@ it.effect("holds the meeting in the conversation the person sent it from", () =>
           (statement) => statement.threadId === existingThreadId,
         ),
       ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("hands a mid-round interjection to the very next speaker", () =>
+  Effect.gen(function* () {
+    const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
+    const harness = yield* makeHarness({
+      run: meetingRun(),
+      // The person speaks up while the first seat is mid-turn; the projection
+      // (faked by liveInterjections) has recorded it by the time the reactor
+      // reloads the run for the second seat.
+      respond: (prompt) => {
+        if (prompt.startsWith("# Workspace Meeting Statement") && prompt.includes("Seat: Claude")) {
+          liveInterjections.push({
+            text: "긴급: 예산은 무료 티어로 한정해줘",
+            roundIndex: 0,
+            afterStatements: 1,
+            saidAt: at,
+          });
+        }
+        return respondForMeetingPrompt(prompt);
+      },
+      liveInterjections,
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("completed");
+
+      const prompts = yield* Ref.get(harness.promptsRef);
+      const claudePrompt = prompts.find((prompt) => prompt.includes("Seat: Claude"));
+      const codexPrompt = prompts.find((prompt) => prompt.includes("Seat: Codex"));
+      // The first seat spoke before the person did; the second seat reads the
+      // interjection inside the transcript, in arrival order.
+      expect(claudePrompt).not.toContain("긴급: 예산은 무료 티어로 한정해줘");
+      expect(codexPrompt).toContain("사용자 (개입)");
+      expect(codexPrompt).toContain("긴급: 예산은 무료 티어로 한정해줘");
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );

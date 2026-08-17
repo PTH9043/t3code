@@ -566,6 +566,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                     rounds: [],
                     pendingQuestion: null,
                     answers: [],
+                    interjections: [],
                   },
             finalOutput: null,
             error: null,
@@ -635,6 +636,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           question: command.question,
           answer: command.answer,
           answeredAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.collaboration.run.interject": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-interjected",
+        payload: {
+          projectId: command.projectId,
+          runId: command.runId,
+          text: command.text,
+          interjectedAt: command.createdAt,
         },
       };
     }

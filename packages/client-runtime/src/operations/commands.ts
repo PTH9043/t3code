@@ -40,6 +40,8 @@ export type RequestWorkspaceCollaborationRunInput =
   CommandInput<"project.collaboration.run.request">;
 export type CancelWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.cancel">;
 export type AnswerWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.answer">;
+export type InterjectWorkspaceCollaborationRunInput =
+  CommandInput<"project.collaboration.run.interject">;
 export type UpsertWorkspaceScheduleInput = CommandInput<"project.schedule.upsert">;
 export type RemoveWorkspaceScheduleInput = CommandInput<"project.schedule.remove">;
 export type UpsertWorkspaceProgramInput = CommandInput<"project.program.upsert">;
@@ -236,6 +238,20 @@ export const answerWorkspaceCollaborationRun: (
     return yield* dispatch({
       ...input,
       type: "project.collaboration.run.answer",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const interjectWorkspaceCollaborationRun: (
+  input: InterjectWorkspaceCollaborationRunInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.interjectWorkspaceCollaborationRun")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.collaboration.run.interject",
       commandId: metadata.commandId,
       createdAt: metadata.createdAt,
     });

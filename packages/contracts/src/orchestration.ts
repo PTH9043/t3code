@@ -778,6 +778,16 @@ export const WorkspaceMeetingQuestion = Schema.Struct({
 });
 export type WorkspaceMeetingQuestion = typeof WorkspaceMeetingQuestion.Type;
 
+export const WorkspaceMeetingInterjection = Schema.Struct({
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  /** The round that was open (or about to open) when this arrived. */
+  roundIndex: NonNegativeInt,
+  /** How many statements that round already had — the transcript anchor. */
+  afterStatements: NonNegativeInt,
+  saidAt: IsoDateTime,
+});
+export type WorkspaceMeetingInterjection = typeof WorkspaceMeetingInterjection.Type;
+
 export const WorkspaceMeeting = Schema.Struct({
   mode: WorkspaceMeetingMode,
   phase: WorkspaceMeetingPhase,
@@ -805,6 +815,15 @@ export const WorkspaceMeeting = Schema.Struct({
       answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
       answeredAt: IsoDateTime,
     }),
+  ),
+  /**
+   * What the person said into the live discussion, outside the
+   * question/answer protocol. Each entry is anchored to the transcript
+   * position it arrived at — after `afterStatements` statements of round
+   * `roundIndex` — so prompts replay the meeting in true speaking order.
+   */
+  interjections: Schema.Array(WorkspaceMeetingInterjection).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
 });
 export type WorkspaceMeeting = typeof WorkspaceMeeting.Type;
@@ -1762,6 +1781,19 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
 });
 
 /**
+ * The person speaking into a live meeting outside the question/answer
+ * protocol. Recorded into the transcript; the next seat to speak sees it.
+ */
+const ProjectCollaborationRunInterjectCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.interject"),
+  commandId: CommandId,
+  runId: WorkspaceCollaborationRunId,
+  projectId: ProjectId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  createdAt: IsoDateTime,
+});
+
+/**
  * Settles the run's `pendingQuestion` and lets it continue. Carries the question
  * text it answers so a stale client cannot answer a question that has already
  * been superseded.
@@ -2153,6 +2185,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCollaborationRunRequestCommand,
   ProjectCollaborationRunCancelCommand,
   ProjectCollaborationRunAnswerCommand,
+  ProjectCollaborationRunInterjectCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
   ProjectProgramUpsertCommand,
@@ -2202,6 +2235,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCollaborationRunRequestCommand,
   ProjectCollaborationRunCancelCommand,
   ProjectCollaborationRunAnswerCommand,
+  ProjectCollaborationRunInterjectCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
   ProjectProgramUpsertCommand,
@@ -2407,6 +2441,7 @@ export const OrchestrationEventType = Schema.Literals([
   "project.collaboration-run-cancel-requested",
   "project.collaboration-run-upserted",
   "project.collaboration-run-answered",
+  "project.collaboration-run-interjected",
   "project.schedule-upserted",
   "project.schedule-removed",
   "project.schedule-runtime-updated",
@@ -2554,6 +2589,13 @@ export const ProjectCollaborationRunAnsweredPayload = Schema.Struct({
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   answeredAt: IsoDateTime,
+});
+
+export const ProjectCollaborationRunInterjectedPayload = Schema.Struct({
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  interjectedAt: IsoDateTime,
 });
 
 export const ProjectScheduleUpsertedPayload = Schema.Struct({
@@ -2927,6 +2969,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.collaboration-run-answered"),
     payload: ProjectCollaborationRunAnsweredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-interjected"),
+    payload: ProjectCollaborationRunInterjectedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

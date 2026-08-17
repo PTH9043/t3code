@@ -28,6 +28,45 @@ function participantName(meeting: WorkspaceMeeting, participantId: string | null
   );
 }
 
+type RoundTranscriptEntry =
+  | {
+      readonly kind: "statement";
+      readonly statement: WorkspaceMeeting["rounds"][number]["statements"][number];
+    }
+  | {
+      readonly kind: "interjection";
+      readonly interjection: WorkspaceMeeting["interjections"][number];
+    };
+
+/** Statements and the person's interjections, in true speaking order. */
+function mergeRoundTranscript(
+  meeting: WorkspaceMeeting,
+  round: WorkspaceMeeting["rounds"][number],
+): RoundTranscriptEntry[] {
+  const interjections = meeting.interjections.filter(
+    (interjection) => interjection.roundIndex === round.index,
+  );
+  const entries: RoundTranscriptEntry[] = [];
+  const pushInterjectionsAt = (position: number) => {
+    for (const interjection of interjections) {
+      if (interjection.afterStatements === position) {
+        entries.push({ kind: "interjection", interjection });
+      }
+    }
+  };
+  pushInterjectionsAt(0);
+  round.statements.forEach((statement, index) => {
+    entries.push({ kind: "statement", statement });
+    pushInterjectionsAt(index + 1);
+  });
+  for (const interjection of interjections) {
+    if (interjection.afterStatements > round.statements.length) {
+      entries.push({ kind: "interjection", interjection });
+    }
+  }
+  return entries;
+}
+
 /**
  * The meeting half of a collaboration run: who sat, what each round said, and
  * — when the run is parked — the question the person owes an answer to.
@@ -137,25 +176,38 @@ export function WorkspaceMeetingView(props: {
                 ) : null}
               </summary>
               <div className="mt-2 grid gap-2">
-                {/* A seat speaks at most once per round, so the seat id is the row identity. */}
-                {round.statements.map((statement) => (
-                  <div key={statement.participantId} className="text-xs">
-                    <p className="font-semibold">
-                      {participantName(meeting, statement.participantId)}
-                      {statement.respondsTo.length > 0 ? (
-                        <span className="ml-1 font-normal text-muted-foreground">
-                          →{" "}
-                          {statement.respondsTo
-                            .map((target) => participantName(meeting, target))
-                            .join(", ")}
-                        </span>
-                      ) : null}
-                    </p>
-                    <p className="mt-0.5 line-clamp-6 whitespace-pre-wrap leading-relaxed">
-                      {statement.content}
-                    </p>
-                  </div>
-                ))}
+                {/* A seat speaks at most once per round, so the seat id is the
+                    row identity; interjections key on their arrival time. */}
+                {mergeRoundTranscript(meeting, round).map((entry) =>
+                  entry.kind === "statement" ? (
+                    <div key={entry.statement.participantId} className="text-xs">
+                      <p className="font-semibold">
+                        {participantName(meeting, entry.statement.participantId)}
+                        {entry.statement.respondsTo.length > 0 ? (
+                          <span className="ml-1 font-normal text-muted-foreground">
+                            →{" "}
+                            {entry.statement.respondsTo
+                              .map((target) => participantName(meeting, target))
+                              .join(", ")}
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="mt-0.5 line-clamp-6 whitespace-pre-wrap leading-relaxed">
+                        {entry.statement.content}
+                      </p>
+                    </div>
+                  ) : (
+                    <div
+                      key={`interjection:${entry.interjection.saidAt}`}
+                      className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs"
+                    >
+                      <p className="font-semibold">사용자 (개입)</p>
+                      <p className="mt-0.5 whitespace-pre-wrap leading-relaxed">
+                        {entry.interjection.text}
+                      </p>
+                    </div>
+                  ),
+                )}
                 {round.chairSummary !== null ? (
                   <div
                     className={cn(

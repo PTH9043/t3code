@@ -73,6 +73,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "project.collaboration.run.request":
     case "project.collaboration.run.cancel":
     case "project.collaboration.run.answer":
+    case "project.collaboration.run.interject":
     case "project.collaboration.run.schedule":
     case "project.schedule.upsert":
     case "project.schedule.remove":

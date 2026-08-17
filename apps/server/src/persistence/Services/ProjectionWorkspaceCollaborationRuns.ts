@@ -30,6 +30,17 @@ export interface ProjectionWorkspaceCollaborationRunRepositoryShape {
     readonly answer: string;
     readonly answeredAt: string;
   }) => Effect.Effect<void, ProjectionRepositoryError>;
+  /**
+   * Appends the person's remark to a live meeting, anchored to the transcript
+   * position at arrival. A no-op when the run has no meeting or is already
+   * done.
+   */
+  readonly recordInterjection: (input: {
+    readonly projectId: ProjectId;
+    readonly runId: WorkspaceCollaborationRunId;
+    readonly text: string;
+    readonly interjectedAt: string;
+  }) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly getById: (input: {
     readonly projectId: ProjectId;
     readonly runId: WorkspaceCollaborationRunId;

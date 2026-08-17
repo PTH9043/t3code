@@ -116,6 +116,7 @@ it.effect("triggers one deterministic unattended run and durably advances the sc
       upsert: () => Effect.void,
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
+      recordInterjection: () => Effect.void,
       getById: ({ projectId: requestedProjectId, runId }) =>
         Ref.get(runsRef).pipe(
           Effect.map((runs) => {

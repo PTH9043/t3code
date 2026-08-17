@@ -359,6 +359,7 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
         run.id === scheduledRun.id ? Ref.set(scheduledRunRef, run) : Ref.set(runRef, run),
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
+      recordInterjection: () => Effect.void,
       getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
         Effect.all([Ref.get(runRef), Ref.get(scheduledRunRef)]).pipe(
           Effect.map(([userRun, scheduleRun]) => {

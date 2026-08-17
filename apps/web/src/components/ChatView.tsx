@@ -1205,6 +1205,12 @@ function ChatViewContent(props: ChatViewProps) {
   const requestMeetingRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
     reportFailure: false,
   });
+  const interjectMeetingRun = useAtomCommand(
+    projectEnvironment.interjectWorkspaceCollaborationRun,
+    {
+      reportFailure: false,
+    },
+  );
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
@@ -4994,24 +5000,69 @@ function ChatViewContent(props: ChatViewProps) {
       // The meeting runs in THIS conversation when it already exists on the
       // server; only a draft with no thread yet opens a fresh one.
       const meetingThreadId = isServerThread && activeThread ? activeThread.id : undefined;
-      const meetingRunActiveHere =
-        meetingThreadId !== undefined &&
-        (meetingRunsQuery.data?.runs ?? []).some(
-          (run) =>
-            run.meeting?.threadId === meetingThreadId &&
-            (run.status === "queued" ||
-              run.status === "running" ||
-              run.status === "cancel-requested"),
-        );
-      if (meetingRunActiveHere) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "이 대화창에서 회의가 진행 중입니다",
-            description:
-              "회의가 끝난 뒤 새 주제를 보내세요. 의장이 질문을 올리면 제어 센터에서 답할 수 있습니다.",
-          }),
-        );
+      const liveMeetingRunHere =
+        meetingThreadId === undefined
+          ? undefined
+          : (meetingRunsQuery.data?.runs ?? []).find(
+              (run) =>
+                run.meeting?.threadId === meetingThreadId &&
+                (run.status === "queued" ||
+                  run.status === "running" ||
+                  run.status === "cancel-requested"),
+            );
+      if (liveMeetingRunHere !== undefined) {
+        // A live meeting turns the composer into the person's voice at the
+        // table: the text is interjected into the transcript and the next
+        // seat to speak must address it. Execution is the exception — a plan
+        // being carried out no longer takes mid-flight redirection.
+        if (liveMeetingRunHere.meeting?.phase === "executing") {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "회의가 이미 실행 단계입니다",
+              description:
+                "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 제어 센터에서 실행을 취소하세요.",
+            }),
+          );
+          return;
+        }
+        const interjectionText = promptForSend.trim().slice(0, 8_000);
+        if (interjectionText.length === 0) return;
+        sendInFlightRef.current = true;
+        try {
+          const interjected = await interjectMeetingRun({
+            environmentId,
+            input: {
+              runId: liveMeetingRunHere.id,
+              projectId: liveMeetingRunHere.projectId,
+              text: interjectionText,
+            },
+          });
+          if (interjected._tag === "Failure") {
+            if (!isAtomCommandInterrupted(interjected)) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "회의에 발언을 전달하지 못했습니다",
+                  description: "연결 상태를 확인하고 다시 시도하세요.",
+                }),
+              );
+            }
+            return;
+          }
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+          toastManager.add(
+            stackedThreadToast({
+              type: "success",
+              title: "회의에 발언을 전달했습니다",
+              description: "다음 발언자부터 즉시 반영됩니다.",
+            }),
+          );
+        } finally {
+          sendInFlightRef.current = false;
+        }
         return;
       }
       const meetingTask = appendReviewCommentsToPrompt(

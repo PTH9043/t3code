@@ -132,6 +132,33 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
     }),
   );
 
+  it.effect("turns an interjection into its event verbatim", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const event = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.collaboration.run.interject",
+            commandId: CommandId.make("interject-1"),
+            runId: WorkspaceCollaborationRunId.make("run-a"),
+            projectId,
+            text: "예산은 무료 티어로 한정해줘",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+
+      expect(event.type).toBe("project.collaboration-run-interjected");
+      if (event.type !== "project.collaboration-run-interjected") return;
+      expect(event.payload).toMatchObject({
+        runId: "run-a",
+        text: "예산은 무료 티어로 한정해줘",
+        interjectedAt: now,
+      });
+    }),
+  );
+
   it.effect("rejects a meeting aimed at a conversation that does not exist", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();

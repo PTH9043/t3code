@@ -970,6 +970,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             answeredAt: event.payload.answeredAt,
           });
           return;
+        case "project.collaboration-run-interjected":
+          yield* projectionWorkspaceCollaborationRunRepository.recordInterjection({
+            projectId: event.payload.projectId,
+            runId: event.payload.runId,
+            text: event.payload.text,
+            interjectedAt: event.payload.interjectedAt,
+          });
+          return;
         default:
           return;
       }
