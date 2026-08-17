@@ -10,6 +10,7 @@ function node(id: string, order: number, dependsOn: ReadonlyArray<string> = []):
     kind: "research",
     agent: "grok",
     role: "researcher",
+    participantId: null,
     title: id,
     handoff: {
       task: id,

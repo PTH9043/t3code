@@ -70,6 +70,7 @@ const NODE_STATUS_LABELS: Readonly<Record<WorkspaceTaskNodeStatus, string>> = {
   queued: "실행 대기",
   running: "실행 중",
   "awaiting-validation": "검증 대기",
+  "awaiting-user": "내 답변 대기",
   completed: "완료",
   failed: "실패",
   cancelled: "취소",

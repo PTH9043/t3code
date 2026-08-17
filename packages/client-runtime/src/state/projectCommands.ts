@@ -9,6 +9,7 @@ import {
   createEnvironmentRpcQueryAtomFamily,
 } from "./runtime.ts";
 import {
+  type AnswerWorkspaceCollaborationRunInput,
   type ArchiveWorkspaceKnowledgeItemInput,
   type CancelWorkspaceCollaborationRunInput,
   type CreateProjectInput,
@@ -31,6 +32,7 @@ import {
   type StopWorkspaceProgramIntegrityInput,
   type RequestWorkspaceIncidentRepairInput,
   type ResolveWorkspaceIncidentInput,
+  answerWorkspaceCollaborationRun,
   archiveWorkspaceKnowledgeItem,
   cancelWorkspaceCollaborationRun,
   createProject,
@@ -67,6 +69,7 @@ export type {
   RemoveWorkspaceAgentRoleInput,
   RequestWorkspaceCollaborationRunInput,
   CancelWorkspaceCollaborationRunInput,
+  AnswerWorkspaceCollaborationRunInput,
   UpsertWorkspaceScheduleInput,
   RemoveWorkspaceScheduleInput,
   UpsertWorkspaceProgramInput,
@@ -183,6 +186,13 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:commands:project:request-workspace-collaboration-run",
       execute: (input: RequestWorkspaceCollaborationRunInput) =>
         requestWorkspaceCollaborationRun(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    answerWorkspaceCollaborationRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:answer-workspace-collaboration-run",
+      execute: (input: AnswerWorkspaceCollaborationRunInput) =>
+        answerWorkspaceCollaborationRun(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),

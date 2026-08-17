@@ -21,6 +21,8 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
+  WorkspaceCollaborationRunId,
+  WorkspaceMeetingParticipantId,
 } from "@t3tools/contracts";
 import {
   connectionStatusTitle,
@@ -160,7 +162,7 @@ import {
   GitBranchIcon,
   WifiOffIcon,
 } from "lucide-react";
-import { cn, randomHex } from "~/lib/utils";
+import { cn, randomHex, randomUUID } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
@@ -199,6 +201,7 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
+import { readMeetingComposerConfig, updateMeetingComposerConfig } from "../meetingComposerStore";
 import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
@@ -1198,6 +1201,9 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
   const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
+  const requestMeetingRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
+    reportFailure: false,
+  });
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
@@ -4944,6 +4950,102 @@ function ChatViewContent(props: ChatViewProps) {
           description: "이 임시 작성 내용이 더 이상 사용 가능한 프로젝트를 가리키지 않습니다.",
         }),
       );
+      return;
+    }
+
+    // An armed meeting turns the composer text into a collaboration-run topic:
+    // the roster discusses it, agrees a plan, and executes it — no thread turn
+    // is started, so this leaves the current conversation untouched.
+    const meetingDraft = readMeetingComposerConfig(composerDraftTarget);
+    if (meetingDraft.enabled && !directAnnotation) {
+      if (composerImages.length > 0) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "회의 주제에는 이미지를 첨부할 수 없습니다",
+            description: "이미지를 제거하거나 회의 모드를 끄고 보내세요.",
+          }),
+        );
+        return;
+      }
+      if (meetingDraft.seats.length < 2) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "회의 참가자가 부족합니다",
+            description: "모델 선택기의 회의 모드에서 참가자를 2명 이상 선택하세요.",
+          }),
+        );
+        return;
+      }
+      const meetingTask = appendReviewCommentsToPrompt(
+        composerPreviewAnnotations.reduce(
+          (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+          appendElementContextsToPrompt(
+            appendTerminalContextsToPrompt(promptForSend, sendableComposerTerminalContexts),
+            composerElementContexts,
+          ),
+        ),
+        composerReviewComments,
+      )
+        .trim()
+        .slice(0, 20_000);
+      if (meetingTask.length === 0) return;
+      sendInFlightRef.current = true;
+      try {
+        const result = await requestMeetingRun({
+          environmentId,
+          input: {
+            runId: WorkspaceCollaborationRunId.make(randomUUID()),
+            projectId: activeProject.id,
+            task: meetingTask,
+            meeting: {
+              mode: meetingDraft.mode,
+              participants: meetingDraft.seats.map((seat) => ({
+                id: WorkspaceMeetingParticipantId.make(seat.id),
+                displayName: seat.displayName,
+                modelSelection: { instanceId: seat.instanceId, model: seat.model },
+              })),
+              chairParticipantId:
+                meetingDraft.chairSeatId === null
+                  ? null
+                  : WorkspaceMeetingParticipantId.make(meetingDraft.chairSeatId),
+              maxRounds: meetingDraft.maxRounds,
+              userInLoop: meetingDraft.userInLoop,
+            },
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "회의를 시작하지 못했습니다",
+                description: "연결 상태를 확인하고 다시 시도하세요.",
+              }),
+            );
+          }
+          return;
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        updateMeetingComposerConfig(composerDraftTarget, (config) => ({
+          ...config,
+          enabled: false,
+        }));
+        toastManager.add(
+          stackedThreadToast({
+            type: "success",
+            title: "AI 회의를 시작했습니다",
+            description: `${meetingDraft.seats
+              .map((seat) => seat.displayName)
+              .join(", ")} — 진행은 프로젝트 제어 센터의 실행 이력에서 볼 수 있습니다.`,
+          }),
+        );
+      } finally {
+        sendInFlightRef.current = false;
+      }
       return;
     }
     const threadIdForSend = activeThread.id;

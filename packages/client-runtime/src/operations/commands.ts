@@ -39,6 +39,7 @@ export type RemoveWorkspaceAgentRoleInput = CommandInput<"project.agent-role.rem
 export type RequestWorkspaceCollaborationRunInput =
   CommandInput<"project.collaboration.run.request">;
 export type CancelWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.cancel">;
+export type AnswerWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.answer">;
 export type UpsertWorkspaceScheduleInput = CommandInput<"project.schedule.upsert">;
 export type RemoveWorkspaceScheduleInput = CommandInput<"project.schedule.remove">;
 export type UpsertWorkspaceProgramInput = CommandInput<"project.program.upsert">;
@@ -221,6 +222,20 @@ export const cancelWorkspaceCollaborationRun: (
     return yield* dispatch({
       ...input,
       type: "project.collaboration.run.cancel",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const answerWorkspaceCollaborationRun: (
+  input: AnswerWorkspaceCollaborationRunInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.answerWorkspaceCollaborationRun")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.collaboration.run.answer",
       commandId: metadata.commandId,
       createdAt: metadata.createdAt,
     });

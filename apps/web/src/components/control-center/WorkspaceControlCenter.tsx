@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   ProviderInstanceId,
   ThreadId,
@@ -68,6 +69,7 @@ import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
 import { WorkspaceProgramsSection } from "./WorkspaceProgramsSection";
+import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
 import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
 
 const SELECT_CLASS =
@@ -500,6 +502,8 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
   const configuredRoot = project.workspaceControl?.longTermMemoryRoot ?? "";
   const configuredConversationRag =
     project.workspaceControl?.conversationRag ?? DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS;
+  const configuredAgentKnowledge =
+    project.workspaceControl?.agentKnowledge ?? DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS;
   const [memoryRoot, setMemoryRoot] = useState(configuredRoot);
   const [conversationRagEnabled, setConversationRagEnabled] = useState(
     configuredConversationRag.enabled,
@@ -510,6 +514,15 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
   const [maxInputChars, setMaxInputChars] = useState(
     String(configuredConversationRag.maxInputChars),
   );
+  const [agentKnowledgeEnabled, setAgentKnowledgeEnabled] = useState(
+    configuredAgentKnowledge.enabled,
+  );
+  const [agentKnowledgeRedact, setAgentKnowledgeRedact] = useState(
+    configuredAgentKnowledge.redactSensitiveData,
+  );
+  const [maxOutputChars, setMaxOutputChars] = useState(
+    String(configuredAgentKnowledge.maxOutputChars),
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -517,17 +530,27 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     setConversationRagEnabled(configuredConversationRag.enabled);
     setRedactSensitiveData(configuredConversationRag.redactSensitiveData);
     setMaxInputChars(String(configuredConversationRag.maxInputChars));
-  }, [configuredConversationRag, configuredRoot, project.id]);
+    setAgentKnowledgeEnabled(configuredAgentKnowledge.enabled);
+    setAgentKnowledgeRedact(configuredAgentKnowledge.redactSensitiveData);
+    setMaxOutputChars(String(configuredAgentKnowledge.maxOutputChars));
+  }, [configuredAgentKnowledge, configuredConversationRag, configuredRoot, project.id]);
 
   const normalizedMaxInputChars = Math.min(
     120_000,
     Math.max(2_000, Number.parseInt(maxInputChars, 10) || configuredConversationRag.maxInputChars),
   );
+  const normalizedMaxOutputChars = Math.min(
+    120_000,
+    Math.max(2_000, Number.parseInt(maxOutputChars, 10) || configuredAgentKnowledge.maxOutputChars),
+  );
   const settingsChanged =
     memoryRoot !== configuredRoot ||
     conversationRagEnabled !== configuredConversationRag.enabled ||
     redactSensitiveData !== configuredConversationRag.redactSensitiveData ||
-    normalizedMaxInputChars !== configuredConversationRag.maxInputChars;
+    normalizedMaxInputChars !== configuredConversationRag.maxInputChars ||
+    agentKnowledgeEnabled !== configuredAgentKnowledge.enabled ||
+    agentKnowledgeRedact !== configuredAgentKnowledge.redactSensitiveData ||
+    normalizedMaxOutputChars !== configuredAgentKnowledge.maxOutputChars;
 
   const save = async () => {
     setSaving(true);
@@ -541,6 +564,11 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
             enabled: conversationRagEnabled,
             redactSensitiveData,
             maxInputChars: normalizedMaxInputChars,
+          },
+          agentKnowledge: {
+            enabled: agentKnowledgeEnabled,
+            redactSensitiveData: agentKnowledgeRedact,
+            maxOutputChars: normalizedMaxOutputChars,
           },
           createLongTermMemoryRootIfMissing: true,
         },
@@ -576,7 +604,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
               id="workspace-memory-root"
               value={memoryRoot}
               onChange={(event) => setMemoryRoot(event.currentTarget.value)}
-              placeholder="예: F:\\AI-Memory\\내작업공간"
+              placeholder="예: E:\\AI-Memory\\내작업공간"
               className="min-w-0 flex-1 font-mono"
             />
             <Button onClick={() => void save()} disabled={saving || !settingsChanged}>
@@ -627,6 +655,48 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
             <p className="text-xs leading-relaxed text-muted-foreground">
               원본 대화는 기존 기록에 그대로 남습니다. 이 기능을 끄면 자동 생성된 압축 RAG 사본만
               제거되며 직접 등록한 지식·RAG 자료는 유지됩니다.
+            </p>
+          </div>
+          <div className="mt-3 grid gap-3 rounded-xl border border-border/70 bg-muted/20 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">에이전트 결과 자동 압축 등록</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  협업 실행이 끝나면 각 작업의 결과를 빠짐없이 압축해 검색 자료로 등록합니다.
+                </p>
+              </div>
+              <Switch
+                checked={agentKnowledgeEnabled}
+                onCheckedChange={setAgentKnowledgeEnabled}
+                aria-label="에이전트 결과 자동 압축 등록"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <Switch
+                  checked={agentKnowledgeRedact}
+                  onCheckedChange={setAgentKnowledgeRedact}
+                  disabled={!agentKnowledgeEnabled}
+                />
+                토큰·키·암호 자동 마스킹
+              </label>
+              <label className="grid gap-1 text-xs font-medium">
+                작업별 최대 저장 문자
+                <Input
+                  type="number"
+                  min={2_000}
+                  max={120_000}
+                  step={1_000}
+                  value={maxOutputChars}
+                  onChange={(event) => setMaxOutputChars(event.currentTarget.value)}
+                  disabled={!agentKnowledgeEnabled}
+                />
+              </label>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              페이블이 고른 기억 후보와 별개로, 조사·구현·검증 결과 자체가
+              <span className="font-mono"> collaboration-outputs </span>
+              폴더에 등록됩니다. 끄면 이후 실행부터 등록하지 않으며 이미 등록된 자료는 남습니다.
             </p>
           </div>
         </div>
@@ -938,14 +1008,26 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                       {item.tags.includes("auto-conversation") ? (
                         <Badge variant="info">대화 자동 압축</Badge>
                       ) : null}
+                      {item.tags.includes("auto-agent-output") ? (
+                        <Badge variant="info">에이전트 결과</Badge>
+                      ) : null}
+                      {/* Automatic capture accumulates fast, so the item that
+                          never reached a model is the one worth spotting. */}
+                      {item.promptUses > 0 ? (
+                        <Badge variant="outline">프롬프트 {item.promptUses}회</Badge>
+                      ) : (
+                        <Badge variant="warning">미사용</Badge>
+                      )}
                     </div>
                     <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
                       {item.content}
                     </p>
-                    {item.tags.includes("auto-conversation") ? (
+                    {item.originalChars !== null && item.storedChars !== null ? (
                       <p className="mt-2 text-[10px] text-muted-foreground">
-                        원문 {numericKnowledgeTag(item.tags, "original-chars-") ?? "-"}자 → 저장{" "}
-                        {numericKnowledgeTag(item.tags, "stored-chars-") ?? "-"}자
+                        원문 {item.originalChars}자 → 저장 {item.storedChars}자
+                        {item.originalChars > 0
+                          ? ` · ${Math.round((1 - item.storedChars / item.originalChars) * 100)}% 절감`
+                          : ""}
                         {item.tags.some((tag) => tag.startsWith("redacted-"))
                           ? " · 민감정보 마스킹"
                           : ""}
@@ -1335,8 +1417,29 @@ function CollaborationSection({ project }: { project: EnvironmentProject }) {
     label: "프로젝트 협업 취소",
     reportFailure: false,
   });
+  const answerRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
+    label: "회의 질문 답변",
+    reportFailure: false,
+  });
   const [task, setTask] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
+
+  const answer = async (runId: WorkspaceCollaborationRunId, question: string, text: string) => {
+    setAnsweringRunId(runId);
+    try {
+      const result = await answerRun({
+        environmentId: project.environmentId,
+        input: { projectId: project.id, runId, question, answer: text },
+      });
+      if (!notifyCommandFailure(result, "답변 전송 실패")) {
+        runs.refresh();
+        notifySuccess("답변을 전달했습니다.", "회의가 이어서 진행됩니다.");
+      }
+    } finally {
+      setAnsweringRunId(null);
+    }
+  };
 
   const submit = async () => {
     if (!task.trim()) return;
@@ -1438,9 +1541,18 @@ function CollaborationSection({ project }: { project: EnvironmentProject }) {
                     · {formatTimestamp(run.createdAt)}
                   </span>
                 </span>
+                {run.meeting?.pendingQuestion ? <Badge variant="warning">답변 필요</Badge> : null}
                 <Badge variant={runBadgeVariant(run.status)}>{runStatusLabel(run.status)}</Badge>
               </summary>
               <div className="mt-4 grid gap-3 border-t border-border/50 pt-3">
+                {run.meeting ? (
+                  <WorkspaceMeetingView
+                    meeting={run.meeting}
+                    canAnswer={run.status === "queued" || run.status === "running"}
+                    answering={answeringRunId === run.id}
+                    onAnswer={(question, text) => void answer(run.id, question, text)}
+                  />
+                ) : null}
                 {run.graph ? (
                   <WorkspaceTaskGraphView
                     graph={run.graph}

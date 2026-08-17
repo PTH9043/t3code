@@ -3127,6 +3127,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     model={selectedModelForPickerWithCustomFallback}
                     lockedProvider={lockedProvider}
                     lockedContinuationGroupKey={lockedContinuationGroupKey}
+                    meetingTarget={composerDraftTarget}
                     instanceEntries={providerInstanceEntries}
                     keybindings={keybindings}
                     modelOptionsByInstance={modelOptionsByInstance}

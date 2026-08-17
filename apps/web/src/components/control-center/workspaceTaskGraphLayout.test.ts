@@ -14,6 +14,7 @@ function taskNode(
     kind: "research",
     agent: "grok",
     role: "researcher",
+    participantId: null,
     title: id,
     handoff: {
       task: id,
