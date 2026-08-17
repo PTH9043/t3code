@@ -97,7 +97,18 @@ class WorkspaceCollaborationExecutionError extends Data.TaggedError(
 const MAX_PARALLEL_GRAPH_NODES = 3;
 const MAX_GRAPH_REVISIONS = 8;
 const MAX_AGENT_RESPONSE_CHARS = 160_000;
-const MAX_NODE_HANDOFF_CHARS = 40_000;
+const MAX_NODE_HANDOFF_CHARS = 100_000;
+
+/**
+ * Never behead a deliverable silently: past the cap the text is cut WITH a
+ * visible notice, so the next seat knows it is reading a fragment instead of
+ * mistaking it for the whole (which stalled executions on "the artifact cuts
+ * off mid-sentence").
+ */
+const truncateNodeOutput = (text: string): string =>
+  text.length <= MAX_NODE_HANDOFF_CHARS
+    ? text
+    : `${text.slice(0, MAX_NODE_HANDOFF_CHARS)}\n\n[⚠️ 출력이 ${MAX_NODE_HANDOFF_CHARS.toLocaleString()}자 한도에서 잘렸습니다. 전체 산출물이 필요하면 파일로 저장해 경로를 전달하세요.]`;
 const MAX_ATTEMPT_RECORD_CHARS = 8_000;
 /** A meeting turn (statement, chair close, plan) is retried once before the run fails. */
 const MAX_MEETING_TURN_ATTEMPTS = 2;
@@ -1645,7 +1656,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const completedNode: WorkspaceTaskNode = {
               ...withCompletedAttempt,
               status: "completed",
-              output: result.output.slice(0, MAX_NODE_HANDOFF_CHARS),
+              output: truncateNodeOutput(result.output),
               error: null,
               completedAt,
             };
@@ -1682,7 +1693,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const validationNode: WorkspaceTaskNode = {
               ...withCompletedAttempt,
               status: "completed",
-              output: result.output.slice(0, MAX_NODE_HANDOFF_CHARS),
+              output: truncateNodeOutput(result.output),
               error: null,
               confidence: decision.confidence,
               failureClassification: decision.failureClassification,
@@ -1815,7 +1826,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               const needsValidationNode: WorkspaceTaskNode = {
                 ...withCompletedAttempt,
                 status: "completed",
-                output: synthesis.finalOutput.slice(0, MAX_NODE_HANDOFF_CHARS),
+                output: truncateNodeOutput(synthesis.finalOutput),
                 error: null,
                 confidence: synthesis.confidence,
                 failureClassification: "validation",
@@ -1840,7 +1851,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const completedNode: WorkspaceTaskNode = {
               ...withCompletedAttempt,
               status: "completed",
-              output: synthesis.finalOutput.slice(0, MAX_NODE_HANDOFF_CHARS),
+              output: truncateNodeOutput(synthesis.finalOutput),
               error: null,
               confidence: synthesis.confidence,
               completedAt,
@@ -1894,7 +1905,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const completedNode: WorkspaceTaskNode = {
             ...withCompletedAttempt,
             status: current.agent === "fable" ? "completed" : "awaiting-validation",
-            output: result.output.slice(0, MAX_NODE_HANDOFF_CHARS),
+            output: truncateNodeOutput(result.output),
             error: null,
             completedAt: current.agent === "fable" ? completedAt : null,
           };

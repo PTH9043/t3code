@@ -34,9 +34,19 @@ const ROLE_OPERATING_RULE: Record<WorkspaceAgentRole, string> = {
     "Verify acceptance criteria with focused checks and report exact evidence. Do not modify the implementation unless explicitly delegated by the current user task.",
 };
 
-const MAX_HANDOFF_CHARS = 30_000;
-const MAX_HANDOFF_CHARS_PER_STEP = 6_000;
-const MAX_GRAPH_DEPENDENCY_CHARS = 20_000;
+// Sized for real deliverables: 6k per step silently beheaded work tables in
+// transit — the next seat read a mid-sentence fragment as if it were whole,
+// and executions failed on "the artifact cuts off". Cuts past the caps are
+// now marked so a fragment can never masquerade as the full artifact.
+const MAX_HANDOFF_CHARS = 80_000;
+const MAX_HANDOFF_CHARS_PER_STEP = 32_000;
+const MAX_GRAPH_DEPENDENCY_CHARS = 80_000;
+
+function cutWithNotice(text: string, limit: number): string {
+  if (limit <= 0) return "";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n\n[⚠️ 전달 한도로 이 출력은 ${limit.toLocaleString()}자에서 잘렸습니다 — 아래 내용은 전체가 아닙니다.]`;
+}
 
 const GRAPH_AGENT_OPERATING_RULE: Record<WorkspaceOrchestrationAgent, string> = {
   fable:
@@ -96,7 +106,7 @@ function formatPriorHandoffs(priorSteps: ReadonlyArray<WorkspaceCollaborationSte
   const sections: string[] = [];
   for (const step of priorSteps) {
     if (step.status !== "completed" || step.output === null || remaining <= 0) continue;
-    const body = step.output.slice(0, Math.min(MAX_HANDOFF_CHARS_PER_STEP, remaining));
+    const body = cutWithNotice(step.output, Math.min(MAX_HANDOFF_CHARS_PER_STEP, remaining));
     remaining -= body.length;
     sections.push(
       `### Step ${step.index + 1}: ${step.displayName} (${step.role}, ${step.phase})\n${body}`,
@@ -163,7 +173,10 @@ function formatGraphDependencies(graph: WorkspaceTaskGraph, node: WorkspaceTaskN
   for (const dependencyId of node.dependsOn) {
     const dependency = dependencies.get(dependencyId);
     if (dependency === undefined || dependency.output === null || remaining <= 0) continue;
-    const output = dependency.output.slice(0, Math.min(MAX_HANDOFF_CHARS_PER_STEP, remaining));
+    const output = cutWithNotice(
+      dependency.output,
+      Math.min(MAX_HANDOFF_CHARS_PER_STEP, remaining),
+    );
     remaining -= output.length;
     sections.push(`### ${dependency.id}: ${dependency.title}\n${output}`);
   }

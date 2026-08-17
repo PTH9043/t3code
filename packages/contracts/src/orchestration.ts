@@ -607,7 +607,9 @@ export const WorkspaceTaskNode = Schema.Struct({
   status: WorkspaceTaskNodeStatus,
   maxAttempts: PositiveInt.check(Schema.isLessThanOrEqualTo(3)),
   attempts: Schema.Array(WorkspaceTaskAttempt),
-  output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(40_000))),
+  // Wide enough for real deliverables (work tables, multi-session plans);
+  // 40k silently beheaded them in transit and stalled meeting executions.
+  output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(120_000))),
   error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
   failureClassification: Schema.NullOr(WorkspaceFailureClassification),
   confidence: Schema.NullOr(WorkspaceValidationConfidence),
