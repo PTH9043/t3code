@@ -1415,6 +1415,25 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const sendInFlightSinceRef = useRef(0);
+  const beginSendInFlight = useCallback(() => {
+    sendInFlightRef.current = true;
+    sendInFlightSinceRef.current = Date.now();
+  }, []);
+  /**
+   * A hung command (a server restart mid-await) must not brick the composer
+   * forever: past the watchdog window the stale lock releases itself. While
+   * genuinely locked, callers must SAY so — a silently dropped message reads
+   * as "the app ignored me".
+   */
+  const isSendLocked = useCallback(() => {
+    if (!sendInFlightRef.current) return false;
+    if (Date.now() - sendInFlightSinceRef.current > 15_000) {
+      sendInFlightRef.current = false;
+      return false;
+    }
+    return true;
+  }, []);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -5001,13 +5020,19 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     };
-    if (
-      !activeThread ||
-      isSendBusy ||
-      isConnecting ||
-      threadDetailLoading ||
-      sendInFlightRef.current
-    ) {
+    if (isSendLocked()) {
+      // A visible hold beats a silent drop: the person must never wonder
+      // whether the app ignored them.
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "이전 메시지를 보내는 중입니다",
+          description: "전송이 끝난 직후 다시 시도하세요.",
+        }),
+      );
+      return;
+    }
+    if (!activeThread || isSendBusy || isConnecting || threadDetailLoading) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -5186,7 +5211,7 @@ function ChatViewContent(props: ChatViewProps) {
         // meeting wakes up, instead of an interjection it would never read.
         const answerText = promptForSend.trim().slice(0, 8_000);
         if (answerText.length === 0) return;
-        sendInFlightRef.current = true;
+        beginSendInFlight();
         try {
           const answered = await answerMeetingRun({
             environmentId,
@@ -5237,7 +5262,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
       const interjectionText = promptForSend.trim().slice(0, 8_000);
       if (interjectionText.length === 0) return;
-      sendInFlightRef.current = true;
+      beginSendInFlight();
       try {
         const interjected = await interjectMeetingRun({
           environmentId,
@@ -5332,7 +5357,7 @@ function ChatViewContent(props: ChatViewProps) {
       const meetingTask = (
         readAskFirstEnabled() ? ASK_FIRST_MEETING_PREFIX + meetingTopic : meetingTopic
       ).slice(0, 20_000);
-      sendInFlightRef.current = true;
+      beginSendInFlight();
       try {
         const result = await requestMeetingRun({
           environmentId,
@@ -5418,7 +5443,7 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
-    sendInFlightRef.current = true;
+    beginSendInFlight();
     if (isDraftHeroState && activeThreadKey) {
       let resolveDockStarted: (() => void) | undefined;
       const dockStarted = new Promise<void>((resolve) => {
@@ -5878,13 +5903,7 @@ function ChatViewContent(props: ChatViewProps) {
       text: string;
       interactionMode: "default" | "plan";
     }) => {
-      if (
-        !activeThread ||
-        !isServerThread ||
-        isSendBusy ||
-        isConnecting ||
-        sendInFlightRef.current
-      ) {
+      if (!activeThread || !isServerThread || isSendBusy || isConnecting || isSendLocked()) {
         return;
       }
 
@@ -5916,7 +5935,7 @@ function ChatViewContent(props: ChatViewProps) {
         text: trimmed,
       });
 
-      sendInFlightRef.current = true;
+      beginSendInFlight();
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
@@ -6041,7 +6060,7 @@ function ChatViewContent(props: ChatViewProps) {
       isSendBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
-      sendInFlightRef.current
+      isSendLocked()
     ) {
       return;
     }
@@ -6072,7 +6091,7 @@ function ChatViewContent(props: ChatViewProps) {
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
 
-    sendInFlightRef.current = true;
+    beginSendInFlight();
     beginLocalDispatch({ preparingWorktree: false });
     const finish = () => {
       sendInFlightRef.current = false;
