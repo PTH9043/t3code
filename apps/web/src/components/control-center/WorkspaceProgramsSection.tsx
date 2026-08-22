@@ -15,6 +15,7 @@ import {
   ActivityIcon,
   AlertTriangleIcon,
   CheckCircle2Icon,
+  ChevronRightIcon,
   CircleStopIcon,
   ExternalLinkIcon,
   FileWarningIcon,
@@ -28,9 +29,10 @@ import {
   ShieldCheckIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
-import { randomUUID } from "~/lib/utils";
+import { cn, randomUUID } from "~/lib/utils";
+import { useRecencyGroups } from "~/useRecencyGroups";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { projectEnvironment } from "~/state/projects";
@@ -260,6 +262,10 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
     () => new Map((programs.data?.programs ?? []).map((program) => [program.id, program.name])),
     [programs.data?.programs],
   );
+  // Runs accumulate for as long as the environment lives, so the table folds by
+  // day and only keeps the recent ones open.
+  const runList = useMemo(() => runs.data?.runs ?? [], [runs.data?.runs]);
+  const runGroups = useRecencyGroups(runList, (run: WorkspaceProgramRun) => run.startedAt);
 
   const refreshAll = () => {
     programs.refresh();
@@ -1085,18 +1091,43 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
               </tr>
             </thead>
             <tbody>
-              {(runs.data?.runs ?? []).map((run) => (
-                <tr key={run.id} className="border-b border-border/45">
-                  <td className="px-2 py-2">
-                    {programNameById.get(run.programId) ?? run.programId}
-                  </td>
-                  <td className="px-2 py-2">{runStatusLabel(run.status)}</td>
-                  <td className="px-2 py-2">{run.pid ?? "-"}</td>
-                  <td className="px-2 py-2">{timestamp(run.startedAt)}</td>
-                  <td className="px-2 py-2">{timestamp(run.stoppedAt)}</td>
-                  <td className="px-2 py-2">{run.exitCode ?? "-"}</td>
-                </tr>
-              ))}
+              {runGroups.groups.map((group) => {
+                const expanded = runGroups.isExpanded(group.key);
+                return (
+                  <Fragment key={group.key}>
+                    <tr className="border-b border-border/45">
+                      <th colSpan={6} className="p-0 text-left font-normal">
+                        <button
+                          type="button"
+                          onClick={() => runGroups.toggle(group.key)}
+                          aria-expanded={expanded}
+                          className="flex w-full items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground"
+                        >
+                          <ChevronRightIcon
+                            className={cn("size-3.5 shrink-0", expanded && "rotate-90")}
+                          />
+                          <span className="font-medium">{group.label}</span>
+                          <span className="text-[11px]">({group.items.length}개)</span>
+                        </button>
+                      </th>
+                    </tr>
+                    {expanded
+                      ? group.items.map((run) => (
+                          <tr key={run.id} className="border-b border-border/45">
+                            <td className="px-2 py-2">
+                              {programNameById.get(run.programId) ?? run.programId}
+                            </td>
+                            <td className="px-2 py-2">{runStatusLabel(run.status)}</td>
+                            <td className="px-2 py-2">{run.pid ?? "-"}</td>
+                            <td className="px-2 py-2">{timestamp(run.startedAt)}</td>
+                            <td className="px-2 py-2">{timestamp(run.stoppedAt)}</td>
+                            <td className="px-2 py-2">{run.exitCode ?? "-"}</td>
+                          </tr>
+                        ))
+                      : null}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </CardPanel>

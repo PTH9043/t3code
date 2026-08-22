@@ -42,10 +42,16 @@ import {
   buildMeetingChairClosePrompt,
   buildMeetingPlanPrompt,
   buildMeetingStatementPrompt,
+  isNodeInterventionQuestion,
+  isProviderContentRefusal,
   meetingAssignmentRoute,
   nextMeetingStep,
+  NODE_INTERVENTION_OPTIONS,
+  nodeInterventionQuestion,
+  nodeRefusalQuestion,
   parseChairVerdict,
   parseMeetingQuestion,
+  parseNodeInterventionDecision,
   parseStatementRespondsTo,
   renderMeetingTranscript,
   resolveChairParticipantId,
@@ -96,13 +102,30 @@ class WorkspaceCollaborationExecutionError extends Data.TaggedError(
 
 const MAX_PARALLEL_GRAPH_NODES = 3;
 const MAX_GRAPH_REVISIONS = 8;
+/** Mirrors the contract's ceiling on `WorkspaceTaskNode.maxAttempts`. */
+const MAX_NODE_ATTEMPTS = 10;
 
 /**
- * A run's revision budget: the person's 협업 한도 when they set one, always
- * bounded by the global ceiling so no setup can extend a run past it.
+ * Materializing the plan already lands the graph on revision 1, so revision N
+ * means N-1 recoveries have been spent. Budgets are counted from there — the
+ * cap used to be compared against the raw revision, which silently ate the
+ * whole allowance: a run set to 한도 1 started at 1 and could never retry
+ * anything, and its first failure ended it.
+ */
+const INITIAL_PLAN_REVISION = 1;
+
+/** The person's 협업 한도, as revisions actually spent recovering. */
+const graphRevisionBudget = (
+  meeting: { readonly maxRevisions?: number | undefined } | null,
+): number => Math.min(meeting?.maxRevisions ?? MAX_GRAPH_REVISIONS, MAX_GRAPH_REVISIONS);
+
+/**
+ * The highest graph revision the run may reach: the person's budget plus the
+ * revision the plan itself occupies. Always bounded by the global ceiling so
+ * no setup can extend a run past it.
  */
 const graphRevisionCap = (meeting: { readonly maxRevisions?: number | undefined } | null): number =>
-  Math.min(meeting?.maxRevisions ?? MAX_GRAPH_REVISIONS, MAX_GRAPH_REVISIONS);
+  graphRevisionBudget(meeting) + INITIAL_PLAN_REVISION;
 const MAX_AGENT_RESPONSE_CHARS = 160_000;
 const MAX_NODE_HANDOFF_CHARS = 100_000;
 
@@ -119,6 +142,13 @@ const truncateNodeOutput = (text: string): string =>
 const MAX_ATTEMPT_RECORD_CHARS = 8_000;
 /** A meeting turn (statement, chair close, plan) is retried once before the run fails. */
 const MAX_MEETING_TURN_ATTEMPTS = 2;
+/**
+ * How long an interrupted turn waits for the run's own cancel to surface
+ * before the interruption counts as a failure. Stop flows interrupt the
+ * visible turn and cancel the run as two separate commands.
+ */
+const INTERRUPTED_TURN_CANCEL_GRACE_CHECKS = 4;
+const INTERRUPTED_TURN_CANCEL_GRACE_INTERVAL = "250 millis" as const;
 const MAX_MEETING_STATEMENT_CHARS = 20_000;
 const MAX_MEETING_SUMMARY_CHARS = 20_000;
 
@@ -441,9 +471,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
 
     if (result.turn.state === "completed") return terminalAssistantOutput(result.thread);
     if (result.turn.state === "interrupted") {
-      const current = yield* getRun(runRef);
-      if (current.status === "cancel-requested" || current.status === "cancelled") {
-        return yield* new WorkspaceCollaborationCancelled({ runRef });
+      // A stop flow interrupts the visible turn first and cancels the run a
+      // beat later; reading the run status in that gap would misfile the
+      // user's stop as a seat failure. Give the cancel a short grace to land
+      // before treating the interruption as an error.
+      for (let attempt = 0; ; attempt++) {
+        const current = yield* getRun(runRef);
+        if (current.status === "cancel-requested" || current.status === "cancelled") {
+          return yield* new WorkspaceCollaborationCancelled({ runRef });
+        }
+        if (attempt >= INTERRUPTED_TURN_CANCEL_GRACE_CHECKS) break;
+        yield* Effect.sleep(INTERRUPTED_TURN_CANCEL_GRACE_INTERVAL);
       }
       return yield* executionError(`Collaboration turn '${result.turn.turnId}' was interrupted.`);
     }
@@ -1120,6 +1158,54 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             continue;
           }
 
+          case "ask-wrap-up": {
+            const askedAt = yield* nowIso;
+            const finalRound = meeting.rounds.at(-1);
+            const consensusNote =
+              meeting.mode === "until-consensus" && finalRound?.consensusReached === false
+                ? "의장 판단: 아직 합의에 도달하지 못했습니다 — 라운드 추가를 고려하세요.\n\n"
+                : "";
+            run = yield* persistRun({
+              ...run,
+              meeting: {
+                ...meeting,
+                pendingQuestion: {
+                  askedByParticipantId: null,
+                  question: step.question,
+                  options: ["합의대로 실행 시작", "라운드 1회 추가", "여기서 종료 (실행 없음)"],
+                  context: `${consensusNote}${finalRound?.chairSummary ?? ""}`,
+                  askedAt,
+                },
+              },
+              updatedAt: askedAt,
+            });
+            continue;
+          }
+
+          case "conclude": {
+            // The person took the conclusions and declined execution: the
+            // discussion itself is the deliverable.
+            const concludedAt = yield* nowIso;
+            const finalRound = meeting.rounds.at(-1);
+            yield* persistRun({
+              ...run,
+              meeting: { ...meeting, phase: "done" },
+              status: "completed",
+              finalOutput: [
+                "## 회의 결론",
+                ...(finalRound?.chairSummary == null ? [] : [finalRound.chairSummary]),
+                "",
+                "## 회의 전문",
+                renderMeetingTranscript(meeting),
+              ].join("\n"),
+              error: null,
+              updatedAt: concludedAt,
+            });
+            const settled = yield* getRun(input.runRef);
+            if (settled.status === "completed") yield* captureRunMemory(settled);
+            return false;
+          }
+
           case "plan": {
             if (meeting.phase === "discussing") {
               // Entering planning is persisted on its own so a crash mid-plan
@@ -1448,8 +1534,16 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     readonly classification: WorkspaceFailureClassification;
     readonly completedAt: string;
     readonly revisionCap: number;
+    /**
+     * A reply the parser rejected is a formatting miss, not a plan problem, so
+     * it re-asks for free: charging it to the shared revision budget let a few
+     * malformed blocks anywhere in the graph strand every later node on
+     * "Task graph revision limit N has been reached." Defaults to charging.
+     */
+    readonly consumesRevision?: boolean;
   }): WorkspaceTaskGraph => {
     const error = input.error.slice(0, 6_000);
+    const consumesRevision = input.consumesRevision ?? true;
     const failedAttemptNode = updateLastAttempt(input.node, (attempt) => ({
       ...attempt,
       status: "failed",
@@ -1460,7 +1554,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }));
     const mayRetry =
       failedAttemptNode.attempts.length < failedAttemptNode.maxAttempts &&
-      input.graph.revision < input.revisionCap;
+      (!consumesRevision || input.graph.revision < input.revisionCap);
     const node: WorkspaceTaskNode = {
       ...failedAttemptNode,
       status: mayRetry ? "queued" : "failed",
@@ -1471,7 +1565,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       validation: null,
       completedAt: mayRetry ? null : input.completedAt,
     };
-    const revision = Math.min(input.graph.revision + 1, input.revisionCap);
+    const revision = consumesRevision
+      ? Math.min(input.graph.revision + 1, input.revisionCap)
+      : input.graph.revision;
     return refreshWorkspaceTaskGraphQueue({
       ...replaceGraphNode(input.graph, String(node.id), node),
       revision,
@@ -1482,16 +1578,16 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           revision,
           reason: failureChangeReason(input.classification),
           summary: mayRetry
-            ? `${node.title} 실패를 분류하고 다른 계정 또는 접근법으로 재시도합니다: ${error}`
-            : `${node.title}의 재시도 한도에 도달했습니다: ${error}`,
+            ? `'${node.title}' 단계가 실패해 다른 계정 또는 접근법으로 재시도합니다: ${error}`
+            : `'${node.title}' 단계가 재시도 한도에 도달했습니다: ${error}`,
           addedNodeIds: [],
           supersededNodeIds: mayRetry ? [] : [node.id],
           occurredAt: input.completedAt,
         },
       ],
       nextAction: mayRetry
-        ? `${node.title}을 이전과 다른 경로로 재시도합니다.`
-        : `${node.title} 실패로 사용자 개입이 필요합니다.`,
+        ? `'${node.title}' 단계를 이전과 다른 경로로 재시도합니다.`
+        : `'${node.title}' 단계가 실패해 사용자 개입이 필요합니다.`,
     });
   };
 
@@ -1593,18 +1689,85 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const planContext = meeting === null ? null : meetingPlanContext(meeting);
       const revisionCap = graphRevisionCap(meeting);
 
+      /**
+       * Retry the node, and when its budget is gone stop ON the node instead of
+       * tearing the run down. `retryGraphNode` marks an exhausted node — and the
+       * whole graph — failed, whose `nextAction` then read "사용자 개입이
+       * 필요합니다" even though the run was already dead and there was nothing
+       * left to intervene in. Parking keeps every completed node, and the
+       * person's answer says whether to retry, skip, or stop here.
+       */
+      const failOrParkNode = (failure: {
+        readonly node: WorkspaceTaskNode;
+        readonly graph: WorkspaceTaskGraph;
+        readonly error: string;
+        readonly classification: WorkspaceFailureClassification;
+        readonly completedAt: string;
+        readonly consumesRevision?: boolean;
+      }): WorkspaceTaskGraph => {
+        const completedAt = failure.completedAt;
+        // A provider's policy refusal is not the account's fault and not the
+        // plan's: re-running the same seat just spends minutes to be refused
+        // again. Stop on it at once, and keep the budgets for real failures.
+        const refused = isProviderContentRefusal(failure.error);
+        const retried = retryGraphNode({
+          graph: failure.graph,
+          node: failure.node,
+          error: failure.error,
+          classification: failure.classification,
+          completedAt,
+          revisionCap,
+          consumesRevision: refused ? false : (failure.consumesRevision ?? true),
+        });
+        const settled = retried.nodes.find((node) => node.id === failure.node.id);
+        // Only one question can be open at a time, and a run with no meeting
+        // has no channel to ask through; both keep the old failing behaviour.
+        if (
+          settled === undefined ||
+          (settled.status !== "failed" && !refused) ||
+          meeting === null ||
+          meeting.pendingQuestion !== null
+        ) {
+          return retried;
+        }
+        const question = refused
+          ? nodeRefusalQuestion(settled.title)
+          : nodeInterventionQuestion(settled.title);
+        meeting = {
+          ...meeting,
+          pendingQuestion: {
+            askedByParticipantId: settled.participantId,
+            question,
+            options: [...NODE_INTERVENTION_OPTIONS],
+            context: failure.error.slice(0, 20_000),
+            askedAt: completedAt,
+          },
+        };
+        return refreshWorkspaceTaskGraphQueue({
+          ...replaceGraphNode(retried, String(settled.id), {
+            ...settled,
+            // `awaiting-user` WITH an error is what marks this park as an
+            // intervention rather than a seat's own question, which parks
+            // with `error: null`. The resume path reads that difference.
+            status: "awaiting-user",
+            completedAt: null,
+          }),
+          status: "executing",
+          nextAction: question,
+        });
+      };
+
       for (const result of input.results) {
         const current = graph.nodes.find((node) => node.id === result.nodeId);
         if (current === undefined || current.status !== "running") continue;
         const completedAt = yield* nowIso;
         if (result.error !== undefined) {
-          graph = retryGraphNode({
+          graph = failOrParkNode({
             graph,
             node: current,
             error: result.error,
             classification: "tool",
             completedAt,
-            revisionCap,
           });
           continue;
         }
@@ -1621,7 +1784,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           if (current.kind === "orchestration") {
             if (graph.revision >= revisionCap) {
               throw new WorkspaceTaskGraphError(
-                `Task graph revision limit ${revisionCap} has been reached.`,
+                `Task graph revision limit ${revisionCap - INITIAL_PLAN_REVISION} has been reached.`,
               );
             }
             const proposal = parseWorkspaceTaskGraphProposal(result.output, planContext);
@@ -1729,7 +1892,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               if (decision.followUpNodes.length > 0) {
                 if (graph.revision >= revisionCap) {
                   throw new WorkspaceTaskGraphError(
-                    `Task graph revision limit ${revisionCap} has been reached.`,
+                    `Task graph revision limit ${revisionCap - INITIAL_PLAN_REVISION} has been reached.`,
                   );
                 }
                 if (
@@ -1910,13 +2073,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           graph = replaceGraphNode(graph, result.nodeId, completedNode);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          graph = retryGraphNode({
+          graph = failOrParkNode({
             graph: graphBeforeResult,
             node: withCompletedAttempt,
             error: message,
             classification: "validation",
             completedAt,
-            revisionCap,
+            consumesRevision: !(error instanceof WorkspaceTaskGraphError && error.malformedOutput),
           });
         }
       }
@@ -2029,14 +2192,69 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         if (run.meeting.pendingQuestion !== null) return;
         if (run.graph.nodes.some((node) => node.status === "awaiting-user")) {
           // The person answered; parked seats rejoin the queue and re-run with
-          // the recorded decision in their prompt.
+          // the recorded decision in their prompt. A node parked because its
+          // retries ran out (`awaiting-user` WITH an error) also takes the
+          // person's verdict on what to do with it.
+          const lastAnswer = run.meeting.answers.at(-1) ?? null;
+          const verdict =
+            lastAnswer !== null && isNodeInterventionQuestion(lastAnswer.question)
+              ? parseNodeInterventionDecision(lastAnswer.answer)
+              : null;
+          const isParkedFailure = (node: WorkspaceTaskNode): boolean =>
+            node.status === "awaiting-user" && node.error !== null;
+          const answeredAt = yield* nowIso;
+
+          if (verdict?.kind === "stop") {
+            const stopped = refreshWorkspaceTaskGraphQueue({
+              ...run.graph,
+              status: "failed" as const,
+              nextAction: "사용자가 여기서 종료를 선택했습니다.",
+              nodes: run.graph.nodes.map((node) =>
+                isParkedFailure(node)
+                  ? { ...node, status: "failed" as const, completedAt: answeredAt }
+                  : node,
+              ),
+            });
+            run = yield* persistGraphRun(run, stopped, bindings, {
+              status: "failed",
+              error: stopped.nextAction,
+              updatedAt: answeredAt,
+            });
+            return;
+          }
+
           const graph = refreshWorkspaceTaskGraphQueue({
             ...run.graph,
-            nodes: run.graph.nodes.map((node) =>
-              node.status === "awaiting-user" ? { ...node, status: "queued" as const } : node,
-            ),
+            nodes: run.graph.nodes.map((node) => {
+              if (node.status !== "awaiting-user") return node;
+              if (!isParkedFailure(node)) return { ...node, status: "queued" as const };
+              if (verdict?.kind === "skip") {
+                return {
+                  ...node,
+                  status: "completed" as const,
+                  output: `(사용자가 이 단계를 건너뛰었습니다. 마지막 실패: ${node.error})`,
+                  completedAt: answeredAt,
+                };
+              }
+              // Whichever way it resumes, the automatic budget is spent, so the
+              // person's answer buys exactly one more attempt.
+              const granted = {
+                ...node,
+                status: "queued" as const,
+                error: null,
+                maxAttempts: Math.min(node.attempts.length + 1, MAX_NODE_ATTEMPTS),
+              };
+              if (verdict?.kind !== "reassign") return granted;
+              // Hand it to another seat the person already picked — never to an
+              // account outside the meeting, which would run as someone they
+              // did not choose. With no one else seated, retry in place.
+              const nextSeat = run.meeting!.participants.find(
+                (participant) => participant.id !== node.participantId,
+              );
+              return nextSeat === undefined ? granted : { ...granted, participantId: nextSeat.id };
+            }),
           });
-          run = yield* persistGraphRun(run, graph, bindings, { updatedAt: yield* nowIso });
+          run = yield* persistGraphRun(run, graph, bindings, { updatedAt: answeredAt });
           continue;
         }
       }

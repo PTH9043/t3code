@@ -96,6 +96,163 @@ function hasAnswered(meeting: WorkspaceMeeting, question: string): boolean {
   return meeting.answers.some((answer) => answer.question === question);
 }
 
+/**
+ * The end-of-discussion check-in, keyed by how many rounds have been held.
+ *
+ * Deterministic like the round check-in, and round-count-scoped on purpose: a
+ * person who grants extra rounds gets asked again when THOSE run out, because
+ * the new round count derives a new key.
+ */
+export function meetingWrapUpQuestion(roundCount: number): string {
+  return `${roundCount}라운드 회의가 끝났습니다. 이제 무엇을 할까요?`;
+}
+
+const WRAP_UP_QUESTION_PATTERN = /^(\d+)라운드 회의가 끝났습니다/u;
+
+/** Offered with the intervention questions below; free text is read too. */
+export const NODE_INTERVENTION_OPTIONS: ReadonlyArray<string> = [
+  "다른 좌석에게 맡기기",
+  "다시 시도",
+  "이 단계 건너뛰고 계속",
+  "여기서 종료",
+];
+
+/**
+ * The provider itself refused the request — OpenAI's cyber-risk classifier is
+ * the one we hit in practice, on a node whose wording ("적대 프로브", "우회
+ * 경로 능동 탐색") reads as offensive security even though the node forbids
+ * every mutation. Retrying the same account cannot clear it: the account is
+ * not what failed, the wording is, so only the person can decide.
+ */
+const PROVIDER_REFUSAL_PATTERNS: ReadonlyArray<RegExp> = [
+  /flagged for possible cybersecurity risk/i,
+  /trusted access for cyber/i,
+  /\b(?:content|usage) polic(?:y|ies)\b/i,
+];
+
+export function isProviderContentRefusal(error: string): boolean {
+  return PROVIDER_REFUSAL_PATTERNS.some((pattern) => pattern.test(error));
+}
+
+export function nodeRefusalQuestion(nodeTitle: string): string {
+  return `'${nodeTitle}' 단계를 담당 좌석의 제공자가 정책상 거부했습니다. 어떻게 할까요?`;
+}
+
+/**
+ * Raised when a node has spent its automatic retries. The run used to die here
+ * with "사용자 개입이 필요합니다", which left the person nothing to intervene
+ * in — the work was already gone. Now the run parks on this question and the
+ * answer decides.
+ */
+export function nodeInterventionQuestion(nodeTitle: string): string {
+  return `'${nodeTitle}' 단계가 자동 재시도를 모두 쓰고도 실패했습니다. 어떻게 할까요?`;
+}
+
+const NODE_INTERVENTION_QUESTION_PATTERN =
+  /^'.+' 단계(?:가 자동 재시도를 모두 쓰고도 실패했습니다|를 담당 좌석의 제공자가 정책상 거부했습니다)/u;
+
+export function isNodeInterventionQuestion(question: string): boolean {
+  return NODE_INTERVENTION_QUESTION_PATTERN.test(question.trim());
+}
+
+export type WorkspaceNodeInterventionDecision =
+  | { readonly kind: "retry" }
+  | { readonly kind: "reassign" }
+  | { readonly kind: "skip" }
+  | { readonly kind: "stop" };
+
+/**
+ * What the person's answer to {@link nodeInterventionQuestion} means. Read the
+ * same way as the wrap-up answer: intent words over exact option strings, and
+ * an unrecognized answer retries — the safe reading, because it keeps the work
+ * and the person's words reach the next attempt as a recorded decision.
+ */
+export function parseNodeInterventionDecision(answer: string): WorkspaceNodeInterventionDecision {
+  const text = answer.trim();
+  if (/다른\s*(?:좌석|참가자|계정|모델|에이전트)|맡기|넘겨|바꿔서\s*(?:실행|진행)/u.test(text)) {
+    return { kind: "reassign" };
+  }
+  if (/건너뛰|스킵|skip|넘어가|생략|빼고|무시하고\s*(?:계속|진행)/iu.test(text)) {
+    return { kind: "skip" };
+  }
+  if (
+    /종료|그만|끝내|여기까지|중단|포기|하지\s*마|스탑|스톱|stop|abort/iu.test(text) &&
+    !/재시도|다시\s*(?:시도|해)|retry/iu.test(text)
+  ) {
+    return { kind: "stop" };
+  }
+  return { kind: "retry" };
+}
+
+export type WorkspaceMeetingWrapUpDecision =
+  | { readonly kind: "execute" }
+  | { readonly kind: "more-rounds"; readonly count: number }
+  | { readonly kind: "conclude" };
+
+/**
+ * What the person's wrap-up answer means. Free text is allowed — the composer
+ * routes a typed message as the answer — so this leans on intent words rather
+ * than exact option strings. Anything that is not "more rounds" or "stop here"
+ * proceeds to execution, with the raw answer flowing into the plan prompt as a
+ * recorded decision.
+ */
+export function parseWrapUpDecision(answer: string): WorkspaceMeetingWrapUpDecision {
+  const text = answer.trim();
+  const counted =
+    /(\d+)\s*(?:라운드|번|회|차례)\s*(?:만)?\s*(?:더|추가)/u.exec(text) ??
+    /(?:더|추가)\s*(\d+)\s*(?:라운드|번|회|차례)/u.exec(text);
+  if (counted?.[1] !== undefined) {
+    const count = Number.parseInt(counted[1], 10);
+    if (Number.isFinite(count) && count > 0) {
+      return { kind: "more-rounds", count: Math.min(count, 10) };
+    }
+  }
+  if (
+    /(?:라운드|회의|토론|논의)\s*(?:를|을)?\s*(?:더|추가|연장|계속)|(?:더|추가로?|연장)\s*(?:라운드|회의|토론|논의)|더\s*(?:해|하자|얘기|이야기|논의)/u.test(
+      text,
+    )
+  ) {
+    return { kind: "more-rounds", count: 1 };
+  }
+  if (
+    /종료|그만|끝내|여기까지|중단|하지\s*마|필요\s*없|안\s*해도|스탑|스톱|stop/iu.test(text) &&
+    !/실행\s*(?:을|를)?\s*(?:시작|진행|해)/u.test(text)
+  ) {
+    return { kind: "conclude" };
+  }
+  return { kind: "execute" };
+}
+
+function latestAnswerTo(meeting: WorkspaceMeeting, question: string): string | null {
+  for (let index = meeting.answers.length - 1; index >= 0; index -= 1) {
+    const answer = meeting.answers[index];
+    if (answer !== undefined && answer.question === question) return answer.answer;
+  }
+  return null;
+}
+
+/**
+ * Round grants from wrap-up answers, each anchored to the round count it was
+ * asked at: "1회 추가" at 3 rounds means "hold round 4", regardless of the
+ * original `maxRounds`. Derived from answers alone so a resumed run
+ * re-computes the same budget.
+ */
+function grantedRoundTargets(meeting: WorkspaceMeeting): ReadonlyArray<number> {
+  const targets: number[] = [];
+  for (const answer of meeting.answers) {
+    const match = WRAP_UP_QUESTION_PATTERN.exec(answer.question);
+    if (match?.[1] === undefined) continue;
+    const decision = parseWrapUpDecision(answer.answer);
+    if (decision.kind !== "more-rounds") continue;
+    targets.push(Number.parseInt(match[1], 10) + decision.count);
+  }
+  return targets;
+}
+
+function effectiveMaxRounds(meeting: WorkspaceMeeting): number {
+  return Math.max(meeting.maxRounds, ...grantedRoundTargets(meeting));
+}
+
 function isRoundClosed(round: WorkspaceMeetingRound): boolean {
   return round.chairSummary !== null;
 }
@@ -148,8 +305,13 @@ function pendingSpeakers(
  * planning step rather than argue until the token budget runs out.
  */
 function shouldOpenAnotherRound(meeting: WorkspaceMeeting): boolean {
-  if (meeting.rounds.length >= meeting.maxRounds) return false;
+  if (meeting.rounds.length >= effectiveMaxRounds(meeting)) return false;
   if (meeting.mode === "until-consensus") {
+    // A person-granted round outranks an early consensus: they asked for more
+    // discussion, so the table talks again even if the chair called it done.
+    if (grantedRoundTargets(meeting).some((target) => target > meeting.rounds.length)) {
+      return true;
+    }
     return meeting.rounds.at(-1)?.consensusReached !== true;
   }
   return true;
@@ -169,6 +331,13 @@ export type WorkspaceMeetingStep =
   /** The round closed, `userInLoop` is on, and this round's check-in is unanswered. */
   | { readonly kind: "ask-round-check-in"; readonly roundIndex: number; readonly question: string }
   | { readonly kind: "open-round"; readonly roundIndex: number }
+  /**
+   * The round budget is spent; the person decides what happens next — more
+   * rounds, execution, or wrapping up with the discussion's conclusions.
+   */
+  | { readonly kind: "ask-wrap-up"; readonly question: string }
+  /** The person chose to stop after discussion: no plan, no execution. */
+  | { readonly kind: "conclude" }
   /** Discussion is over; the chair turns the transcript into a task graph. */
   | { readonly kind: "plan" }
   /** The meeting is past discussion — the graph, not this module, drives from here. */
@@ -207,8 +376,21 @@ export function nextMeetingStep(meeting: WorkspaceMeeting): WorkspaceMeetingStep
     }
   }
 
-  return shouldOpenAnotherRound(meeting)
-    ? { kind: "open-round", roundIndex: meeting.rounds.length }
+  if (shouldOpenAnotherRound(meeting)) {
+    return { kind: "open-round", roundIndex: meeting.rounds.length };
+  }
+
+  // The person set the round budget; when it is spent the run does not march
+  // into execution on its own. It asks what happens next — the chair's read
+  // (consensus or not) rides along as context, and "more rounds" answers feed
+  // back into the budget above.
+  const wrapUpQuestion = meetingWrapUpQuestion(meeting.rounds.length);
+  const wrapUpAnswer = latestAnswerTo(meeting, wrapUpQuestion);
+  if (wrapUpAnswer === null) {
+    return { kind: "ask-wrap-up", question: wrapUpQuestion };
+  }
+  return parseWrapUpDecision(wrapUpAnswer).kind === "conclude"
+    ? { kind: "conclude" }
     : { kind: "plan" };
 }
 
@@ -635,6 +817,10 @@ export function buildMeetingPlanPrompt(input: {
     'The JSON shape is: {"summary":string,"nextAction":string,"nodes":[{"id":slug,"kind":"research"|"implementation"|"debug","participantId":seatId,"title":string,"task":string,"goal":string,"context":string,"input":string,"constraints":string[],"expectedOutput":string,"successCriteria":string[],"dependsOn":slug[],"priority":nonNegativeInteger}]}.',
     "participantId must be a seat id from the roster; assign each node to the seat whose argued position fits it best. Encode real dependencies only; independent nodes must not depend on each other. Do not use the id 'plan'.",
     "Do not add validation or synthesis nodes. The server inserts those gates, runs them on the chair's seat, and rejects duplicate ids, missing dependencies, cycles, and unseated assignments.",
+    // A node worded as offensive security gets refused by the provider before
+    // it runs, which stalls the whole graph on work that was only ever
+    // defensive. Say what the check IS, not what it is defending against.
+    "Word every node as the verification it actually is. Even for hardening or safety work, do not describe a node as designing attacks, adversarial probes, exploits, or hunting for ways to bypass a safeguard — providers refuse such requests on policy. Write it as reproducing, re-measuring, cross-checking, or listing gaps instead.",
     'If planning is blocked on a decision that belongs to the user, return only <t3_question>{"question":string,"options":string[],"context":string}</t3_question> and no task graph.',
   ].join("\n");
 }

@@ -39,6 +39,7 @@ import {
   interjectWorkspaceCollaborationRun,
   type InterjectWorkspaceCollaborationRunInput,
   cancelWorkspaceCollaborationRun,
+  cancelLiveWorkspaceCollaborationRuns,
   createProject,
   deleteProject,
   removeWorkspaceAgentRole,
@@ -141,6 +142,12 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
+    readT3File: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:read-t3-file",
+      tag: WS_METHODS.projectsReadT3File,
+      staleTimeMs: 30_000,
+      idleTtlMs: 5 * 60_000,
+    }),
     optimisticFile: (target: OptimisticProjectFileTarget) =>
       optimisticFileFamily(optimisticProjectFileKey(target)),
     create: createEnvironmentCommand(runtime, {
@@ -229,6 +236,13 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:commands:project:cancel-workspace-collaboration-run",
       execute: (input: CancelWorkspaceCollaborationRunInput) =>
         cancelWorkspaceCollaborationRun(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    cancelLiveWorkspaceCollaborationRuns: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:cancel-live-workspace-collaboration-runs",
+      execute: (input: Pick<CancelWorkspaceCollaborationRunInput, "projectId">) =>
+        cancelLiveWorkspaceCollaborationRuns(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),

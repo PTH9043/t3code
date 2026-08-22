@@ -199,7 +199,8 @@ it.effect("rejects graph nodes whose retry bound exceeds the orchestration limit
             validationTargetId: null,
             priority: 0,
             status: "queued",
-            maxAttempts: 4,
+            // Above the ceiling that leaves room for person-granted retries.
+            maxAttempts: 11,
             attempts: [],
             output: null,
             error: null,

@@ -24,7 +24,11 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
-import { roundCheckInQuestion } from "../workspaceMeeting.ts";
+import {
+  meetingWrapUpQuestion,
+  nodeInterventionQuestion,
+  roundCheckInQuestion,
+} from "../workspaceMeeting.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -391,9 +395,19 @@ const answeredEvent = (question: string, answer: string): OrchestrationEvent =>
     payload: { projectId, runId, question, answer, answeredAt: at },
   }) as unknown as OrchestrationEvent;
 
+/** A pre-recorded "go ahead and execute" for the end-of-discussion gate. */
+const executeWrapUp = (roundCount: number) => ({
+  question: meetingWrapUpQuestion(roundCount),
+  answer: "합의대로 실행 시작",
+  answeredAt: at,
+});
+
 it.effect("runs the meeting, plans onto the roster, and executes with the same seats", () =>
   Effect.gen(function* () {
-    const harness = yield* makeHarness({ run: meetingRun(), respond: respondForMeetingPrompt });
+    const harness = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: respondForMeetingPrompt,
+    });
 
     yield* Effect.gen(function* () {
       const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
@@ -466,7 +480,7 @@ it.effect("holds the meeting in the conversation the person sent it from", () =>
   Effect.gen(function* () {
     const existingThreadId = ThreadId.make("thread-existing");
     const harness = yield* makeHarness({
-      run: meetingRun({ threadId: existingThreadId }),
+      run: meetingRun({ threadId: existingThreadId, answers: [executeWrapUp(1)] }),
       respond: respondForMeetingPrompt,
     });
     // The person's conversation predates the meeting; its title is theirs.
@@ -526,7 +540,7 @@ it.effect("hands a mid-round interjection to the very next speaker", () =>
   Effect.gen(function* () {
     const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
     const harness = yield* makeHarness({
-      run: meetingRun(),
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
       // The person speaks up while the first seat is mid-turn; the projection
       // (faked by liveInterjections) has recorded it by the time the reactor
       // reloads the run for the second seat.
@@ -567,7 +581,7 @@ it.effect("hands a mid-round interjection to the very next speaker", () =>
 it.effect("parks on the round check-in and resumes when the person answers", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness({
-      run: meetingRun({ userInLoop: true }),
+      run: meetingRun({ userInLoop: true, answers: [executeWrapUp(1)] }),
       respond: respondForMeetingPrompt,
     });
 
@@ -592,7 +606,10 @@ it.effect("parks on the round check-in and resumes when the person answers", () 
         meeting: {
           ...run.meeting!,
           pendingQuestion: null,
-          answers: [{ question: roundCheckInQuestion(0), answer: "계속 진행", answeredAt: at }],
+          answers: [
+            executeWrapUp(1),
+            { question: roundCheckInQuestion(0), answer: "계속 진행", answeredAt: at },
+          ],
         },
       }));
       yield* PubSub.publish(harness.pubsub, answeredEvent(roundCheckInQuestion(0), "계속 진행"));
@@ -600,7 +617,7 @@ it.effect("parks on the round check-in and resumes when the person answers", () 
       const resumed = yield* awaitRunStatus(harness.runRef, "completed");
       expect(resumed.meeting?.phase).toBe("done");
       expect(resumed.finalOutput).toBe("회의 합의대로 구현 완료");
-      expect(resumed.meeting?.answers).toHaveLength(1);
+      expect(resumed.meeting?.answers).toHaveLength(2);
 
       const prompts = yield* Ref.get(harness.promptsRef);
       const planPrompt = prompts.find((prompt) => prompt.startsWith("# Workspace Meeting Plan"));
@@ -608,6 +625,56 @@ it.effect("parks on the round check-in and resumes when the person answers", () 
       expect(planPrompt).toContain("계속 진행");
       const buildPrompt = prompts.find((prompt) => prompt.includes("Node: build\n"));
       expect(buildPrompt).toContain("USER DECISIONS:");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("parks at the wrap-up gate and concludes without execution when the person stops", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({ run: meetingRun(), respond: respondForMeetingPrompt });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      // The round budget is spent: no plan, no graph — the run waits on the person.
+      const parked = yield* Ref.get(harness.runRef);
+      expect(parked.status).toBe("running");
+      expect(parked.graph).toBeNull();
+      expect(parked.meeting?.pendingQuestion).toMatchObject({
+        askedByParticipantId: null,
+        question: meetingWrapUpQuestion(1),
+        options: ["합의대로 실행 시작", "라운드 1회 추가", "여기서 종료 (실행 없음)"],
+      });
+      expect(parked.meeting?.pendingQuestion?.context).toContain("합의: 서버 구현으로 진행");
+
+      // The projection applies the answer before the event is published.
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [
+            {
+              question: meetingWrapUpQuestion(1),
+              answer: "여기서 종료 (실행 없음)",
+              answeredAt: at,
+            },
+          ],
+        },
+      }));
+      yield* PubSub.publish(
+        harness.pubsub,
+        answeredEvent(meetingWrapUpQuestion(1), "여기서 종료 (실행 없음)"),
+      );
+
+      const concluded = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(concluded.graph).toBeNull();
+      expect(concluded.meeting?.phase).toBe("done");
+      expect(concluded.finalOutput).toContain("## 회의 결론");
+      expect(concluded.finalOutput).toContain("합의: 서버 구현으로 진행");
+      expect(concluded.finalOutput).toContain("## 회의 전문");
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );
@@ -648,10 +715,13 @@ it.effect("parks a node whose seat asks the person and re-runs it with the answe
   Effect.gen(function* () {
     const question = "DB는 어느 것으로 할까요?";
     const harness = yield* makeHarness({
-      run: meetingRun(),
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
       respond: (prompt) => {
         if (prompt.includes("Node: build\n")) {
-          return prompt.includes("USER DECISIONS:")
+          // The wrap-up answer already renders a USER DECISIONS section into
+          // every node prompt, so the park/resume split keys on the node's
+          // own answer instead.
+          return prompt.includes("SQLite")
             ? "SQLite 결정을 반영해 구현을 완료했다."
             : `<t3_question>${JSON.stringify({
                 question,
@@ -705,6 +775,153 @@ it.effect("parks a node whose seat asks the person and re-runs it with the answe
       expect(build?.attempts.every((attempt) => attempt.threadId === meetingThread)).toBe(true);
       expect((yield* Ref.get(harness.threadsRef)).size).toBe(1);
       expect(resumed.meeting?.phase).toBe("done");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("parks on the node instead of failing the run when its retries run out", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: (prompt) =>
+        // The validator answers in prose, so the receipt never parses. This is
+        // the shape of the production failure ("Missing <t3_validation> JSON
+        // payload."): a formatting miss, not a wrong plan.
+        prompt.includes("Return one strict receipt between <t3_validation>")
+          ? "구현은 괜찮아 보인다."
+          : respondForMeetingPrompt(prompt),
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const parked = yield* Ref.get(harness.runRef);
+      const validation = parked.graph?.nodes.find((node) => node.kind === "validation");
+      expect(validation).toBeDefined();
+      // The run is alive and waiting ON the node, with every earlier node kept.
+      expect(parked.status).toBe("running");
+      expect(validation?.status).toBe("awaiting-user");
+      expect(parked.graph?.status).not.toBe("failed");
+      expect(parked.graph?.nodes.find((node) => node.id === "build")?.status).toBe(
+        "awaiting-validation",
+      );
+      expect(parked.meeting?.pendingQuestion).toMatchObject({
+        question: nodeInterventionQuestion(validation!.title),
+      });
+      expect(parked.meeting?.pendingQuestion?.context).toContain("<t3_validation>");
+      // It spent its own attempts, but a malformed reply is re-askable for
+      // free, so the shared plan-revision budget is untouched.
+      expect(validation?.attempts).toHaveLength(validation!.maxAttempts);
+      // Still the planned graph's own revision: both rejected receipts would
+      // otherwise have charged it, which is what stranded real runs on
+      // "Task graph revision limit N has been reached."
+      expect(parked.graph?.revision).toBe(1);
+      // The retry told the seat what was wrong instead of re-sending the
+      // identical prompt.
+      const prompts = yield* Ref.get(harness.promptsRef);
+      expect(prompts.some((prompt) => prompt.includes("WAS REJECTED:"))).toBe(true);
+
+      const question = parked.meeting!.pendingQuestion!.question;
+      const answer = "이 단계 건너뛰고 계속";
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at }],
+        },
+      }));
+      yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+
+      const resumed = yield* awaitRunStatus(harness.runRef, "completed");
+      const skipped = resumed.graph?.nodes.find((node) => node.kind === "validation");
+      expect(skipped?.status).toBe("completed");
+      expect(skipped?.output).toContain("건너뛰");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("still retries a node when the person's revision budget is 1", () =>
+  Effect.gen(function* () {
+    let receipts = 0;
+    const harness = yield* makeHarness({
+      // The tightest budget a person can set. It used to leave a run with no
+      // retry at all — the plan already sits on revision 1 — so the very first
+      // rejected reply ended it.
+      run: meetingRun({ maxRevisions: 1, answers: [executeWrapUp(1)] }),
+      respond: (prompt) => {
+        if (prompt.includes("Return one strict receipt between <t3_validation>")) {
+          receipts += 1;
+          if (receipts === 1) return "구현은 괜찮아 보인다.";
+        }
+        return respondForMeetingPrompt(prompt);
+      },
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const run = yield* awaitRunStatus(harness.runRef, "completed");
+      const validation = run.graph?.nodes.find((node) => node.kind === "validation");
+      expect(validation?.status).toBe("completed");
+      expect(validation?.attempts).toHaveLength(2);
+      expect(validation?.attempts[0]?.status).toBe("failed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("hands a parked node to another seat when the person asks for one", () =>
+  Effect.gen(function* () {
+    let receipts = 0;
+    const harness = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: (prompt) => {
+        if (prompt.includes("Return one strict receipt between <t3_validation>")) {
+          receipts += 1;
+          // Rejected on the chair's seat until the node moves to the other one.
+          if (receipts <= 2) return "구현은 괜찮아 보인다.";
+        }
+        return respondForMeetingPrompt(prompt);
+      },
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const parked = yield* Ref.get(harness.runRef);
+      const validation = parked.graph?.nodes.find((node) => node.kind === "validation");
+      expect(validation?.status).toBe("awaiting-user");
+      expect(parked.meeting?.pendingQuestion?.options).toContain("다른 좌석에게 맡기기");
+      const seatBefore = validation?.participantId;
+
+      const question = parked.meeting!.pendingQuestion!.question;
+      const answer = "다른 좌석에게 맡기기";
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at }],
+        },
+      }));
+      yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+
+      const resumed = yield* awaitRunStatus(harness.runRef, "completed");
+      const moved = resumed.graph?.nodes.find((node) => node.kind === "validation");
+      expect(moved?.status).toBe("completed");
+      // A seat the person already picked — never an account outside the meeting.
+      expect(moved?.participantId).not.toBe(seatBefore);
+      expect(
+        resumed.meeting?.participants.some(
+          (participant) => participant.id === moved?.participantId,
+        ),
+      ).toBe(true);
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );

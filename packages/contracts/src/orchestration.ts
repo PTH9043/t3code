@@ -750,7 +750,12 @@ export const WorkspaceTaskNode = Schema.Struct({
   validationTargetId: Schema.NullOr(WorkspaceTaskNodeId),
   priority: NonNegativeInt,
   status: WorkspaceTaskNodeStatus,
-  maxAttempts: PositiveInt.check(Schema.isLessThanOrEqualTo(3)),
+  /**
+   * The node's automatic retry budget. Headroom above the planner's default
+   * exists because a person who answers the intervention question with "다시
+   * 시도" grants one more attempt, and they may do that several times.
+   */
+  maxAttempts: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
   attempts: Schema.Array(WorkspaceTaskAttempt),
   // Wide enough for real deliverables (work tables, multi-session plans);
   // 40k silently beheaded them in transit and stalled meeting executions.
@@ -3036,6 +3041,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
+  inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),

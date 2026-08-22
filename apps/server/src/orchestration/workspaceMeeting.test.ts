@@ -13,8 +13,15 @@ import {
   buildMeetingChairClosePrompt,
   buildMeetingPlanPrompt,
   buildMeetingStatementPrompt,
+  meetingWrapUpQuestion,
   nextMeetingStep,
   parseChairVerdict,
+  isNodeInterventionQuestion,
+  isProviderContentRefusal,
+  nodeInterventionQuestion,
+  nodeRefusalQuestion,
+  parseNodeInterventionDecision,
+  parseWrapUpDecision,
   parseMeetingQuestion,
   parseStatementRespondsTo,
   plannedSpeakers,
@@ -154,7 +161,7 @@ describe("nextMeetingStep", () => {
   });
 
   describe("fixed-rounds", () => {
-    it("runs exactly maxRounds and then plans", () => {
+    it("runs exactly maxRounds and then asks the person what happens next", () => {
       const closed = { spoke: ["p1", "p2"], chairSummary: "정리" };
       const afterFirst = nextMeetingStep(meeting({ rounds: [round({ index: 0, ...closed })] }));
       expect(afterFirst).toEqual({ kind: "open-round", roundIndex: 1 });
@@ -162,7 +169,7 @@ describe("nextMeetingStep", () => {
       const afterSecond = nextMeetingStep(
         meeting({ rounds: [round({ index: 0, ...closed }), round({ index: 1, ...closed })] }),
       );
-      expect(afterSecond).toEqual({ kind: "plan" });
+      expect(afterSecond).toEqual({ kind: "ask-wrap-up", question: meetingWrapUpQuestion(2) });
     });
 
     it("ignores a consensus verdict, which is not its stopping rule", () => {
@@ -178,7 +185,7 @@ describe("nextMeetingStep", () => {
   });
 
   describe("until-consensus", () => {
-    it("stops early once the chair reports agreement", () => {
+    it("stops early once the chair reports agreement and asks the person", () => {
       const step = nextMeetingStep(
         meeting({
           mode: "until-consensus",
@@ -188,7 +195,7 @@ describe("nextMeetingStep", () => {
           ],
         }),
       );
-      expect(step).toEqual({ kind: "plan" });
+      expect(step).toEqual({ kind: "ask-wrap-up", question: meetingWrapUpQuestion(1) });
     });
 
     it("keeps going while disagreement remains", () => {
@@ -213,7 +220,131 @@ describe("nextMeetingStep", () => {
           rounds: [round({ index: 0, ...unresolved }), round({ index: 1, ...unresolved })],
         }),
       );
-      expect(step).toEqual({ kind: "plan" });
+      expect(step).toEqual({ kind: "ask-wrap-up", question: meetingWrapUpQuestion(2) });
+    });
+  });
+
+  describe("wrap-up gate", () => {
+    const closed = { spoke: ["p1", "p2"], chairSummary: "정리" };
+    const spentRounds = [round({ index: 0, ...closed }), round({ index: 1, ...closed })];
+    const answered = (answer: string) =>
+      meeting({
+        rounds: spentRounds,
+        answers: [{ question: meetingWrapUpQuestion(2), answer, answeredAt: at }],
+      });
+
+    it("plans once the person says to execute", () => {
+      expect(nextMeetingStep(answered("합의대로 실행 시작"))).toEqual({ kind: "plan" });
+    });
+
+    it("treats free text without a stop or more-rounds intent as an execute steer", () => {
+      expect(nextMeetingStep(answered("배포 파트는 빼고 진행해줘"))).toEqual({ kind: "plan" });
+    });
+
+    it("concludes without execution when the person stops here", () => {
+      expect(nextMeetingStep(answered("여기서 종료 (실행 없음)"))).toEqual({ kind: "conclude" });
+    });
+
+    it("reopens discussion when the person grants more rounds", () => {
+      expect(nextMeetingStep(answered("라운드 1회 추가"))).toEqual({
+        kind: "open-round",
+        roundIndex: 2,
+      });
+    });
+
+    it("asks again with a fresh key once the granted rounds are spent", () => {
+      const step = nextMeetingStep(
+        meeting({
+          rounds: [...spentRounds, round({ index: 2, ...closed })],
+          answers: [
+            { question: meetingWrapUpQuestion(2), answer: "라운드 1회 추가", answeredAt: at },
+          ],
+        }),
+      );
+      expect(step).toEqual({ kind: "ask-wrap-up", question: meetingWrapUpQuestion(3) });
+    });
+
+    it("grants rounds past an early consensus in until-consensus mode", () => {
+      const step = nextMeetingStep(
+        meeting({
+          mode: "until-consensus",
+          maxRounds: 5,
+          rounds: [
+            round({ index: 0, spoke: ["p1", "p2"], chairSummary: "합의", consensusReached: true }),
+          ],
+          answers: [
+            { question: meetingWrapUpQuestion(1), answer: "2라운드 더 해", answeredAt: at },
+          ],
+        }),
+      );
+      expect(step).toEqual({ kind: "open-round", roundIndex: 1 });
+    });
+
+    it("does not gate a zero-round direct collaboration", () => {
+      expect(nextMeetingStep(meeting({ maxRounds: 0 }))).toEqual({ kind: "plan" });
+    });
+  });
+
+  describe("parseWrapUpDecision", () => {
+    it("maps the canonical options", () => {
+      expect(parseWrapUpDecision("합의대로 실행 시작")).toEqual({ kind: "execute" });
+      expect(parseWrapUpDecision("라운드 1회 추가")).toEqual({ kind: "more-rounds", count: 1 });
+      expect(parseWrapUpDecision("여기서 종료 (실행 없음)")).toEqual({ kind: "conclude" });
+    });
+
+    it("reads a round count out of free text", () => {
+      expect(parseWrapUpDecision("3라운드 더 진행해")).toEqual({ kind: "more-rounds", count: 3 });
+      expect(parseWrapUpDecision("회의를 더 하자")).toEqual({ kind: "more-rounds", count: 1 });
+    });
+
+    it("reads stop intent out of free text", () => {
+      expect(parseWrapUpDecision("그만하고 정리만 해줘")).toEqual({ kind: "conclude" });
+      expect(parseWrapUpDecision("실행은 하지 마")).toEqual({ kind: "conclude" });
+    });
+
+    it("defaults free text to executing with the answer as a steer", () => {
+      expect(parseWrapUpDecision("결론대로 가되 문서는 한 개만 써")).toEqual({ kind: "execute" });
+    });
+  });
+
+  describe("node intervention", () => {
+    it("recognizes its own question and nothing else", () => {
+      expect(isNodeInterventionQuestion(nodeInterventionQuestion("DOM-03 주문 도메인"))).toBe(true);
+      expect(isNodeInterventionQuestion(meetingWrapUpQuestion(2))).toBe(false);
+      expect(isNodeInterventionQuestion("이 단계 어떻게 할까요?")).toBe(false);
+    });
+
+    it("maps the canonical options", () => {
+      expect(parseNodeInterventionDecision("다른 좌석에게 맡기기")).toEqual({ kind: "reassign" });
+      expect(parseNodeInterventionDecision("다시 시도")).toEqual({ kind: "retry" });
+      expect(parseNodeInterventionDecision("이 단계 건너뛰고 계속")).toEqual({ kind: "skip" });
+      expect(parseNodeInterventionDecision("여기서 종료")).toEqual({ kind: "stop" });
+    });
+
+    it("recognizes a provider refusal and its question", () => {
+      expect(
+        isProviderContentRefusal(
+          "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+        ),
+      ).toBe(true);
+      expect(isProviderContentRefusal("Missing <t3_validation> JSON payload.")).toBe(false);
+      expect(isNodeInterventionQuestion(nodeRefusalQuestion("Codex 교차 검증"))).toBe(true);
+    });
+
+    it("reads skip and stop intent out of free text", () => {
+      expect(parseNodeInterventionDecision("그건 스킵하고 다음으로 가")).toEqual({ kind: "skip" });
+      expect(parseNodeInterventionDecision("그만하자")).toEqual({ kind: "stop" });
+    });
+
+    it("keeps the work by defaulting free text to a retry", () => {
+      expect(parseNodeInterventionDecision("경로를 바꿔서 다시 해봐")).toEqual({ kind: "retry" });
+      expect(parseNodeInterventionDecision("이번엔 파일을 직접 읽고 진행해")).toEqual({
+        kind: "retry",
+      });
+    });
+
+    it("treats an explicit retry as a retry even when it mentions stopping", () => {
+      expect(parseNodeInterventionDecision("중단하지 말고 다시 시도해")).toEqual({ kind: "retry" });
     });
   });
 

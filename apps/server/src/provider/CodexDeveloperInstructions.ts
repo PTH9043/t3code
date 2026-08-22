@@ -142,9 +142,9 @@ Your active mode changes only when new developer instructions with a different \
 
 ## request_user_input availability
 
-The \`request_user_input\` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error.
+The \`request_user_input\` tool IS available in Default mode. T3 Code renders it as a card the user answers by clicking, so it is always the better way to ask.
 
-In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
+In Default mode, still strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. But when you do have to ask — the answer cannot be discovered from local context and a wrong assumption would be costly or hard to undo — ask with the \`request_user_input\` tool, giving 2-4 meaningful options and a recommended default. Never write a multiple choice question as a textual assistant message.
 ${T3_CODE_BROWSER_TOOL_INSTRUCTIONS}
 </collaboration_mode>`;
 

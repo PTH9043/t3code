@@ -250,6 +250,11 @@ export function buildWorkspaceTaskNodePrompt(input: {
     meeting?.participants.find((participant) => participant.id === input.node.participantId) ??
     null;
   const includeWorkspaceContext = input.node.kind === "orchestration";
+  // A retry used to arrive as a byte-identical prompt, so a reply rejected for
+  // its shape ("Missing <t3_validation> JSON payload.") tended to come back the
+  // same way and burn the node's last attempt. Say what was wrong.
+  const lastFailure =
+    input.node.attempts.findLast((attempt) => attempt.status === "failed") ?? null;
   return [
     "# Workspace Task Graph Assignment",
     `Run ID: ${input.run.id}`,
@@ -279,6 +284,14 @@ export function buildWorkspaceTaskNodePrompt(input: {
             .join("\n"),
         ]
       : []),
+    ...(lastFailure?.error == null
+      ? []
+      : [
+          "",
+          `PREVIOUS ATTEMPT (#${lastFailure.number}) WAS REJECTED:`,
+          lastFailure.error,
+          "Fix exactly that. If it was rejected for its shape, redo the work and return the required block, complete and valid.",
+        ]),
     "",
     "TASK:",
     input.node.handoff.task,

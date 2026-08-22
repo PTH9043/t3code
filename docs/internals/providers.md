@@ -23,6 +23,19 @@
 [`ProviderAdapter.ts`][adapter]를 따릅니다. 특정 에이전트의 전송 방식, 설정, 이벤트 형태가 어떻게
 대응되는지 보려면 드라이버와 그 어댑터를 함께 읽으세요.
 
+### 사용자에게 묻는 질문
+
+에이전트가 선택지를 갖춘 질문을 던지면 `user-input.requested` 런타임 이벤트가 되고, 클라이언트는
+제공자와 무관하게 같은 카드를 그립니다. 답은 `thread.user-input.respond` 명령으로 돌아갑니다.
+제공자마다 이 이벤트를 만드는 출처가 다릅니다. Claude는 `AskUserQuestion` 도구 호출을 권한
+콜백에서 가로채고, Codex는 app-server가 보내는 `item/tool/requestUserInput` 요청을 받습니다.
+
+Codex의 `request_user_input` 도구는 Plan 모드에서만 열려 있어서, Default 모드에서 호출하면
+`request_user_input is unavailable in Default mode`가 돌아오고 모델은 평범한 문장으로 질문하게
+됩니다. Default 모드에서도 같은 카드가 뜨도록 [`codexLaunchArgs.ts`][codexargs]가 app-server를
+`-c features.default_mode_request_user_input=true`로 띄웁니다. `--enable`이 아니라 `-c`인 이유는
+그 파일의 주석에 적어 두었습니다.
+
 ## 레지스트리와 라우팅
 
 레지스트리 두 개가 설정과 실행 중인 프로세스를 분리합니다.
@@ -76,6 +89,7 @@
 
 [drivers]: ../../apps/server/src/provider/builtInDrivers.ts
 [codex]: ../../apps/server/src/provider/Drivers/CodexDriver.ts
+[codexargs]: ../../apps/server/src/provider/Layers/codexLaunchArgs.ts
 [claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts

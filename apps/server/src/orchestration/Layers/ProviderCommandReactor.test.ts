@@ -1742,7 +1742,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   effectIt.effect(
-    "rejects changing models after start when the provider requires a new thread",
+    "restarts the session with a handoff for a model change when the provider requires a new provider thread",
     () =>
       Effect.gen(function* () {
         const harness = yield* Effect.promise(() =>
@@ -1786,32 +1786,22 @@ describe("ProviderCommandReactor", () => {
           createdAt: now,
         });
 
-        yield* Effect.promise(() =>
-          waitFor(async () => {
-            const readModel = await harness.readModel();
-            const thread = readModel.threads.find(
-              (entry) => entry.id === ThreadId.make("thread-1"),
-            );
-            return (
-              thread?.activities.some(
-                (activity) => activity.kind === "provider.turn.start.failed",
-              ) ?? false
-            );
-          }),
-        );
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
 
-        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
-        const readModel = yield* Effect.promise(() => harness.readModel());
-        const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-        expect(
-          thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
-        ).toMatchObject({
-          payload: {
-            detail: expect.stringContaining(
-              "cannot switch models after the conversation has started",
-            ),
+        expect(harness.stopSession).toHaveBeenCalledTimes(1);
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+          threadId: ThreadId.make("thread-1"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.1-codex",
           },
         });
+        // The fresh provider thread has no history: the switching turn
+        // carries the conversation across.
+        const secondInput = harness.sendTurn.mock.calls[1]?.[0] as { input?: string };
+        expect(secondInput.input).toContain("<t3_conversation_handoff>");
+        expect(secondInput.input).toContain("second");
       }),
   );
 
@@ -2310,7 +2300,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
-  it("rejects provider changes after a thread is already bound to a session provider", async () => {
+  it("hands a live session across drivers with a conversation handoff instead of rejecting", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2355,31 +2345,23 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return (
-        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
-        false
-      );
-    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
 
-    expect(harness.startSession.mock.calls.length).toBe(1);
-    expect(harness.sendTurn.mock.calls.length).toBe(1);
-    expect(harness.stopSession.mock.calls.length).toBe(0);
+    expect(harness.stopSession.mock.calls.length).toBe(1);
+    expect(harness.startSession.mock.calls.length).toBe(2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      provider: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.providerName).toBe("codex");
-    expect(thread?.session?.runtimeMode).toBe("approval-required");
-    expect(
-      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
-    ).toMatchObject({
-      payload: {
-        detail: expect.stringContaining("cannot switch to 'claudeAgent'"),
-      },
-    });
+    expect(thread?.session?.providerName).toBe("claudeAgent");
+    // The incoming driver starts from a blank provider thread: the switching
+    // turn carries the conversation across.
+    const secondInput = harness.sendTurn.mock.calls[1]?.[0] as { input?: string };
+    expect(secondInput.input).toContain("<t3_conversation_handoff>");
+    expect(secondInput.input).toContain("second");
   });
 
   it("starts a fresh session for a cross-driver turn once the previous session has stopped", async () => {

@@ -1087,6 +1087,49 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("keeps an option whose description Codex left blank, falling back to its label", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-user-input-blank-description"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/tool/requestUserInput",
+        requestId: ApprovalRequestId.make("req-user-input-2"),
+        payload: {
+          itemId: "item-user-input-2",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          questions: [
+            {
+              id: "use_emoji",
+              header: "README",
+              question: "Should the greeting use emoji?",
+              options: [
+                { label: "Yes", description: "" },
+                { label: "No", description: "Plain text" },
+              ],
+            },
+          ],
+        },
+      } satisfies ProviderEvent);
+
+      const event = yield* Fiber.join(eventFiber);
+      NodeAssert.equal(event._tag, "Some");
+      if (event._tag !== "Some" || event.value.type !== "user-input.requested") {
+        return;
+      }
+      NodeAssert.deepEqual(event.value.payload.questions[0]?.options, [
+        { label: "Yes", description: "Yes" },
+        { label: "No", description: "Plain text" },
+      ]);
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

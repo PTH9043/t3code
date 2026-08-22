@@ -23,6 +23,7 @@ import {
   TerminalOpenInput,
   WorkspaceCollaborationRunId,
   WorkspaceMeetingParticipantId,
+  type WorkspaceRuntimeSnapshot,
 } from "@t3tools/contracts";
 import {
   connectionStatusTitle,
@@ -158,7 +159,9 @@ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
+  CheckIcon,
   ChevronDownIcon,
+  EyeIcon,
   GitBranchIcon,
   SquareIcon,
   UsersIcon,
@@ -227,7 +230,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { projectEnvironment } from "../state/projects";
-import { useEnvironmentQuery } from "../state/query";
+import { useEnvironmentQuery, useEnvironmentQuerySelector } from "../state/query";
 import {
   primaryServerAvailableEditorsAtom,
   primaryServerKeybindingsAtom,
@@ -299,7 +302,6 @@ import {
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   shouldShowBranchMismatchBanner,
-  getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
   type LocalDispatchSnapshot,
@@ -310,6 +312,7 @@ import {
   reconcileMountedTerminalThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  resolveVisibleThreadError,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -351,6 +354,11 @@ const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+// Module-level so the derived atom behind useEnvironmentQuerySelector stays
+// stable across renders. "" stands in for "no operations yet" so a null result
+// always means the snapshot itself has not arrived.
+const selectWorkspaceOperationsRevision = (snapshot: WorkspaceRuntimeSnapshot): string =>
+  snapshot.operationsUpdatedAt ?? "";
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1380,6 +1388,14 @@ function ChatViewContent(props: ChatViewProps) {
   const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
     Record<string, LocalThreadErrorEntry>
   >({});
+  /**
+   * The session error text the person closed, per thread. Keyed by the message
+   * so a later, different failure still surfaces — see
+   * {@link resolveVisibleThreadError}.
+   */
+  const [dismissedSessionErrorsByThreadKey, setDismissedSessionErrorsByThreadKey] = useState<
+    Record<string, string>
+  >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -1559,9 +1575,14 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
-  const threadError = isServerThread
-    ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
-    : localDraftError;
+  const sessionError = activeServerThread?.session?.lastError ?? null;
+  const threadError = resolveVisibleThreadError({
+    isServerThread,
+    localDraftError,
+    localServerError,
+    sessionError,
+    dismissedSessionError: dismissedSessionErrorsByThreadKey[routeThreadKey] ?? null,
+  });
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   // Plan mode is legacy (Settings → Beta). With the flag off the effective
   // mode is forced to "default" — even for threads with a stored plan mode —
@@ -1743,6 +1764,33 @@ function ChatViewContent(props: ChatViewProps) {
         })
       : null,
   );
+  // The runs query only fetches on mount, but the send path needs it CURRENT:
+  // a meeting that started after mount is otherwise invisible here, so the
+  // stop banner never shows and a message meant as an interjection convenes a
+  // whole new meeting. The live workspace-runtime subscription carries a
+  // revision for exactly this. Only the revision is selected: the subscription
+  // is shared with the sidebar and control center, and its full snapshot turns
+  // over on every thread state change — this view must not re-render for that.
+  const meetingOperationsRevision = useEnvironmentQuerySelector(
+    activeProject
+      ? orchestrationEnvironment.workspaceRuntime({
+          environmentId,
+          input: { projectId: activeProject.id },
+        })
+      : null,
+    selectWorkspaceOperationsRevision,
+  );
+  const lastMeetingOperationsRevisionRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (meetingOperationsRevision === null) return;
+    if (lastMeetingOperationsRevisionRef.current === undefined) {
+      lastMeetingOperationsRevisionRef.current = meetingOperationsRevision;
+      return;
+    }
+    if (lastMeetingOperationsRevisionRef.current === meetingOperationsRevision) return;
+    lastMeetingOperationsRevisionRef.current = meetingOperationsRevision;
+    meetingRunsQuery.refresh();
+  }, [meetingRunsQuery.refresh, meetingOperationsRevision]);
   // Every meeting run that owns THIS conversation, running first. They drive
   // the stop banner above the composer and claim the send path further below.
   const liveMeetingRuns = useMemo(() => {
@@ -1805,63 +1853,53 @@ function ChatViewContent(props: ChatViewProps) {
     );
   }, [cancelMeetingRun, environmentId, liveMeetingRuns]);
   // Off means OFF: flipping the folder's meeting mode off also stops every
-  // live meeting run in the folder. Without this the switch reads as broken —
-  // the mode shows off yet seats keep talking and sends keep routing to them.
+  // live meeting run in the folder. The cancel runs against the server's
+  // CURRENT run list — a client snapshot that predates the newest run must
+  // never leave seats quietly talking while the mode reads "off".
   const meetingModeEnabledHere = useMeetingComposerConfig().enabled;
   const previousMeetingModeEnabledRef = useRef(meetingModeEnabledHere);
-  // Survives the moment the runs query has no data yet: the off-flip marks a
-  // pending cancel, and the effect completes it as soon as data arrives
-  // instead of missing the transition tick forever.
-  const pendingMeetingModeCancelRef = useRef(false);
   useEffect(() => {
     const wasEnabled = previousMeetingModeEnabledRef.current;
     previousMeetingModeEnabledRef.current = meetingModeEnabledHere;
-    if (meetingModeEnabledHere) {
-      pendingMeetingModeCancelRef.current = false;
-      return;
-    }
-    if (wasEnabled) pendingMeetingModeCancelRef.current = true;
-    if (!pendingMeetingModeCancelRef.current) return;
-    if (meetingRunsQuery.data == null) {
-      meetingRunsQuery.refresh();
-      return;
-    }
-    pendingMeetingModeCancelRef.current = false;
-    const liveFolderMeetings = meetingRunsQuery.data.runs.filter(
-      (run) => run.meeting !== null && (run.status === "queued" || run.status === "running"),
-    );
-    if (liveFolderMeetings.length === 0) return;
+    if (meetingModeEnabledHere || !wasEnabled) return;
+    const projectId = activeProject?.id;
+    if (projectId === undefined) return;
     void (async () => {
-      let failed = false;
-      for (const run of liveFolderMeetings) {
-        const cancelled = await cancelMeetingRun({
-          environmentId,
-          input: { projectId: run.projectId, runId: run.id },
-        });
-        if (cancelled._tag === "Failure" && !isAtomCommandInterrupted(cancelled)) failed = true;
-      }
-      toastManager.add(
-        failed
-          ? stackedThreadToast({
+      const cancelled = await cancelLiveMeetingRuns({
+        environmentId,
+        input: { projectId },
+      });
+      if (cancelled._tag === "Failure") {
+        if (!isAtomCommandInterrupted(cancelled)) {
+          toastManager.add(
+            stackedThreadToast({
               type: "error",
-              title: "회의 모드는 껐지만 일부 회의를 중지하지 못했습니다",
+              title: "회의 모드는 껐지만 회의를 중지하지 못했습니다",
               description: "제어 센터에서 남은 실행을 취소하세요.",
-            })
-          : stackedThreadToast({
-              type: "success",
-              title:
-                liveFolderMeetings.length > 1
-                  ? `회의 모드 종료 — 진행 중이던 회의 ${liveFolderMeetings.length}건을 중지합니다`
-                  : "회의 모드 종료 — 진행 중이던 회의를 중지합니다",
-              description: "회의 모드를 끄면 이 폴더의 회의도 함께 멈춥니다.",
             }),
+          );
+        }
+        return;
+      }
+      meetingRunsQuery.refresh();
+      const stopped = cancelled.value;
+      if (stopped === 0) return;
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title:
+            stopped > 1
+              ? `회의 모드 종료 — 진행 중이던 회의 ${stopped}건을 중지합니다`
+              : "회의 모드 종료 — 진행 중이던 회의를 중지합니다",
+          description: "회의 모드를 끄면 이 폴더의 회의도 함께 멈춥니다.",
+        }),
       );
     })();
   }, [
-    cancelMeetingRun,
+    activeProject?.id,
+    cancelLiveMeetingRuns,
     environmentId,
     meetingModeEnabledHere,
-    meetingRunsQuery.data,
     meetingRunsQuery.refresh,
   ]);
   const handleNewThreadInActiveProject = useCallback(() => {
@@ -2931,6 +2969,32 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeServerThread, draftId, routeThreadKey, routeThreadRef],
   );
+
+  const dismissThreadError = useCallback(() => {
+    setThreadError(activeThreadId, null);
+    // The local entry alone is not enough: the session keeps its `lastError`
+    // until the next turn, so the banner must be told which text to stay quiet
+    // about.
+    if (sessionError !== null) {
+      setDismissedSessionErrorsByThreadKey((existing) =>
+        existing[routeThreadKey] === sessionError
+          ? existing
+          : { ...existing, [routeThreadKey]: sessionError },
+      );
+    }
+  }, [activeThreadId, routeThreadKey, sessionError, setThreadError]);
+
+  // A dismissal covers one occurrence. Once the session drops the error, forget
+  // it so the same text can raise the banner again if it comes back.
+  useEffect(() => {
+    if (sessionError !== null) return;
+    setDismissedSessionErrorsByThreadKey((existing) => {
+      if (existing[routeThreadKey] === undefined) return existing;
+      const next = { ...existing };
+      delete next[routeThreadKey];
+      return next;
+    });
+  }, [routeThreadKey, sessionError]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
@@ -6315,25 +6379,6 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef,
   ]);
 
-  const getModelDisabledReason = useCallback(
-    (instanceId: ProviderInstanceId, model: string): string | null => {
-      if (!activeThread) {
-        return null;
-      }
-      const reason = getStartedThreadModelChangeBlockReason({
-        providers: providerStatuses,
-        hasStartedSession: activeThread.session !== null,
-        currentModelSelection: activeThread.modelSelection,
-        currentProviderInstanceId: activeThread.session?.providerInstanceId ?? null,
-        nextModelSelection: { instanceId, model },
-      });
-      return reason
-        ? "이 모델은 현재 대화에서 사용할 수 없습니다. 사용하려면 새 대화를 시작하세요."
-        : null;
-    },
-    [activeThread, providerStatuses],
-  );
-
   const onProviderModelSelect = useCallback(
     (instanceId: ProviderInstanceId, model: string) => {
       if (!activeThread) return;
@@ -6377,22 +6422,6 @@ function ChatViewContent(props: ChatViewProps) {
         instanceId,
         model: resolvedModel,
       };
-      const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
-        providers: providerStatuses,
-        hasStartedSession: activeThread.session !== null,
-        currentModelSelection: activeThread.modelSelection,
-        currentProviderInstanceId: activeThread.session?.providerInstanceId ?? null,
-        nextModelSelection,
-      });
-      if (modelChangeBlockReason) {
-        toastManager.add({
-          type: "warning",
-          title: modelChangeBlockReason.title,
-          description: modelChangeBlockReason.description,
-        });
-        scheduleComposerFocus();
-        return;
-      }
       setComposerDraftModelSelection(
         scopeThreadRef(activeThread.environmentId, activeThread.id),
         nextModelSelection,
@@ -6643,10 +6672,7 @@ function ChatViewContent(props: ChatViewProps) {
           />
         </header>
 
-        <ThreadErrorBanner
-          error={threadError}
-          onDismiss={() => setThreadError(activeThread.id, null)}
-        />
+        <ThreadErrorBanner error={threadError} onDismiss={dismissThreadError} />
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">
           {/* Chat column */}
@@ -6841,7 +6867,6 @@ function ChatViewContent(props: ChatViewProps) {
                               onChangeActivePendingUserInputCustomAnswer
                             }
                             onProviderModelSelect={onProviderModelSelect}
-                            getModelDisabledReason={getModelDisabledReason}
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
                             handleInteractionModeChange={handleInteractionModeChange}

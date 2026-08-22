@@ -99,10 +99,22 @@ export interface WorkspaceSynthesisPayload {
 
 export class WorkspaceTaskGraphError extends Error {
   override readonly name = "WorkspaceTaskGraphError";
+  /**
+   * The reply did not match the protocol — tag missing, JSON broken, a field
+   * the wrong shape — as opposed to the plan itself being wrong. Re-asking
+   * costs one turn and almost always works, so a caller must not spend the
+   * run's plan-revision budget on it.
+   */
+  readonly malformedOutput: boolean;
+
+  constructor(message: string, options?: { readonly malformedOutput?: boolean }) {
+    super(message);
+    this.malformedOutput = options?.malformedOutput ?? false;
+  }
 }
 
 function fail(message: string): never {
-  throw new WorkspaceTaskGraphError(message);
+  throw new WorkspaceTaskGraphError(message, { malformedOutput: true });
 }
 
 function record(value: unknown, path: string): Readonly<Record<string, unknown>> {

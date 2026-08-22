@@ -344,15 +344,18 @@ function toCanonicalUserInputAnswers(
 function toUserInputQuestions(questions: ReadonlyArray<CodexToolUserInputQuestion>) {
   const parsedQuestions = questions
     .map((question) => {
+      // A blank description is not a reason to drop the choice: dropping every
+      // option drops the question, and the tool call is a blocking request, so
+      // the turn would hang with nothing on screen to answer. The label carries
+      // the meaning; reuse it so the contract's non-empty description holds.
       const options =
         question.options
           ?.map((option) => {
             const label = trimText(option.label);
-            const description = trimText(option.description);
-            if (!label || !description) {
+            if (!label) {
               return undefined;
             }
-            return { label, description };
+            return { label, description: trimText(option.description) ?? label };
           })
           .filter((option) => option !== undefined) ?? [];
 

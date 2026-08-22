@@ -30,15 +30,29 @@ describe("resolveCodexLaunchArgs", () => {
 
 describe("codexAppServerArgs", () => {
   it("returns the app-server command for empty launch args", () => {
-    NodeAssert.deepStrictEqual(codexAppServerArgs(""), ["app-server"]);
+    NodeAssert.deepStrictEqual(codexAppServerArgs(""), [
+      "app-server",
+      "-c",
+      "features.default_mode_request_user_input=true",
+    ]);
   });
 
   it("appends parsed launch args after app-server", () => {
     NodeAssert.deepStrictEqual(codexAppServerArgs("--strict-config --enable foo"), [
       "app-server",
+      "-c",
+      "features.default_mode_request_user_input=true",
       "--strict-config",
       "--enable",
       "foo",
+    ]);
+  });
+
+  it("puts the question feature before launch args so a user can turn it back off", () => {
+    const args = codexAppServerArgs("-c features.default_mode_request_user_input=false");
+    NodeAssert.deepStrictEqual(args.slice(-2), [
+      "-c",
+      "features.default_mode_request_user_input=false",
     ]);
   });
 });

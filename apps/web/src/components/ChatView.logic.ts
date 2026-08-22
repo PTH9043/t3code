@@ -138,6 +138,30 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
   );
 }
 
+/**
+ * Which error the thread banner shows.
+ *
+ * The banner's X only ever cleared the LOCAL entry, and the fallback then read
+ * `local ?? session.lastError` — so a dismissed local error fell straight back
+ * through to the server's still-set `lastError` and the banner never closed.
+ * A provider refusal, which sticks on the session until the next turn, was
+ * impossible to get rid of. Dismissal is therefore recorded against the server
+ * message itself: that exact text stays hidden, while a different error — or
+ * the same one after the session cleared it — shows again.
+ */
+export function resolveVisibleThreadError(input: {
+  readonly isServerThread: boolean;
+  readonly localDraftError: string | null;
+  readonly localServerError: string | null;
+  readonly sessionError: string | null;
+  readonly dismissedSessionError: string | null;
+}): string | null {
+  if (!input.isServerThread) return input.localDraftError;
+  if (input.localServerError !== null) return input.localServerError;
+  if (input.sessionError === null) return null;
+  return input.sessionError === input.dismissedSessionError ? null : input.sessionError;
+}
+
 export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "session">): {
   threadId: ThreadId;
   turnId?: TurnId;
@@ -370,27 +394,24 @@ export function threadHasStarted(thread: Thread | null | undefined): boolean {
   );
 }
 
-// `threadProvider` is the open branded driver kind carried by the session.
+// A started conversation no longer chains itself to its first provider: the
+// server releases the live session and starts a fresh one (carrying a
+// conversation handoff) when the person picks a model another driver serves.
+// The lock exists only while a turn is actively streaming — switching drivers
+// at that moment would tear down the session serving the in-flight turn.
 // Unknown driver kinds degrade to `null` (i.e. "unlocked"), which is the safe
 // rollback / fork behavior — the routing layer is the right place to surface
 // "driver not installed" errors, not the lock state.
-//
-// `selectedProvider` takes the same open-string shape because the composer
-// now tracks the picker selection as a `ProviderInstanceId` (e.g.
-// `codex_personal`). Custom instance ids that don't directly match a
-// registered driver resolve to `null` here, which matches the existing
-// "unknown driver -> unlocked" semantics. Callers that want the lock to track
-// a custom instance's underlying driver kind should resolve the instance id
-// upstream and pass the correlated kind.
 export function deriveLockedProvider(input: {
   thread: Thread | null | undefined;
   selectedProvider: string | null;
   threadProvider: string | null;
 }): ProviderDriverKind | null {
-  if (!threadHasStarted(input.thread)) {
+  const session = input.thread?.session;
+  if (session?.status !== "running" && session?.status !== "starting") {
     return null;
   }
-  const sessionProvider = input.thread?.session?.providerName ?? null;
+  const sessionProvider = session.providerName ?? null;
   if (sessionProvider && isProviderDriverKind(sessionProvider)) {
     return sessionProvider;
   }
@@ -403,44 +424,6 @@ export function deriveLockedProvider(input: {
       ? input.selectedProvider
       : null;
   return narrowedThreadProvider ?? narrowedSelectedProvider ?? null;
-}
-
-export function getStartedThreadModelChangeBlockReason(input: {
-  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "requiresNewThreadForModelChange">>;
-  hasStartedSession: boolean;
-  currentModelSelection: ModelSelection;
-  currentProviderInstanceId?: ModelSelection["instanceId"] | null | undefined;
-  nextModelSelection: ModelSelection;
-}): { title: string; description: string } | null {
-  if (!input.hasStartedSession) {
-    return null;
-  }
-  const currentModelSelection = {
-    ...input.currentModelSelection,
-    instanceId: input.currentProviderInstanceId ?? input.currentModelSelection.instanceId,
-  };
-  if (
-    currentModelSelection.instanceId === input.nextModelSelection.instanceId &&
-    currentModelSelection.model === input.nextModelSelection.model
-  ) {
-    return null;
-  }
-  const currentProvider = input.providers.find(
-    (snapshot) => snapshot.instanceId === currentModelSelection.instanceId,
-  );
-  const nextProvider = input.providers.find(
-    (snapshot) => snapshot.instanceId === input.nextModelSelection.instanceId,
-  );
-  if (
-    currentProvider?.requiresNewThreadForModelChange !== true &&
-    nextProvider?.requiresNewThreadForModelChange !== true
-  ) {
-    return null;
-  }
-  return {
-    title: "모델을 바꾸려면 새 대화를 시작하세요",
-    description: "이 제공자는 대화를 시작한 뒤 모델을 변경할 수 없습니다.",
-  };
 }
 
 export async function waitForStartedServerThread(

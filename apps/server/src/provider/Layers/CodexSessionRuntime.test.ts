@@ -355,6 +355,8 @@ describe("codexSessionAppServerArgs", () => {
     NodeAssert.deepStrictEqual(codexSessionAppServerArgs(["-c", "model=gpt-5"], undefined), [
       "app-server",
       "-c",
+      "features.default_mode_request_user_input=true",
+      "-c",
       "model=gpt-5",
     ]);
   });
@@ -367,6 +369,8 @@ describe("codexSessionAppServerArgs", () => {
       ),
       [
         "app-server",
+        "-c",
+        "features.default_mode_request_user_input=true",
         "--strict-config",
         "--enable",
         "foo",

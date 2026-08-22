@@ -20,7 +20,6 @@ import {
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
-  getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
@@ -28,6 +27,7 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  resolveVisibleThreadError,
   scheduleEnvironmentReconnectWarning,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
@@ -304,72 +304,6 @@ describe("buildExpiredTerminalContextToastCopy", () => {
     expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
       title: "만료된 터미널 컨텍스트 2개는 메시지에서 제외되었습니다",
       description: "터미널 출력을 포함하려면 다시 추가하세요.",
-    });
-  });
-});
-
-describe("getStartedThreadModelChangeBlockReason", () => {
-  const providers = [
-    {
-      instanceId: ProviderInstanceId.make("codex"),
-    },
-    {
-      instanceId: ProviderInstanceId.make("grok"),
-      requiresNewThreadForModelChange: true,
-    },
-  ];
-
-  it("allows model changes before a provider session has started", () => {
-    expect(
-      getStartedThreadModelChangeBlockReason({
-        providers,
-        hasStartedSession: false,
-        currentModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-        nextModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-other",
-        },
-      }),
-    ).toBeNull();
-  });
-
-  it("allows unchanged model selections for restricted providers", () => {
-    expect(
-      getStartedThreadModelChangeBlockReason({
-        providers,
-        hasStartedSession: true,
-        currentModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-        nextModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-      }),
-    ).toBeNull();
-  });
-
-  it("blocks started-session model changes when either provider requires a new thread", () => {
-    expect(
-      getStartedThreadModelChangeBlockReason({
-        providers,
-        hasStartedSession: true,
-        currentModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.4",
-        },
-        nextModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-      }),
-    ).toEqual({
-      title: "모델을 바꾸려면 새 대화를 시작하세요",
-      description: "이 제공자는 대화를 시작한 뒤 모델을 변경할 수 없습니다.",
     });
   });
 });
@@ -714,5 +648,64 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+describe("resolveVisibleThreadError", () => {
+  const base = {
+    isServerThread: true,
+    localDraftError: null,
+    localServerError: null,
+    sessionError: null,
+    dismissedSessionError: null,
+  } as const;
+  const refusal =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.";
+
+  it("shows the session error while it stands", () => {
+    expect(resolveVisibleThreadError({ ...base, sessionError: refusal })).toBe(refusal);
+  });
+
+  it("closes for good once the person dismisses that message", () => {
+    // The regression: the X cleared only the local entry, so the banner fell
+    // back to the session error and reappeared immediately.
+    expect(
+      resolveVisibleThreadError({
+        ...base,
+        sessionError: refusal,
+        dismissedSessionError: refusal,
+      }),
+    ).toBeNull();
+  });
+
+  it("still raises a different failure after one was dismissed", () => {
+    expect(
+      resolveVisibleThreadError({
+        ...base,
+        sessionError: "세션을 시작하지 못했습니다.",
+        dismissedSessionError: refusal,
+      }),
+    ).toBe("세션을 시작하지 못했습니다.");
+  });
+
+  it("prefers a local error over the session's", () => {
+    expect(
+      resolveVisibleThreadError({
+        ...base,
+        localServerError: "보내지 못했습니다.",
+        sessionError: refusal,
+      }),
+    ).toBe("보내지 못했습니다.");
+  });
+
+  it("reads the draft error while the thread is still local", () => {
+    expect(
+      resolveVisibleThreadError({
+        ...base,
+        isServerThread: false,
+        localDraftError: "초안 오류",
+        sessionError: refusal,
+      }),
+    ).toBe("초안 오류");
   });
 });

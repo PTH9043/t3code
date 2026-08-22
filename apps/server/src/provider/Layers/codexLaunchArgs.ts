@@ -10,8 +10,26 @@ export const resolveCodexLaunchArgs = (
 export const codexLaunchArgv = (launchArgs?: string): ReadonlyArray<string> =>
   tokenizeCliArgs(launchArgs);
 
+/**
+ * Codex only lets `request_user_input` through in Plan mode unless this
+ * feature is on, so in Default mode the model's question came back as
+ * "request_user_input is unavailable in Default mode" and it fell back to
+ * plain prose — no selectable question, unlike Claude's AskUserQuestion.
+ *
+ * Written as `-c features.…` rather than `--enable …`: an unknown `--enable`
+ * name is fatal (`Error: Unknown feature flag`), which would take down every
+ * Codex session the day the flag graduates or is renamed, while an unknown
+ * `-c features.…` key is ignored. Ours goes first so a user's own launch args
+ * can still turn it back off.
+ */
+export const CODEX_DEFAULT_MODE_QUESTION_ARGS: ReadonlyArray<string> = [
+  "-c",
+  "features.default_mode_request_user_input=true",
+];
+
 export const codexAppServerArgs = (launchArgs?: string) => [
   "app-server",
+  ...CODEX_DEFAULT_MODE_QUESTION_ARGS,
   ...codexLaunchArgv(launchArgs),
 ];
 

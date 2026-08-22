@@ -193,11 +193,11 @@ it.effect("settles only after a committed event wakes the pinned turn", () =>
   }),
 );
 
-it.effect("rejects a replacement turn instead of satisfying the original wait", () =>
+it.effect("follows a replacement turn instead of abandoning the wait", () =>
   Effect.gen(function* () {
     const system = yield* createSystem(thread(latestTurn("turn-original", "running")));
 
-    const error = yield* Effect.gen(function* () {
+    const result = yield* Effect.gen(function* () {
       const wait = yield* Effect.service(OrchestrationTurnWait);
       const fiber = yield* wait
         .waitForSettledTurn({ threadId })
@@ -214,14 +214,51 @@ it.effect("rejects a replacement turn instead of satisfying the original wait", 
           payload: {},
         }),
       );
-      return yield* Fiber.join(fiber).pipe(Effect.flip);
+      return yield* Fiber.join(fiber);
     }).pipe(Effect.provide(system.layer), Effect.scoped);
 
-    expect(error._tag).toBe("OrchestrationTurnWaitTargetReplacedError");
-    if (error._tag === "OrchestrationTurnWaitTargetReplacedError") {
-      expect(error.expectedTurnId).toBe(TurnId.make("turn-original"));
-      expect(error.actualTurnId).toBe(TurnId.make("turn-replacement"));
-    }
+    expect(result.turn.turnId).toBe(TurnId.make("turn-replacement"));
+    expect(result.turn.state).toBe("completed");
+  }),
+);
+
+it.effect("keeps waiting on a replacement turn that is still running", () =>
+  Effect.gen(function* () {
+    const system = yield* createSystem(thread(latestTurn("turn-original", "running")));
+
+    const result = yield* Effect.gen(function* () {
+      const wait = yield* Effect.service(OrchestrationTurnWait);
+      const fiber = yield* wait
+        .waitForSettledTurn({ threadId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(system.firstRead);
+      yield* Ref.set(system.threadRef, thread(latestTurn("turn-replacement", "running", later)));
+      yield* Queue.offer(
+        system.events,
+        domainEvent({
+          sequence: 2,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          type: "thread.session-set",
+          payload: {},
+        }),
+      );
+      yield* Ref.set(system.threadRef, thread(latestTurn("turn-replacement", "completed", later)));
+      yield* Queue.offer(
+        system.events,
+        domainEvent({
+          sequence: 3,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          type: "thread.session-set",
+          payload: {},
+        }),
+      );
+      return yield* Fiber.join(fiber);
+    }).pipe(Effect.provide(system.layer), Effect.scoped);
+
+    expect(result.turn.turnId).toBe(TurnId.make("turn-replacement"));
+    expect(result.turn.state).toBe("completed");
   }),
 );
 

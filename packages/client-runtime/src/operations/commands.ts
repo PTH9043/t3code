@@ -14,6 +14,7 @@ import {
   type EnvironmentRpcUnavailableError,
   request,
 } from "../rpc/client.ts";
+import { listWorkspaceCollaborationRuns } from "./workspaceKnowledge.ts";
 
 type CommandType = ClientOrchestrationCommand["type"];
 type CommandOf<T extends CommandType> = Extract<ClientOrchestrationCommand, { readonly type: T }>;
@@ -259,6 +260,25 @@ export const cancelWorkspaceCollaborationRun: (
     });
   },
 );
+
+/**
+ * Cancel every live meeting run in one folder in a single act, against the
+ * server's CURRENT run list. The meeting-mode-off switch calls this so a
+ * client-side snapshot that predates the newest run can never leave a meeting
+ * quietly running after the mode reads "off". Returns how many were stopped.
+ */
+export const cancelLiveWorkspaceCollaborationRuns = Effect.fn(
+  "EnvironmentCommands.cancelLiveWorkspaceCollaborationRuns",
+)(function* (input: Pick<CancelWorkspaceCollaborationRunInput, "projectId">) {
+  const { runs } = yield* listWorkspaceCollaborationRuns({ projectId: input.projectId });
+  const live = runs.filter(
+    (run) => run.meeting !== null && (run.status === "queued" || run.status === "running"),
+  );
+  for (const run of live) {
+    yield* cancelWorkspaceCollaborationRun({ projectId: run.projectId, runId: run.id });
+  }
+  return live.length;
+});
 
 export const answerWorkspaceCollaborationRun: (
   input: AnswerWorkspaceCollaborationRunInput,
