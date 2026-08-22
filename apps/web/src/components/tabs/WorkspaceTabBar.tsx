@@ -1,7 +1,7 @@
 import type { OrchestrationThreadShell } from "@t3tools/contracts";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { Loader2Icon, PlusIcon, XIcon } from "lucide-react";
+import { PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useHandleNewThread } from "../../hooks/useHandleNewThread";
@@ -79,16 +79,17 @@ function badgeForThreadShell(
   return null;
 }
 
+// Stepped pulses, never a spinner: the tab strip is always on screen, and a
+// continuously rotating icon ticks style every frame for as long as any
+// folder has a live run (measured ~60 style recalcs/s on an idle renderer).
 function TabBadgeDot({ badge }: { badge: TabBadge }) {
   if (badge === null) return null;
-  if (badge === "working") {
-    return <Loader2Icon className="size-3 shrink-0 animate-spin text-muted-foreground" />;
-  }
   return (
     <span
       className={cn(
         "size-2 shrink-0 rounded-full",
-        badge === "awaiting-input" && "animate-pulse bg-amber-500",
+        badge === "working" && "animate-status-pulse bg-muted-foreground",
+        badge === "awaiting-input" && "animate-status-pulse bg-amber-500",
         badge === "error" && "bg-destructive",
         badge === "completed" && "bg-emerald-500",
       )}

@@ -683,6 +683,48 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("appends an in-order row without touching earlier rows, and re-sorts a late one", () => {
+      const row = (id: string, sequence: number) => ({
+        id: EventId.make(id),
+        tone: "tool" as const,
+        kind: "command",
+        summary: id,
+        payload: {},
+        turnId: TurnId.make("turn-1"),
+        sequence,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      });
+      const existing = [row("a", 1), row("b", 2)];
+      const append = (activity: ReturnType<typeof row>, activities = existing) =>
+        applyThreadDetailEvent(
+          { ...baseThread, activities },
+          {
+            ...baseEventFields,
+            sequence: 50,
+            occurredAt: "2026-04-01T11:01:00.000Z",
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make("thread-1"),
+            type: "thread.activity-appended",
+            payload: { threadId: ThreadId.make("thread-1"), activity },
+          },
+        );
+
+      const inOrder = append(row("c", 3));
+      expect(inOrder.kind).toBe("updated");
+      if (inOrder.kind === "updated") {
+        expect(inOrder.thread.activities.map((entry) => entry.id)).toEqual(["a", "b", "c"]);
+        // Earlier rows keep their identity: downstream caches key on it.
+        expect(inOrder.thread.activities[0]).toBe(existing[0]);
+        expect(inOrder.thread.activities[1]).toBe(existing[1]);
+      }
+
+      const late = append(row("early", 0));
+      expect(late.kind).toBe("updated");
+      if (late.kind === "updated") {
+        expect(late.thread.activities.map((entry) => entry.id)).toEqual(["early", "a", "b"]);
+      }
+    });
+
     it("replaces earlier resolvable context-window updates for the same turn", () => {
       const contextWindowActivity = (id: string, sequence: number, usedTokens: unknown) => ({
         id: EventId.make(id),

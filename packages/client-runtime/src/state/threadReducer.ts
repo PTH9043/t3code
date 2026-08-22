@@ -571,20 +571,26 @@ export function applyThreadDetailEvent(
       // thread.reverted that discards turns can still resolve a value from
       // the turns that survive.
       const supersedesContextWindow = isResolvableContextWindowActivity(activity);
-      const activities = pipe(
-        thread.activities,
-        Arr.filter(
-          (entry) =>
-            entry.id !== activity.id &&
-            !(
-              supersedesContextWindow &&
-              entry.turnId === activity.turnId &&
-              isResolvableContextWindowActivity(entry)
-            ),
-        ),
-        Arr.append(activity),
-        Arr.sort(activityOrder),
-      );
+      const dropped = (entry: OrchestrationThreadActivity) =>
+        entry.id === activity.id ||
+        (supersedesContextWindow &&
+          entry.turnId === activity.turnId &&
+          isResolvableContextWindowActivity(entry));
+      // Providers stream rows in order, so the new one almost always belongs
+      // at the end: append, and leave the full re-sort for the rare row that
+      // arrives out of order. A long thread holds tens of thousands of rows,
+      // and sorting all of them on every event was the client's dominant idle
+      // cost. Appending also keeps every earlier row's identity and position,
+      // which is what lets the web's derived-work-log caches skip re-checking
+      // them.
+      const base = thread.activities.some(dropped)
+        ? thread.activities.filter((entry) => !dropped(entry))
+        : thread.activities;
+      const last = base[base.length - 1];
+      const activities =
+        last === undefined || activityOrder(last, activity) <= 0
+          ? [...base, activity]
+          : Arr.sort([...base, activity], activityOrder);
 
       return {
         kind: "updated",

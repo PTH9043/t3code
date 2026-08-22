@@ -387,7 +387,7 @@ export function derivePendingApprovals(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingApproval[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingApproval>();
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = orderedActivities(activities);
 
   for (const activity of ordered) {
     const payload =
@@ -493,7 +493,7 @@ export function derivePendingUserInputs(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingUserInput>();
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = orderedActivities(activities);
 
   for (const activity of ordered) {
     const payload =
@@ -583,7 +583,7 @@ export function deriveActivePlanState(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
 ): ActivePlanState | null {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = orderedActivities(activities);
   const allPlanActivities = ordered.filter((activity) => activity.kind === "turn.plan.updated");
   // Prefer plan from the current turn; fall back to the most recent plan from any turn
   // so that TodoWrite tasks persist across follow-up messages.
@@ -616,7 +616,7 @@ export interface TurnPlanEntry {
 export function deriveTurnPlans(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): TurnPlanEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = orderedActivities(activities);
   const byTurn = new Map<string, TurnPlanEntry>();
   for (const activity of ordered) {
     if (activity.kind !== "turn.plan.updated") {
@@ -745,7 +745,7 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = orderedActivities(activities);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
     if (activity.kind === "tool.started") continue;
@@ -799,7 +799,24 @@ function extractWorkLogToolLifecycleStatus(
   return undefined;
 }
 
+/**
+ * Per-activity derivation cached by activity identity. Activities are
+ * immutable rows that only ever get appended, while the work log re-derives
+ * on every streamed event; without this, a long thread re-parsed every
+ * command, file list, and title on each of those events. Downstream collapse
+ * and merge steps build new objects rather than mutating these.
+ */
+const derivedWorkLogEntryCache = new WeakMap<OrchestrationThreadActivity, DerivedWorkLogEntry>();
+
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
+  const cached = derivedWorkLogEntryCache.get(activity);
+  if (cached !== undefined) return cached;
+  const entry = toDerivedWorkLogEntryUncached(activity);
+  derivedWorkLogEntryCache.set(activity, entry);
+  return entry;
+}
+
+function toDerivedWorkLogEntryUncached(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
@@ -1527,6 +1544,69 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   const seen = new Set<string>();
   collectChangedFiles(asRecord(payload?.data), changedFiles, seen, 0);
   return changedFiles;
+}
+
+/**
+ * The activity log in display order, sorted once per distinct input array.
+ *
+ * Five derivations (work log, plans, approvals, user inputs, active plan)
+ * each re-run on every streamed activity, and a long thread holds tens of
+ * thousands of rows, so five fresh O(n log n) sorts per event was the bulk of
+ * the renderer's idle CPU. Inputs arrive already in order almost always, so an
+ * O(n) ordered-check skips the sort, and the result is cached by array
+ * identity so the five derivations share it.
+ */
+const orderedActivitiesCache = new WeakMap<
+  ReadonlyArray<OrchestrationThreadActivity>,
+  ReadonlyArray<OrchestrationThreadActivity>
+>();
+
+// Previous input per thread, keyed by the array's first activity — stable for
+// a thread's lifetime and distinct across threads, so several mounted threads
+// (background tabs) each keep their own fast path.
+const lastOrderedInputByHead = new WeakMap<
+  OrchestrationThreadActivity,
+  ReadonlyArray<OrchestrationThreadActivity>
+>();
+
+function orderedActivities(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<OrchestrationThreadActivity> {
+  const cached = orderedActivitiesCache.get(activities);
+  if (cached !== undefined) return cached;
+  // A streamed update is the previous array plus a tail. When the previous
+  // input was already in order and is an identical prefix of this one, only
+  // the seam and the tail need comparing; identity checks are far cheaper
+  // than the comparator, which falls back to localeCompare.
+  let checkFrom = 1;
+  const head = activities[0];
+  const previous = head === undefined ? undefined : lastOrderedInputByHead.get(head);
+  if (
+    previous !== undefined &&
+    previous.length > 0 &&
+    previous.length <= activities.length &&
+    orderedActivitiesCache.get(previous) === previous
+  ) {
+    let samePrefix = true;
+    for (let index = 0; index < previous.length; index += 1) {
+      if (previous[index] !== activities[index]) {
+        samePrefix = false;
+        break;
+      }
+    }
+    if (samePrefix) checkFrom = previous.length;
+  }
+  let sorted = true;
+  for (let index = checkFrom; index < activities.length; index += 1) {
+    if (compareActivitiesByOrder(activities[index - 1]!, activities[index]!) > 0) {
+      sorted = false;
+      break;
+    }
+  }
+  const ordered = sorted ? activities : [...activities].toSorted(compareActivitiesByOrder);
+  orderedActivitiesCache.set(activities, ordered);
+  if (head !== undefined) lastOrderedInputByHead.set(head, activities);
+  return ordered;
 }
 
 function compareActivitiesByOrder(

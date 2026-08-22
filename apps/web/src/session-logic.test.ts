@@ -907,6 +907,22 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["first", "second"]);
   });
 
+  it("still sorts when a streamed tail lands out of order behind an ordered prefix", () => {
+    const tool = (id: string, sequence: number) =>
+      makeActivity({ id, sequence, summary: "Tool call complete", kind: "tool.completed" });
+    const prefix = [tool("a", 1), tool("b", 2)];
+    expect(deriveWorkLogEntries(prefix).map((entry) => entry.id)).toEqual(["a", "b"]);
+
+    // Same objects, plus a late row with an earlier sequence: the fast path
+    // compares only the seam and tail, and must still detect the disorder.
+    const appended = [...prefix, tool("d", 4), tool("c", 3)];
+    expect(deriveWorkLogEntries(appended).map((entry) => entry.id)).toEqual(["a", "b", "c", "d"]);
+
+    // A disordered row at the seam itself.
+    const seam = [...prefix, tool("z", 0)];
+    expect(deriveWorkLogEntries(seam).map((entry) => entry.id)).toEqual(["z", "a", "b"]);
+  });
+
   it("extracts command text for command tool activities", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

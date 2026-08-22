@@ -693,8 +693,19 @@ function resolveFinalAssistantTextForTurn(
   return finalAssistantText;
 }
 
+/**
+ * The preview shows one ellipsised line plus a three-line clamp, so only the
+ * head of a message can ever be visible. Compacting a whole long assistant
+ * reply on every streamed row (the minimap re-derives per update) was the
+ * renderer's single largest cost on long threads; whitespace-folding a bounded
+ * prefix keeps the same visible text.
+ */
+const MINIMAP_PREVIEW_SOURCE_CHARS = 600;
+
 function compactMinimapPreview(text: string | null | undefined) {
-  const compact = text?.replace(/\s+/g, " ").trim() ?? "";
+  if (!text) return null;
+  const head = text.trimStart().slice(0, MINIMAP_PREVIEW_SOURCE_CHARS);
+  const compact = head.replace(/\s+/g, " ").trim();
   return compact.length > 0 ? compact : null;
 }
 
