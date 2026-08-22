@@ -82,6 +82,7 @@ import {
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
+  deriveBackgroundWatchStatus,
   derivePendingApprovals,
   derivePendingUserInputs,
   derivePhase,
@@ -4578,6 +4579,42 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
   }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  // "What is the seat doing while I'm not looking": watch loops, the next
+  // self-wakeup, last check-in, and whether a restart cut them off. Read from
+  // the activity log, so it is there after a reload and when the liveness
+  // registry (in-memory on the server) is empty. Re-evaluated once a minute so
+  // "next wake" expires on time.
+  const [watchClockMs, setWatchClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setWatchClockMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const backgroundWatch = useMemo(
+    () => deriveBackgroundWatchStatus(threadActivities, watchClockMs),
+    [threadActivities, watchClockMs],
+  );
+  const backgroundWatchDescription = useMemo(() => {
+    const clock = (iso: string) =>
+      new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    const parts: string[] = [];
+    if (backgroundWatch.monitors.length > 0) {
+      const titles = backgroundWatch.monitors
+        .map((monitor) => monitor.title)
+        .filter((title): title is string => title !== null)
+        .slice(0, 3)
+        .join(" · ");
+      parts.push(`감시 ${backgroundWatch.monitors.length}개${titles ? `: ${titles}` : ""}`);
+    }
+    if (backgroundWatch.lastCheckedAt !== null) {
+      parts.push(`마지막 확인 ${clock(backgroundWatch.lastCheckedAt)}`);
+    }
+    if (backgroundWatch.nextWakeAt !== null) {
+      parts.push(
+        `다음 자동 확인 ${clock(backgroundWatch.nextWakeAt)}${backgroundWatch.nextWakeReason ? ` — ${backgroundWatch.nextWakeReason}` : ""}`,
+      );
+    }
+    return parts.length > 0 ? parts.join(" · ") : null;
+  }, [backgroundWatch]);
   const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (activeBackgroundLiveness === null || !activeThread) {
       return null;
@@ -4598,6 +4635,7 @@ function ChatViewContent(props: ChatViewProps) {
           ? `에이전트 ${liveCount}개가 백그라운드에서 작업 중입니다`
           : "백그라운드 작업 실행 중"
         : "백그라운드에서 모니터링 중",
+      ...(backgroundWatchDescription === null ? {} : { description: backgroundWatchDescription }),
       actions: (
         <Button
           size="xs"
@@ -4613,8 +4651,48 @@ function ChatViewContent(props: ChatViewProps) {
     activeBackgroundLiveness,
     activeThread,
     agentPanelModel.liveCount,
+    backgroundWatchDescription,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
+  ]);
+  // Without live work there is still something to say when a wake is
+  // scheduled, or when a restart silently killed the watch the person was
+  // relying on — that second case is the one they could not otherwise see.
+  const backgroundWatchBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (!activeThread || isWorking || backgroundLivenessBannerItem !== null) return null;
+    const clock = (iso: string) =>
+      new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    if (backgroundWatch.interrupted !== null) {
+      const { monitorCount, lostWakeup, at } = backgroundWatch.interrupted;
+      const what = [
+        ...(monitorCount > 0 ? [`백그라운드 감시 ${monitorCount}개`] : []),
+        ...(lostWakeup ? ["예약된 자동 확인"] : []),
+      ].join("와 ");
+      return {
+        id: `background-watch-interrupted:${activeThread.id}`,
+        variant: "warning",
+        icon: <EyeIcon />,
+        title: `${clock(at)} 서버 재시작으로 ${what}이(가) 끊겼습니다`,
+        description:
+          "지금은 아무것도 감시하고 있지 않습니다. 계속 지켜봐야 하면 AI에게 감시를 다시 띄우라고 보내세요.",
+      };
+    }
+    if (backgroundWatch.nextWakeAt !== null) {
+      return {
+        id: `background-watch:${activeThread.id}`,
+        variant: "default",
+        icon: <AlarmClockIcon />,
+        title: `다음 자동 확인 ${clock(backgroundWatch.nextWakeAt)} 예정`,
+        ...(backgroundWatchDescription === null ? {} : { description: backgroundWatchDescription }),
+      };
+    }
+    return null;
+  }, [
+    activeThread,
+    backgroundLivenessBannerItem,
+    backgroundWatch,
+    backgroundWatchDescription,
+    isWorking,
   ]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
@@ -4800,8 +4878,10 @@ function ChatViewContent(props: ChatViewProps) {
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const meetingRunItems = meetingRunBannerItem === null ? [] : [meetingRunBannerItem];
     const monitoringPlanItems = monitoringPlanBannerItem === null ? [] : [monitoringPlanBannerItem];
-    const backgroundLivenessItems =
-      backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const backgroundLivenessItems = [
+      ...(backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem]),
+      ...(backgroundWatchBannerItem === null ? [] : [backgroundWatchBannerItem]),
+    ];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -4869,6 +4949,7 @@ function ChatViewContent(props: ChatViewProps) {
     monitoringPlanBannerItem,
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    backgroundWatchBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,

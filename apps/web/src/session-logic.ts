@@ -489,6 +489,147 @@ function parseUserInputQuestions(
   return parsed.length > 0 ? parsed : null;
 }
 
+export interface BackgroundWatchMonitor {
+  readonly taskId: string;
+  readonly title: string | null;
+  readonly startedAt: string;
+}
+
+/**
+ * What the seat is doing for this thread while no turn is running: watch
+ * loops it started (Monitor / background shells), the self-wakeup it last
+ * scheduled, when it last checked in, and whether a server restart has cut
+ * any of that off since. Derived purely from the activity log, so it survives
+ * reloads and is identical on every client.
+ */
+export interface BackgroundWatchStatus {
+  /** Watch loops with no terminal row since the last recovery marker. */
+  readonly monitors: ReadonlyArray<BackgroundWatchMonitor>;
+  /** When the seat last finished a turn or scheduled a wake — "last seen". */
+  readonly lastCheckedAt: string | null;
+  /** Next self-wakeup, only while it is still ahead of `nowMs`. */
+  readonly nextWakeAt: string | null;
+  /** The seat's own one-line reason for the next wake. */
+  readonly nextWakeReason: string | null;
+  /** Set when a restart cut monitors/wakeups and nothing new has been armed since. */
+  readonly interrupted: {
+    readonly at: string;
+    readonly monitorCount: number;
+    readonly lostWakeup: boolean;
+  } | null;
+}
+
+const EMPTY_BACKGROUND_WATCH: BackgroundWatchStatus = {
+  monitors: [],
+  lastCheckedAt: null,
+  nextWakeAt: null,
+  nextWakeReason: null,
+  interrupted: null,
+};
+
+export function deriveBackgroundWatchStatus(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  nowMs: number,
+): BackgroundWatchStatus {
+  if (activities.length === 0) return EMPTY_BACKGROUND_WATCH;
+  const ordered = orderedActivities(activities);
+  const monitors = new Map<string, BackgroundWatchMonitor>();
+  let lastCheckedAt: string | null = null;
+  let nextWakeAt: string | null = null;
+  let nextWakeReason: string | null = null;
+  let interrupted: BackgroundWatchStatus["interrupted"] = null;
+
+  for (const activity of ordered) {
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    if (payload === null) continue;
+
+    if (activity.kind === "session.recovered") {
+      const tasks = Array.isArray(payload.interruptedTasks) ? payload.interruptedTasks : [];
+      interrupted = {
+        at: activity.createdAt,
+        monitorCount: tasks.length,
+        lostWakeup: typeof payload.wakeupScheduledFor === "string",
+      };
+      monitors.clear();
+      nextWakeAt = null;
+      nextWakeReason = null;
+      continue;
+    }
+    if (activity.kind === "checkpoint.captured") {
+      lastCheckedAt = activity.createdAt;
+      continue;
+    }
+    const taskId = typeof payload.taskId === "string" ? payload.taskId : null;
+    if (taskId !== null) {
+      if (activity.kind === "task.started" && payload.agentKind === "background") {
+        monitors.set(taskId, {
+          taskId,
+          title: typeof payload.title === "string" ? payload.title : null,
+          startedAt: activity.createdAt,
+        });
+        // New watch work after a restart supersedes the "cut off" notice.
+        interrupted = null;
+      } else if (
+        (activity.kind === "task.completed" && typeof payload.status === "string") ||
+        (activity.kind === "task.updated" && typeof payload.endedAt === "string")
+      ) {
+        monitors.delete(taskId);
+      }
+      continue;
+    }
+    if (activity.kind === "tool.completed") {
+      const data =
+        payload.data && typeof payload.data === "object"
+          ? (payload.data as Record<string, unknown>)
+          : null;
+      if (data?.toolName !== "ScheduleWakeup") continue;
+      const input =
+        data.input && typeof data.input === "object"
+          ? (data.input as Record<string, unknown>)
+          : null;
+      lastCheckedAt = activity.createdAt;
+      if (input?.stop === true) {
+        nextWakeAt = null;
+        nextWakeReason = null;
+        continue;
+      }
+      const delaySeconds = typeof input?.delaySeconds === "number" ? input.delaySeconds : null;
+      if (delaySeconds === null) continue;
+      const at =
+        Date.parse(activity.createdAt) + Math.min(3_600, Math.max(60, delaySeconds)) * 1_000;
+      nextWakeAt = new Date(at).toISOString();
+      nextWakeReason = typeof input?.reason === "string" ? input.reason : null;
+      interrupted = null;
+    }
+  }
+
+  // A wake that is past due never fired (or its turn already ran and either
+  // re-armed or stopped); only an upcoming one is worth promising.
+  const WAKE_GRACE_MS = 5 * 60_000;
+  if (nextWakeAt !== null && Date.parse(nextWakeAt) + WAKE_GRACE_MS < nowMs) {
+    nextWakeAt = null;
+    nextWakeReason = null;
+  }
+  if (
+    monitors.size === 0 &&
+    lastCheckedAt === null &&
+    nextWakeAt === null &&
+    interrupted === null
+  ) {
+    return EMPTY_BACKGROUND_WATCH;
+  }
+  return {
+    monitors: [...monitors.values()],
+    lastCheckedAt,
+    nextWakeAt,
+    nextWakeReason,
+    interrupted,
+  };
+}
+
 export function derivePendingUserInputs(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {

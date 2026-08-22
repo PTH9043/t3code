@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -309,5 +310,116 @@ it.effect("closes the questions the dead session left open and tells the seat to
     const turnStart = dispatched[2];
     if (turnStart?.type !== "thread.turn.start") throw new Error("expected a turn start");
     expect(turnStart.message.text).toContain("같은 질문을 다시 해 주세요");
+  }),
+);
+
+it.effect("marks background monitors and a pending self-wakeup as lost, and tells the seat", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-watching");
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const harness = yield* makeHarness({
+      threads: [
+        threadShell({
+          id: "thread-watching",
+          session: session({ threadId, status: "running", activeTurnId: TurnId.make("turn-1") }),
+        }),
+      ],
+      activities: [
+        // A monitor that already ended normally: not reported.
+        activity({
+          id: "t1",
+          threadId,
+          kind: "task.started",
+          payload: {
+            taskId: "done",
+            agentKind: "background",
+            taskType: "local_bash",
+            title: "old",
+          },
+          createdAt: "2026-08-17T00:00:01.000Z",
+        }),
+        activity({
+          id: "t2",
+          threadId,
+          kind: "task.completed",
+          payload: { taskId: "done", status: "completed" },
+          createdAt: "2026-08-17T00:00:02.000Z",
+        }),
+        // Two live watch loops.
+        activity({
+          id: "t3",
+          threadId,
+          kind: "task.started",
+          payload: {
+            taskId: "m1",
+            agentKind: "background",
+            taskType: "local_bash",
+            title: "log watch",
+          },
+          createdAt: "2026-08-17T00:00:03.000Z",
+        }),
+        activity({
+          id: "t4",
+          threadId,
+          kind: "task.started",
+          payload: {
+            taskId: "m2",
+            agentKind: "background",
+            taskType: "monitor",
+            title: "liveness",
+          },
+          createdAt: "2026-08-17T00:00:04.000Z",
+        }),
+        // An agent (not background) must not be counted as a monitor.
+        activity({
+          id: "t5",
+          threadId,
+          kind: "task.started",
+          payload: { taskId: "a1", agentKind: "agent", taskType: "local_agent", title: "worker" },
+          createdAt: "2026-08-17T00:00:05.000Z",
+        }),
+        // A self-wakeup scheduled 20 minutes out: still ahead of the sweep.
+        activity({
+          id: "t6",
+          threadId,
+          kind: "tool.completed",
+          payload: {
+            itemType: "dynamic_tool_call",
+            detail: "ScheduleWakeup: {}",
+            data: { toolName: "ScheduleWakeup", input: { delaySeconds: 1200, noop: false } },
+          },
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs - 60_000)),
+        }),
+      ],
+    });
+    yield* runSweep(harness);
+
+    const dispatched = yield* Ref.get(harness.dispatchedRef);
+    expect(dispatched.map((command) => command.type)).toEqual([
+      "thread.session.stop",
+      "thread.activity.append",
+      "thread.activity.append",
+      "thread.activity.append",
+      "thread.turn.start",
+    ]);
+    const appended = dispatched.filter((command) => command.type === "thread.activity.append");
+    expect(appended.map((command) => command.activity.kind)).toEqual([
+      "task.completed",
+      "task.completed",
+      "session.recovered",
+    ]);
+    expect(
+      appended.map((command) => (command.activity.payload as { taskId?: string }).taskId),
+    ).toEqual(["m1", "m2", undefined]);
+    const marker = appended[2]!.activity.payload as {
+      interruptedTasks: ReadonlyArray<{ taskId: string }>;
+      wakeupScheduledFor: string | null;
+    };
+    expect(marker.interruptedTasks.map((task) => task.taskId)).toEqual(["m1", "m2"]);
+    expect(marker.wakeupScheduledFor).not.toBeNull();
+    const turnStart = dispatched.at(-1);
+    if (turnStart?.type !== "thread.turn.start") throw new Error("expected a turn start");
+    expect(turnStart.message.text).toContain("백그라운드 감시 2개");
+    expect(turnStart.message.text).toContain("자동 깨어남");
   }),
 );

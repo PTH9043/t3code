@@ -24,6 +24,15 @@
  * when answered; meanwhile the recovery turn asks again. Closing it keeps one
  * live question on screen instead of a dead one above it.
  *
+ * Background watch work dies with the provider process as well: Monitor
+ * loops and background shells (`task.started` with no terminal row) and a
+ * scheduled self-wakeup (`ScheduleWakeup`) the seat was counting on. Both are
+ * invisible casualties — the seat resumes from its transcript believing they
+ * still run, and the person sees nothing either way. The sweep records them
+ * as interrupted (a `task.completed` per task plus one `session.recovered`
+ * marker the clients read as the cut-off) and tells the seat in the recovery
+ * turn so it can re-arm what it still needs.
+ *
  * @module SessionRecoveryReactor
  */
 import {
@@ -64,6 +73,110 @@ const ABANDONED_QUESTION_TEXT =
 
 const ABANDONED_QUESTION_SUMMARY =
   "서버가 재시작되어 이 질문은 사라졌습니다. 답이 필요하면 다시 묻습니다.";
+
+/** Background work the dead session was running, read back from the activity log. */
+export interface OrphanedBackgroundWork {
+  readonly tasks: ReadonlyArray<{ readonly taskId: string; readonly title: string | null }>;
+  /** ISO time the seat had scheduled itself to wake, if that was still ahead. */
+  readonly wakeupScheduledFor: string | null;
+}
+
+const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "cancelled",
+  "interrupted",
+]);
+
+function payloadOf(activity: ProjectionThreadActivity): Record<string, unknown> | null {
+  return typeof activity.payload === "object" && activity.payload !== null
+    ? (activity.payload as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * Monitor loops / background shells still open at the end of the log, and a
+ * self-wakeup scheduled for after `nowMs`. Ordered by the same rule as the
+ * question scan so both read the log the same way.
+ */
+export function orphanedBackgroundWork(
+  activities: ReadonlyArray<ProjectionThreadActivity>,
+  nowMs: number,
+): OrphanedBackgroundWork {
+  const ordered = [...activities].toSorted(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) ||
+      left.activityId.localeCompare(right.activityId),
+  );
+  const open = new Map<string, { readonly taskId: string; readonly title: string | null }>();
+  let wakeupScheduledFor: string | null = null;
+  for (const activity of ordered) {
+    const payload = payloadOf(activity);
+    if (payload === null) continue;
+    if (activity.kind === "session.recovered") {
+      // Everything before an earlier recovery marker was already settled.
+      open.clear();
+      wakeupScheduledFor = null;
+      continue;
+    }
+    const taskId = typeof payload.taskId === "string" ? payload.taskId : null;
+    if (taskId !== null) {
+      if (activity.kind === "task.started" && payload.agentKind === "background") {
+        open.set(taskId, {
+          taskId,
+          title: typeof payload.title === "string" ? payload.title : null,
+        });
+      } else if (
+        (activity.kind === "task.completed" &&
+          typeof payload.status === "string" &&
+          TERMINAL_TASK_STATUSES.has(payload.status)) ||
+        (activity.kind === "task.updated" && typeof payload.endedAt === "string")
+      ) {
+        open.delete(taskId);
+      }
+      continue;
+    }
+    if (activity.kind === "tool.completed") {
+      const data = payloadOf({ ...activity, payload: payload.data });
+      if (data?.toolName !== "ScheduleWakeup") continue;
+      const input =
+        typeof data.input === "object" && data.input !== null
+          ? (data.input as Record<string, unknown>)
+          : null;
+      if (input?.stop === true) {
+        wakeupScheduledFor = null;
+        continue;
+      }
+      const delaySeconds = typeof input?.delaySeconds === "number" ? input.delaySeconds : null;
+      if (delaySeconds === null) continue;
+      const at =
+        Date.parse(activity.createdAt) + Math.min(3_600, Math.max(60, delaySeconds)) * 1_000;
+      wakeupScheduledFor = at > nowMs ? DateTime.formatIso(DateTime.makeUnsafe(at)) : null;
+    }
+  }
+  return { tasks: [...open.values()], wakeupScheduledFor };
+}
+
+function orphanedWorkText(work: OrphanedBackgroundWork): string {
+  const parts: string[] = [];
+  if (work.tasks.length > 0) {
+    const names = work.tasks
+      .map((task) => task.title)
+      .filter((title): title is string => title !== null)
+      .slice(0, 4)
+      .join(", ");
+    parts.push(
+      `백그라운드 감시 ${work.tasks.length}개(${names || "제목 없음"})는 서버와 함께 종료되어 더 이상 돌지 않습니다. 아직 필요하면 같은 감시를 다시 띄우세요.`,
+    );
+  }
+  if (work.wakeupScheduledFor !== null) {
+    parts.push(
+      "예약해 둔 자동 깨어남(ScheduleWakeup)도 사라졌습니다. 계속 주기적으로 확인해야 하면 다시 예약하세요.",
+    );
+  }
+  return parts.join(" ");
+}
 
 const isInterruptedSessionStatus = (status: string): boolean =>
   status === "starting" || status === "running";
@@ -116,8 +229,8 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
   /** Close every question the dead session left open; returns how many there were. */
   const abandonOpenQuestions = Effect.fn("SessionRecoveryReactor.abandonOpenQuestions")(function* (
     threadId: ThreadId,
+    activities: ReadonlyArray<ProjectionThreadActivity>,
   ) {
-    const activities = yield* activityRepository.listByThreadId({ threadId });
     const open = openUserInputRequestIds(activities);
     for (const requestId of open) {
       const createdAt = yield* nowIso;
@@ -127,7 +240,7 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
         threadId,
         activity: {
           id: EventId.make(yield* randomUUID),
-          tone: "warning",
+          tone: "info",
           kind: "user-input.resolved",
           summary: ABANDONED_QUESTION_SUMMARY,
           payload: { requestId, answers: {}, abandoned: true },
@@ -138,6 +251,67 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       });
     }
     return open.length;
+  });
+
+  /**
+   * Settle background work the dead session took with it: one interrupted
+   * `task.completed` per open task (keeps the timeline's task state honest)
+   * and a `session.recovered` marker the clients use as the cut-off for
+   * "still watching" / "next wake" displays.
+   */
+  const settleOrphanedWork = Effect.fn("SessionRecoveryReactor.settleOrphanedWork")(function* (
+    threadId: ThreadId,
+    activities: ReadonlyArray<ProjectionThreadActivity>,
+  ) {
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const work = orphanedBackgroundWork(activities, nowMs);
+    if (work.tasks.length === 0 && work.wakeupScheduledFor === null) return work;
+    for (const task of work.tasks) {
+      const createdAt = yield* nowIso;
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* randomUUID),
+        threadId,
+        activity: {
+          id: EventId.make(yield* randomUUID),
+          tone: "info",
+          kind: "task.completed",
+          summary: "서버 재시작으로 백그라운드 작업이 끊겼습니다",
+          payload: {
+            taskId: task.taskId,
+            status: "interrupted",
+            agentKind: "background",
+            ...(task.title === null ? {} : { title: task.title }),
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    }
+    const createdAt = yield* nowIso;
+    yield* engine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(yield* randomUUID),
+      threadId,
+      activity: {
+        id: EventId.make(yield* randomUUID),
+        tone: "info",
+        kind: "session.recovered",
+        summary:
+          work.tasks.length > 0
+            ? `서버 재시작으로 백그라운드 감시 ${work.tasks.length}개가 끊겼습니다${work.wakeupScheduledFor === null ? "" : " (예약된 자동 깨어남 포함)"}`
+            : "서버 재시작으로 예약된 자동 깨어남이 사라졌습니다",
+        payload: {
+          interruptedTasks: work.tasks,
+          wakeupScheduledFor: work.wakeupScheduledFor,
+        },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+    return work;
   });
 
   const recoverThread = Effect.fn("SessionRecoveryReactor.recoverThread")(function* (
@@ -153,9 +327,11 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       threadId: thread.id,
       createdAt: yield* nowIso,
     });
+    const activities = yield* activityRepository.listByThreadId({ threadId: thread.id });
     const abandonedQuestions = thread.hasPendingUserInput
-      ? yield* abandonOpenQuestions(thread.id)
+      ? yield* abandonOpenQuestions(thread.id, activities)
       : 0;
+    const orphaned = yield* settleOrphanedWork(thread.id, activities);
     if (!startRecoveryTurn) return;
 
     yield* engine.dispatch({
@@ -165,10 +341,13 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       message: {
         messageId: MessageId.make(yield* randomUUID),
         role: "user",
-        text:
-          abandonedQuestions > 0
-            ? `${RECOVERY_TURN_TEXT} ${ABANDONED_QUESTION_TEXT}`
-            : RECOVERY_TURN_TEXT,
+        text: [
+          RECOVERY_TURN_TEXT,
+          ...(abandonedQuestions > 0 ? [ABANDONED_QUESTION_TEXT] : []),
+          ...(orphaned.tasks.length > 0 || orphaned.wakeupScheduledFor !== null
+            ? [orphanedWorkText(orphaned)]
+            : []),
+        ].join(" "),
         attachments: [],
       },
       inputOrigin: "automation",
@@ -181,6 +360,8 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       threadId: thread.id,
       projectId: thread.projectId,
       abandonedQuestions,
+      interruptedBackgroundTasks: orphaned.tasks.length,
+      lostWakeup: orphaned.wakeupScheduledFor !== null,
     });
   });
 

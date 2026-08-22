@@ -15,6 +15,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  deriveBackgroundWatchStatus,
   deriveWorkLogEntries,
   findLatestProposedPlan,
   hasActionableProposedPlan,
@@ -905,6 +906,99 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities);
     expect(entries.map((entry) => entry.id)).toEqual(["first", "second"]);
+  });
+
+  it("derives the background watch status: monitors, next wake, last check-in, restart cut-off", () => {
+    const T = (minutesAgo: number, now: number) =>
+      new Date(now - minutesAgo * 60_000).toISOString();
+    const now = Date.parse("2026-08-22T03:00:00.000Z");
+    const monitorStarted = (id: string, title: string, at: string) =>
+      makeActivity({
+        id: `start-${id}`,
+        kind: "task.started",
+        createdAt: at,
+        payload: { taskId: id, agentKind: "background", taskType: "local_bash", title },
+      });
+    const wakeup = (id: string, at: string, input: Record<string, unknown>) =>
+      makeActivity({
+        id,
+        kind: "tool.completed",
+        createdAt: at,
+        payload: { itemType: "dynamic_tool_call", data: { toolName: "ScheduleWakeup", input } },
+      });
+
+    const live = deriveBackgroundWatchStatus(
+      [
+        monitorStarted("m1", "log watch", T(40, now)),
+        monitorStarted("m2", "liveness", T(39, now)),
+        makeActivity({
+          id: "end-m2",
+          kind: "task.completed",
+          createdAt: T(30, now),
+          payload: { taskId: "m2", status: "completed" },
+        }),
+        wakeup("w1", T(10, now), { delaySeconds: 1200, reason: "profile check" }),
+      ],
+      now,
+    );
+    expect(live.monitors.map((monitor) => monitor.title)).toEqual(["log watch"]);
+    expect(live.lastCheckedAt).toBe(T(10, now));
+    expect(live.nextWakeAt).toBe(new Date(now + 10 * 60_000).toISOString());
+    expect(live.nextWakeReason).toBe("profile check");
+    expect(live.interrupted).toBeNull();
+
+    // A wake scheduled long ago is not promised; stop clears it.
+    const stale = deriveBackgroundWatchStatus(
+      [wakeup("w2", T(90, now), { delaySeconds: 600 })],
+      now,
+    );
+    expect(stale.nextWakeAt).toBeNull();
+    expect(stale.lastCheckedAt).toBe(T(90, now));
+    const stopped = deriveBackgroundWatchStatus(
+      [wakeup("w3", T(5, now), { delaySeconds: 600 }), wakeup("w4", T(4, now), { stop: true })],
+      now,
+    );
+    expect(stopped.nextWakeAt).toBeNull();
+
+    // The restart marker cuts everything before it and surfaces what was lost,
+    // until the seat arms new watch work.
+    const cut = deriveBackgroundWatchStatus(
+      [
+        monitorStarted("m1", "log watch", T(40, now)),
+        wakeup("w5", T(20, now), { delaySeconds: 1800 }),
+        makeActivity({
+          id: "recovered",
+          kind: "session.recovered",
+          createdAt: T(15, now),
+          payload: {
+            interruptedTasks: [{ taskId: "m1", title: "log watch" }],
+            wakeupScheduledFor: T(-10, now),
+          },
+        }),
+      ],
+      now,
+    );
+    expect(cut.monitors).toEqual([]);
+    expect(cut.nextWakeAt).toBeNull();
+    expect(cut.interrupted).toEqual({ at: T(15, now), monitorCount: 1, lostWakeup: true });
+
+    const rearmed = deriveBackgroundWatchStatus(
+      [
+        makeActivity({
+          id: "recovered-2",
+          kind: "session.recovered",
+          createdAt: T(15, now),
+          payload: {
+            interruptedTasks: [{ taskId: "m1", title: "log watch" }],
+            wakeupScheduledFor: null,
+          },
+        }),
+        monitorStarted("m3", "log watch again", T(5, now)),
+      ],
+      now,
+    );
+    expect(rearmed.interrupted).toBeNull();
+    expect(rearmed.monitors.map((monitor) => monitor.taskId)).toEqual(["m3"]);
   });
 
   it("still sorts when a streamed tail lands out of order behind an ordered prefix", () => {
