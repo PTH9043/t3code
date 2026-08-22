@@ -592,6 +592,191 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("derives workspace runtime from the project's own threads only", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      assert.isDefined(snapshotQuery.getWorkspaceRuntime);
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'project-runtime-a',
+            'Runtime A',
+            '/tmp/runtime-a',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            '[]',
+            '2026-04-06T00:00:00.000Z',
+            '2026-04-06T00:00:01.000Z',
+            NULL
+          ),
+          (
+            'project-runtime-b',
+            'Runtime B',
+            '/tmp/runtime-b',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            '[]',
+            '2026-04-06T00:00:00.000Z',
+            '2026-04-06T00:00:01.000Z',
+            NULL
+          )
+      `;
+
+      // A: one working thread plus one archived (must not count). B: an
+      // errored thread that must not leak into A's digest.
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'thread-a-working',
+            'project-runtime-a',
+            'A working',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:02.000Z',
+            '2026-04-06T00:00:03.000Z',
+            NULL,
+            NULL
+          ),
+          (
+            'thread-a-archived',
+            'project-runtime-a',
+            'A archived',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:02.000Z',
+            '2026-04-06T00:00:03.000Z',
+            '2026-04-06T00:00:04.000Z',
+            NULL
+          ),
+          (
+            'thread-b-failed',
+            'project-runtime-b',
+            'B failed',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:02.000Z',
+            '2026-04-06T00:00:09.000Z',
+            NULL,
+            NULL
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_session_id,
+          provider_thread_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES
+          (
+            'thread-a-working',
+            'running',
+            'codex',
+            NULL,
+            NULL,
+            'full-access',
+            NULL,
+            NULL,
+            '2026-04-06T00:00:03.000Z'
+          ),
+          (
+            'thread-b-failed',
+            'error',
+            'codex',
+            NULL,
+            NULL,
+            'full-access',
+            NULL,
+            'boom',
+            '2026-04-06T00:00:09.000Z'
+          )
+      `;
+
+      const runtime = yield* snapshotQuery.getWorkspaceRuntime({
+        projectId: asProjectId("project-runtime-a"),
+      });
+
+      assert.equal(runtime.counts.threadCount, 1);
+      assert.equal(runtime.counts.workingThreadCount, 1);
+      assert.equal(runtime.counts.failedThreadCount, 0);
+      assert.deepEqual(
+        runtime.evidence.map((item) => item.sourceId),
+        ["thread-a-working"],
+      );
+      // B's newer session must not drag A's clock forward.
+      assert.equal(runtime.updatedAt, "2026-04-06T00:00:03.000Z");
+
+      const other = yield* snapshotQuery.getWorkspaceRuntime({
+        projectId: asProjectId("project-runtime-b"),
+      });
+      assert.equal(other.counts.failedThreadCount, 1);
+    }),
+  );
+
   it.effect("keeps settled threads in the shell snapshot with non-null settlement fields", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

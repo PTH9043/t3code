@@ -87,6 +87,11 @@ export const make = Effect.gen(function* () {
       } satisfies DiscoveryProbeResult<Kind>);
     }
 
+    // A VCS the user has not installed is the common case, and its spawn failure
+    // is this probe's answer rather than an error, so the run is untraced: it
+    // would otherwise leave failed `VcsProcess.run` and `processRunner.*` spans
+    // for every absent tool on every discovery call. The probe's outcome is
+    // reported in full through the returned result and its caller's span.
     return process
       .run({
         operation: "source-control.discovery.probe",
@@ -98,6 +103,7 @@ export const make = Effect.gen(function* () {
         appendTruncationMarker: true,
       })
       .pipe(
+        Effect.withTracerEnabled(false),
         Effect.map(
           (result) =>
             ({

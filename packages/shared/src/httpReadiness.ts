@@ -47,6 +47,11 @@ export function describeReadinessCause(cause: unknown): unknown {
  * its own tagged error. `makeError` is called at every failure site; callers can
  * inspect `cause` (which carries a `kind` discriminator for the probe-timeout and
  * overall-timeout cases) to reproduce phase-specific messages, or ignore it.
+ *
+ * Per-attempt client spans are suppressed. A probe failing while the target is
+ * still starting is the expected path, and at a 100ms cadence a slow start would
+ * otherwise emit hundreds of failed `http.client GET` spans that mean nothing.
+ * This span carries the attempt count and the failing case still fails loudly.
  */
 export const waitForHttpReady = Effect.fn("shared.httpReadiness.waitForHttpReady")(function* <
   E,
@@ -133,19 +138,25 @@ export const waitForHttpReady = Effect.fn("shared.httpReadiness.waitForHttpReady
 
   const result = yield* readinessClient.execute(HttpClientRequest.get(requestUrl)).pipe(
     Effect.mapError((cause) => (isMadeError(cause) ? cause : fail(cause))),
+    Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
     Effect.timeoutOption(Duration.millis(timeoutMs)),
   );
 
   return yield* Option.match(result, {
     onSome: () =>
-      Effect.logDebug("httpReadiness.succeeded", {
-        baseUrl: input.baseUrl,
-        requestUrl,
-        attempts: attempt,
-      }),
+      Effect.annotateCurrentSpan({ "readiness.attempts": attempt }).pipe(
+        Effect.andThen(
+          Effect.logDebug("httpReadiness.succeeded", {
+            baseUrl: input.baseUrl,
+            requestUrl,
+            attempts: attempt,
+          }),
+        ),
+      ),
     onNone: () =>
       Effect.gen(function* () {
         const lastFailure = yield* Ref.get(lastProbeFailure);
+        yield* Effect.annotateCurrentSpan({ "readiness.attempts": attempt });
         yield* Effect.logWarning("httpReadiness.timedOut", {
           baseUrl: input.baseUrl,
           requestUrl,

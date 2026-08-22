@@ -69,6 +69,8 @@ function runShellEnvironment(input: {
   readonly platform: NodeJS.Platform;
   readonly handler: (command: ChildProcess.Command) => string;
   readonly failure?: PlatformError.PlatformError;
+  /** Per-command failure, for candidate-list walks where only some executables exist. */
+  readonly failFor?: (command: ChildProcess.Command) => PlatformError.PlatformError | undefined;
 }) {
   const environmentLayer = Layer.succeed(
     DesktopEnvironment.DesktopEnvironment,
@@ -78,11 +80,12 @@ function runShellEnvironment(input: {
   );
   const spawnerLayer = Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make((command) =>
-      input.failure === undefined
+    ChildProcessSpawner.make((command) => {
+      const failure = input.failure ?? input.failFor?.(command);
+      return failure === undefined
         ? Effect.succeed(makeProcess(input.handler(command)))
-        : Effect.fail(input.failure),
-    ),
+        : Effect.fail(failure);
+    }),
   );
 
   const program = Effect.gen(function* () {
@@ -337,6 +340,86 @@ describe("DesktopShellEnvironment", () => {
           assert.notProperty(errors[0] ?? {}, "args");
           assert.equal(errors[0]?.cause, cause);
           assert.notInclude(errors[0]?.message ?? "", cause.message);
+        }),
+      ),
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    );
+  });
+
+  it.effect("falls back to Windows PowerShell without warning when pwsh.exe is absent", () => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "C:\\Windows\\System32",
+      USERPROFILE: "C:\\Users\\testuser",
+    };
+    const messages: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => {
+      messages.push(message);
+    });
+
+    return runShellEnvironment({
+      env,
+      platform: "win32",
+      failFor: (command) =>
+        command._tag === "StandardCommand" && command.command === "pwsh.exe"
+          ? PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+              pathOrDescriptor: "pwsh.exe",
+            })
+          : undefined,
+      handler: () => envOutput({ PATH: "C:\\Fallback\\Bin;C:\\Windows\\System32" }),
+    }).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          const errors = messages
+            .flatMap((message) => (Array.isArray(message) ? message : [message]))
+            .filter(isDesktopShellEnvironmentCommandError);
+          assert.lengthOf(errors, 0);
+          assert.include(env.PATH ?? "", "C:\\Fallback\\Bin");
+        }),
+      ),
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    );
+  });
+
+  it.effect("warns once per probe when no Windows PowerShell candidate exists", () => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "C:\\Windows\\System32",
+      USERPROFILE: "C:\\Users\\testuser",
+    };
+    const messages: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => {
+      messages.push(message);
+    });
+
+    return runShellEnvironment({
+      env,
+      platform: "win32",
+      failFor: (command) =>
+        PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          pathOrDescriptor: command._tag === "StandardCommand" ? command.command : "unknown",
+        }),
+      handler: () => "",
+    }).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          const errors = messages
+            .flatMap((message) => (Array.isArray(message) ? message : [message]))
+            .filter(isDesktopShellEnvironmentCommandError);
+          // One per probe (no-profile and profile), always for the last candidate.
+          assert.lengthOf(errors, 2);
+          assert.deepEqual(
+            errors.map((error) => error.executable),
+            ["powershell.exe", "powershell.exe"],
+          );
+          assert.deepEqual(
+            errors.map((error) => error.probe),
+            ["powershell-no-profile", "powershell-profile"],
+          );
         }),
       ),
       Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),

@@ -13,7 +13,10 @@ import * as Layer from "effect/Layer";
 import * as ProcessRunner from "../processRunner.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
-const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(1);
+// A resolved remote changes about never; a miss (not a repo, or no remote yet)
+// should be retried sooner. Each miss of either cache costs a git spawn on a
+// snapshot hot path, and on Windows that spawn blocks the event loop.
+const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(10);
 const DEFAULT_NEGATIVE_CACHE_TTL = Duration.minutes(1);
 
 export interface RepositoryIdentityResolverOptions {

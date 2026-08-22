@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as PlatformError from "effect/PlatformError";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
@@ -227,6 +228,14 @@ const logShellEnvironmentCommandError = (
     }),
   );
 
+/**
+ * True when the probe failed because the executable is not on this machine, as
+ * opposed to a permission, timeout, or crash failure. Matched on the platform
+ * error's reason rather than its message so it survives locale changes.
+ */
+const isMissingExecutable = (cause: unknown): boolean =>
+  cause instanceof PlatformError.PlatformError && cause.reason._tag === "NotFound";
+
 const capturePosixEnvironmentCommand = (names: ReadonlyArray<string>) =>
   names
     .map((name) => {
@@ -280,6 +289,12 @@ const runCommandOutput = Effect.fn("desktop.shellEnvironment.runCommandOutput")(
   readonly args: ReadonlyArray<string>;
   readonly timeout: Duration.Duration;
   readonly shell?: boolean;
+  /**
+   * Set by callers that walk a candidate list, where a missing executable is
+   * the expected outcome for every candidate but the last. Only silences the
+   * "not installed" case; permission and crash failures still warn.
+   */
+  readonly onMissingExecutable?: "warn" | "quiet";
 }): Effect.fn.Return<string, never, ChildProcessSpawner.ChildProcessSpawner> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const output = yield* spawner
@@ -305,7 +320,10 @@ const runCommandOutput = Effect.fn("desktop.shellEnvironment.runCommandOutput")(
       ),
       Effect.catchTags({
         DesktopShellEnvironmentCommandError: (error) =>
-          logShellEnvironmentCommandError(error).pipe(Effect.as("")),
+          (input.onMissingExecutable === "quiet" && isMissingExecutable(error.cause)
+            ? Effect.void
+            : logShellEnvironmentCommandError(error)
+          ).pipe(Effect.as("")),
       }),
       Effect.timeoutOption(input.timeout),
     );
@@ -358,12 +376,16 @@ const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEn
       captureWindowsEnvironmentCommand(names),
     ];
 
-    for (const command of WINDOWS_SHELL_CANDIDATES) {
+    // PowerShell 7 is absent on a stock Windows install, so a miss on every
+    // candidate but the last is the normal path and must not warn. Running out
+    // of candidates means the machine has no PowerShell at all, which does.
+    for (const [index, command] of WINDOWS_SHELL_CANDIDATES.entries()) {
       const output = yield* runCommandOutput({
         probe: options.loadProfile ? "powershell-profile" : "powershell-no-profile",
         command,
         args,
         timeout: LOGIN_SHELL_TIMEOUT,
+        onMissingExecutable: index === WINDOWS_SHELL_CANDIDATES.length - 1 ? "warn" : "quiet",
       });
       const environment = extractEnvironment(output, names);
       if (Object.keys(environment).length > 0) {

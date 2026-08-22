@@ -21,6 +21,16 @@ import {
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "./providerMaintenance.ts";
 
+// Install-location detection is platform independent, but finding the binary on
+// PATH is not: a forced "darwin" cannot walk a Windows temp dir, because POSIX
+// PATH parsing splits on ":" and shreds the drive letter off "C:\...". These
+// cases therefore run under the host platform and shape the fixture to match.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Chooses the fixture shape for the real filesystem, outside any Effect runtime; the resolved value is then provided explicitly below.
+const HOST_PLATFORM = NodeOS.platform();
+const hostExecutableName = (name: string) => (HOST_PLATFORM === "win32" ? `${name}.exe` : name);
+const hostPathEnv = (dir: string) =>
+  HOST_PLATFORM === "win32" ? { PATH: dir, PATHEXT: ".COM;.EXE;.BAT;.CMD" } : { PATH: dir };
+
 const driver = (value: string) => ProviderDriverKind.make(value);
 const makeTempDir = (name: string) =>
   Crypto.Crypto.pipe(
@@ -205,7 +215,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const tempDir = yield* makeTempDir("t3-vite-plus-capabilities");
         const vitePlusBinDir = NodePath.join(tempDir, ".vite-plus", "bin");
         NodeFS.mkdirSync(vitePlusBinDir, { recursive: true });
-        const packageToolPath = NodePath.join(vitePlusBinDir, "package-tool");
+        const packageToolPath = NodePath.join(vitePlusBinDir, hostExecutableName("package-tool"));
         NodeFS.writeFileSync(packageToolPath, "#!/bin/sh\n");
         NodeFS.chmodSync(packageToolPath, 0o755);
 
@@ -213,11 +223,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           packageToolUpdate,
           {
             binaryPath: "package-tool",
-            env: {
-              PATH: vitePlusBinDir,
-            },
+            env: hostPathEnv(vitePlusBinDir),
           },
-        ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+        ).pipe(Effect.provideService(HostProcessPlatform, HOST_PLATFORM));
 
         expect(capabilities).toEqual({
           provider: driver("packageTool"),
@@ -278,7 +286,10 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const tempDir = yield* makeTempDir("t3-pnpm-capabilities");
         const pnpmHomeDir = NodePath.join(tempDir, ".local", "share", "pnpm");
         NodeFS.mkdirSync(pnpmHomeDir, { recursive: true });
-        const scopedPackageToolPath = NodePath.join(pnpmHomeDir, "scoped-package-tool");
+        const scopedPackageToolPath = NodePath.join(
+          pnpmHomeDir,
+          hostExecutableName("scoped-package-tool"),
+        );
         NodeFS.writeFileSync(scopedPackageToolPath, "#!/bin/sh\n");
         NodeFS.chmodSync(scopedPackageToolPath, 0o755);
 
@@ -286,11 +297,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           scopedPackageToolUpdate,
           {
             binaryPath: "scoped-package-tool",
-            env: {
-              PATH: pnpmHomeDir,
-            },
+            env: hostPathEnv(pnpmHomeDir),
           },
-        ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+        ).pipe(Effect.provideService(HostProcessPlatform, HOST_PLATFORM));
 
         expect(capabilities).toEqual({
           provider: driver("scopedPackageTool"),
@@ -338,7 +347,10 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const tempDir = yield* makeTempDir("t3-native-package-tool-native-capabilities");
         const nativeBinDir = NodePath.join(tempDir, ".local", "bin");
         NodeFS.mkdirSync(nativeBinDir, { recursive: true });
-        const nativePackageToolPath = NodePath.join(nativeBinDir, "native-package-tool");
+        const nativePackageToolPath = NodePath.join(
+          nativeBinDir,
+          hostExecutableName("native-package-tool"),
+        );
         NodeFS.writeFileSync(nativePackageToolPath, "#!/bin/sh\n");
         NodeFS.chmodSync(nativePackageToolPath, 0o755);
 
@@ -346,11 +358,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           nativePackageToolUpdate,
           {
             binaryPath: "native-package-tool",
-            env: {
-              PATH: nativeBinDir,
-            },
+            env: hostPathEnv(nativeBinDir),
           },
-        ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+        ).pipe(Effect.provideService(HostProcessPlatform, HOST_PLATFORM));
 
         expect(capabilities).toEqual({
           provider: driver("nativePackageTool"),
@@ -375,7 +385,10 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const tempDir = yield* makeTempDir("t3-scoped-package-tool-native-capabilities");
         const nativeBinDir = NodePath.join(tempDir, ".scoped-package-tool", "bin");
         NodeFS.mkdirSync(nativeBinDir, { recursive: true });
-        const scopedPackageToolPath = NodePath.join(nativeBinDir, "scoped-package-tool");
+        const scopedPackageToolPath = NodePath.join(
+          nativeBinDir,
+          hostExecutableName("scoped-package-tool"),
+        );
         NodeFS.writeFileSync(scopedPackageToolPath, "#!/bin/sh\n");
         NodeFS.chmodSync(scopedPackageToolPath, 0o755);
 
@@ -383,11 +396,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           scopedPackageToolUpdate,
           {
             binaryPath: "scoped-package-tool",
-            env: {
-              PATH: nativeBinDir,
-            },
+            env: hostPathEnv(nativeBinDir),
           },
-        ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+        ).pipe(Effect.provideService(HostProcessPlatform, HOST_PLATFORM));
 
         expect(capabilities).toEqual({
           provider: driver("scopedPackageTool"),

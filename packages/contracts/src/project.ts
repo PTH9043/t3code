@@ -5,6 +5,7 @@ import {
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
+import { T3ProjectFile } from "./t3ProjectFile.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
 const PROJECT_SEARCH_CONTENTS_MAX_LIMIT = 500;
@@ -203,6 +204,22 @@ export const ProjectReadFileResult = Schema.Struct({
   truncated: Schema.Boolean,
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
+
+/**
+ * Reads the workspace's checked-in `t3.json`. Absence is a normal answer, not a
+ * failure: a project that declares nothing yields `projectFile: null`. Callers
+ * that need a file to exist use {@link ProjectReadFileInput} instead, whose
+ * error channel reports a missing file.
+ */
+export const ProjectReadT3FileInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+});
+export type ProjectReadT3FileInput = typeof ProjectReadT3FileInput.Type;
+
+export const ProjectReadT3FileResult = Schema.Struct({
+  projectFile: Schema.NullOr(T3ProjectFile),
+});
+export type ProjectReadT3FileResult = typeof ProjectReadT3FileResult.Type;
 
 export const ProjectFileFailure = Schema.Literals([
   "workspace_path_outside_root",

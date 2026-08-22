@@ -355,9 +355,13 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
   }
 
   const env = options?.env ?? (yield* readCommandLookupEnv);
+  // A provider binary that is not on PATH is a normal answer here (the resolver
+  // falls back below), so the lookup runs untraced rather than leaving a pair of
+  // failed `shell.resolveCommandPath*` spans behind every negative result.
   const resolvedCommandPath =
     (yield* resolveCommandPath(binaryPath, { env }).pipe(
       Effect.catchTag("CommandResolutionError", () => Effect.succeed(null)),
+      Effect.withTracerEnabled(false),
     )) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
   if (!resolvedCommandPath) {
     return resolver.resolve(options);

@@ -107,6 +107,7 @@ import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -315,6 +316,25 @@ const SHELL_RESUME_MAX_GAP = 1_000;
 // databases. Past this gap the client is reset with a fresh thread snapshot.
 const THREAD_RESUME_MAX_GAP = 1_000;
 
+// Workspace runtime is a per-project state digest (which threads are working,
+// blocked, or errored; run and schedule status). Every refresh reads the
+// project's thread rows, so the subscription only wakes on events that can
+// move that digest. Assistant streaming arrives as one thread.message-sent per
+// delta — many per second — and none of them change it; nor do pin changes or
+// diff completions. With a 75ms debounce the old subscription re-ran the
+// query continuously for the whole turn, stacking queries faster than they
+// finished and starving the event loop the chat stream shares.
+const WORKSPACE_RUNTIME_INERT_THREAD_EVENTS: ReadonlySet<OrchestrationEvent["type"]> = new Set<
+  OrchestrationEvent["type"]
+>([
+  "thread.message-sent",
+  "thread.pinned",
+  "thread.unpinned",
+  "thread.pin-reordered",
+  "thread.turn-diff-completed",
+]);
+const WORKSPACE_RUNTIME_REFRESH_DEBOUNCE = Duration.millis(500);
+
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
   revision: number,
@@ -387,6 +407,7 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const t3ProjectFileLoader = yield* T3ProjectFileLoader.T3ProjectFileLoader;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
@@ -1362,13 +1383,44 @@ const makeWsRpcLayer = (
                           }),
                       ),
                     );
+              // Thread events carry no projectId, so ownership is resolved once
+              // per thread and remembered for the life of the subscription.
+              // `null` marks a thread that is not ours (or is gone) so it is
+              // not looked up again. thread.created is the one event that
+              // names its project and seeds the map without a query.
+              const threadProjectIds = new Map<ThreadId, ProjectId | null>();
+              const isThisProjectThreadEvent = (event: OrchestrationEvent) => {
+                if (event.type === "thread.created") {
+                  threadProjectIds.set(event.payload.threadId, event.payload.projectId);
+                  return Effect.succeed(event.payload.projectId === input.projectId);
+                }
+                const threadId = event.aggregateId as ThreadId;
+                const known = threadProjectIds.get(threadId);
+                if (known !== undefined) {
+                  return Effect.succeed(known === input.projectId);
+                }
+                return projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+                  Effect.map((shell) => {
+                    const projectId = Option.isSome(shell) ? shell.value.projectId : null;
+                    threadProjectIds.set(threadId, projectId);
+                    return projectId === input.projectId;
+                  }),
+                  Effect.orElseSucceed(() => false),
+                );
+              };
               const live = orchestrationEngine.streamDomainEvents.pipe(
-                Stream.filter(
-                  (event) =>
-                    event.aggregateKind === "thread" ||
-                    (event.aggregateKind === "project" && event.aggregateId === input.projectId),
+                Stream.filter((event) =>
+                  event.aggregateKind === "project"
+                    ? event.aggregateId === input.projectId
+                    : event.aggregateKind === "thread" &&
+                      !WORKSPACE_RUNTIME_INERT_THREAD_EVENTS.has(event.type),
                 ),
-                Stream.debounce(Duration.millis(75)),
+                Stream.filterEffect((event) =>
+                  event.aggregateKind === "project"
+                    ? Effect.succeed(true)
+                    : isThisProjectThreadEvent(event),
+                ),
+                Stream.debounce(WORKSPACE_RUNTIME_REFRESH_DEBOUNCE),
                 Stream.mapEffect(() => loadRuntime),
               );
               return Stream.concat(Stream.fromEffect(loadRuntime), live).pipe(Stream.changes);
@@ -1998,6 +2050,18 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsReadT3File]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsReadT3File,
+            // No error channel beyond authorization: a workspace without a
+            // `t3.json` is a project that declares nothing, which is an answer
+            // rather than a fault. The loader already reports genuine read and
+            // decode failures on its own and yields none.
+            t3ProjectFileLoader
+              .load(input.cwd)
+              .pipe(Effect.map((projectFile) => ({ projectFile: Option.getOrNull(projectFile) }))),
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>

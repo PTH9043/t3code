@@ -572,6 +572,7 @@ const buildAppUnderTest = (options?: {
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(T3ProjectFileLoader.layer),
       ),
+      T3ProjectFileLoader.layer,
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
       Layer.provideMerge(vcsDriverRegistryLayer),
@@ -4764,6 +4765,39 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         byteLength: 26,
         truncated: false,
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("routes websocket rpc projects.readT3File for present and absent files", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const withFile = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-t3-file-present-" });
+      const withoutFile = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-t3-file-absent-" });
+      yield* fs.writeFileString(
+        path.join(withFile, "t3.json"),
+        '{"scripts":[{"name":"Setup Worktree","command":"vp i"}]}',
+      );
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all({
+            present: client[WS_METHODS.projectsReadT3File]({ cwd: withFile }),
+            absent: client[WS_METHODS.projectsReadT3File]({ cwd: withoutFile }),
+          }),
+        ),
+      );
+
+      assert.deepEqual(
+        response.present.projectFile?.scripts?.map((script) => script.name),
+        ["Setup Worktree"],
+      );
+      // A workspace without the file answers with null rather than failing, so
+      // an absent t3.json never reaches the error channel.
+      assert.equal(response.absent.projectFile, null);
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 

@@ -2,6 +2,7 @@ import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
+  ChevronRight,
   CloudIcon,
   ContainerIcon,
   FolderPlusIcon,
@@ -24,7 +25,7 @@ import {
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
-import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
+import React, { Fragment, useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   DndContext,
@@ -75,7 +76,8 @@ import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstra
 import { isElectron } from "../env";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { isMacPlatform } from "../lib/utils";
+import { cn, isMacPlatform } from "../lib/utils";
+import { useRecencyGroups } from "../useRecencyGroups";
 import {
   readThreadShell,
   useProject,
@@ -184,7 +186,7 @@ import {
   useThreadJumpHintVisibility,
   ThreadStatusPill,
 } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
+import { getThreadSortTimestamp, sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
@@ -883,6 +885,7 @@ interface SidebarProjectThreadListProps {
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
+  threadSortOrder: SidebarThreadSortOrder;
   projectCwd: string;
   activeRouteThreadKey: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -934,6 +937,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     showEmptyThreadState,
     shouldShowThreadPanel,
     isThreadListExpanded,
+    threadSortOrder,
     projectCwd,
     activeRouteThreadKey,
     threadJumpLabelByKey,
@@ -962,6 +966,39 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   } = props;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
+  // Day folding applies to the full list only. The collapsed preview is already
+  // capped to a handful of threads, so grouping it would add headers to a list
+  // that has no pile-up to solve.
+  const threadGroups = useRecencyGroups(renderedThreads, (thread: SidebarThreadSummary) =>
+    getThreadSortTimestamp(thread, threadSortOrder),
+  );
+  const renderThreadGroups = (
+    threads: readonly SidebarThreadSummary[],
+    renderRow: (thread: SidebarThreadSummary) => React.ReactNode,
+  ) => {
+    if (!isThreadListExpanded) return threads.map(renderRow);
+    return threadGroups.groups.map((group) => {
+      const expanded = threadGroups.isExpanded(group.key);
+      return (
+        <Fragment key={group.key}>
+          <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+            <button
+              type="button"
+              data-thread-selection-safe
+              onClick={() => threadGroups.toggle(group.key)}
+              aria-expanded={expanded}
+              className="flex h-6 w-full items-center gap-1 px-2 text-left text-[11px] text-sidebar-muted-foreground/75 hover:text-sidebar-foreground"
+            >
+              <ChevronRight className={cn("size-3 shrink-0", expanded && "rotate-90")} />
+              <span className="truncate">{group.label}</span>
+              <span className="shrink-0">({group.items.length})</span>
+            </button>
+          </SidebarMenuSubItem>
+          {expanded ? group.items.map(renderRow) : null}
+        </Fragment>
+      );
+    });
+  };
 
   return (
     <SidebarMenuSub
@@ -979,7 +1016,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         </SidebarMenuSubItem>
       ) : null}
       {shouldShowThreadPanel &&
-        renderedThreads.map((thread) => {
+        renderThreadGroups(renderedThreads, (thread) => {
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <SidebarThreadRow
@@ -2327,6 +2364,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
         isThreadListExpanded={isThreadListExpanded}
+        threadSortOrder={threadSortOrder}
         projectCwd={project.workspaceRoot}
         activeRouteThreadKey={activeRouteThreadKey}
         threadJumpLabelByKey={threadJumpLabelByKey}

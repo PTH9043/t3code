@@ -667,9 +667,14 @@ export const isCommandAvailable = Effect.fn("shell.isCommandAvailable")(function
   command: string,
   options: CommandAvailabilityOptions = {},
 ) {
+  // "Not on this machine" is this function's answer, not a failure, so the
+  // resolution runs untraced: otherwise every negative check leaves a pair of
+  // failed `shell.resolveCommandPath*` spans that read like real errors. The
+  // boolean this returns is what callers trace.
   return yield* resolveCommandPath(command, options).pipe(
     Effect.as(true),
     Effect.catchTag("CommandResolutionError", () => Effect.succeed(false)),
+    Effect.withTracerEnabled(false),
   );
 });
 

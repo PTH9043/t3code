@@ -35,6 +35,7 @@ import {
   AlarmClockOffIcon,
   ActivityIcon,
   CheckIcon,
+  EyeIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   CircleCheckIcon,

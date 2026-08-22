@@ -352,6 +352,9 @@ const WorkspaceLayerLive = Layer.mergeAll(
   WorkspacePaths.layer,
   WorkspaceEntriesLayerLive,
   WorkspaceFileSystemLayerLive,
+  // Exposed to the whole runtime, not just the favicon resolver: the
+  // `projects.readT3File` RPC reads the checked-in project file through it.
+  T3ProjectFileLoader.layer,
 );
 
 const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
