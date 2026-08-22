@@ -103,6 +103,7 @@ const TARGET_KIND_LABELS: Readonly<Record<WorkspaceMonitoringTarget["kind"], str
   "self-desktop": "T3 데스크톱",
   process: "프로세스",
   url: "URL",
+  log: "로그 파일",
 };
 
 const METRIC_LABELS: Readonly<Record<WorkspaceMonitoringMetric["metric"], string>> = {
@@ -112,6 +113,7 @@ const METRIC_LABELS: Readonly<Record<WorkspaceMonitoringMetric["metric"], string
   "slow-spans": "느린 span",
   health: "상태검사",
   regression: "회귀",
+  "log-matches": "로그 패턴",
 };
 
 const TREND_LABELS: Readonly<Record<WorkspaceMonitoringMetric["trend"], string>> = {
@@ -136,7 +138,9 @@ export function describeMonitoringTarget(target: WorkspaceMonitoringTarget): str
         ? ` (pid ${target.pid})`
         : target.kind === "url" && target.url
           ? ` (${target.url})`
-          : "";
+          : target.kind === "log" && target.path
+            ? ` (${target.path}${target.patterns?.length ? ` · 패턴 ${target.patterns.length}개` : ""})`
+            : "";
   return `${TARGET_KIND_LABELS[target.kind]} · ${target.label}${extra}`;
 }
 
@@ -157,6 +161,8 @@ function formatLimit(metric: WorkspaceMonitoringMetric): string {
       return `연속 ${metric.limit}회 실패`;
     case "regression":
       return `${metric.limit}회 실패`;
+    case "log-matches":
+      return `${metric.limit}줄 이상`;
   }
 }
 

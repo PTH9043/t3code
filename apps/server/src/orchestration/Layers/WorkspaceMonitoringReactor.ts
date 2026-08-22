@@ -25,8 +25,10 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -98,6 +100,8 @@ interface ProjectMonitor {
   regression: { readonly failures: number; readonly detail: string; readonly at: number } | null;
   /** HTTP probe state per probed URL (url targets and program health-check URLs). */
   readonly probes: Map<string, { consecutiveFailures: number; latencyMs: number | null }>;
+  /** Tail state per log path: read offset and recent matching lines. */
+  readonly logs: Map<string, LogTailState>;
   /** `process` targets of the approved plan, handed to the telemetry sidecar as extra roots. */
   externalProcesses: ReadonlyArray<ResourceMonitorExternalProcess>;
 }
@@ -118,8 +122,38 @@ function freshMonitor(): ProjectMonitor {
     regressionInFlight: false,
     regression: null,
     probes: new Map(),
+    logs: new Map(),
     externalProcesses: [],
   };
+}
+
+interface LogTailState {
+  /** Byte offset already consumed; the file is read from here on each tick. */
+  offset: number;
+  /** Matching lines, newest last, trimmed to the last hour and LOG_MATCH_KEEP rows. */
+  readonly matches: Array<{ readonly at: number; readonly line: string }>;
+  lastError: string | null;
+}
+
+const LOG_MATCH_KEEP = 200;
+const LOG_MATCH_RETAIN_MS = 60 * 60_000;
+/** Per tick, per file: a runaway log must not stall the tick. */
+const LOG_READ_CAP_BYTES = 1024 * 1024;
+const LOG_LINE_MAX_CHARS = 300;
+
+function compileLogPatterns(patterns: ReadonlyArray<string> | undefined): ReadonlyArray<RegExp> {
+  if (patterns === undefined) return [];
+  return patterns.flatMap((pattern) => {
+    try {
+      return [new RegExp(pattern)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function resolveLogPath(path: Path.Path, target: string, workspaceRoot: string): string {
+  return path.isAbsolute(target) ? target : path.join(workspaceRoot, target);
 }
 
 /** The plan's `process` targets as sidecar roots; a target without a pid has nothing to follow. */
@@ -202,6 +236,8 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const platform = yield* HostProcessPlatform;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   // Validation commands spawn processes; on Windows a spawn blocks the event
   // loop, so at most one runs at a time across all projects, always forked.
   const validationMutex = yield* Semaphore.make(1);
@@ -327,6 +363,23 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         ),
       );
 
+  /**
+   * The 감시 AI for a project: the model the person picked in monitoring
+   * settings, else the operator/coordinator role binding. Null when neither
+   * exists — monitoring cannot start a thread or a turn without an account.
+   */
+  const pickMonitoringModel = Effect.fn("WorkspaceMonitoringReactor.pickMonitoringModel")(
+    function* (projectId: ProjectId) {
+      const row = yield* projectRepository.getById({ projectId });
+      const chosen = Option.isSome(row)
+        ? row.value.workspaceControl.monitoring.modelSelection
+        : null;
+      if (chosen !== null) return chosen;
+      const binding = yield* pickBinding(projectId);
+      return binding?.modelSelection ?? null;
+    },
+  );
+
   /** Create the project's monitoring thread once; returns null when no AI account can own it. */
   const ensureThread = Effect.fn("WorkspaceMonitoringReactor.ensureThread")(function* (
     projectId: ProjectId,
@@ -334,13 +387,11 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     settings: WorkspaceMonitoringSettings,
   ) {
     if (settings.threadId !== null) return settings.threadId;
-    const binding = yield* pickBinding(projectId);
-    if (binding === undefined) {
+    const modelSelection = settings.modelSelection ?? (yield* pickMonitoringModel(projectId));
+    if (modelSelection === null) {
       yield* Effect.logWarning(
-        "Monitoring: no operator/coordinator role binding; thread not created",
-        {
-          projectId,
-        },
+        "Monitoring: no 감시 AI selected and no operator/coordinator role binding; thread not created",
+        { projectId },
       );
       return null;
     }
@@ -351,7 +402,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       threadId,
       projectId,
       title: `모니터링 · ${projectTitle}`,
-      modelSelection: binding.modelSelection,
+      modelSelection,
       runtimeMode: "approval-required",
       interactionMode: "plan",
       branch: null,
@@ -368,8 +419,8 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     threadId: ThreadId,
     prompt: string,
   ) {
-    const binding = yield* pickBinding(projectId);
-    if (binding === undefined) return null;
+    const modelSelection = yield* pickMonitoringModel(projectId);
+    if (modelSelection === null) return null;
     const requestedAt = yield* nowIso;
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.start",
@@ -382,7 +433,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         attachments: [],
       },
       inputOrigin: "automation",
-      modelSelection: binding.modelSelection,
+      modelSelection,
       runtimeMode: "approval-required",
       interactionMode: "plan",
       createdAt: requestedAt,
@@ -494,6 +545,8 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     readonly selfSignals: ServerSelfSignalsReading;
     readonly regression: ProjectMonitor["regression"];
     readonly probes: ProjectMonitor["probes"];
+    readonly logs: ProjectMonitor["logs"];
+    readonly workspaceRoot: string;
     readonly nowMs: number;
   }
 
@@ -510,11 +563,26 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       }
       case "process":
         return target.pid === undefined ? "none" : `pid:${target.pid}`;
+      case "log":
+        return target.path === undefined ? "none" : `log:${target.path}`;
       case "self-server":
       case "self-desktop":
       case "url":
         return target.kind;
     }
+  }
+
+  /** Matching lines of a log target inside the metric window, newest last. */
+  function logMatchesFor(
+    target: WorkspaceMonitoringTarget,
+    windowMin: number,
+    context: SampleContext,
+  ): ReadonlyArray<{ readonly at: number; readonly line: string }> | null {
+    if (target.kind !== "log" || target.path === undefined) return null;
+    const state = context.logs.get(resolveLogPath(path, target.path, context.workspaceRoot));
+    if (state === undefined) return null;
+    const since = context.nowMs - windowMin * 60_000;
+    return state.matches.filter((match) => match.at >= since);
   }
 
   function sampleMetric(
@@ -542,6 +610,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         case "self-desktop":
           return categoryUsage(context.telemetry, (category) => category.startsWith("electron-"));
         case "url":
+        case "log":
           return null;
       }
     })();
@@ -579,6 +648,10 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       }
       case "slow-spans":
         return target.kind === "self-server" ? context.selfSignals.slowSpansPerMin : null;
+      case "log-matches": {
+        const matches = logMatchesFor(target, metric.windowMin, context);
+        return matches === null ? null : matches.length;
+      }
       case "regression":
         return context.regression?.failures ?? null;
     }
@@ -808,6 +881,90 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
   }
 
   /**
+   * Read what each `log` target's file gained since the last tick and keep the
+   * lines that match its patterns. The first sight of a file only records its
+   * size — history is not replayed — and a file that shrank (rotation) starts
+   * over from zero. This is the server-side replacement for a seat's own
+   * `tail -F | grep` Monitor loop: it needs no provider session and survives
+   * restarts because the plan, not the seat, owns it.
+   */
+  const tailLogs = Effect.fn("WorkspaceMonitoringReactor.tailLogs")(function* (input: {
+    readonly plan: WorkspaceMonitoringPlan;
+    readonly workspaceRoot: string;
+    readonly logs: ProjectMonitor["logs"];
+    readonly nowMs: number;
+  }) {
+    const byPath = new Map<string, RegExp[]>();
+    for (const target of input.plan.targets) {
+      if (target.kind !== "log" || target.path === undefined) continue;
+      const resolved = resolveLogPath(path, target.path, input.workspaceRoot);
+      const list = byPath.get(resolved) ?? [];
+      list.push(...compileLogPatterns(target.patterns));
+      byPath.set(resolved, list);
+    }
+    // Paths that left the plan stop being tracked.
+    for (const path of [...input.logs.keys()]) if (!byPath.has(path)) input.logs.delete(path);
+    if (byPath.size === 0) return;
+    yield* Effect.forEach(
+      [...byPath],
+      ([filePath, patterns]) =>
+        Effect.gen(function* () {
+          let state = input.logs.get(filePath);
+          const stat = yield* fileSystem.stat(filePath).pipe(Effect.option);
+          if (Option.isNone(stat)) {
+            if (state !== undefined) state.lastError = "파일을 읽을 수 없습니다";
+            return;
+          }
+          const size = Number(stat.value.size);
+          if (state === undefined) {
+            state = { offset: size, matches: [], lastError: null };
+            input.logs.set(filePath, state);
+            return;
+          }
+          state.lastError = null;
+          if (size < state.offset) state.offset = 0;
+          if (size === state.offset) return;
+          const start = state.offset;
+          const end = Math.min(size, start + LOG_READ_CAP_BYTES);
+          const chunk = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const file = yield* fileSystem.open(filePath, { flag: "r" });
+              yield* file.seek(FileSystem.Size(start), "start");
+              const bytes = yield* file.readAlloc(FileSystem.Size(end - start));
+              return Option.match(bytes, {
+                onNone: () => "",
+                onSome: (buffer) => new TextDecoder().decode(buffer),
+              });
+            }),
+          ).pipe(Effect.option);
+          if (Option.isNone(chunk)) {
+            state.lastError = "파일을 읽을 수 없습니다";
+            return;
+          }
+          // Keep a trailing partial line for the next tick.
+          const lastNewline = chunk.value.lastIndexOf("\n");
+          const complete = lastNewline === -1 ? "" : chunk.value.slice(0, lastNewline + 1);
+          state.offset = start + new TextEncoder().encode(complete).byteLength;
+          if (end === size && lastNewline === -1 && end - start > LOG_LINE_MAX_CHARS * 4) {
+            // A very long line with no newline yet: skip it rather than stall.
+            state.offset = end;
+          }
+          for (const raw of complete.split("\n")) {
+            const line = raw.replace(/\r$/, "");
+            if (line.length === 0 || !patterns.some((pattern) => pattern.test(line))) continue;
+            state.matches.push({ at: input.nowMs, line: line.slice(0, LOG_LINE_MAX_CHARS) });
+          }
+          const cutoff = input.nowMs - LOG_MATCH_RETAIN_MS;
+          while (state.matches.length > 0 && state.matches[0]!.at < cutoff) state.matches.shift();
+          if (state.matches.length > LOG_MATCH_KEEP) {
+            state.matches.splice(0, state.matches.length - LOG_MATCH_KEEP);
+          }
+        }),
+      { concurrency: 4, discard: true },
+    );
+  });
+
+  /**
    * One GET per probed URL per evaluation, concurrently, bounded to 5s each.
    * Only URLs some metric actually reads are probed, so a plan without url or
    * latency metrics costs nothing here.
@@ -893,9 +1050,17 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         selfSignals: selfSignals.read(selfWindowMin, nowMs),
         regression: monitor.regression,
         probes: monitor.probes,
+        logs: monitor.logs,
+        workspaceRoot: input.workspaceRoot,
         nowMs,
       };
       yield* probeUrls({ plan: input.plan, programs, probes: monitor.probes });
+      yield* tailLogs({
+        plan: input.plan,
+        workspaceRoot: input.workspaceRoot,
+        logs: monitor.logs,
+        nowMs,
+      });
       if (input.plan.metrics.some((metric) => metric.metric === "regression")) {
         yield* pollForCodeChanges({
           projectId: input.projectId,
@@ -948,7 +1113,14 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
             observed:
               metric.metric === "regression" && monitor.regression !== null
                 ? verdict.observed + "\n" + monitor.regression.detail
-                : verdict.observed,
+                : metric.metric === "log-matches"
+                  ? verdict.observed +
+                    "\n" +
+                    (logMatchesFor(target, metric.windowMin, context) ?? [])
+                      .slice(-8)
+                      .map((match) => `  ${match.line}`)
+                      .join("\n")
+                  : verdict.observed,
             observedAt: now,
           },
         });

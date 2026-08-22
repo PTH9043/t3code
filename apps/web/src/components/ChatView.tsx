@@ -104,6 +104,7 @@ import {
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
+import { hasUnseenCompletion } from "./Sidebar.logic";
 import { useUiStateStore } from "../uiStateStore";
 import {
   buildPlanImplementationThreadTitle,
@@ -249,6 +250,7 @@ import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   useProject,
   useProjects,
+  useThreadShells,
   useThread,
   useThreadRefs,
   useThreadShell,
@@ -4734,6 +4736,68 @@ function ChatViewContent(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  // The 감시 AI speaks up wherever the person is: when the active project's
+  // monitoring thread has a report or a question they have not seen, a line
+  // appears above this composer too (the sidebar eye alone is easy to miss
+  // mid-work). Reading the monitoring thread clears it through the same
+  // visit timestamp the sidebar uses.
+  const allThreadShells = useThreadShells();
+  const watcherThreadRef = useMemo(() => {
+    if (!activeThread) return null;
+    const project = allProjects.find(
+      (candidate) =>
+        candidate.id === activeThread.projectId &&
+        candidate.environmentId === activeThread.environmentId,
+    );
+    const threadId = project?.workspaceControl?.monitoring?.threadId ?? null;
+    if (threadId === null || threadId === activeThread.id) return null;
+    return scopeThreadRef(activeThread.environmentId, threadId);
+  }, [activeThread, allProjects]);
+  const watcherThreadKey = watcherThreadRef === null ? null : scopedThreadKey(watcherThreadRef);
+  const watcherLastVisitedAt = useUiStateStore((store) =>
+    watcherThreadKey === null ? undefined : store.threadLastVisitedAtById[watcherThreadKey],
+  );
+  const watcherBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (watcherThreadRef === null) return null;
+    const shell = allThreadShells.find(
+      (candidate) =>
+        candidate.id === watcherThreadRef.threadId &&
+        candidate.environmentId === watcherThreadRef.environmentId &&
+        candidate.archivedAt === null,
+    );
+    if (!shell) return null;
+    const asking = shell.hasPendingUserInput;
+    const reported = hasUnseenCompletion({ ...shell, lastVisitedAt: watcherLastVisitedAt });
+    if (!asking && !reported) return null;
+    const at = shell.latestTurn?.completedAt ?? shell.updatedAt;
+    const clock = new Date(at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    return {
+      id: `watcher:${watcherThreadKey}`,
+      variant: asking ? "warning" : "info",
+      icon: <EyeIcon />,
+      title: asking ? "감시 AI가 묻고 있습니다" : `감시 AI의 새 보고 (${clock})`,
+      description: asking
+        ? "감시 스레드에서 답을 기다리는 질문이 있습니다."
+        : "감시 스레드에 새 발견이 올라왔습니다.",
+      actions: (
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() =>
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: {
+                environmentId: watcherThreadRef.environmentId,
+                threadId: watcherThreadRef.threadId,
+              },
+            })
+          }
+        >
+          감시 스레드 열기
+        </Button>
+      ),
+    };
+  }, [allThreadShells, navigate, watcherLastVisitedAt, watcherThreadKey, watcherThreadRef]);
   // The stack renders items[0] front-most and tucks the rest behind hover, so
   // ordering is priority: urgent system banners (error/warning variants plus
   // calm-styled live states flagged `urgent`, like update progress), then
@@ -4906,10 +4970,12 @@ function ChatViewContent(props: ChatViewProps) {
       ...(backgroundWatchBannerItem === null ? [] : [backgroundWatchBannerItem]),
     ];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
+    const watcherItems = watcherBannerItem === null ? [] : [watcherBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
+        ...watcherItems,
         ...meetingRunItems,
         ...monitoringPlanItems,
         ...backgroundLivenessItems,
@@ -4920,6 +4986,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [
       ...urgentSystemItems,
+      ...watcherItems,
       ...meetingRunItems,
       ...monitoringPlanItems,
       ...backgroundLivenessItems,
@@ -4980,6 +5047,7 @@ function ChatViewContent(props: ChatViewProps) {
     parkedThreadBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
+    watcherBannerItem,
     wokeThreadBannerItem,
   ]);
 

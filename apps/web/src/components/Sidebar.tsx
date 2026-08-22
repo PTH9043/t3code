@@ -458,6 +458,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // the descriptor is not loaded. Pinning itself lives in the context menu.
   pinningSupported: boolean;
   isPinned: boolean;
+  // The project's 감시 AI thread: sits at the top of the project's list and
+  // wears an eye instead of a pin. It is where the watcher reports and where
+  // the person talks to it.
+  isWatcher?: boolean;
   // Present only on pinned cards whose server supports reordering: dnd-kit
   // sortable bag applied to the card root so the whole card drags (the
   // pointer sensor's distance constraint keeps plain clicks working).
@@ -1082,7 +1086,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <span className="flex-1" />
               )}
-              {props.isPinned ? (
+              {props.isWatcher ? (
+                <EyeIcon
+                  aria-label="감시 AI"
+                  role="img"
+                  className="size-3 shrink-0 text-sky-600 dark:text-sky-300/80"
+                />
+              ) : props.isPinned ? (
                 props.pinningSupported ? (
                   <button
                     type="button"
@@ -1370,6 +1380,18 @@ export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
+  // Thread keys of every project's 감시 AI thread (monitoring mode on or off:
+  // the thread keeps its role until deleted).
+  const watcherThreadKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const project of projects) {
+      const threadId = project.workspaceControl?.monitoring?.threadId ?? null;
+      if (threadId !== null) {
+        keys.add(scopedThreadKey(scopeThreadRef(project.environmentId, threadId)));
+      }
+    }
+    return keys;
+  }, [projects]);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1875,6 +1897,9 @@ export default function Sidebar() {
     const snoozed: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
     for (const thread of visible) {
+      const isWatcher = watcherThreadKeys.has(
+        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      );
       // Threads on servers without the settlement capability (old server,
       // or descriptor not loaded yet) never classify as settled: the user
       // could neither un-settle nor pin them, so auto-settling them would
@@ -1897,7 +1922,9 @@ export default function Sidebar() {
         // auto-settle out of sight. (The decider clears settled state on
         // pin and the pin on settle, so pin-vs-settled conflicts only
         // arise from stale or raced writes.)
-      } else if (thread.pinnedAt != null) {
+      } else if (thread.pinnedAt != null || isWatcher) {
+        // The 감시 AI thread never auto-settles out of sight: its whole job
+        // is to be found when it has something to say.
         pinned.push(thread);
       } else if (
         supportsSettlement &&
@@ -1942,6 +1969,7 @@ export default function Sidebar() {
     serverConfigs,
     snoozeWakeTick,
     threads,
+    watcherThreadKeys,
   ]);
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
@@ -3554,7 +3582,8 @@ export default function Sidebar() {
                           serverConfigs.get(thread.environmentId)?.environment.capabilities
                             .threadPinning === true
                         }
-                        isPinned={section === "pinned"}
+                        isPinned={section === "pinned" && thread.pinnedAt != null}
+                        isWatcher={watcherThreadKeys.has(threadKey)}
                         sortable={sortable}
                         snoozeWakeLabelText={
                           section === "snoozed" && thread.snoozedUntil != null

@@ -151,6 +151,7 @@ const METRIC_GUIDE = [
   "- slow-spans / threshold: limit = 분당 1초 이상 걸린 span 수. self-server 대상 전용.",
   "- health / threshold: limit = 연속 실패 횟수.",
   "- regression / threshold: limit = 1. 코드 변경 후 검증 명령이 실패하면 이상.",
+  "- log-matches / threshold: limit = 창 안에서 patterns에 맞은 줄 수(보통 1). log 대상 전용. 서버가 파일을 직접 tail 하므로 AI 세션이 끝나거나 서버가 재시작돼도 감시가 유지됩니다.",
 ].join("\n");
 
 /** The once-per-enable (or 다시 분석) prompt that ends in a parsable plan. */
@@ -213,7 +214,8 @@ export function buildMonitoringProposalPrompt(context: MonitoringProposalContext
       2,
     ),
     WORKSPACE_MONITORING_PLAN_CLOSE_MARKER,
-    "targets 최대 16개, metrics 최대 32개, playbooks 최대 8개. process/url 대상은 실제로 폴더에서 확인한 것만.",
+    "targets 최대 16개, metrics 최대 32개, playbooks 최대 8개. process/url/log 대상은 실제로 폴더나 데이터 디렉터리에서 확인한 것만.",
+    '## 로그 파일 감시\n프로그램이 쓰는 로그 파일(예: watcher.log)에서 오류·잠금·재시작·특정 판정 같은 줄을 잡고 싶으면 log 대상을 쓰세요: { "kind": "log", "label": "표시 이름", "path": "E:/data/app.log", "patterns": ["database is locked", "Traceback", "^!! "] } + metric { "metric": "log-matches", "trend": "threshold", "windowMin": 5, "limit": 1 }. 패턴은 JavaScript 정규식이며 대소문자를 구분합니다. 과거 내용은 보지 않고 계획 승인 이후에 새로 쓰인 줄만 봅니다.',
   ].join("\n\n");
 }
 

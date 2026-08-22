@@ -132,8 +132,11 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   );
 
   const interruptTurn = vi.fn(
-    (_threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.void,
+    (
+      _threadId: ThreadId,
+      _turnId?: TurnId,
+      _options?: { readonly stopBackground?: boolean },
+    ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
   const respondToRequest = vi.fn(

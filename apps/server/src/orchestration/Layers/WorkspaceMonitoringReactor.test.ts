@@ -19,8 +19,10 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -532,6 +534,73 @@ it.effect(
         );
       }).pipe(Effect.provide(h.layer), Effect.scoped);
     }),
+);
+
+it.effect(
+  "a log target is tailed by the server: new matching lines become a finding with the lines quoted",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-monitor-log-" });
+      const logPath = path.join(dir, "watcher.log");
+      const append = (text: string) => fs.writeFileString(logPath, text, { flag: "a" });
+      yield* fs.writeFileString(logPath, "old: database is locked\n");
+      const h = yield* makeHarness({
+        monitoring: {
+          planStatus: "approved",
+          aiTurnBudget: { perHour: 5, perDay: 10 },
+          plan: {
+            ...approvedPlan([
+              { targetIndex: 0, metric: "log-matches", trend: "threshold", windowMin: 5, limit: 1 },
+            ]),
+            targets: [
+              {
+                kind: "log",
+                label: "워처 로그",
+                path: logPath,
+                patterns: ["database is locked", "^!! "],
+              },
+            ],
+          },
+        },
+      });
+      h.state.assistantOutput = "잠금 오류입니다.";
+      yield* TestClock.setTime(Date.parse(T0));
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceMonitoringReactor;
+        yield* reactor.start();
+
+        // First sight only records the size: history is not replayed.
+        yield* reactor.tick;
+        yield* TestClock.adjust("1 second");
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+          0,
+        );
+
+        // Quiet lines change nothing.
+        yield* append("cycle ok\n");
+        yield* TestClock.adjust("20 seconds");
+        yield* reactor.tick;
+        yield* TestClock.adjust("1 second");
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+          0,
+        );
+
+        // Two matching lines land: the finding quotes them.
+        yield* append("!! 21:05:10 앱 미응답(15초)\nwrite failed: database is locked\n");
+        yield* TestClock.adjust("20 seconds");
+        yield* reactor.tick;
+        yield* TestClock.adjust("1 second");
+        const turnStarts = h.commands.filter((command) => command.type === "thread.turn.start");
+        expect(turnStarts).toHaveLength(1);
+        const text = (turnStarts[0] as { message: { text: string } }).message.text;
+        expect(text).toContain("워처 로그");
+        expect(text).toContain("!! 21:05:10 앱 미응답(15초)");
+        expect(text).toContain("write failed: database is locked");
+        expect(text).not.toContain("old: database is locked");
+      }).pipe(Effect.provide(h.layer), Effect.scoped);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect(

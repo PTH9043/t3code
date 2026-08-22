@@ -92,16 +92,22 @@ export function evaluateTrend(
   switch (metric.trend) {
     case "threshold": {
       if (current.length === 0) return null;
-      // Health and regression count consecutive failures / failed runs: the
-      // latest value is the count. Everything else is judged on the window mean.
-      const counting = metric.metric === "health" || metric.metric === "regression";
+      // Health and regression count consecutive failures / failed runs, and
+      // log-matches already counts lines inside the window: the latest value
+      // is the count. Everything else is judged on the window mean.
+      const counting =
+        metric.metric === "health" ||
+        metric.metric === "regression" ||
+        metric.metric === "log-matches";
       const value = counting
         ? current.at(-1)!.value
         : current.reduce((sum, sample) => sum + sample.value, 0) / current.length;
       return {
         anomalous: value >= metric.limit,
         observed: counting
-          ? `${formatNumber(value)}회 (한도 ${formatNumber(metric.limit)})`
+          ? metric.metric === "log-matches"
+            ? `창 안 ${formatNumber(value)}줄 (한도 ${formatNumber(metric.limit)})`
+            : `${formatNumber(value)}회 (한도 ${formatNumber(metric.limit)})`
           : `창 평균 ${formatNumber(value)} (한도 ${formatNumber(metric.limit)})`,
         direction: "over",
       };

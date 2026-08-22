@@ -75,3 +75,7 @@
 ## 상태검사 실패 사유
 
 `WorkspaceProgramRun.lastHealthFailure`(`reason` + `detail` + `elapsedMs`)가 마지막 실패를 기록합니다. `timeout`인데 실제 경과가 한도보다 1.5초 이상 더 길면 감시 서버의 이벤트 루프가 멈춰 있던 것이므로 `inconclusive`로 남기고 연속 실패 횟수에 넣지 않습니다(dev 빌드 버스트 때 나던 오탐). 장애 증거와 런타임 요약 digest에 사유가 그대로 들어가 AI가 가설 대신 사실로 판정합니다.
+
+## 감시 AI 선택과 로그 대상 (2026-08-22)
+
+`WorkspaceMonitoringUserSettings.modelSelection`(null = 역할 바인딩 폴백)이 감시 스레드 생성과 모든 automation 턴의 모델을 정합니다(`pickMonitoringModel`). `log` 대상(`path`, `patterns`)은 리액터의 `tailLogs`가 매 평가마다 Effect `FileSystem`으로 오프셋 이후만 읽어(최대 1MB/틱, 첫 관측은 오프셋만 기록, 축소 시 0으로) 패턴에 맞는 줄을 `ProjectMonitor.logs`에 한 시간/200줄까지 보관합니다. `log-matches` 지표는 창 안의 줄 수이며 threshold 평가에서 health처럼 "최신 값"으로 판정합니다. 발견 프롬프트에는 마지막 8줄이 인용됩니다. 웹은 프로젝트의 `monitoring.threadId`로 감시 스레드를 식별해 사이드바 고정(눈 아이콘)과 다른 대화의 "감시 AI 새 보고" 배너(`hasUnseenCompletion` 또는 pending user input)를 그립니다.

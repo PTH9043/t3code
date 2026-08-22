@@ -299,6 +299,8 @@ export const WorkspaceMonitoringTargetKind = Schema.Literals([
   "self-desktop",
   "process",
   "url",
+  /** A log file the server tails for regex patterns (replaces a seat's own `tail -F | grep` loop). */
+  "log",
 ]);
 export type WorkspaceMonitoringTargetKind = typeof WorkspaceMonitoringTargetKind.Type;
 
@@ -309,6 +311,12 @@ export const WorkspaceMonitoringTarget = Schema.Struct({
   pid: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
   startTimeMs: Schema.optionalKey(NonNegativeInt),
   url: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(2_000))),
+  /** `log` targets: absolute or workspace-relative file path. */
+  path: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(1_000))),
+  /** `log` targets: regular expressions; a line matching any of them counts. */
+  patterns: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(200))).check(Schema.isMaxLength(8)),
+  ),
 });
 export type WorkspaceMonitoringTarget = typeof WorkspaceMonitoringTarget.Type;
 
@@ -319,6 +327,8 @@ export const WorkspaceMonitoringMetricKind = Schema.Literals([
   "slow-spans",
   "health",
   "regression",
+  /** Lines of a `log` target matching its patterns within the window. */
+  "log-matches",
 ]);
 export type WorkspaceMonitoringMetricKind = typeof WorkspaceMonitoringMetricKind.Type;
 
@@ -338,8 +348,9 @@ export const WorkspaceMonitoringMetric = Schema.Struct({
   /**
    * Unit depends on `metric`+`trend`: percent for cpu threshold, bytes/min for
    * memory slope, ms for latency, count/min for slow-spans, consecutive
-   * failures for health, non-zero exit count for regression, and a ratio
-   * (e.g. 1.5 = 50% worse) for p95-vs-baseline.
+   * failures for health, non-zero exit count for regression, matching lines
+   * in the window for log-matches, and a ratio (e.g. 1.5 = 50% worse) for
+   * p95-vs-baseline.
    */
   limit: Schema.Number.check(Schema.isFinite()),
 });
@@ -386,6 +397,13 @@ export const WorkspaceMonitoringUserSettings = Schema.Struct({
   autonomy: WorkspaceMonitoringAutonomy,
   checkIntervalSec: Schema.Int.check(Schema.isBetween({ minimum: 15, maximum: 3_600 })),
   aiTurnBudget: WorkspaceMonitoringTurnBudget,
+  /**
+   * The 감시 AI: which account and model run the monitoring thread's turns.
+   * Null falls back to the project's operator/coordinator role binding.
+   */
+  modelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type WorkspaceMonitoringUserSettings = typeof WorkspaceMonitoringUserSettings.Type;
 
@@ -405,6 +423,7 @@ export const DEFAULT_WORKSPACE_MONITORING_SETTINGS: WorkspaceMonitoringSettings 
   autonomy: "ask",
   checkIntervalSec: 60,
   aiTurnBudget: { perHour: 4, perDay: 24 },
+  modelSelection: null,
   threadId: null,
   plan: null,
   planStatus: "none",

@@ -6,7 +6,9 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+  ProviderInstanceId,
   WorkspaceMonitoringPlan,
+  type ModelSelection,
   type WorkspaceMonitoringAutonomy,
   type WorkspaceMonitoringPlanStatus,
   type WorkspaceMonitoringSettings,
@@ -23,6 +25,8 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { useEnvironmentSettings } from "~/hooks/useSettings";
+import { deriveProviderInstanceEntries } from "~/providerInstances";
+import { useServerConfigs } from "~/state/entities";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { projectEnvironment } from "~/state/projects";
 import { useEnvironmentQuery } from "~/state/query";
@@ -61,6 +65,9 @@ function timestamp(value: string | null): string {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("ko-KR");
 }
+
+const WATCHER_SELECT_CLASS =
+  "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-shadow focus:border-ring focus:ring-3 focus:ring-ring/20 dark:bg-input/32";
 
 const AUTONOMY_OPTIONS: ReadonlyArray<{
   readonly value: WorkspaceMonitoringAutonomy;
@@ -111,6 +118,20 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
   const [checkInterval, setCheckInterval] = useState(String(settings.checkIntervalSec));
   const [perHour, setPerHour] = useState(String(settings.aiTurnBudget.perHour));
   const [perDay, setPerDay] = useState(String(settings.aiTurnBudget.perDay));
+  // 감시 AI: which account/model runs the monitoring thread. Empty instance =
+  // fall back to the project's operator/coordinator role binding.
+  const serverConfigs = useServerConfigs();
+  const providerSnapshots = serverConfigs.get(project.environmentId)?.providers ?? [];
+  const providerEntries = useMemo(
+    () => deriveProviderInstanceEntries(providerSnapshots).filter((entry) => entry.enabled),
+    [providerSnapshots],
+  );
+  const [watcherInstanceId, setWatcherInstanceId] = useState(
+    settings.modelSelection?.instanceId ?? "",
+  );
+  const [watcherModel, setWatcherModel] = useState(settings.modelSelection?.model ?? "");
+  const watcherProvider =
+    providerEntries.find((entry) => entry.instanceId === watcherInstanceId) ?? null;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
@@ -120,17 +141,28 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
     setCheckInterval(String(settings.checkIntervalSec));
     setPerHour(String(settings.aiTurnBudget.perHour));
     setPerDay(String(settings.aiTurnBudget.perDay));
+    setWatcherInstanceId(settings.modelSelection?.instanceId ?? "");
+    setWatcherModel(settings.modelSelection?.model ?? "");
   }, [
     project.id,
     settings.checkIntervalSec,
     settings.aiTurnBudget.perHour,
     settings.aiTurnBudget.perDay,
+    settings.modelSelection,
   ]);
 
+  const watcherSelection = useMemo<ModelSelection | null>(() => {
+    if (watcherInstanceId.trim().length === 0) return null;
+    const provider = providerEntries.find((entry) => entry.instanceId === watcherInstanceId);
+    const model = watcherModel.trim() || provider?.models[0]?.slug || "";
+    if (model.length === 0) return null;
+    return { instanceId: ProviderInstanceId.make(watcherInstanceId), model };
+  }, [providerEntries, watcherInstanceId, watcherModel]);
   const userSettings = useMemo(
     () => ({
       enabled: settings.enabled,
       autonomy: settings.autonomy,
+      modelSelection: watcherSelection,
       checkIntervalSec: Math.min(
         3_600,
         Math.max(15, Number.parseInt(checkInterval, 10) || settings.checkIntervalSec),
@@ -146,9 +178,13 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
         ),
       },
     }),
-    [checkInterval, perDay, perHour, settings],
+    [checkInterval, perDay, perHour, settings, watcherSelection],
   );
+  const watcherChanged =
+    (watcherSelection?.instanceId ?? null) !== (settings.modelSelection?.instanceId ?? null) ||
+    (watcherSelection?.model ?? null) !== (settings.modelSelection?.model ?? null);
   const settingsChanged =
+    watcherChanged ||
     userSettings.checkIntervalSec !== settings.checkIntervalSec ||
     userSettings.aiTurnBudget.perHour !== settings.aiTurnBudget.perHour ||
     userSettings.aiTurnBudget.perDay !== settings.aiTurnBudget.perDay;
@@ -266,6 +302,50 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
             ) : null}
           </div>
           <div className="grid gap-3">
+            <span className="text-sm font-medium">감시 AI</span>
+            <div className="grid gap-2 md:grid-cols-2">
+              <label className="grid gap-1 text-xs text-muted-foreground">
+                CLI 계정
+                <select
+                  className={WATCHER_SELECT_CLASS}
+                  value={watcherInstanceId}
+                  onChange={(event) => {
+                    const next = providerEntries.find(
+                      (entry) => entry.instanceId === event.currentTarget.value,
+                    );
+                    setWatcherInstanceId(event.currentTarget.value);
+                    setWatcherModel(next?.models[0]?.slug ?? "");
+                  }}
+                >
+                  <option value="">역할 바인딩(운영자/조정자)을 따름</option>
+                  {providerEntries.map((provider) => (
+                    <option key={provider.instanceId} value={provider.instanceId}>
+                      {provider.displayName} ({provider.instanceId})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-xs text-muted-foreground">
+                모델
+                <Input
+                  value={watcherModel}
+                  disabled={watcherInstanceId.length === 0}
+                  onChange={(event) => setWatcherModel(event.currentTarget.value)}
+                  list="monitoring-watcher-models"
+                  placeholder="모델 식별자"
+                />
+                <datalist id="monitoring-watcher-models">
+                  {watcherProvider?.models.map((entry) => (
+                    <option key={entry.slug} value={entry.slug} />
+                  ))}
+                </datalist>
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              감시 스레드의 계획 제안·발견 보고·질문을 이 AI가 맡습니다. 감시 스레드에서 직접 대화할
+              때도 같은 AI가 답합니다. Monitor 도구가 없는 모델이어도 됩니다 — 로그 tail과 상태
+              수집은 서버가 합니다.
+            </p>
             <label htmlFor="monitoring-interval" className="text-sm font-medium">
               점검 주기 (초, 15~3600)
             </label>
@@ -304,9 +384,9 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
             <Button
               size="sm"
               disabled={!settingsChanged || busy}
-              onClick={() => void saveMonitoring({}, "점검 주기와 예산을 저장했습니다.")}
+              onClick={() => void saveMonitoring({}, "감시 AI·주기·예산을 저장했습니다.")}
             >
-              주기·예산 저장
+              감시 AI·주기·예산 저장
             </Button>
           </div>
         </div>

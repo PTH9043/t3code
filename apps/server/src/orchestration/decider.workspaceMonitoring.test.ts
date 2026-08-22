@@ -79,6 +79,7 @@ it.layer(NodeServices.layer)("Workspace monitoring decider", (it) => {
             monitoring: {
               enabled: true,
               autonomy: "ask",
+              modelSelection: null,
               checkIntervalSec: 30,
               aiTurnBudget: { perHour: 2, perDay: 10 },
             },
@@ -195,6 +196,7 @@ it.layer(NodeServices.layer)("Workspace monitoring decider", (it) => {
             monitoring: {
               enabled: true,
               autonomy: "playbooks",
+              modelSelection: null,
               checkIntervalSec: 60,
               aiTurnBudget: { perHour: 4, perDay: 24 },
               plan: samplePlan,

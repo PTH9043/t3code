@@ -243,6 +243,7 @@ function applyMonitoringUserSettings(
     autonomy: update.autonomy,
     checkIntervalSec: update.checkIntervalSec,
     aiTurnBudget: update.aiTurnBudget,
+    modelSelection: update.modelSelection,
   };
   if (update.plan === undefined) return base;
   if (update.plan === null) return { ...base, plan: null, planStatus: "none" };
