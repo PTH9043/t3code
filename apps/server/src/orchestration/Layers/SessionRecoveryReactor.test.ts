@@ -1,4 +1,5 @@
 import {
+  EventId,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -16,6 +17,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
+import {
+  ProjectionThreadActivityRepository,
+  type ProjectionThreadActivity,
+} from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import {
   OrchestrationEngineService,
@@ -54,6 +59,7 @@ function session(input: {
 function threadShell(input: {
   readonly id: string;
   readonly session: OrchestrationSession | null;
+  readonly hasPendingUserInput?: boolean;
 }): OrchestrationThreadShell {
   return {
     id: ThreadId.make(input.id),
@@ -73,14 +79,34 @@ function threadShell(input: {
     session: input.session,
     latestUserMessageAt: null,
     hasPendingApprovals: false,
-    hasPendingUserInput: false,
+    hasPendingUserInput: input.hasPendingUserInput ?? false,
     hasActionableProposedPlan: false,
   } as OrchestrationThreadShell;
+}
+
+function activity(input: {
+  readonly id: string;
+  readonly threadId: ThreadId;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly createdAt?: string;
+}): ProjectionThreadActivity {
+  return {
+    activityId: EventId.make(input.id),
+    threadId: input.threadId,
+    turnId: null,
+    tone: "info",
+    kind: input.kind,
+    summary: input.kind,
+    payload: input.payload,
+    createdAt: input.createdAt ?? at,
+  };
 }
 
 function makeHarness(input: {
   readonly threads: ReadonlyArray<OrchestrationThreadShell>;
   readonly resumableRuns?: ReadonlyArray<WorkspaceCollaborationRun>;
+  readonly activities?: ReadonlyArray<ProjectionThreadActivity>;
 }) {
   return Effect.gen(function* () {
     const dispatchedRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
@@ -103,11 +129,16 @@ function makeHarness(input: {
     const repository = {
       listResumable: () => Effect.succeed(input.resumableRuns ?? []),
     } as unknown as ProjectionWorkspaceCollaborationRunRepository["Service"];
+    const activityRepository = {
+      listByThreadId: ({ threadId }: { readonly threadId: ThreadId }) =>
+        Effect.succeed((input.activities ?? []).filter((row) => row.threadId === threadId)),
+    } as unknown as ProjectionThreadActivityRepository["Service"];
 
     const layer = SessionRecoveryReactorLive.pipe(
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
       Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
       Layer.provideMerge(Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, repository)),
+      Layer.provideMerge(Layer.succeed(ProjectionThreadActivityRepository, activityRepository)),
       Layer.provideMerge(NodeServices.layer),
     );
     return { dispatchedRef, layer };
@@ -213,5 +244,70 @@ it.effect("does not race the collaboration reactor for a resumable run's thread"
     // restarting the work — no recovery turn here.
     const dispatched = yield* Ref.get(harness.dispatchedRef);
     expect(dispatched.map((command) => command.type)).toEqual(["thread.session.stop"]);
+  }),
+);
+
+it.effect("closes the questions the dead session left open and tells the seat to ask again", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-asking");
+    const harness = yield* makeHarness({
+      threads: [
+        threadShell({
+          id: "thread-asking",
+          session: session({ threadId, status: "running", activeTurnId: TurnId.make("turn-1") }),
+          hasPendingUserInput: true,
+        }),
+      ],
+      activities: [
+        // Answered before the restart: stays closed.
+        activity({
+          id: "a1",
+          threadId,
+          kind: "user-input.requested",
+          payload: { requestId: "q-old" },
+        }),
+        activity({
+          id: "a2",
+          threadId,
+          kind: "user-input.resolved",
+          payload: { requestId: "q-old" },
+        }),
+        // Open when the server died: the provider no longer knows it.
+        activity({
+          id: "a3",
+          threadId,
+          kind: "user-input.requested",
+          payload: { requestId: "q-open" },
+        }),
+        // Already failed as stale once: nothing left to close.
+        activity({
+          id: "a4",
+          threadId,
+          kind: "user-input.requested",
+          payload: { requestId: "q-stale" },
+        }),
+        activity({
+          id: "a5",
+          threadId,
+          kind: "provider.user-input.respond.failed",
+          payload: { requestId: "q-stale", detail: "Stale pending user-input request: q-stale" },
+        }),
+      ],
+    });
+    yield* runSweep(harness);
+
+    const dispatched = yield* Ref.get(harness.dispatchedRef);
+    expect(dispatched.map((command) => command.type)).toEqual([
+      "thread.session.stop",
+      "thread.activity.append",
+      "thread.turn.start",
+    ]);
+    const closed = dispatched[1];
+    if (closed?.type !== "thread.activity.append") throw new Error("expected an activity append");
+    expect(closed.activity.kind).toBe("user-input.resolved");
+    expect(closed.activity.payload).toMatchObject({ requestId: "q-open", abandoned: true });
+    const turnStart = dispatched[2];
+    if (turnStart?.type !== "thread.turn.start") throw new Error("expected a turn start");
+    expect(turnStart.message.text).toContain("같은 질문을 다시 해 주세요");
   }),
 );

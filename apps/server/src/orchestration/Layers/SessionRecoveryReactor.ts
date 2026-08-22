@@ -18,9 +18,21 @@
  * recovery turn — the collaboration reactor re-drives those itself, and a
  * second driver would race it.
  *
+ * A question the seat had open when the server died (`user-input.requested`
+ * with no resolution) is closed here too. Provider callback state does not
+ * survive the restart, so the card could only ever fail with "stale request"
+ * when answered; meanwhile the recovery turn asks again. Closing it keeps one
+ * live question on screen instead of a dead one above it.
+ *
  * @module SessionRecoveryReactor
  */
-import { CommandId, MessageId, type OrchestrationThreadShell } from "@t3tools/contracts";
+import {
+  CommandId,
+  EventId,
+  MessageId,
+  type OrchestrationThreadShell,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -29,6 +41,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { forkParked } from "../../serverActivation.ts";
+import {
+  ProjectionThreadActivityRepository,
+  type ProjectionThreadActivity,
+} from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -43,17 +59,86 @@ const RECOVERY_TURN_TEXT = [
   "이미 완료된 작업은 반복하지 말고, 확인 결과와 이어서 한 작업을 정리해 보고해 주세요.",
 ].join(" ");
 
+const ABANDONED_QUESTION_TEXT =
+  "중단 직전에 사용자에게 던진 질문은 답을 받지 못한 채 사라졌습니다. 아직 답이 필요하면 같은 질문을 다시 해 주세요.";
+
+const ABANDONED_QUESTION_SUMMARY =
+  "서버가 재시작되어 이 질문은 사라졌습니다. 답이 필요하면 다시 묻습니다.";
+
 const isInterruptedSessionStatus = (status: string): boolean =>
   status === "starting" || status === "running";
+
+const requestIdOf = (payload: unknown): string | null => {
+  if (typeof payload !== "object" || payload === null) return null;
+  const requestId = (payload as Record<string, unknown>).requestId;
+  return typeof requestId === "string" ? requestId : null;
+};
+
+/**
+ * Request ids of questions still open in the activity log — asked, never
+ * resolved, and not already failed as stale. Mirrors the projection's own
+ * pending-count derivation so the two never disagree on what is open.
+ */
+export function openUserInputRequestIds(
+  activities: ReadonlyArray<ProjectionThreadActivity>,
+): ReadonlyArray<string> {
+  const open = new Set<string>();
+  const ordered = [...activities].toSorted(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) ||
+      left.activityId.localeCompare(right.activityId),
+  );
+  for (const activity of ordered) {
+    const requestId = requestIdOf(activity.payload);
+    if (requestId === null) continue;
+    if (activity.kind === "user-input.requested") open.add(requestId);
+    else if (activity.kind === "user-input.resolved") open.delete(requestId);
+    else if (activity.kind === "provider.user-input.respond.failed") {
+      const detail = (activity.payload as Record<string, unknown>).detail;
+      if (typeof detail === "string" && /pending user.?input request/i.test(detail)) {
+        open.delete(requestId);
+      }
+    }
+  }
+  return [...open];
+}
 
 export const makeSessionRecoveryReactor = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
+  const activityRepository = yield* ProjectionThreadActivityRepository;
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4;
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const done = yield* Deferred.make<void>();
+
+  /** Close every question the dead session left open; returns how many there were. */
+  const abandonOpenQuestions = Effect.fn("SessionRecoveryReactor.abandonOpenQuestions")(function* (
+    threadId: ThreadId,
+  ) {
+    const activities = yield* activityRepository.listByThreadId({ threadId });
+    const open = openUserInputRequestIds(activities);
+    for (const requestId of open) {
+      const createdAt = yield* nowIso;
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* randomUUID),
+        threadId,
+        activity: {
+          id: EventId.make(yield* randomUUID),
+          tone: "warning",
+          kind: "user-input.resolved",
+          summary: ABANDONED_QUESTION_SUMMARY,
+          payload: { requestId, answers: {}, abandoned: true },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    }
+    return open.length;
+  });
 
   const recoverThread = Effect.fn("SessionRecoveryReactor.recoverThread")(function* (
     thread: OrchestrationThreadShell,
@@ -68,6 +153,9 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       threadId: thread.id,
       createdAt: yield* nowIso,
     });
+    const abandonedQuestions = thread.hasPendingUserInput
+      ? yield* abandonOpenQuestions(thread.id)
+      : 0;
     if (!startRecoveryTurn) return;
 
     yield* engine.dispatch({
@@ -77,7 +165,10 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       message: {
         messageId: MessageId.make(yield* randomUUID),
         role: "user",
-        text: RECOVERY_TURN_TEXT,
+        text:
+          abandonedQuestions > 0
+            ? `${RECOVERY_TURN_TEXT} ${ABANDONED_QUESTION_TEXT}`
+            : RECOVERY_TURN_TEXT,
         attachments: [],
       },
       inputOrigin: "automation",
@@ -89,6 +180,7 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
     yield* Effect.logInfo("recovered an interrupted turn after restart", {
       threadId: thread.id,
       projectId: thread.projectId,
+      abandonedQuestions,
     });
   });
 
