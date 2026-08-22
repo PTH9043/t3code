@@ -32,6 +32,10 @@ const watchedDirectories = [
 ];
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
+// fs.watch on Windows (and on some editors' atomic writes) occasionally misses
+// a rebuilt bundle, leaving the app on stale code after a server build. A
+// slow mtime/size poll is the backstop; the watcher stays for fast restarts.
+const watchPollIntervalMs = 1_000;
 const childTreeGracePeriodMs = 1_200;
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
@@ -58,6 +62,41 @@ let currentApp = null;
 let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
 const watchers = [];
+/** Last mtime+size seen per watched file path; refreshed whenever a restart is scheduled. */
+const watchedFileStamps = new Map();
+let watchPollTimer = null;
+
+function watchedFilePaths() {
+  return watchedDirectories.flatMap(({ directory, files }) =>
+    [...files].map((file) => NodePath.join(desktopDir, directory, file)),
+  );
+}
+
+function stampOf(filePath) {
+  try {
+    const stat = NodeFS.statSync(filePath);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+function refreshWatchedFileStamps() {
+  for (const filePath of watchedFilePaths()) {
+    watchedFileStamps.set(filePath, stampOf(filePath));
+  }
+}
+
+function pollWatchedFiles() {
+  if (shuttingDown) return;
+  for (const filePath of watchedFilePaths()) {
+    const stamp = stampOf(filePath);
+    if (stamp === null || stamp === watchedFileStamps.get(filePath)) continue;
+    console.log(`[dev-electron] change to ${NodePath.basename(filePath)} seen by poll`);
+    scheduleRestart();
+    return;
+  }
+}
 
 function killChildTreeByPid(pid, signal) {
   if (hostPlatform === "win32" || typeof pid !== "number") {
@@ -169,6 +208,7 @@ function scheduleRestart() {
 
   restartTimer = setTimeout(() => {
     restartTimer = null;
+    refreshWatchedFileStamps();
     restartQueue = restartQueue
       .catch(() => undefined)
       .then(async () => {
@@ -196,6 +236,9 @@ function startWatchers() {
 
     watchers.push(watcher);
   }
+  refreshWatchedFileStamps();
+  watchPollTimer = setInterval(pollWatchedFiles, watchPollIntervalMs);
+  watchPollTimer.unref();
 }
 
 function killChildTree(signal) {
@@ -220,6 +263,10 @@ async function shutdown(exitCode) {
 
   for (const watcher of watchers) {
     watcher.close();
+  }
+  if (watchPollTimer) {
+    clearInterval(watchPollTimer);
+    watchPollTimer = null;
   }
 
   await stopApp();
