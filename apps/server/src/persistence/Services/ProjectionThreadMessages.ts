@@ -74,6 +74,11 @@ export interface ProjectionThreadMessageRepositoryShape {
    *
    * Returned in ascending creation order.
    */
+  /** `created_at` of the newest user-role message, or null — one scalar instead of the whole transcript. */
+  readonly latestUserMessageAt: (
+    input: ListProjectionThreadMessagesInput,
+  ) => Effect.Effect<string | null, ProjectionRepositoryError>;
+
   readonly listByThreadId: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;

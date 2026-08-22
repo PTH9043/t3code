@@ -1,5 +1,7 @@
 import {
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+  EventId,
+  MessageId,
   ProjectId,
   ThreadId,
   ProviderInstanceId,
@@ -12,14 +14,20 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
+import { ProjectionThreadActivityRepositoryLive } from "./ProjectionThreadActivities.ts";
+import { ProjectionThreadMessageRepositoryLive } from "./ProjectionThreadMessages.ts";
 import { ProjectionThreadRepositoryLive } from "./ProjectionThreads.ts";
 import { ProjectionProjectRepository } from "../Services/ProjectionProjects.ts";
+import { ProjectionThreadActivityRepository } from "../Services/ProjectionThreadActivities.ts";
+import { ProjectionThreadMessageRepository } from "../Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadRepository } from "../Services/ProjectionThreads.ts";
 
 const projectionRepositoriesLayer = it.layer(
   Layer.mergeAll(
     ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionThreadActivityRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionThreadMessageRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     SqlitePersistenceMemory,
   ),
 );
@@ -206,5 +214,60 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       assert.strictEqual(updated?.snoozedAt, null);
       assert.strictEqual(updated?.pinnedAt, null);
     }),
+  );
+
+  it.effect(
+    "narrow shell-summary reads: activities by kind keep order, latest user message is one scalar",
+    () =>
+      Effect.gen(function* () {
+        const activities = yield* ProjectionThreadActivityRepository;
+        const messages = yield* ProjectionThreadMessageRepository;
+        const threadId = ThreadId.make("thread-narrow");
+        const row = (id: string, kind: string, sequence: number) => ({
+          activityId: EventId.make(id),
+          threadId,
+          turnId: null,
+          tone: "info" as const,
+          kind,
+          summary: kind,
+          payload: { requestId: id },
+          sequence,
+          createdAt: "2026-08-23T00:00:00.000Z",
+        });
+        yield* activities.upsert(row("a3", "user-input.resolved", 3));
+        yield* activities.upsert(row("a1", "user-input.requested", 1));
+        yield* activities.upsert(row("a2", "tool.completed", 2));
+        yield* activities.upsert(row("a4", "provider.user-input.respond.failed", 4));
+
+        const narrowed = yield* activities.listByThreadIdAndKinds({
+          threadId,
+          kinds: [
+            "user-input.requested",
+            "user-input.resolved",
+            "provider.user-input.respond.failed",
+          ],
+        });
+        assert.deepEqual(
+          narrowed.map((entry) => entry.activityId),
+          ["a1", "a3", "a4"],
+        );
+        assert.deepEqual(yield* activities.listByThreadIdAndKinds({ threadId, kinds: [] }), []);
+
+        assert.equal(yield* messages.latestUserMessageAt({ threadId }), null);
+        const message = (id: string, role: "user" | "assistant", createdAt: string) => ({
+          messageId: MessageId.make(id),
+          threadId,
+          turnId: null,
+          role,
+          text: id,
+          isStreaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        yield* messages.upsert(message("m1", "user", "2026-08-23T00:00:01.000Z"));
+        yield* messages.upsert(message("m2", "assistant", "2026-08-23T00:00:05.000Z"));
+        yield* messages.upsert(message("m3", "user", "2026-08-23T00:00:03.000Z"));
+        assert.equal(yield* messages.latestUserMessageAt({ threadId }), "2026-08-23T00:00:03.000Z");
+      }),
   );
 });

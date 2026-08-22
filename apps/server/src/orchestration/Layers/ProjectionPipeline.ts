@@ -159,6 +159,13 @@ function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
   );
 }
 
+/** The only activity kinds derivePendingUserInputCountFromActivities reads. */
+const USER_INPUT_LIFECYCLE_ACTIVITY_KINDS: ReadonlyArray<string> = [
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+];
+
 function derivePendingUserInputCountFromActivities(
   activities: ReadonlyArray<ProjectionThreadActivity>,
 ): number {
@@ -1094,22 +1101,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [messages, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
-        projectionThreadMessageRepository.listByThreadId({ threadId }),
+      // Narrow reads on purpose: this runs on every event of the thread, and
+      // a long thread's full transcript + activity log (26k rows with payloads
+      // on a real project) made each event a ~1s transaction with hundreds of
+      // megabytes of short-lived allocation.
+      const [latestUserMessageAt, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
+        projectionThreadMessageRepository.latestUserMessageAt({ threadId }),
         projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-        projectionThreadActivityRepository.listByThreadId({ threadId }),
+        projectionThreadActivityRepository.listByThreadIdAndKinds({
+          threadId,
+          kinds: USER_INPUT_LIFECYCLE_ACTIVITY_KINDS,
+        }),
         projectionPendingApprovalRepository.listByThreadId({ threadId }),
       ]);
-
-      let latestUserMessageAt: string | null = null;
-      for (const message of messages) {
-        if (
-          message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
-        ) {
-          latestUserMessageAt = message.createdAt;
-        }
-      }
 
       const pendingApprovalCount = pendingApprovals.filter(
         (approval) => approval.status === "pending",

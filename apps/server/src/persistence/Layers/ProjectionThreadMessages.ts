@@ -159,6 +159,27 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       Effect.map(Option.map(toProjectionThreadMessage)),
     );
 
+  const latestUserMessageAtRow = SqlSchema.findOne({
+    Request: ListProjectionThreadMessagesInput,
+    Result: Schema.Struct({ latest: Schema.NullOr(Schema.String) }),
+    execute: ({ threadId }) =>
+      sql`
+        SELECT MAX(created_at) AS "latest"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId} AND role = 'user'
+      `,
+  });
+
+  const latestUserMessageAt: ProjectionThreadMessageRepositoryShape["latestUserMessageAt"] = (
+    input,
+  ) =>
+    latestUserMessageAtRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadMessageRepository.latestUserMessageAt:query"),
+      ),
+      Effect.map((row) => row.latest),
+    );
+
   const listByThreadId: ProjectionThreadMessageRepositoryShape["listByThreadId"] = (input) =>
     listProjectionThreadMessageRows(input).pipe(
       Effect.mapError(
@@ -177,6 +198,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
   return {
     upsert,
     getByMessageId,
+    latestUserMessageAt,
     listByThreadId,
     deleteByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;

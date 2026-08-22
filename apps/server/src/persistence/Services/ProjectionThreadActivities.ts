@@ -38,6 +38,13 @@ export const ListProjectionThreadActivitiesInput = Schema.Struct({
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
 
+export const ListProjectionThreadActivitiesByKindInput = Schema.Struct({
+  threadId: ThreadId,
+  kinds: Schema.Array(Schema.String),
+});
+export type ListProjectionThreadActivitiesByKindInput =
+  typeof ListProjectionThreadActivitiesByKindInput.Type;
+
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -65,6 +72,16 @@ export interface ProjectionThreadActivityRepositoryShape {
    */
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * Same order as listByThreadId, restricted to the given activity kinds. The
+   * shell summary only needs the user-input lifecycle rows, and loading a long
+   * thread's whole log (payloads included) on every event was the server's
+   * dominant per-event cost.
+   */
+  readonly listByThreadIdAndKinds: (
+    input: ListProjectionThreadActivitiesByKindInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
