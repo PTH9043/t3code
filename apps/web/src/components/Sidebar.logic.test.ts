@@ -1028,6 +1028,19 @@ describe("resolveThreadStatusPill", () => {
     },
   };
 
+  it("keeps the watch visible while a turn runs on top of standing monitors", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...baseThread, backgroundLiveness: "monitoring" },
+      }),
+    ).toMatchObject({ label: "작업 중 · 감시 유지", pulse: true });
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...baseThread, backgroundLiveness: null },
+      }),
+    ).toMatchObject({ label: "작업 중" });
+  });
+
   it("shows pending approval before all other statuses", () => {
     expect(
       resolveThreadStatusPill({

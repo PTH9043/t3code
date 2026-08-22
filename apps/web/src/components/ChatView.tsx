@@ -4545,40 +4545,6 @@ function ChatViewContent(props: ChatViewProps) {
   // banner is the only visible stop affordance. Stop routes through the
   // stop-everything interrupt: it kills every live background task before
   // interrupting, and works by session, so no active turn is needed.
-  const activeBackgroundLiveness =
-    !isWorking && activeThread ? (activeThreadShell?.backgroundLiveness ?? null) : null;
-  const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
-  useEffect(() => {
-    // "Stopping..." holds until the liveness clears; the interrupt command
-    // returning only means the request was accepted.
-    if (activeBackgroundLiveness === null) {
-      setIsStoppingBackgroundWork(false);
-    }
-  }, [activeBackgroundLiveness]);
-  useEffect(() => {
-    // Per-thread state: switching threads while A's stop is pending must not
-    // disable B's Stop button (review finding).
-    setIsStoppingBackgroundWork(false);
-  }, [activeThreadId]);
-  const handleStopBackgroundWork = useCallback(async () => {
-    if (!activeThread) return;
-    setIsStoppingBackgroundWork(true);
-    const result = await interruptThreadTurn({
-      environmentId,
-      input: buildThreadTurnInterruptInput(activeThread),
-    });
-    if (result._tag === "Failure") {
-      // Every failure clears the pending state — an interrupted command
-      // never reached the server, so liveness would hold "Stopping..."
-      // forever. Only real failures toast.
-      setIsStoppingBackgroundWork(false);
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        console.error(error);
-        setThreadError(activeThread.id, "백그라운드 작업을 중지하지 못했습니다.");
-      }
-    }
-  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
   // "What is the seat doing while I'm not looking": watch loops, the next
   // self-wakeup, last check-in, and whether a restart cut them off. Read from
   // the activity log, so it is there after a reload and when the liveness
@@ -4615,6 +4581,55 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return parts.length > 0 ? parts.join(" · ") : null;
   }, [backgroundWatch]);
+  // While a turn runs, the composer's own stop button covers agent work, but
+  // watch loops are still live underneath and the person must keep seeing
+  // them — dropping the banner read as "monitoring got released".
+  const shellBackgroundLiveness = activeThread
+    ? (activeThreadShell?.backgroundLiveness ?? null)
+    : null;
+  // Mid-turn, only a standing watch loop counts: the seat's own short
+  // background shells register as monitors for a second or two each and
+  // would flicker the banner on every command.
+  const hasStandingWatch = backgroundWatch.monitors.some(
+    (monitor) => watchClockMs - Date.parse(monitor.startedAt) >= 60_000,
+  );
+  const activeBackgroundLiveness = !isWorking
+    ? shellBackgroundLiveness
+    : shellBackgroundLiveness === "monitoring" && hasStandingWatch
+      ? "monitoring"
+      : null;
+  const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
+  useEffect(() => {
+    // "Stopping..." holds until the liveness clears; the interrupt command
+    // returning only means the request was accepted.
+    if (activeBackgroundLiveness === null) {
+      setIsStoppingBackgroundWork(false);
+    }
+  }, [activeBackgroundLiveness]);
+  useEffect(() => {
+    // Per-thread state: switching threads while A's stop is pending must not
+    // disable B's Stop button (review finding).
+    setIsStoppingBackgroundWork(false);
+  }, [activeThreadId]);
+  const handleStopBackgroundWork = useCallback(async () => {
+    if (!activeThread) return;
+    setIsStoppingBackgroundWork(true);
+    const result = await interruptThreadTurn({
+      environmentId,
+      input: buildThreadTurnInterruptInput(activeThread),
+    });
+    if (result._tag === "Failure") {
+      // Every failure clears the pending state — an interrupted command
+      // never reached the server, so liveness would hold "Stopping..."
+      // forever. Only real failures toast.
+      setIsStoppingBackgroundWork(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        console.error(error);
+        setThreadError(activeThread.id, "백그라운드 작업을 중지하지 못했습니다.");
+      }
+    }
+  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
   const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (activeBackgroundLiveness === null || !activeThread) {
       return null;
@@ -4634,18 +4649,25 @@ function ChatViewContent(props: ChatViewProps) {
         ? liveCount > 0
           ? `에이전트 ${liveCount}개가 백그라운드에서 작업 중입니다`
           : "백그라운드 작업 실행 중"
-        : "백그라운드에서 모니터링 중",
+        : isWorking
+          ? "답변하는 동안에도 백그라운드 감시는 계속됩니다"
+          : "백그라운드에서 모니터링 중",
       ...(backgroundWatchDescription === null ? {} : { description: backgroundWatchDescription }),
-      actions: (
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={isStoppingBackgroundWork}
-          onClick={() => void handleStopBackgroundWork()}
-        >
-          {isStoppingBackgroundWork ? "중지 중..." : "중지"}
-        </Button>
-      ),
+      // The stop affordance belongs to the composer while a turn runs.
+      ...(isWorking
+        ? {}
+        : {
+            actions: (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isStoppingBackgroundWork}
+                onClick={() => void handleStopBackgroundWork()}
+              >
+                {isStoppingBackgroundWork ? "중지 중..." : "중지"}
+              </Button>
+            ),
+          }),
     };
   }, [
     activeBackgroundLiveness,
@@ -4654,6 +4676,7 @@ function ChatViewContent(props: ChatViewProps) {
     backgroundWatchDescription,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
+    isWorking,
   ]);
   // Without live work there is still something to say when a wake is
   // scheduled, or when a restart silently killed the watch the person was

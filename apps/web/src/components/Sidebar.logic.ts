@@ -118,7 +118,15 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
 }
 
 export interface ThreadStatusPill {
-  label: "작업 중" | "모니터링 중" | "연결 중" | "완료" | "승인 필요" | "입력 대기" | "계획 준비됨";
+  label:
+    | "작업 중"
+    | "작업 중 · 감시 유지"
+    | "모니터링 중"
+    | "연결 중"
+    | "완료"
+    | "승인 필요"
+    | "입력 대기"
+    | "계획 준비됨";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -131,6 +139,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "승인 필요": 6,
   "입력 대기": 5,
   "작업 중": 4,
+  "작업 중 · 감시 유지": 4,
   "연결 중": 4,
   "계획 준비됨": 3,
   "모니터링 중": 2,
@@ -623,8 +632,10 @@ export function resolveThreadStatusPill(input: {
   }
 
   if (thread.session?.status === "running") {
+    // Watch loops keep running underneath a turn; say so, or the person
+    // reads the switch from "모니터링 중" to "작업 중" as the watch being dropped.
     return {
-      label: "작업 중",
+      label: thread.backgroundLiveness === "monitoring" ? "작업 중 · 감시 유지" : "작업 중",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,
