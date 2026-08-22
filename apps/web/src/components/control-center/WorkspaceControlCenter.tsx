@@ -69,6 +69,7 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
+import { WorkspaceMonitoringSection } from "./WorkspaceMonitoringSection";
 import { WorkspaceProgramsSection } from "./WorkspaceProgramsSection";
 import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
 import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
@@ -219,6 +220,7 @@ function runtimeEvidenceSourceLabel(source: WorkspaceRuntimeEvidence["source"]):
   if (source === "program") return "프로그램";
   if (source === "incident") return "장애 보고";
   if (source === "collaboration") return "작업 그래프";
+  if (source === "monitoring") return "모니터링";
   return "스케줄";
 }
 
@@ -226,6 +228,7 @@ function runtimeEvidenceAuthorityLabel(authority: WorkspaceRuntimeEvidence["auth
   if (authority === "provider") return "에이전트 이벤트";
   if (authority === "program-supervisor") return "프로그램 감시기";
   if (authority === "scheduler") return "자동화 스케줄러";
+  if (authority === "monitoring") return "프로그램 모니터링";
   return "프로젝트 오케스트레이션";
 }
 
@@ -281,7 +284,9 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
         ? "project-programs"
         : item.source === "collaboration"
           ? "project-runs"
-          : "project-automation";
+          : item.source === "monitoring"
+            ? "project-monitoring"
+            : "project-automation";
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
@@ -1990,6 +1995,7 @@ export function WorkspaceControlCenter({ project }: { project: EnvironmentProjec
           {[
             ["project-status", "상태"],
             ["project-programs", "프로그램·장애"],
+            ["project-monitoring", "모니터링"],
             ["project-terminals", "터미널"],
             ["project-runs", "실행"],
             ["project-accounts", "AI 계정"],
@@ -2013,6 +2019,7 @@ export function WorkspaceControlCenter({ project }: { project: EnvironmentProjec
         <section id="project-programs" className="scroll-mt-24">
           <WorkspaceProgramsSection project={project} />
         </section>
+        <WorkspaceMonitoringSection project={project} />
         <CollaborationSection project={project} />
         <RoleSection project={project} />
         <KnowledgeSection project={project} />

@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   ProjectId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
@@ -49,6 +50,7 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
         longTermMemoryRoot: "F:/NewAutoUsage/workspaces/workspace-a/memory/long-term",
         conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
         agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+        monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
       });
     }),
   );
@@ -104,6 +106,7 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
           maxInputChars: 12_000,
         },
         agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+        monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
       });
 
       // A later update that only touches agent capture must not reset the
@@ -141,6 +144,7 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
           redactSensitiveData: false,
           maxOutputChars: 60_000,
         },
+        monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
       });
     }),
   );

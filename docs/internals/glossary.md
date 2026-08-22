@@ -88,6 +88,18 @@ T3 Code를 위해 계속 갱신되는 용어집입니다. 이 코드베이스에
 
 프로젝트 협업 실행 안에 있는 영속적인 방향 비순환 그래프입니다. 작업에는 범위가 지정된 인계 하나, 의존성, 논리 에이전트 경로 배정, 상한이 있는 시도 횟수, 출력, 신뢰도, 검증 상태가 담깁니다. 순수한 파싱, 그래프 구체화, 준비된 작업 경계 계산, 순환 검사는 [workspaceTaskGraph.ts][26]에 있습니다.
 
+#### 모니터링 스레드
+
+프로젝트마다 하나뿐인, 서버가 만든 대화입니다. 프로그램 모니터링 모드가 감시 계획 제안, 이상 보고, 행동 전 질문을 모두 여기에 올립니다. 스레드 id는 프로젝트 행의 `workspaceControl.monitoring.threadId`에 붙어 있어 재시작에도 같은 스레드를 씁니다. [workspace-monitoring.md][28]를 참고하세요.
+
+#### 감시 계획
+
+모니터링 대상·지표·플레이북을 담은 구조화된 객체입니다. AI가 `[T3_MONITORING_PLAN]` 블록으로 제안하고 사람이 승인하거나, 사람이 직접 편집해 저장합니다. 상태는 `none → proposed → approved`이며 프로그램 집합이 바뀌면 `stale`이 됩니다. [workspace-monitoring.md][28]를 참고하세요.
+
+#### 플레이북
+
+감시 계획 안의 "이 지표가 이상이면 이렇게" 규칙입니다. 사람이 계획을 승인할 때 함께 승인하며, 서버가 AI 턴 시작 전에 기존 프로그램 명령으로 실행합니다. `monitoringAutoActions` 권한이 꺼져 있으면 기록만 됩니다. [workspace-monitoring.md][28]를 참고하세요.
+
 #### 페이블, 코덱스, 그록 논리 에이전트
 
 새로운 제공자 드라이버가 아니라 협업 그래프의 역할입니다. 페이블은 조정자이자 검증자, 코덱스는 구현 담당, 그록은 최신 정보 조사 담당입니다. 프로젝트 역할 연결은 이 논리 에이전트들을 기존 제공자 인스턴스로 연결합니다. [workspace-collaboration.md][27]를 참고하세요.
@@ -195,3 +207,4 @@ T3 Code를 위해 계속 갱신되는 용어집입니다. 이 코드베이스에
 [25]: ../../apps/server/src/orchestration/Layers/WorkspaceCollaborationReactor.ts
 [26]: ../../apps/server/src/orchestration/workspaceTaskGraph.ts
 [27]: ./workspace-collaboration.md
+[28]: ./workspace-monitoring.md

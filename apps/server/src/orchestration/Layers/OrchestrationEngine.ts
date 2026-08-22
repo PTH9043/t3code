@@ -88,6 +88,10 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "project.program.incident.repair.request":
     case "project.program.incident.resolve":
     case "project.collaboration.run.incident":
+    case "project.monitoring.plan.approve":
+    case "project.monitoring.reanalyze":
+    case "project.monitoring.plan.propose":
+    case "project.monitoring.runtime.update":
     case "project.delete":
       return {
         aggregateKind: "project",

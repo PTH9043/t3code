@@ -1,5 +1,5 @@
 import { httpHeaderRedactionLayer } from "@t3tools/shared/httpObservability";
-import { makeLocalFileTracer, makeTraceSink } from "@t3tools/shared/observability";
+import { makeLocalFileTracer, makeTraceSink, type TraceSink } from "@t3tools/shared/observability";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
@@ -10,6 +10,7 @@ import * as OtlpSerialization from "effect/unstable/observability/OtlpSerializat
 import * as OtlpTracer from "effect/unstable/observability/OtlpTracer";
 
 import * as ServerConfig from "../../config.ts";
+import { serverSelfSignals } from "../../diagnostics/ServerSelfSignals.ts";
 import * as ResourceAttribution from "../../resourceTelemetry/ResourceAttribution.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import * as BrowserTraceCollector from "../BrowserTraceCollector.ts";
@@ -58,12 +59,24 @@ export const ObservabilityLive = Layer.unwrap(
                 },
               });
 
+        // Server spans also feed the self-monitoring counters (slow / failed
+        // per minute). Browser spans go straight to the sink: they are not
+        // this process's health.
+        const tappedSink: TraceSink = {
+          filePath: sink.filePath,
+          flush: sink.flush,
+          close: sink.close,
+          push: (record) => {
+            serverSelfSignals.recordSpan(record);
+            sink.push(record);
+          },
+        };
         const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,
           maxBytes: config.traceMaxBytes,
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
-          sink,
+          sink: tappedSink,
           ...(delegate ? { delegate } : {}),
         });
 

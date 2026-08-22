@@ -58,6 +58,8 @@ import { SessionRecoveryReactorLive } from "./orchestration/Layers/SessionRecove
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
+import * as ServerSelfSignals from "./diagnostics/ServerSelfSignals.ts";
+import { WorkspaceMonitoringReactorLive } from "./orchestration/Layers/WorkspaceMonitoringReactor.ts";
 import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceSchedulerReactor.ts";
 import { WorkspaceProgramSupervisorLive } from "./orchestration/Layers/WorkspaceProgramSupervisor.ts";
 import { WorkspaceKnowledgeFileStoreLive } from "./orchestration/Layers/WorkspaceKnowledgeFileStore.ts";
@@ -239,7 +241,19 @@ const PlatformServicesLive = Layer.unwrap(
 const WorkspaceProgramSupervisorLayerLive = WorkspaceProgramSupervisorLive.pipe(
   Layer.provide(PtyAdapterLive),
 );
+// Monitoring reads the supervisor (program discovery) and the telemetry
+// sidecar; both layers are shared by reference with the rest of the graph.
+// VcsStatusBroadcaster and HostProcessPlatform come from the wider runtime
+// graph (VcsLayerLive / host process layers) that ReactorLayerLive sits inside.
+const WorkspaceMonitoringReactorLayerLive = WorkspaceMonitoringReactorLive.pipe(
+  Layer.provide(WorkspaceProgramSupervisorLayerLive),
+  Layer.provide(ResourceTelemetryLayerLive),
+  Layer.provide(ServerSelfSignals.layer),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(FetchHttpClient.layer),
+);
 const OrchestrationReactorWithProgramsLive = OrchestrationReactorLive.pipe(
+  Layer.provideMerge(WorkspaceMonitoringReactorLayerLive),
   Layer.provideMerge(WorkspaceProgramSupervisorLayerLive),
 );
 

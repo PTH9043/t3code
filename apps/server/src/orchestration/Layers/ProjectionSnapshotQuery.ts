@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   ChatAttachment,
   CheckpointRef,
   IsoDateTime,
@@ -2533,6 +2534,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         incidents,
         collaborationRuns,
         schedules,
+        monitoring: project?.workspaceControl?.monitoring ?? DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+        now,
       });
     });
 

@@ -340,6 +340,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           autoStart: false,
           autoDiagnosis: false,
           autoRestartAfterRepair: false,
+          monitoringAutoActions: false,
         } as const),
       ),
     ),

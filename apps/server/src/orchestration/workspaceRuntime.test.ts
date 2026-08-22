@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -62,6 +63,8 @@ function derive(threads: ReadonlyArray<OrchestrationThreadShell>) {
     incidents: [],
     collaborationRuns: [],
     schedules: [],
+    monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+    now: at,
   });
 }
 
@@ -141,6 +144,8 @@ it("separates operation changes from conversation activity", () => {
         updatedAt: operationAt,
       },
     ],
+    monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+    now: at,
   });
 
   expect(snapshot.updatedAt).toBe("2026-08-10T00:03:00.000Z");
@@ -171,6 +176,8 @@ it("keeps completed work visible until the project has been viewed", () => {
     incidents: [],
     collaborationRuns: [],
     schedules: [],
+    monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+    now: at,
   });
   const seen = deriveWorkspaceRuntimeSnapshot({
     projectId,
@@ -182,6 +189,8 @@ it("keeps completed work visible until the project has been viewed", () => {
     incidents: [],
     collaborationRuns: [],
     schedules: [],
+    monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+    now: at,
   });
 
   expect(unseen.attention).toBe("completed-unseen");

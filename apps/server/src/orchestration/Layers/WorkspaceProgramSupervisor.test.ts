@@ -325,6 +325,7 @@ function supervisorHarness(input: {
         autoStart: false,
         autoDiagnosis: false,
         autoRestartAfterRepair: false,
+        monitoringAutoActions: false,
       },
     }),
     Layer.succeed(PtyAdapter.PtyAdapter, {

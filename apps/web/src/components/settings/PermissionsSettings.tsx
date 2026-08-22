@@ -6,6 +6,7 @@ import { AlertTriangleIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import { useProjects } from "../../state/entities";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -23,6 +24,11 @@ type ProgramPermission = keyof WorkspaceProgramPermissions;
 export function PermissionsSettingsPanel() {
   const updateState = useDesktopUpdateState();
   const programPermissions = usePrimarySettings((settings) => settings.workspaceProgramPermissions);
+  const selfMonitoring = usePrimarySettings((settings) => settings.selfMonitoring);
+  const projects = useProjects();
+  const monitoredProjects = projects.filter(
+    (project) => project.workspaceControl?.monitoring.enabled === true,
+  );
   const updateSettings = useUpdatePrimarySettings();
   const bridge = typeof window === "undefined" ? undefined : window.desktopBridge;
   const supportsUpdateAutomation =
@@ -110,11 +116,15 @@ export function PermissionsSettingsPanel() {
   const updateProgramPermission = (permission: ProgramPermission, enabled: boolean) => {
     if (
       enabled &&
-      (permission === "autoStart" || permission === "autoRestartAfterRepair") &&
+      (permission === "autoStart" ||
+        permission === "autoRestartAfterRepair" ||
+        permission === "monitoringAutoActions") &&
       !window.confirm(
         permission === "autoStart"
           ? "등록된 프로그램이 T3 서버 시작과 함께 자동 실행될 수 있습니다. 자동 시작을 허용할까요?"
-          : "AI 수정과 검증이 성공하면 해당 프로그램이 자동으로 재시작됩니다. 자동 재시작을 허용할까요?",
+          : permission === "autoRestartAfterRepair"
+            ? "AI 수정과 검증이 성공하면 해당 프로그램이 자동으로 재시작됩니다. 자동 재시작을 허용할까요?"
+            : "모니터링 모드가 '플레이북' 자율 범위일 때, 승인한 계획의 규칙(재시작·중지·시작·수정 run)을 사람에게 묻지 않고 실행합니다. 허용할까요?",
       )
     ) {
       return;
@@ -242,6 +252,70 @@ export function PermissionsSettingsPanel() {
                 updateProgramPermission("autoRestartAfterRepair", checked)
               }
             />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("workspace-program-monitoring-auto-actions")}
+          description="프로그램 모니터링 모드가 '승인한 플레이북 안에서 자율'일 때, 승인된 규칙에 한해 재시작·중지·시작·수정 run을 묻지 않고 실행합니다. 꺼져 있으면 모니터링은 관찰·진단만 하고 모든 행동을 묻습니다."
+          status={programPermissions.monitoringAutoActions ? "허용됨" : "허용 안 함"}
+          control={
+            <Switch
+              aria-label="모니터링 자동 조치 권한"
+              checked={programPermissions.monitoringAutoActions}
+              onCheckedChange={(checked) =>
+                updateProgramPermission("monitoringAutoActions", checked)
+              }
+            />
+          }
+        />
+      </SettingsSection>
+      <SettingsSection title="T3 Code 자체 감시">
+        <SettingsRow
+          {...searchableSetting("self-monitoring-enabled")}
+          description="이 서버의 이벤트 루프 지연, 느린·실패한 작업 span, 메모리·CPU(데스크톱이 호스트이면 데스크톱 프로세스까지)를 프로그램 모니터링 모드의 감시 대상으로 올립니다. 발견은 아래에서 고른 프로젝트의 모니터링 스레드 하나로만 갑니다."
+          status={
+            !selfMonitoring.enabled
+              ? "꺼짐"
+              : monitoredProjects.length === 0
+                ? "켜짐 · 모니터링이 켜진 프로젝트가 없어 대기 중"
+                : "켜짐"
+          }
+          control={
+            <Switch
+              aria-label="T3 Code 자체 감시"
+              checked={selfMonitoring.enabled}
+              onCheckedChange={(enabled) =>
+                updateSettings({ selfMonitoring: { ...selfMonitoring, enabled } })
+              }
+            />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("self-monitoring-project")}
+          description="비워 두면 모니터링이 켜진 첫 프로젝트가 받습니다. 프로젝트를 고르면 그 프로젝트의 모니터링이 켜져 있을 때만 감시합니다. 대상은 다음 '다시 분석' 때 감시 계획에 반영됩니다."
+          control={
+            <select
+              aria-label="자체 감시 수신 프로젝트"
+              className="h-9 min-w-56 rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-ring"
+              value={selfMonitoring.projectId ?? ""}
+              disabled={!selfMonitoring.enabled}
+              onChange={(event) =>
+                updateSettings({
+                  selfMonitoring: {
+                    ...selfMonitoring,
+                    projectId: event.target.value === "" ? null : (event.target.value as never),
+                  },
+                })
+              }
+            >
+              <option value="">모니터링이 켜진 첫 프로젝트</option>
+              {projects.map((project) => (
+                <option key={`${project.environmentId}:${project.id}`} value={project.id}>
+                  {project.title}
+                  {project.workspaceControl?.monitoring.enabled ? "" : " (모니터링 꺼짐)"}
+                </option>
+              ))}
+            </select>
           }
         />
       </SettingsSection>

@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   WorkspaceControlSettings,
 } from "@t3tools/contracts";
@@ -56,6 +57,7 @@ layer("039_ProjectionProjectsWorkspaceControl", (it) => {
         longTermMemoryRoot: null,
         conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
         agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+        monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
       });
     }),
   );

@@ -13,6 +13,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
+  WorkspaceMonitoringPlan,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -33,6 +34,7 @@ import type {
   ThreadFeedEntry,
 } from "../../lib/threadActivity";
 import { PendingApprovalCard } from "./PendingApprovalCard";
+import { MonitoringPlanCard } from "./MonitoringPlanCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import {
   COMPOSER_COLLAPSED_CHROME,
@@ -87,6 +89,10 @@ export interface ThreadDetailScreenProps {
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
   ) => Promise<unknown>;
+  /** Set when this thread is its project's monitoring thread and a plan awaits approval. */
+  readonly proposedMonitoringPlan: WorkspaceMonitoringPlan | null;
+  readonly approvingMonitoringPlan: boolean;
+  readonly onApproveMonitoringPlan: () => Promise<unknown>;
   readonly onSelectUserInputOption: (
     requestId: ApprovalRequestId,
     questionId: string,
@@ -391,12 +397,21 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               pushes the resting content floor up by the same amount. */}
           <View ref={composerOverlayRef} onLayout={onComposerLayout} className="w-full">
             <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
-              {props.activePendingApproval || props.activePendingUserInput ? (
+              {props.activePendingApproval ||
+              props.activePendingUserInput ||
+              props.proposedMonitoringPlan ? (
                 <Animated.View
                   className="shrink-0 gap-3 px-4 pb-3"
                   entering={FadeInDown.duration(220)}
                   exiting={FadeOut.duration(140)}
                 >
+                  {props.proposedMonitoringPlan ? (
+                    <MonitoringPlanCard
+                      plan={props.proposedMonitoringPlan}
+                      approving={props.approvingMonitoringPlan}
+                      onApprove={props.onApproveMonitoringPlan}
+                    />
+                  ) : null}
                   {props.activePendingApproval ? (
                     <PendingApprovalCard
                       approval={props.activePendingApproval}

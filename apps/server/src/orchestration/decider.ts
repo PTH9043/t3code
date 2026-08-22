@@ -1,10 +1,12 @@
 import {
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   EventId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type WorkspaceMonitoringSettings,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -216,6 +218,46 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   return plannedEvents;
 });
 
+/**
+ * Merge the person's monitoring edits over the stored settings. A plan the
+ * person hands in is approved by definition — they wrote it — and replaces
+ * whatever the AI had proposed; `plan: null` clears it and asks for nothing
+ * until the switch is turned on again (the reactor proposes on "none").
+ */
+function applyMonitoringUserSettings(
+  current: WorkspaceMonitoringSettings,
+  update:
+    | (Omit<
+        WorkspaceMonitoringSettings,
+        "threadId" | "plan" | "planStatus" | "turnLog" | "lastCheckedAt"
+      > & {
+        readonly plan?: WorkspaceMonitoringSettings["plan"];
+      })
+    | undefined,
+  now: string,
+): WorkspaceMonitoringSettings {
+  if (update === undefined) return current;
+  const base: WorkspaceMonitoringSettings = {
+    ...current,
+    enabled: update.enabled,
+    autonomy: update.autonomy,
+    checkIntervalSec: update.checkIntervalSec,
+    aiTurnBudget: update.aiTurnBudget,
+  };
+  if (update.plan === undefined) return base;
+  if (update.plan === null) return { ...base, plan: null, planStatus: "none" };
+  return {
+    ...base,
+    plan: {
+      ...update.plan,
+      revision: (current.plan?.revision ?? 0) + 1,
+      proposedAt: current.plan?.proposedAt ?? now,
+      approvedAt: now,
+    },
+    planStatus: "approved",
+  };
+}
+
 export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
@@ -349,7 +391,95 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               command.agentKnowledge ??
               project.workspaceControl?.agentKnowledge ??
               DEFAULT_WORKSPACE_CONTROL_SETTINGS.agentKnowledge,
+            monitoring: applyMonitoringUserSettings(
+              project.workspaceControl?.monitoring ?? DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+              command.monitoring,
+              occurredAt,
+            ),
           },
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    // All monitoring mutations ride the existing workspace-control event: the
+    // blob is already persisted and projected everywhere, and one event type
+    // means the sidebar, control center, and reactor all see the same change.
+    case "project.monitoring.plan.approve":
+    case "project.monitoring.reanalyze":
+    case "project.monitoring.plan.propose":
+    case "project.monitoring.runtime.update": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      const control = project.workspaceControl ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS;
+      const current = control.monitoring;
+      const occurredAt = yield* nowIso;
+      let monitoring: WorkspaceMonitoringSettings;
+      switch (command.type) {
+        case "project.monitoring.plan.approve": {
+          if (current.planStatus !== "proposed" || current.plan === null) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Project '${command.projectId}' has no proposed monitoring plan to approve.`,
+            });
+          }
+          if (current.plan.revision !== command.revision) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Monitoring plan revision ${command.revision} was replaced by revision ${current.plan.revision}.`,
+            });
+          }
+          monitoring = {
+            ...current,
+            plan: { ...current.plan, approvedAt: occurredAt },
+            planStatus: "approved",
+          };
+          break;
+        }
+        case "project.monitoring.reanalyze":
+          // The old plan stays visible until the new proposal replaces it.
+          monitoring = { ...current, planStatus: "none" };
+          break;
+        case "project.monitoring.plan.propose":
+          monitoring = {
+            ...current,
+            plan: {
+              ...command.plan,
+              revision: (current.plan?.revision ?? 0) + 1,
+              proposedAt: occurredAt,
+              approvedAt: null,
+            },
+            planStatus: "proposed",
+          };
+          break;
+        case "project.monitoring.runtime.update":
+          monitoring = {
+            ...current,
+            ...(command.threadId !== undefined ? { threadId: command.threadId } : {}),
+            ...(command.turnLog !== undefined ? { turnLog: command.turnLog } : {}),
+            ...(command.lastCheckedAt !== undefined
+              ? { lastCheckedAt: command.lastCheckedAt }
+              : {}),
+            ...(command.planStatus !== undefined && current.planStatus === "approved"
+              ? { planStatus: command.planStatus }
+              : {}),
+          };
+          break;
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "project.workspace-control-updated",
+        payload: {
+          projectId: command.projectId,
+          workspaceControl: { ...control, monitoring },
           updatedAt: occurredAt,
         },
       };
@@ -1092,6 +1222,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           deletedAt: occurredAt,
         },
       };
+      // Deleting the monitoring thread must not strand the loop on a dead id;
+      // the next check creates a fresh one.
+      const monitoredProject = readModel.projects.find(
+        (project) => project.workspaceControl?.monitoring.threadId === command.threadId,
+      );
+      if (monitoredProject === undefined) return deletedEvent;
+      const control = monitoredProject.workspaceControl ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS;
+      return [
+        deletedEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "project",
+            aggregateId: monitoredProject.id,
+            occurredAt,
+            commandId: command.commandId,
+          })),
+          type: "project.workspace-control-updated",
+          payload: {
+            projectId: monitoredProject.id,
+            workspaceControl: { ...control, monitoring: { ...control.monitoring, threadId: null } },
+            updatedAt: occurredAt,
+          },
+        },
+      ];
     }
 
     case "thread.archive": {

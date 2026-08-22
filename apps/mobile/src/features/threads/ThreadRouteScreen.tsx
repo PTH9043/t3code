@@ -62,6 +62,7 @@ import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-s
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
+import { projectEnvironment } from "../../state/projects";
 import { threadEnvironment } from "../../state/threads";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import {
@@ -214,6 +215,36 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const approveMonitoringPlan = useAtomCommand(
+    projectEnvironment.approveWorkspaceMonitoringPlan,
+    "monitoring plan approve",
+  );
+  const [approvingMonitoringPlan, setApprovingMonitoringPlan] = useState(false);
+  // The project's monitoring thread shows the AI's watch plan for approval
+  // right above the composer, like the web client.
+  const monitoring = selectedThreadProject?.workspaceControl?.monitoring;
+  const proposedMonitoringPlan =
+    monitoring !== undefined &&
+    selectedThread !== null &&
+    monitoring.threadId === selectedThread.id &&
+    monitoring.planStatus === "proposed"
+      ? monitoring.plan
+      : null;
+  const handleApproveMonitoringPlan = useCallback(async () => {
+    if (!selectedThreadProject || !selectedThread || proposedMonitoringPlan === null) return;
+    setApprovingMonitoringPlan(true);
+    try {
+      await approveMonitoringPlan({
+        environmentId: selectedThread.environmentId,
+        input: {
+          projectId: selectedThreadProject.id,
+          revision: proposedMonitoringPlan.revision,
+        },
+      });
+    } finally {
+      setApprovingMonitoringPlan(false);
+    }
+  }, [approveMonitoringPlan, proposedMonitoringPlan, selectedThread, selectedThreadProject]);
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -803,6 +834,9 @@ function ThreadRouteContent(
           onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
           onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
           onRespondToApproval={requests.onRespondToApproval}
+          proposedMonitoringPlan={proposedMonitoringPlan}
+          approvingMonitoringPlan={approvingMonitoringPlan}
+          onApproveMonitoringPlan={handleApproveMonitoringPlan}
           onSelectUserInputOption={requests.onSelectUserInputOption}
           onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}
           onSubmitUserInput={requests.onSubmitUserInput}

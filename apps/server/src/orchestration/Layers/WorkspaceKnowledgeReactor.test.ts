@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+  DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   EventId,
   ProjectId,
@@ -55,6 +56,7 @@ const project: OrchestrationProjectShell = {
     longTermMemoryRoot: "F:/NewAutoUsage/workspaces/workspace-a/memory/long-term",
     conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
     agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+    monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   },
   createdAt: now,
   updatedAt: now,

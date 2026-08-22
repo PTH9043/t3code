@@ -187,6 +187,7 @@ describe("ServerSettings Workspace program permissions", () => {
       autoStart: false,
       autoDiagnosis: true,
       autoRestartAfterRepair: false,
+      monitoringAutoActions: false,
     });
   });
 

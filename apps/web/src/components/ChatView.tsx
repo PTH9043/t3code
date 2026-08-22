@@ -1229,9 +1229,16 @@ function ChatViewContent(props: ChatViewProps) {
   const answerMeetingRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
     reportFailure: false,
   });
+  const approveMonitoringPlan = useAtomCommand(projectEnvironment.approveWorkspaceMonitoringPlan, {
+    reportFailure: false,
+  });
   const cancelMeetingRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
     reportFailure: false,
   });
+  const cancelLiveMeetingRuns = useAtomCommand(
+    projectEnvironment.cancelLiveWorkspaceCollaborationRuns,
+    { reportFailure: false },
+  );
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
@@ -4663,12 +4670,72 @@ function ChatViewContent(props: ChatViewProps) {
       ),
     };
   }, [handleStopMeetingRun, liveMeetingRun]);
+  // This conversation is the project's monitoring thread and the AI has put a
+  // watch plan on the table: approval is a button here, not a chat reply — a
+  // reply cannot be validated as consent and would cost a turn to interpret.
+  const monitoring = activeProject?.workspaceControl?.monitoring;
+  const monitoringProjectId = activeProject?.id;
+  const monitoringPlanBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (
+      monitoring === undefined ||
+      monitoringProjectId === undefined ||
+      monitoring.threadId === null ||
+      monitoring.threadId !== activeThreadId ||
+      monitoring.planStatus !== "proposed" ||
+      monitoring.plan === null
+    ) {
+      return null;
+    }
+    const plan = monitoring.plan;
+    return {
+      id: `monitoring-plan:${plan.revision}`,
+      variant: "info",
+      icon: <EyeIcon />,
+      title: (
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="shrink-0 font-medium">감시 계획 제안 · {plan.revision}판</span>
+          <span className="min-w-0 truncate font-normal text-muted-foreground">
+            대상 {plan.targets.length} · 지표 {plan.metrics.length} · 플레이북{" "}
+            {plan.playbooks.length}
+            {" — 승인하면 이 계획대로 감시를 시작합니다"}
+          </span>
+        </span>
+      ),
+      className: "dark:shadow-none",
+      actions: (
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={() =>
+            void approveMonitoringPlan({
+              environmentId,
+              input: { projectId: monitoringProjectId, revision: plan.revision },
+            }).then((result) => {
+              if (result._tag !== "Success") {
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "감시 계획 승인 실패",
+                    description: "제어센터에서 계획 상태를 확인해 주세요.",
+                  }),
+                );
+              }
+            })
+          }
+        >
+          <CheckIcon />
+          승인
+        </Button>
+      ),
+    };
+  }, [activeThreadId, approveMonitoringPlan, environmentId, monitoring, monitoringProjectId]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const isUrgentSystemItem = (item: ComposerBannerStackItem) =>
       item.urgent === true || item.variant === "error" || item.variant === "warning";
     const urgentSystemItems = systemComposerBannerItems.filter(isUrgentSystemItem);
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const meetingRunItems = meetingRunBannerItem === null ? [] : [meetingRunBannerItem];
+    const monitoringPlanItems = monitoringPlanBannerItem === null ? [] : [monitoringPlanBannerItem];
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -4677,6 +4744,7 @@ function ChatViewContent(props: ChatViewProps) {
       return [
         ...urgentSystemItems,
         ...meetingRunItems,
+        ...monitoringPlanItems,
         ...backgroundLivenessItems,
         ...calmSystemItems,
         ...wokeThreadItems,
@@ -4686,6 +4754,7 @@ function ChatViewContent(props: ChatViewProps) {
     return [
       ...urgentSystemItems,
       ...meetingRunItems,
+      ...monitoringPlanItems,
       ...backgroundLivenessItems,
       ...calmSystemItems,
       ...wokeThreadItems,
@@ -4733,6 +4802,7 @@ function ChatViewContent(props: ChatViewProps) {
       ...parkedThreadItems,
     ];
   }, [
+    monitoringPlanBannerItem,
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
     handleRestoreThreadBranch,

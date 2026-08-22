@@ -1631,7 +1631,18 @@ export default function Sidebar() {
           input: { projectId: scopedProjectGroup.id },
         }),
   );
-  const scopedProjectRuntimeLabel =
+  const scopedProjectMonitoring = scopedProjectRuntime.data?.monitoring;
+  const scopedProjectMonitoringLabel =
+    scopedProjectMonitoring?.enabled !== true
+      ? ""
+      : scopedProjectMonitoring.planStatus === "proposed"
+        ? " · 모니터링: 감시 계획 승인 대기"
+        : scopedProjectMonitoring.planStatus === "approved"
+          ? " · 모니터링 감시 중"
+          : scopedProjectMonitoring.planStatus === "stale"
+            ? " · 모니터링: 재분석 권장"
+            : " · 모니터링 준비 중";
+  const scopedProjectRuntimeBaseLabel =
     scopedProjectRuntime.data?.attention === "error"
       ? "프로젝트 오류 확인 필요"
       : scopedProjectRuntime.data?.attention === "needs-input"
@@ -1641,6 +1652,7 @@ export default function Sidebar() {
           : scopedProjectRuntime.data?.lifecycleStatus === "working"
             ? "프로젝트 실행 중"
             : "프로젝트 운영 상태";
+  const scopedProjectRuntimeLabel = scopedProjectRuntimeBaseLabel + scopedProjectMonitoringLabel;
   const scopedProjectRuntimeDotClass =
     scopedProjectRuntime.data?.attention === "error"
       ? "bg-destructive"
@@ -3394,6 +3406,17 @@ export default function Sidebar() {
                           scopedProjectRuntimeDotClass,
                         )}
                       />
+                      {scopedProjectMonitoring?.enabled ? (
+                        <EyeIcon
+                          aria-hidden="true"
+                          className={cn(
+                            "absolute bottom-0.5 right-0.5 size-2.5 rounded-full bg-sidebar",
+                            scopedProjectMonitoring.planStatus === "approved"
+                              ? "text-success"
+                              : "text-warning",
+                          )}
+                        />
+                      ) : null}
                     </TooltipTrigger>
                     <TooltipPopup side="right">{scopedProjectRuntimeLabel}</TooltipPopup>
                   </Tooltip>

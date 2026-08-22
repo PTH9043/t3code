@@ -227,6 +227,21 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/permissions",
   },
   {
+    id: "workspace-program-monitoring-auto-actions",
+    title: "모니터링 자동 조치",
+    to: "/settings/permissions",
+  },
+  {
+    id: "self-monitoring-enabled",
+    title: "T3 Code 자체 감시",
+    to: "/settings/permissions",
+  },
+  {
+    id: "self-monitoring-project",
+    title: "자체 감시 수신 프로젝트",
+    to: "/settings/permissions",
+  },
+  {
     id: "archive",
     title: "보관된 대화",
     to: "/settings/archived",

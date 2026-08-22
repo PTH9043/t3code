@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
@@ -216,8 +216,26 @@ export const WorkspaceProgramPermissions = Schema.Struct({
   autoStart: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoDiagnosis: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   autoRestartAfterRepair: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * 프로그램 모니터링 모드 may run an approved playbook (restart, stop, start,
+   * repair) on its own. Off, the loop only observes and asks; `autoDiagnosis`
+   * still gates whether it may start an AI turn at all.
+   */
+  monitoringAutoActions: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type WorkspaceProgramPermissions = typeof WorkspaceProgramPermissions.Type;
+
+/**
+ * T3 Code watching itself (server event loop, memory, slow spans; desktop
+ * processes when the desktop is the host). Findings post into the monitoring
+ * thread of ONE project — the one named here, or the first monitored project
+ * when null — so a single server anomaly never spends several projects' budgets.
+ */
+export const SelfMonitoringSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  projectId: Schema.NullOr(ProjectId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+});
+export type SelfMonitoringSettings = typeof SelfMonitoringSettings.Type;
 export const DEFAULT_WORKSPACE_PROGRAM_PERMISSIONS: WorkspaceProgramPermissions = Schema.decodeSync(
   WorkspaceProgramPermissions,
 )({});
@@ -625,6 +643,7 @@ export const ServerSettings = Schema.Struct({
   workspaceProgramPermissions: WorkspaceProgramPermissions.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  selfMonitoring: SelfMonitoringSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -758,6 +777,13 @@ export const ServerSettingsPatch = Schema.Struct({
       autoStart: Schema.optionalKey(Schema.Boolean),
       autoDiagnosis: Schema.optionalKey(Schema.Boolean),
       autoRestartAfterRepair: Schema.optionalKey(Schema.Boolean),
+      monitoringAutoActions: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
+  selfMonitoring: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      projectId: Schema.optionalKey(Schema.NullOr(ProjectId)),
     }),
   ),
   providers: Schema.optionalKey(

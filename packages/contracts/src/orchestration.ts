@@ -271,6 +271,147 @@ export const DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS: WorkspaceAgentKnowledge
   maxOutputChars: 24_000,
 };
 
+/**
+ * 프로그램 모니터링 모드 — an always-on watch over the project's programs (and,
+ * when the server is told to, over T3 Code itself) that reports into ONE
+ * dedicated thread per project and asks there before acting.
+ *
+ * The AI writes the watch plan; the person approves it. Everything the loop
+ * needs to survive a restart lives here on the project: which thread is the
+ * monitoring thread, what the approved plan is, and when the last automatic
+ * turns ran (the budget is computed from `turnLog`, since turn origin is not
+ * persisted per turn).
+ */
+export const WorkspaceMonitoringAutonomy = Schema.Literals(["ask", "playbooks"]);
+export type WorkspaceMonitoringAutonomy = typeof WorkspaceMonitoringAutonomy.Type;
+
+export const WorkspaceMonitoringPlanStatus = Schema.Literals([
+  "none",
+  "proposed",
+  "approved",
+  "stale",
+]);
+export type WorkspaceMonitoringPlanStatus = typeof WorkspaceMonitoringPlanStatus.Type;
+
+export const WorkspaceMonitoringTargetKind = Schema.Literals([
+  "program",
+  "self-server",
+  "self-desktop",
+  "process",
+  "url",
+]);
+export type WorkspaceMonitoringTargetKind = typeof WorkspaceMonitoringTargetKind.Type;
+
+export const WorkspaceMonitoringTarget = Schema.Struct({
+  kind: WorkspaceMonitoringTargetKind,
+  label: TrimmedNonEmptyString.check(Schema.isMaxLength(120)),
+  programId: Schema.optionalKey(WorkspaceProgramId),
+  pid: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  startTimeMs: Schema.optionalKey(NonNegativeInt),
+  url: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(2_000))),
+});
+export type WorkspaceMonitoringTarget = typeof WorkspaceMonitoringTarget.Type;
+
+export const WorkspaceMonitoringMetricKind = Schema.Literals([
+  "cpu",
+  "memory",
+  "latency",
+  "slow-spans",
+  "health",
+  "regression",
+]);
+export type WorkspaceMonitoringMetricKind = typeof WorkspaceMonitoringMetricKind.Type;
+
+export const WorkspaceMonitoringTrendKind = Schema.Literals([
+  "slope",
+  "p95-vs-baseline",
+  "threshold",
+]);
+export type WorkspaceMonitoringTrendKind = typeof WorkspaceMonitoringTrendKind.Type;
+
+export const WorkspaceMonitoringMetric = Schema.Struct({
+  targetIndex: NonNegativeInt,
+  metric: WorkspaceMonitoringMetricKind,
+  trend: WorkspaceMonitoringTrendKind,
+  /** Window the trend is judged over. */
+  windowMin: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
+  /**
+   * Unit depends on `metric`+`trend`: percent for cpu threshold, bytes/min for
+   * memory slope, ms for latency, count/min for slow-spans, consecutive
+   * failures for health, non-zero exit count for regression, and a ratio
+   * (e.g. 1.5 = 50% worse) for p95-vs-baseline.
+   */
+  limit: Schema.Number.check(Schema.isFinite()),
+});
+export type WorkspaceMonitoringMetric = typeof WorkspaceMonitoringMetric.Type;
+
+export const WorkspaceMonitoringPlaybookAction = Schema.Literals([
+  "notify-only",
+  "restart-program",
+  "stop-program",
+  "start-program",
+  "repair-run",
+]);
+export type WorkspaceMonitoringPlaybookAction = typeof WorkspaceMonitoringPlaybookAction.Type;
+
+export const WorkspaceMonitoringPlaybook = Schema.Struct({
+  /** Index into `metrics`. */
+  when: NonNegativeInt,
+  action: WorkspaceMonitoringPlaybookAction,
+  programId: Schema.optionalKey(WorkspaceProgramId),
+});
+export type WorkspaceMonitoringPlaybook = typeof WorkspaceMonitoringPlaybook.Type;
+
+export const WorkspaceMonitoringPlan = Schema.Struct({
+  revision: NonNegativeInt,
+  proposedAt: IsoDateTime,
+  approvedAt: Schema.NullOr(IsoDateTime),
+  /** One paragraph the AI wrote about why this plan; shown in the UI verbatim. */
+  rationale: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4_000))),
+  targets: Schema.Array(WorkspaceMonitoringTarget).check(Schema.isMaxLength(16)),
+  metrics: Schema.Array(WorkspaceMonitoringMetric).check(Schema.isMaxLength(32)),
+  playbooks: Schema.Array(WorkspaceMonitoringPlaybook).check(Schema.isMaxLength(8)),
+});
+export type WorkspaceMonitoringPlan = typeof WorkspaceMonitoringPlan.Type;
+
+export const WorkspaceMonitoringTurnBudget = Schema.Struct({
+  perHour: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
+  perDay: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
+});
+export type WorkspaceMonitoringTurnBudget = typeof WorkspaceMonitoringTurnBudget.Type;
+
+/** The part the person edits directly. */
+export const WorkspaceMonitoringUserSettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  autonomy: WorkspaceMonitoringAutonomy,
+  checkIntervalSec: Schema.Int.check(Schema.isBetween({ minimum: 15, maximum: 3_600 })),
+  aiTurnBudget: WorkspaceMonitoringTurnBudget,
+});
+export type WorkspaceMonitoringUserSettings = typeof WorkspaceMonitoringUserSettings.Type;
+
+export const WorkspaceMonitoringSettings = Schema.Struct({
+  ...WorkspaceMonitoringUserSettings.fields,
+  threadId: Schema.NullOr(ThreadId),
+  plan: Schema.NullOr(WorkspaceMonitoringPlan),
+  planStatus: WorkspaceMonitoringPlanStatus,
+  /** Start times of automatic AI turns, newest last, trimmed to the last 24h. */
+  turnLog: Schema.Array(IsoDateTime).check(Schema.isMaxLength(60)),
+  lastCheckedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceMonitoringSettings = typeof WorkspaceMonitoringSettings.Type;
+
+export const DEFAULT_WORKSPACE_MONITORING_SETTINGS: WorkspaceMonitoringSettings = {
+  enabled: false,
+  autonomy: "ask",
+  checkIntervalSec: 60,
+  aiTurnBudget: { perHour: 4, perDay: 24 },
+  threadId: null,
+  plan: null,
+  planStatus: "none",
+  turnLog: [],
+  lastCheckedAt: null,
+};
+
 export const WorkspaceControlSettings = Schema.Struct({
   isolationMode: Schema.Literal("strict"),
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
@@ -280,6 +421,9 @@ export const WorkspaceControlSettings = Schema.Struct({
   agentKnowledge: WorkspaceAgentKnowledgeSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS)),
   ),
+  monitoring: WorkspaceMonitoringSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_MONITORING_SETTINGS)),
+  ),
 });
 export type WorkspaceControlSettings = typeof WorkspaceControlSettings.Type;
 
@@ -288,6 +432,7 @@ export const DEFAULT_WORKSPACE_CONTROL_SETTINGS: WorkspaceControlSettings = {
   longTermMemoryRoot: null,
   conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+  monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
 };
 
 export const WorkspaceKnowledgeKind = Schema.Literals([
@@ -1206,6 +1351,7 @@ export const WorkspaceRuntimeEvidenceAuthority = Schema.Literals([
   "orchestration",
   "program-supervisor",
   "scheduler",
+  "monitoring",
 ]);
 export type WorkspaceRuntimeEvidenceAuthority = typeof WorkspaceRuntimeEvidenceAuthority.Type;
 
@@ -1215,6 +1361,7 @@ export const WorkspaceRuntimeEvidenceSource = Schema.Literals([
   "incident",
   "collaboration",
   "schedule",
+  "monitoring",
 ]);
 export type WorkspaceRuntimeEvidenceSource = typeof WorkspaceRuntimeEvidenceSource.Type;
 
@@ -1245,6 +1392,18 @@ export const WorkspaceRuntimeCounts = Schema.Struct({
 });
 export type WorkspaceRuntimeCounts = typeof WorkspaceRuntimeCounts.Type;
 
+/** Monitoring state as the project row carries it — no reactor memory involved. */
+export const WorkspaceRuntimeMonitoring = Schema.Struct({
+  enabled: Schema.Boolean,
+  planStatus: WorkspaceMonitoringPlanStatus,
+  threadId: Schema.NullOr(ThreadId),
+  /** Automatic turns still allowed this hour / today under the person's budget. */
+  budgetRemainingHour: NonNegativeInt,
+  budgetRemainingDay: NonNegativeInt,
+  lastCheckedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkspaceRuntimeMonitoring = typeof WorkspaceRuntimeMonitoring.Type;
+
 export const WorkspaceRuntimeSnapshotInput = Schema.Struct({ projectId: ProjectId });
 export type WorkspaceRuntimeSnapshotInput = typeof WorkspaceRuntimeSnapshotInput.Type;
 
@@ -1259,6 +1418,7 @@ export const WorkspaceRuntimeSnapshot = Schema.Struct({
   latestCompletionAt: Schema.NullOr(IsoDateTime),
   /** Latest program, incident, collaboration, or schedule projection change. */
   operationsUpdatedAt: Schema.NullOr(IsoDateTime),
+  monitoring: WorkspaceRuntimeMonitoring,
   updatedAt: IsoDateTime,
 });
 export type WorkspaceRuntimeSnapshot = typeof WorkspaceRuntimeSnapshot.Type;
@@ -1697,7 +1857,35 @@ const ProjectWorkspaceControlUpdateCommand = Schema.Struct({
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
   conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
   agentKnowledge: Schema.optionalKey(WorkspaceAgentKnowledgeSettings),
+  /**
+   * Person-editable monitoring fields. Omitted → unchanged. The plan itself is
+   * editable too: a plan the person edits is approved by definition.
+   */
+  monitoring: Schema.optionalKey(
+    Schema.Struct({
+      ...WorkspaceMonitoringUserSettings.fields,
+      plan: Schema.optionalKey(Schema.NullOr(WorkspaceMonitoringPlan)),
+    }),
+  ),
   createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
+});
+
+/** Accept the plan the AI proposed into the monitoring thread. */
+const ProjectMonitoringPlanApproveCommand = Schema.Struct({
+  type: Schema.Literal("project.monitoring.plan.approve"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  /** Guards against approving a plan that was replaced while the card was open. */
+  revision: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
+/** Ask the AI to look at the project again and propose a fresh plan. */
+const ProjectMonitoringReanalyzeCommand = Schema.Struct({
+  type: Schema.Literal("project.monitoring.reanalyze"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  createdAt: IsoDateTime,
 });
 
 const ProjectRuntimeViewCommand = Schema.Struct({
@@ -2188,6 +2376,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectMetaUpdateCommand,
   ProjectWorkspaceControlUpdateCommand,
   ProjectRuntimeViewCommand,
+  ProjectMonitoringPlanApproveCommand,
+  ProjectMonitoringReanalyzeCommand,
   ProjectKnowledgeItemUpsertCommand,
   ProjectKnowledgeItemArchiveCommand,
   ProjectKnowledgeUsageRecordCommand,
@@ -2238,6 +2428,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectMetaUpdateCommand,
   ProjectWorkspaceControlUpdateCommand,
   ProjectRuntimeViewCommand,
+  ProjectMonitoringPlanApproveCommand,
+  ProjectMonitoringReanalyzeCommand,
   ProjectKnowledgeItemUpsertCommand,
   ProjectKnowledgeItemArchiveCommand,
   ProjectKnowledgeUsageRecordCommand,
@@ -2413,6 +2605,26 @@ const ProjectIncidentCollaborationRunRequestCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Server-only: the AI's parsed plan lands as "proposed". */
+const ProjectMonitoringPlanProposeCommand = Schema.Struct({
+  type: Schema.Literal("project.monitoring.plan.propose"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  plan: WorkspaceMonitoringPlan,
+});
+
+/** Server-only: bookkeeping the reactor writes back (thread, budget log, last check). */
+const ProjectMonitoringRuntimeUpdateCommand = Schema.Struct({
+  type: Schema.Literal("project.monitoring.runtime.update"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(Schema.NullOr(ThreadId)),
+  turnLog: Schema.optionalKey(Schema.Array(IsoDateTime).check(Schema.isMaxLength(60))),
+  lastCheckedAt: Schema.optionalKey(IsoDateTime),
+  /** Only "stale" is written here: the program set changed under an approved plan. */
+  planStatus: Schema.optionalKey(Schema.Literal("stale")),
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -2429,6 +2641,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ProjectProgramIntegrityUpdateCommand,
   ProjectIncidentUpsertCommand,
   ProjectIncidentCollaborationRunRequestCommand,
+  ProjectMonitoringPlanProposeCommand,
+  ProjectMonitoringRuntimeUpdateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 

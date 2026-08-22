@@ -31,6 +31,8 @@ type CommandInput<T extends CommandType> = Omit<
 export type CreateProjectInput = CommandInput<"project.create">;
 export type UpdateProjectInput = CommandInput<"project.meta.update">;
 export type UpdateWorkspaceControlInput = CommandInput<"project.workspace-control.update">;
+export type ApproveWorkspaceMonitoringPlanInput = CommandInput<"project.monitoring.plan.approve">;
+export type ReanalyzeWorkspaceMonitoringInput = CommandInput<"project.monitoring.reanalyze">;
 export type MarkWorkspaceRuntimeViewedInput = CommandInput<"project.runtime.view">;
 export type UpsertWorkspaceKnowledgeItemInput = CommandInput<"project.knowledge.item.upsert">;
 export type ArchiveWorkspaceKnowledgeItemInput = CommandInput<"project.knowledge.item.archive">;
@@ -140,6 +142,34 @@ export const updateWorkspaceControl: (input: UpdateWorkspaceControlInput) => Com
       commandId: yield* commandId(input),
     });
   });
+
+export const approveWorkspaceMonitoringPlan: (
+  input: ApproveWorkspaceMonitoringPlanInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.approveWorkspaceMonitoringPlan")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.monitoring.plan.approve",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
+
+export const reanalyzeWorkspaceMonitoring: (
+  input: ReanalyzeWorkspaceMonitoringInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.reanalyzeWorkspaceMonitoring")(
+  function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "project.monitoring.reanalyze",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  },
+);
 
 export const markWorkspaceRuntimeViewed: (input: MarkWorkspaceRuntimeViewedInput) => CommandEffect =
   Effect.fn("EnvironmentCommands.markWorkspaceRuntimeViewed")(function* (input) {

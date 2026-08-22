@@ -12,6 +12,7 @@ import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactor } from "../Services/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
 import { WorkspaceSchedulerReactor } from "../Services/WorkspaceSchedulerReactor.ts";
+import { WorkspaceMonitoringReactor } from "../Services/WorkspaceMonitoringReactor.ts";
 import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
 import { SessionRecoveryReactor } from "../Services/SessionRecoveryReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -25,6 +26,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const workspaceCollaborationReactor = yield* WorkspaceCollaborationReactor;
   const workspaceSchedulerReactor = yield* WorkspaceSchedulerReactor;
   const workspaceProgramSupervisor = yield* Effect.serviceOption(WorkspaceProgramSupervisor);
+  const workspaceMonitoringReactor = yield* Effect.serviceOption(WorkspaceMonitoringReactor);
   const sessionRecoveryReactor = yield* Effect.serviceOption(SessionRecoveryReactor);
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
@@ -38,6 +40,10 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* workspaceSchedulerReactor.start();
     if (workspaceProgramSupervisor._tag === "Some") {
       yield* workspaceProgramSupervisor.value.start();
+    }
+    // After the supervisor: monitoring consumes its program events and runs.
+    if (workspaceMonitoringReactor._tag === "Some") {
+      yield* workspaceMonitoringReactor.value.start();
     }
     // After the reactors above: the recovery turns it dispatches need the
     // command reactor's subscriptions live to reach a provider.

@@ -3,6 +3,7 @@ import type {
   ProjectId,
   WorkspaceCollaborationRun,
   WorkspaceIncident,
+  WorkspaceMonitoringSettings,
   WorkspaceProgram,
   WorkspaceProgramRun,
   WorkspaceRuntimeEvidence,
@@ -12,6 +13,8 @@ import type {
   WorkspaceRuntimeStatus,
   WorkspaceSchedule,
 } from "@t3tools/contracts";
+
+import { runtimeMonitoringView } from "./workspaceMonitoring.ts";
 
 const EVIDENCE_LIMIT = 50;
 const STATUS_PRIORITY: Readonly<Record<WorkspaceRuntimeStatus, number>> = {
@@ -33,6 +36,9 @@ export interface WorkspaceRuntimeProjectionInput {
   readonly incidents: ReadonlyArray<WorkspaceIncident>;
   readonly collaborationRuns: ReadonlyArray<WorkspaceCollaborationRun>;
   readonly schedules: ReadonlyArray<WorkspaceSchedule>;
+  readonly monitoring: WorkspaceMonitoringSettings;
+  /** Wall clock, for the monitoring budget window. */
+  readonly now: string;
 }
 
 function bounded(value: string | null | undefined, maxLength: number): string | null {
@@ -424,6 +430,7 @@ export function deriveWorkspaceRuntimeSnapshot(
     latestCompletionAt: completionAt,
     operationsUpdatedAt:
       operationTimestamps.length === 0 ? null : maxTimestamp(operationTimestamps),
+    monitoring: runtimeMonitoringView(input.monitoring, input.now),
     updatedAt: maxTimestamp([
       input.projectUpdatedAt,
       ...input.threads.map((thread) => thread.updatedAt),
