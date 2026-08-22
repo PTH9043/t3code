@@ -82,6 +82,7 @@ const runWith = (consecutiveHealthFailures: number, pid = 4242): WorkspaceProgra
   healthStatus: consecutiveHealthFailures > 0 ? "unhealthy" : "healthy",
   consecutiveHealthFailures,
   lastHealthCheckAt: T0,
+  lastHealthFailure: null,
   recentLogTail: "",
   updatedAt: T0,
 });
@@ -147,6 +148,10 @@ const makeHarness = (input: {
     const state = {
       assistantOutput: planOutput,
       subscribers: 0,
+      monitoredProcesses: [] as ReadonlyArray<{
+        readonly pid: number;
+        readonly startTimeMs?: number;
+      }>,
       processExitCode: 0,
       httpOk: true,
       httpCalls: 0,
@@ -271,6 +276,10 @@ const makeHarness = (input: {
           readHistory: () => Effect.die("unused"),
           refresh: Effect.die("unused"),
           validateProcessIdentity: () => Effect.succeed(true),
+          setMonitoredProcesses: (processes: typeof state.monitoredProcesses) =>
+            Effect.sync(() => {
+              state.monitoredProcesses = processes;
+            }),
           retry: Effect.die("unused"),
         } as unknown as ResourceTelemetry["Service"]),
       ),
@@ -424,6 +433,38 @@ it.effect(
         yield* reactor.tick;
         yield* reactor.tick;
         expect(h.state.subscribers).toBe(0);
+      }).pipe(Effect.provide(h.layer), Effect.scoped);
+    }),
+);
+
+it.effect(
+  "an approved plan's process targets are handed to the telemetry sidecar, and withdrawn when off",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({
+        monitoring: {
+          planStatus: "approved",
+          plan: {
+            ...approvedPlan([]),
+            targets: [
+              { kind: "program", label: "dev", programId },
+              { kind: "process", label: "worker", pid: 4_321, startTimeMs: 1_000 },
+              { kind: "process", label: "unpinned" },
+            ],
+          },
+        },
+      });
+      yield* TestClock.setTime(Date.parse(T0));
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceMonitoringReactor;
+        yield* reactor.start();
+        yield* reactor.tick;
+        // Only the target with a pid has something to follow.
+        expect(h.state.monitoredProcesses).toEqual([{ pid: 4_321, startTimeMs: 1_000 }]);
+
+        yield* h.patchMonitoring({ enabled: false });
+        yield* reactor.tick;
+        expect(h.state.monitoredProcesses).toEqual([]);
       }).pipe(Effect.provide(h.layer), Effect.scoped);
     }),
 );

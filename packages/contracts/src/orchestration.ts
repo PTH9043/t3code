@@ -1217,6 +1217,33 @@ export const WorkspaceProgramHealthStatus = Schema.Literals([
 ]);
 export type WorkspaceProgramHealthStatus = typeof WorkspaceProgramHealthStatus.Type;
 
+export const WorkspaceHealthCheckFailureReason = Schema.Literals([
+  /** No answer inside `timeoutSeconds`. */
+  "timeout",
+  /** Connection refused, reset, or otherwise failed before any answer. */
+  "connection",
+  /** Answered, but with an HTTP status outside the expected range. */
+  "unexpected-status",
+  /**
+   * The probe did time out, but the watching server's own event loop was
+   * stalled for longer than the limit (a dev build, a GC pause), so the program
+   * may well have answered in time. Recorded, never counted toward the failure
+   * threshold.
+   */
+  "inconclusive",
+]);
+export type WorkspaceHealthCheckFailureReason = typeof WorkspaceHealthCheckFailureReason.Type;
+
+/** Why the most recent health check failed; null while healthy or never checked. */
+export const WorkspaceHealthCheckFailure = Schema.Struct({
+  reason: WorkspaceHealthCheckFailureReason,
+  detail: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
+  /** Wall-clock time the probe took, from dispatch to settlement. */
+  elapsedMs: NonNegativeInt,
+  checkedAt: IsoDateTime,
+});
+export type WorkspaceHealthCheckFailure = typeof WorkspaceHealthCheckFailure.Type;
+
 export const WorkspaceProgramRun = Schema.Struct({
   id: WorkspaceProgramRunId,
   projectId: ProjectId,
@@ -1230,6 +1257,9 @@ export const WorkspaceProgramRun = Schema.Struct({
   healthStatus: WorkspaceProgramHealthStatus,
   consecutiveHealthFailures: NonNegativeInt,
   lastHealthCheckAt: Schema.NullOr(IsoDateTime),
+  lastHealthFailure: Schema.NullOr(WorkspaceHealthCheckFailure).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   recentLogTail: Schema.String.check(Schema.isMaxLength(65_536)),
   updatedAt: IsoDateTime,
 });

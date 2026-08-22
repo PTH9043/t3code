@@ -66,6 +66,12 @@
 
 `apps/mobile/src/features/threads/MonitoringPlanCard.tsx`가 모니터링 스레드에서 `planStatus === "proposed"`일 때 컴포저 위에 승인 카드를 띄우고 `projectEnvironment.approveWorkspaceMonitoringPlan`을 보냅니다. 질문(`user-input.requested`)은 기존 카드와 푸시 경로를 그대로 씁니다.
 
-## 아직 없는 것
+## 트리 밖 `process` 대상
 
-- `process` 대상은 텔레메트리 사이드카가 추적하는 프로세스 트리(서버가 띄운 것 + Electron) 안의 PID만 읽습니다. 트리 밖의 임의 PID를 `ResourceTelemetry.setExternalProcesses`에 가산 등록하는 경로는 아직 없습니다(현재 유일 호출자가 Electron PID를 교체 방식으로 넘김).
+텔레메트리 사이드카는 루트(서버 + 외부 루트)의 하위 트리만 샘플링하므로, 승인된 계획의 `process` 대상(pid, 선택적 startTimeMs)은 루트로 등록돼야 보입니다. 리액터가 매 tick 끝에 모든 프로젝트의 `process` 대상을 합쳐 `ResourceTelemetry.setMonitoredProcesses`로 넘기고(변경 시에만), 마지막 모니터가 꺼지면 빈 목록을 넘깁니다. `ResourceTelemetry`는 데스크톱의 Electron 루트와 모니터링 루트를 따로 들고 있다가 합집합을 사이드카의 교체식 `setExternalProcesses`에 보내므로, 한쪽이 바뀌어도 다른 쪽이 떨어지지 않습니다. 사이드카가 startTimeMs로 PID 재사용을 걸러 줍니다.
+
+등록된 루트와 그 하위는 카테고리 `external`로 분류돼 backend/allT3 집계와 자체 감시(`self-server`, `self-desktop`) 사용량에 섞이지 않습니다.
+
+## 상태검사 실패 사유
+
+`WorkspaceProgramRun.lastHealthFailure`(`reason` + `detail` + `elapsedMs`)가 마지막 실패를 기록합니다. `timeout`인데 실제 경과가 한도보다 1.5초 이상 더 길면 감시 서버의 이벤트 루프가 멈춰 있던 것이므로 `inconclusive`로 남기고 연속 실패 횟수에 넣지 않습니다(dev 빌드 버스트 때 나던 오탐). 장애 증거와 런타임 요약 digest에 사유가 그대로 들어가 AI가 가설 대신 사실로 판정합니다.

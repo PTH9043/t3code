@@ -24,6 +24,12 @@ export const ResourceTelemetryProcessCategory = Schema.Literals([
   "electron-utility",
   "resource-monitor",
   "unknown-t3",
+  /**
+   * A process outside T3 Code's own tree that 프로그램 모니터링 모드 asked the
+   * sidecar to follow (a `process` target of an approved watch plan), and its
+   * descendants. Never counted as server or desktop usage.
+   */
+  "external",
 ]);
 export type ResourceTelemetryProcessCategory = typeof ResourceTelemetryProcessCategory.Type;
 

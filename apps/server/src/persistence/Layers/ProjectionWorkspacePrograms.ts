@@ -1,5 +1,6 @@
 import {
   ProjectId,
+  WorkspaceHealthCheckFailure,
   WorkspaceIncident,
   WorkspaceIncidentId,
   WorkspaceIncidentStatus,
@@ -32,7 +33,14 @@ const ProgramDbRow = WorkspaceProgram.mapFields(
     enabled: Schema.Number,
   }),
 );
-const RunDbRow = WorkspaceProgramRun;
+const RunDbRow = WorkspaceProgramRun.mapFields(
+  Struct.assign({
+    lastHealthFailure: Schema.NullOr(Schema.fromJsonString(WorkspaceHealthCheckFailure)),
+  }),
+);
+const encodeHealthFailure = Schema.encodeUnknownSync(
+  Schema.fromJsonString(WorkspaceHealthCheckFailure),
+);
 const IncidentDbRow = WorkspaceIncident;
 const ProgramLookup = Schema.Struct({ projectId: ProjectId, programId: WorkspaceProgramId });
 const ProjectLookup = Schema.Struct({ projectId: ProjectId });
@@ -82,8 +90,9 @@ const make = Effect.gen(function* () {
     exit_code AS "exitCode", exit_signal AS "exitSignal",
     health_status AS "healthStatus",
     consecutive_health_failures AS "consecutiveHealthFailures",
-    last_health_check_at AS "lastHealthCheckAt", recent_log_tail AS "recentLogTail",
-    updated_at AS "updatedAt"
+    last_health_check_at AS "lastHealthCheckAt",
+    last_health_failure_json AS "lastHealthFailure",
+    recent_log_tail AS "recentLogTail", updated_at AS "updatedAt"
   `;
   const incidentColumns = sql`
     incident_id AS "id", project_id AS "projectId", program_id AS "programId",
@@ -262,11 +271,12 @@ const make = Effect.gen(function* () {
       INSERT INTO projection_workspace_program_runs (
         run_id, project_id, program_id, status, pid, started_at, stopped_at,
         exit_code, exit_signal, health_status, consecutive_health_failures,
-        last_health_check_at, recent_log_tail, updated_at
+        last_health_check_at, last_health_failure_json, recent_log_tail, updated_at
       ) VALUES (
         ${run.id}, ${run.projectId}, ${run.programId}, ${run.status}, ${run.pid},
         ${run.startedAt}, ${run.stoppedAt}, ${run.exitCode}, ${run.exitSignal},
         ${run.healthStatus}, ${run.consecutiveHealthFailures}, ${run.lastHealthCheckAt},
+        ${run.lastHealthFailure === null ? null : encodeHealthFailure(run.lastHealthFailure)},
         ${run.recentLogTail}, ${run.updatedAt}
       )
       ON CONFLICT(run_id) DO UPDATE SET
@@ -275,6 +285,7 @@ const make = Effect.gen(function* () {
         health_status = excluded.health_status,
         consecutive_health_failures = excluded.consecutive_health_failures,
         last_health_check_at = excluded.last_health_check_at,
+        last_health_failure_json = excluded.last_health_failure_json,
         recent_log_tail = excluded.recent_log_tail, updated_at = excluded.updated_at
       WHERE projection_workspace_program_runs.project_id = excluded.project_id
         AND projection_workspace_program_runs.program_id = excluded.program_id

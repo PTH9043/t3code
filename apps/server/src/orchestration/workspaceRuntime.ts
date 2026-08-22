@@ -241,7 +241,9 @@ export function deriveWorkspaceRuntimeSnapshot(
           detail:
             run.status === "failed"
               ? `프로그램이 오류로 종료되었습니다${run.exitCode === null ? "." : ` (종료 코드 ${run.exitCode}).`}`
-              : "상태검사에 응답하지 않습니다.",
+              : run.lastHealthFailure === null
+                ? "상태검사에 응답하지 않습니다."
+                : `상태검사에 응답하지 않습니다. 실패 사유: ${run.lastHealthFailure.detail}`,
           observedAt: run.updatedAt,
         }),
       );
@@ -255,7 +257,10 @@ export function deriveWorkspaceRuntimeSnapshot(
           source: "program",
           sourceId: run.programId,
           title,
-          detail: "프로그램 상태가 불안정하여 확인이 필요합니다.",
+          detail:
+            run.lastHealthFailure === null
+              ? "프로그램 상태가 불안정하여 확인이 필요합니다."
+              : `프로그램 상태가 불안정하여 확인이 필요합니다. 마지막 실패: ${run.lastHealthFailure.detail}`,
           observedAt: run.updatedAt,
         }),
       );

@@ -288,7 +288,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
         expectedStatusMin: 200,
         expectedStatusMax: 399,
         intervalSeconds: 30,
-        timeoutSeconds: 5,
+        timeoutSeconds: 10,
         failureThreshold: 3,
       };
     }
@@ -301,7 +301,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
         host,
         port,
         intervalSeconds: 30,
-        timeoutSeconds: 5,
+        timeoutSeconds: 10,
         failureThreshold: 3,
       };
     }
@@ -597,6 +597,14 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
                       PID {run?.pid ?? "-"} · 시작 {timestamp(run?.startedAt ?? null)} · 상태검사{" "}
                       {timestamp(run?.lastHealthCheckAt ?? null)}
                     </p>
+                    {run?.lastHealthFailure ? (
+                      <p className="mt-1 text-xs text-warning">
+                        {run.lastHealthFailure.reason === "inconclusive"
+                          ? "판정 보류"
+                          : "실패 사유"}
+                        : {run.lastHealthFailure.detail}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {running ? (

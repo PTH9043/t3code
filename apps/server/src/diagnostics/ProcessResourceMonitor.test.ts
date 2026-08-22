@@ -112,6 +112,7 @@ describe("ProcessResourceMonitor", () => {
         readHistory: () => Effect.succeed(history),
         refresh: Effect.die("unused"),
         validateProcessIdentity: () => Effect.die("unused"),
+        setMonitoredProcesses: () => Effect.void,
         retry: Effect.die("unused"),
       };
       const layer = ProcessResourceMonitor.layer.pipe(

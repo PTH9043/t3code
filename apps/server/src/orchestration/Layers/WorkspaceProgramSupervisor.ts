@@ -12,6 +12,7 @@ import {
   type OrchestrationEvent,
   type ProjectId,
   type WorkspaceCollaborationRun,
+  type WorkspaceHealthCheckFailure,
   type WorkspaceIncident,
   type WorkspaceProgram,
   type WorkspaceProgramCandidate,
@@ -90,10 +91,47 @@ const PackageManifest = Schema.Struct({
 });
 const decodePackageManifest = Schema.decodeUnknownEffect(Schema.fromJsonString(PackageManifest));
 
-class WorkspaceHealthCheckError extends Data.TaggedError("WorkspaceHealthCheckError")<{
+export class WorkspaceHealthCheckError extends Data.TaggedError("WorkspaceHealthCheckError")<{
   readonly message: string;
+  readonly reason: "timeout" | "connection" | "unexpected-status";
   readonly cause?: unknown;
 }> {}
+
+/**
+ * A timed-out probe that took this much longer than its limit was not timed
+ * by a running event loop: the loop was stalled (a dev build, a GC pause) and
+ * the timer fired late, before any answer that arrived meanwhile could be
+ * seen. Such a result says nothing about the program.
+ */
+const HEALTH_CHECK_STALL_TOLERANCE_MS = 1_500;
+
+export function classifyHealthFailure(input: {
+  readonly failure: WorkspaceHealthCheckError;
+  readonly timeoutSeconds: number;
+  readonly elapsedMs: number;
+  readonly checkedAt: string;
+}): WorkspaceHealthCheckFailure {
+  const limitMs = input.timeoutSeconds * 1_000;
+  const stalled =
+    input.failure.reason === "timeout" &&
+    input.elapsedMs > limitMs + HEALTH_CHECK_STALL_TOLERANCE_MS;
+  const seconds = (ms: number) => `${(ms / 1_000).toFixed(1)}초`;
+  const causeMessage =
+    input.failure.cause instanceof Error && input.failure.cause.message
+      ? `: ${input.failure.cause.message.slice(0, 300)}`
+      : "";
+  const detail = stalled
+    ? `${input.failure.message} — 한도 ${seconds(limitMs)}인데 검사에 ${seconds(input.elapsedMs)}가 걸렸습니다. 감시하는 서버 자체가 멈춰 있던 구간이라 프로그램 상태로 보지 않습니다.`
+    : input.failure.reason === "timeout"
+      ? `${input.failure.message} (한도 ${seconds(limitMs)}, 경과 ${seconds(input.elapsedMs)})`
+      : `${input.failure.message}${causeMessage} (경과 ${seconds(input.elapsedMs)})`;
+  return {
+    reason: stalled ? "inconclusive" : input.failure.reason,
+    detail,
+    elapsedMs: Math.max(0, Math.round(input.elapsedMs)),
+    checkedAt: input.checkedAt,
+  };
+}
 
 type ProcessExit = PtyAdapter.PtyExitEvent;
 
@@ -262,17 +300,30 @@ function healthCheckEffect(
       ),
       Effect.timeoutOption(Duration.seconds(check.timeoutSeconds)),
       Effect.mapError(
-        (cause) => new WorkspaceHealthCheckError({ message: "HTTP 상태검사 연결 실패", cause }),
+        (cause) =>
+          new WorkspaceHealthCheckError({
+            message: "HTTP 상태검사 연결 실패",
+            reason: "connection",
+            cause,
+          }),
       ),
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(new WorkspaceHealthCheckError({ message: "HTTP 상태검사 시간 초과" })),
+            Effect.fail(
+              new WorkspaceHealthCheckError({
+                message: "HTTP 상태검사 시간 초과",
+                reason: "timeout",
+              }),
+            ),
           onSome: (status) =>
             status >= check.expectedStatusMin && status <= check.expectedStatusMax
               ? Effect.succeed(`HTTP ${status}`)
               : Effect.fail(
-                  new WorkspaceHealthCheckError({ message: `예상하지 않은 HTTP ${status}` }),
+                  new WorkspaceHealthCheckError({
+                    message: `예상하지 않은 HTTP ${status}`,
+                    reason: "unexpected-status",
+                  }),
                 ),
         }),
       ),
@@ -291,11 +342,21 @@ function healthCheckEffect(
     socket.setTimeout(check.timeoutSeconds * 1_000);
     socket.once("connect", () => done(Effect.succeed(`TCP ${check.host}:${check.port}`)));
     socket.once("timeout", () =>
-      done(Effect.fail(new WorkspaceHealthCheckError({ message: "TCP 상태검사 시간 초과" }))),
+      done(
+        Effect.fail(
+          new WorkspaceHealthCheckError({ message: "TCP 상태검사 시간 초과", reason: "timeout" }),
+        ),
+      ),
     );
     socket.once("error", (cause) =>
       done(
-        Effect.fail(new WorkspaceHealthCheckError({ message: "TCP 상태검사 연결 실패", cause })),
+        Effect.fail(
+          new WorkspaceHealthCheckError({
+            message: "TCP 상태검사 연결 실패",
+            reason: "connection",
+            cause,
+          }),
+        ),
       ),
     );
     return Effect.sync(() => socket.destroy());
@@ -698,6 +759,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
       healthStatus: "unknown",
       consecutiveHealthFailures: 0,
       lastHealthCheckAt: null,
+      lastHealthFailure: null,
       recentLogTail: "",
       updatedAt: startedAt,
     };
@@ -1185,21 +1247,45 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           state.program.healthCheck === null
         )
           return;
-        const checkedAt = yield* nowIso;
+        const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
         const result = yield* Effect.result(
           healthCheckEffect(state.program.healthCheck, httpClient),
         );
+        const checkedAt = yield* nowIso;
         if (result._tag === "Success") {
           state.run = {
             ...state.run,
             healthStatus: "healthy",
             consecutiveHealthFailures: 0,
             lastHealthCheckAt: checkedAt,
+            lastHealthFailure: null,
             updatedAt: checkedAt,
           };
           yield* dispatchRun(state.run);
           const incidentId = restartIncidentByProgram.get(item.key);
           if (incidentId !== undefined) yield* resolveIncident(state.program.projectId, incidentId);
+          return;
+        }
+        const failure = classifyHealthFailure({
+          failure: result.failure,
+          timeoutSeconds: state.program.healthCheck.timeoutSeconds,
+          elapsedMs: Date.parse(checkedAt) - startedAtMs,
+          checkedAt,
+        });
+        if (failure.reason === "inconclusive") {
+          // The watcher, not the program, was late. Keep the streak where it
+          // was so a stalled server never reaches the threshold on its own.
+          yield* Effect.logInfo("Program health check inconclusive: watcher stalled", {
+            programId: state.program.id,
+            elapsedMs: failure.elapsedMs,
+          });
+          state.run = {
+            ...state.run,
+            lastHealthCheckAt: checkedAt,
+            lastHealthFailure: failure,
+            updatedAt: checkedAt,
+          };
+          yield* dispatchRun(state.run);
           return;
         }
         const failures = state.run.consecutiveHealthFailures + 1;
@@ -1210,11 +1296,12 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           healthStatus: failures >= threshold ? "unhealthy" : "degraded",
           consecutiveHealthFailures: failures,
           lastHealthCheckAt: checkedAt,
+          lastHealthFailure: failure,
           updatedAt: checkedAt,
         };
         yield* dispatchRun(state.run);
         if (crossedThreshold) {
-          const detail = conciseFailure(result.failure);
+          const detail = `실패 사유: ${failure.detail}`;
           const repairIncidentId = restartIncidentByProgram.get(item.key);
           if (repairIncidentId !== undefined) {
             yield* failRepairVerification({
@@ -1229,7 +1316,11 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
             run: state.run,
             kind: "health-check",
             severity: "critical",
-            fingerprint: fingerprint(["health-check", state.program.healthCheck.kind, detail]),
+            fingerprint: fingerprint([
+              "health-check",
+              state.program.healthCheck.kind,
+              failure.reason,
+            ]),
             summary: `${state.program.name} 상태검사가 ${threshold}회 연속 실패했습니다.`,
             evidence: `${detail}\n\n최근 로그:\n${state.run.recentLogTail}`,
           });

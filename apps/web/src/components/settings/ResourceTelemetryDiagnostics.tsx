@@ -133,6 +133,8 @@ function categoryLabel(category: ResourceTelemetryProcessCategory): string {
       return "Electron 유틸리티";
     case "resource-monitor":
       return "모니터";
+    case "external":
+      return "외부 감시 대상";
     case "unknown-t3":
       return "T3 프로세스";
   }

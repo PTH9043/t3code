@@ -177,6 +177,7 @@ describe("ProcessDiagnostics", () => {
             }),
           ),
           validateProcessIdentity: () => Effect.die("unused"),
+          setMonitoredProcesses: () => Effect.void,
           retry: Effect.die("unused"),
         }),
       );

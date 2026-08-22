@@ -33,8 +33,10 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
 import {
+  classifyHealthFailure,
   isWorkspaceRepairRunApproved,
   makeWorkspaceProgramSupervisor,
+  WorkspaceHealthCheckError,
 } from "./WorkspaceProgramSupervisor.ts";
 import {
   buildInitialWorkspaceTaskGraph,
@@ -517,3 +519,58 @@ it.effect(
       );
     }),
 );
+
+it("classifies health-check failures and treats a late timeout as the watcher's, not the program's", () => {
+  const checkedAt = "2026-08-22T00:00:10.000Z";
+  const timeout = new WorkspaceHealthCheckError({
+    message: "HTTP 상태검사 시간 초과",
+    reason: "timeout",
+  });
+
+  // A timeout that settled near its limit is a real timeout and counts.
+  const real = classifyHealthFailure({
+    failure: timeout,
+    timeoutSeconds: 5,
+    elapsedMs: 5_120,
+    checkedAt,
+  });
+  expect(real.reason).toBe("timeout");
+  expect(real.detail).toContain("한도 5.0초");
+  expect(real.detail).toContain("경과 5.1초");
+
+  // One that settled seconds after its limit was timed by a stalled event loop.
+  const stalled = classifyHealthFailure({
+    failure: timeout,
+    timeoutSeconds: 5,
+    elapsedMs: 9_300,
+    checkedAt,
+  });
+  expect(stalled.reason).toBe("inconclusive");
+  expect(stalled.detail).toContain("감시하는 서버 자체가 멈춰");
+  expect(stalled.elapsedMs).toBe(9_300);
+
+  // Refusals carry the socket's own message; the elapsed time never promotes them to inconclusive.
+  const refused = classifyHealthFailure({
+    failure: new WorkspaceHealthCheckError({
+      message: "TCP 상태검사 연결 실패",
+      reason: "connection",
+      cause: new Error("connect ECONNREFUSED 127.0.0.1:3000"),
+    }),
+    timeoutSeconds: 5,
+    elapsedMs: 12_000,
+    checkedAt,
+  });
+  expect(refused.reason).toBe("connection");
+  expect(refused.detail).toContain("ECONNREFUSED");
+
+  const status = classifyHealthFailure({
+    failure: new WorkspaceHealthCheckError({
+      message: "예상하지 않은 HTTP 503",
+      reason: "unexpected-status",
+    }),
+    timeoutSeconds: 5,
+    elapsedMs: 40,
+    checkedAt,
+  });
+  expect(status.reason).toBe("unexpected-status");
+});

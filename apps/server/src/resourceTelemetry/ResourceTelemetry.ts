@@ -1,6 +1,7 @@
 import type {
   DesktopHostTelemetrySnapshot,
   HostPowerSnapshot,
+  ResourceMonitorExternalProcess,
   ResourceMonitorSnapshotEvent,
   ResourceTelemetryHealth,
   ResourceTelemetryHistoryInput,
@@ -70,6 +71,15 @@ export class ResourceTelemetry extends Context.Service<
     readonly validateProcessIdentity: (
       identity: ResourceTelemetryProcessIdentity,
     ) => Effect.Effect<boolean, ResourceTelemetryRefreshFailed>;
+    /**
+     * Processes outside T3 Code's own tree that the sidecar should follow as
+     * extra roots (프로그램 모니터링 모드's `process` targets). Replaces the
+     * previous monitored set only; the desktop's Electron root is kept
+     * alongside, so a monitor turning off returns the sidecar to Electron-only.
+     */
+    readonly setMonitoredProcesses: (
+      processes: ReadonlyArray<ResourceMonitorExternalProcess>,
+    ) => Effect.Effect<void>;
     readonly retry: Effect.Effect<ResourceTelemetryRetryResult>;
   }
 >()("t3/resourceTelemetry/ResourceTelemetry") {}
@@ -149,22 +159,38 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
   const mutex = yield* Semaphore.make(1);
   const changes = yield* PubSub.sliding<ResourceTelemetrySnapshot>(8);
   const initialReadAt = yield* DateTime.now;
+  // The sidecar takes one replace-all list of external roots. Two owners feed
+  // it — the desktop (its Electron root) and monitoring — so each keeps its own
+  // set here and every change pushes the union.
+  const electronRoots = yield* Ref.make<ReadonlyArray<ResourceMonitorExternalProcess>>([]);
+  const monitoredRoots = yield* Ref.make<ReadonlyArray<ResourceMonitorExternalProcess>>([]);
+  const pushExternalProcesses = Effect.gen(function* () {
+    const electron = yield* Ref.get(electronRoots);
+    const electronPids = new Set(electron.map((process) => process.pid));
+    const monitored = (yield* Ref.get(monitoredRoots)).filter(
+      (process) => !electronPids.has(process.pid),
+    );
+    yield* nativeClient.setExternalProcesses([...electron, ...monitored]).pipe(Effect.ignore);
+  });
+  const setElectronRoot = (snapshot: DesktopHostTelemetrySnapshot) =>
+    Effect.gen(function* () {
+      const electronRoot = snapshot.electronProcesses.find(
+        (process) => process.pid === snapshot.electronPid,
+      );
+      yield* Ref.set(electronRoots, [
+        {
+          pid: snapshot.electronPid,
+          ...(electronRoot === undefined ? {} : { startTimeMs: electronRoot.creationTimeMs }),
+        },
+      ]);
+      yield* pushExternalProcesses;
+    });
   const nativeHealthSubscription = yield* nativeClient.subscribeHealth;
   const desktopHealthSubscription = yield* desktopReceiver.subscribeHealth;
   const desktopSubscription = yield* desktopReceiver.subscribe;
   const initialDesktop = desktopSubscription.latest;
   if (Option.isSome(initialDesktop)) {
-    const electronRoot = initialDesktop.value.electronProcesses.find(
-      (process) => process.pid === initialDesktop.value.electronPid,
-    );
-    yield* nativeClient
-      .setExternalProcesses([
-        {
-          pid: initialDesktop.value.electronPid,
-          ...(electronRoot === undefined ? {} : { startTimeMs: electronRoot.creationTimeMs }),
-        },
-      ])
-      .pipe(Effect.ignore);
+    yield* setElectronRoot(initialDesktop.value);
     yield* nativeClient.setHostPowerState(initialDesktop.value.power).pipe(Effect.ignore);
   }
   const initialNativeHealth = nativeHealthSubscription.latest;
@@ -266,9 +292,13 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
           desktopReceiver.health,
           attribution.snapshot,
         ]);
+        // The sidecar echoes every external root it follows; only the ones the
+        // desktop registered are Electron. The rest are monitoring's.
+        const monitoredPids = new Set((yield* Ref.get(monitoredRoots)).map((p) => p.pid));
         const recordedElectronRoots = Option.match(nativeSnapshot, {
           onNone: () => [],
-          onSome: (snapshot) => snapshot.externalProcesses ?? [],
+          onSome: (snapshot) =>
+            (snapshot.externalProcesses ?? []).filter((process) => !monitoredPids.has(process.pid)),
         });
         const electronRootPids = new Set(recordedElectronRoots.map((process) => process.pid));
         Option.match(desktopSnapshot, {
@@ -288,6 +318,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
           desktopSnapshot,
           electronRootPids,
           electronRootStartTimes,
+          externalRootPids: monitoredPids,
           previous: current.previous,
           counters: current.counters,
           updatePrevious: input.updatePrevious,
@@ -334,17 +365,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
     rebuild({ nativeSnapshot: snapshot, updatePrevious: true });
   const ingestDesktop = (snapshot: DesktopHostTelemetrySnapshot) =>
     Effect.gen(function* () {
-      const electronRoot = snapshot.electronProcesses.find(
-        (process) => process.pid === snapshot.electronPid,
-      );
-      yield* nativeClient
-        .setExternalProcesses([
-          {
-            pid: snapshot.electronPid,
-            ...(electronRoot === undefined ? {} : { startTimeMs: electronRoot.creationTimeMs }),
-          },
-        ])
-        .pipe(Effect.ignore);
+      yield* setElectronRoot(snapshot);
       yield* nativeClient.setHostPowerState(snapshot.power).pipe(Effect.ignore);
       return yield* rebuild({
         desktopSnapshot: snapshot,
@@ -482,6 +503,10 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
       ),
     );
 
+  const setMonitoredProcesses: ResourceTelemetry["Service"]["setMonitoredProcesses"] = (
+    processes,
+  ) => Ref.set(monitoredRoots, [...processes]).pipe(Effect.andThen(pushExternalProcesses));
+
   return ResourceTelemetry.of({
     latest,
     changes: liveChanges,
@@ -489,6 +514,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
     readHistory,
     refresh,
     validateProcessIdentity,
+    setMonitoredProcesses,
     retry: nativeClient.retry.pipe(
       Effect.zip(Ref.get(state)),
       Effect.map(

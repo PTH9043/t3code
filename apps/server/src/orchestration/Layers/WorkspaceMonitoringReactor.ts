@@ -5,6 +5,7 @@ import {
   ThreadId,
   type OrchestrationEvent,
   type ProjectId,
+  type ResourceMonitorExternalProcess,
   type ResourceTelemetrySnapshot,
   type WorkspaceIncident,
   type WorkspaceMonitoringMetric,
@@ -97,6 +98,8 @@ interface ProjectMonitor {
   regression: { readonly failures: number; readonly detail: string; readonly at: number } | null;
   /** HTTP probe state per probed URL (url targets and program health-check URLs). */
   readonly probes: Map<string, { consecutiveFailures: number; latencyMs: number | null }>;
+  /** `process` targets of the approved plan, handed to the telemetry sidecar as extra roots. */
+  externalProcesses: ReadonlyArray<ResourceMonitorExternalProcess>;
 }
 
 function freshMonitor(): ProjectMonitor {
@@ -115,7 +118,25 @@ function freshMonitor(): ProjectMonitor {
     regressionInFlight: false,
     regression: null,
     probes: new Map(),
+    externalProcesses: [],
   };
+}
+
+/** The plan's `process` targets as sidecar roots; a target without a pid has nothing to follow. */
+function externalProcessesOf(
+  plan: WorkspaceMonitoringPlan | null,
+): ReadonlyArray<ResourceMonitorExternalProcess> {
+  if (plan === null) return [];
+  return plan.targets.flatMap((target) =>
+    target.kind !== "process" || target.pid === undefined
+      ? []
+      : [
+          {
+            pid: target.pid,
+            ...(target.startTimeMs === undefined ? {} : { startTimeMs: target.startTimeMs }),
+          },
+        ],
+  );
 }
 
 const PROBE_TIMEOUT = Duration.seconds(5);
@@ -1020,6 +1041,8 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       return;
     }
     const monitor = monitorFor(projectId);
+    monitor.externalProcesses =
+      settings.planStatus === "approved" ? externalProcessesOf(settings.plan) : [];
     const nowMs = Date.parse(yield* nowIso);
     if (nowMs - monitor.lastEvaluatedAt < settings.checkIntervalSec * 1_000) return;
     monitor.lastEvaluatedAt = nowMs;
@@ -1096,8 +1119,25 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     ),
   );
 
+  // The sidecar only samples subtrees of its roots, so a `process` target
+  // outside T3 Code's tree is invisible until registered. Pushed as one union
+  // across projects whenever it changes; empty once the last monitor is off.
+  let pushedExternalKey = "";
+  const syncExternalProcesses = Effect.gen(function* () {
+    const byPid = new Map<number, ResourceMonitorExternalProcess>();
+    for (const monitor of monitors.values()) {
+      for (const process of monitor.externalProcesses) byPid.set(process.pid, process);
+    }
+    const processes = [...byPid.values()].toSorted((left, right) => left.pid - right.pid);
+    const key = processes.map((p) => `${p.pid}:${p.startTimeMs ?? ""}`).join(",");
+    if (key === pushedExternalKey) return;
+    pushedExternalKey = key;
+    yield* telemetry.setMonitoredProcesses(processes);
+  });
+
   const tickUnlocked = Effect.gen(function* () {
     if (enabledProjects.size === 0) {
+      yield* syncExternalProcesses;
       yield* releaseTelemetry;
       return;
     }
@@ -1113,6 +1153,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         }),
       );
     }
+    yield* syncExternalProcesses;
   });
   const tick = tickMutex
     .withPermit(tickUnlocked)

@@ -49,6 +49,11 @@ export interface MergeProcessesInput {
   readonly desktopSnapshot: Option.Option<DesktopHostTelemetrySnapshot>;
   readonly electronRootPids?: ReadonlySet<number>;
   readonly electronRootStartTimes?: ReadonlyMap<number, number>;
+  /**
+   * Roots the sidecar follows on behalf of 프로그램 모니터링 모드. Their subtrees
+   * are categorised `external` so they never inflate server or desktop usage.
+   */
+  readonly externalRootPids?: ReadonlySet<number>;
   readonly previous: ReadonlyMap<string, ProcessState>;
   readonly counters: TelemetryCounters;
   readonly updatePrevious: boolean;
@@ -93,8 +98,9 @@ function finiteNonNegative(value: number): number {
 
 function categoryGroup(
   category: ResourceTelemetryProcessCategory,
-): "backend" | "electron" | "monitor" {
+): "backend" | "electron" | "monitor" | "external" {
   if (category === "resource-monitor") return "monitor";
+  if (category === "external") return "external";
   if (category.startsWith("electron-")) return "electron";
   return "backend";
 }
@@ -186,16 +192,16 @@ function processDepths(
   return depths;
 }
 
-function isElectronDescendant(
+function isDescendantOf(
   pid: number,
   processesByPid: ReadonlyMap<number, ResourceMonitorProcessSample>,
-  electronPids: ReadonlySet<number>,
+  ancestorPids: ReadonlySet<number>,
 ): boolean {
   const visited = new Set<number>();
   let currentPid = pid;
   while (!visited.has(currentPid)) {
     visited.add(currentPid);
-    if (electronPids.has(currentPid)) return true;
+    if (ancestorPids.has(currentPid)) return true;
     const current = processesByPid.get(currentPid);
     if (!current || current.ppid <= 0 || current.ppid === currentPid) return false;
     currentPid = current.ppid;
@@ -305,6 +311,8 @@ function applyLifecycleCounters(input: {
       case "monitor":
         monitor = incrementCounters(monitor, processDelta);
         break;
+      case "external":
+        continue;
     }
     allT3 = incrementCounters(allT3, processDelta);
   }
@@ -322,6 +330,8 @@ function applyLifecycleCounters(input: {
       case "monitor":
         monitor = incrementCounters(monitor, { processStarts: 1 });
         break;
+      case "external":
+        continue;
     }
     allT3 = incrementCounters(allT3, { processStarts: 1 });
   }
@@ -339,6 +349,8 @@ function applyLifecycleCounters(input: {
       case "monitor":
         monitor = incrementCounters(monitor, { processExits: 1 });
         break;
+      case "external":
+        continue;
     }
     allT3 = incrementCounters(allT3, { processExits: 1 });
   }
@@ -456,7 +468,12 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
       })
       .toSorted((left, right) => left - right),
   ].filter((pid, index, values) => values.indexOf(pid) === index);
-  const rootPids = [input.serverPid, ...electronRootPids];
+  const externalRootPids = new Set(
+    [...(input.externalRootPids ?? [])].filter(
+      (pid) => processesByPid.has(pid) && !electronPids.has(pid) && pid !== input.serverPid,
+    ),
+  );
+  const rootPids = [input.serverPid, ...electronRootPids, ...externalRootPids];
   const roots = new Set(rootPids);
   const depths = processDepths(processes, roots);
   const childrenByParent = new Map<number, number[]>();
@@ -506,9 +523,11 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
             ? "electron-main"
             : electronMetric
               ? electronCategory(electronMetric)
-              : isElectronDescendant(process.pid, processesByPid, electronPids)
+              : isDescendantOf(process.pid, processesByPid, electronPids)
                 ? inferredElectronCategory(process)
-                : "server-child";
+                : isDescendantOf(process.pid, processesByPid, externalRootPids)
+                  ? "external"
+                  : "server-child";
     const firstSeenAt = previous?.process.firstSeenAt ?? DateTime.makeUnsafe(sampledAtMs);
     const preservePreviousRates = !input.updatePrevious && previous !== undefined;
     const cpuPercent = preservePreviousRates
@@ -601,7 +620,10 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
       backend: aggregate(backendProcesses, counters.backend),
       electron: aggregate(electronProcesses, counters.electron),
       monitor: aggregate(monitorProcesses, counters.monitor),
-      allT3: aggregate(ordered, counters.allT3),
+      allT3: aggregate(
+        ordered.filter((process) => categoryGroup(process.category) !== "external"),
+        counters.allT3,
+      ),
     },
     deltas: processDeltas,
   };

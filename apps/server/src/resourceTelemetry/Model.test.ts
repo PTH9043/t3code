@@ -97,6 +97,7 @@ function merge(input: {
   readonly desktop?: DesktopHostTelemetrySnapshot;
   readonly previous?: MergeProcessesResult;
   readonly sidecarPid?: number;
+  readonly externalRootPids?: ReadonlySet<number>;
 }): MergeProcessesResult {
   return mergeProcesses({
     serverPid: SERVER_PID,
@@ -104,6 +105,7 @@ function merge(input: {
     fallbackSampledAtMs: input.native.sampledAtUnixMs,
     nativeSnapshot: Option.some(input.native),
     desktopSnapshot: Option.fromUndefinedOr(input.desktop),
+    ...(input.externalRootPids === undefined ? {} : { externalRootPids: input.externalRootPids }),
     previous: input.previous?.previous ?? new Map(),
     counters: input.previous?.counters ?? emptyTelemetryCounters(),
     updatePrevious: true,
@@ -111,6 +113,31 @@ function merge(input: {
 }
 
 describe("resource telemetry process model", () => {
+  it("classifies monitored external roots and their subtrees as external, outside backend usage", () => {
+    const result = merge({
+      externalRootPids: new Set([5_000, 7_777]),
+      native: nativeSnapshot(BASE_TIME_MS, [
+        processSample({ pid: SERVER_PID, ppid: 1, startTimeMs: 1_000 }),
+        processSample({ pid: 200, ppid: SERVER_PID, startTimeMs: 2_000 }),
+        // A process the sidecar follows on monitoring's behalf, with a child.
+        processSample({ pid: 5_000, ppid: 1, startTimeMs: 3_000 }),
+        processSample({ pid: 5_001, ppid: 5_000, startTimeMs: 4_000 }),
+      ]),
+    });
+
+    const categoryOf = (pid: number) =>
+      result.processes.find((process) => process.identity.pid === pid)?.category;
+    expect(categoryOf(5_000)).toBe("external");
+    expect(categoryOf(5_001)).toBe("external");
+    expect(categoryOf(200)).toBe("server-child");
+    expect(result.processes.find((process) => process.identity.pid === 5_001)?.depth).toBe(1);
+    expect(result.groups.backend.processCount).toBe(2);
+    expect(result.groups.allT3.processCount).toBe(2);
+    expect(result.groups.allT3.processStarts).toBe(2);
+    // A requested root the sidecar did not report is simply absent.
+    expect(result.processes.some((process) => process.identity.pid === 7_777)).toBe(false);
+  });
+
   it("builds complete descendant depths and isolates monitor overhead", () => {
     const result = merge({
       sidecarPid: 900,

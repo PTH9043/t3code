@@ -60,6 +60,7 @@ function run(
     healthStatus: "healthy",
     consecutiveHealthFailures: 0,
     lastHealthCheckAt: at,
+    lastHealthFailure: null,
     recentLogTail: "ready",
     updatedAt: at,
   };
