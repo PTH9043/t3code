@@ -404,8 +404,8 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
             </Link>
           ) : (
             <span>
-              모니터링 스레드는 첫 점검 때 만들어집니다. 운영 진단 또는 총괄 조정 역할에 AI 계정이
-              연결돼 있어야 합니다.
+              감시 스레드는 첫 점검 때 만들어집니다. 위에서 감시 AI를 고르거나, 운영 진단·총괄 조정
+              역할에 AI 계정이 연결돼 있어야 합니다.
             </span>
           )}
         </div>
