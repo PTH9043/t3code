@@ -49,6 +49,7 @@ import {
   ThreadId,
   TurnId,
   type UserInputQuestion,
+  classifyTaskAgentKind,
 } from "@t3tools/contracts";
 import {
   applyClaudePromptEffortPrefix,
@@ -4408,15 +4409,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, _turnId, options) {
       const context = yield* requireSession(threadId);
-      // Stop-everything semantics: users reach for Stop precisely when a
-      // fleet ran away. interrupt() alone only ends the parent turn —
-      // background subagents/shells keep running and keep burning tokens.
-      // Stop every live task first (best-effort per task: one refusal must
-      // not strand the rest or block the turn interrupt), then interrupt.
+      // Users reach for Stop when a fleet ran away: interrupt() alone only
+      // ends the parent turn, so live agent tasks are stopped first
+      // (best-effort per task: one refusal must not strand the rest or block
+      // the turn interrupt). Watch loops the seat keeps for the person
+      // (monitor tasks, background shells) survive a plain stop; only an
+      // explicit stop-everything takes them down.
+      const stopBackground = options?.stopBackground === true;
       if (context.query.stopTask && context.liveTaskIds.size > 0) {
-        const liveIds = Array.from(context.liveTaskIds);
+        const liveIds = Array.from(context.liveTaskIds).filter((taskId) => {
+          if (stopBackground) return true;
+          const agent = context.taskAgents.get(taskId);
+          return (
+            classifyTaskAgentKind({
+              taskType: agent?.taskType,
+              agentId: agent?.owningAgentId,
+            }) === "agent"
+          );
+        });
         // Bounded: a wedged child's stopTask promise may never settle
         // (Effect.ignore handles rejection, not non-resolution), and the
         // parent interrupt below MUST still run — Stop matters most during

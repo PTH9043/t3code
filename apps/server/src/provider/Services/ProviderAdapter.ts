@@ -25,6 +25,16 @@ import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
+export interface ProviderInterruptTurnOptions {
+  /**
+   * True stops every live background task before the interrupt (the
+   * stop-everything button). False, the default, ends the turn and the agent
+   * work it spawned but leaves standing watch loops (monitor tasks and
+   * background shells) running: stopping a reply is not stopping the watch.
+   */
+  readonly stopBackground?: boolean;
+}
+
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
@@ -66,7 +76,11 @@ export interface ProviderAdapterShape<TError> {
   /**
    * Interrupt an active turn.
    */
-  readonly interruptTurn: (threadId: ThreadId, turnId?: TurnId) => Effect.Effect<void, TError>;
+  readonly interruptTurn: (
+    threadId: ThreadId,
+    turnId?: TurnId,
+    options?: ProviderInterruptTurnOptions,
+  ) => Effect.Effect<void, TError>;
 
   /**
    * Respond to an interactive approval request.

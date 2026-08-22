@@ -764,7 +764,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
           "provider.turn_id": input.turnId,
         });
-        yield* routed.adapter.interruptTurn(routed.threadId, input.turnId);
+        yield* routed.adapter.interruptTurn(routed.threadId, input.turnId, {
+          stopBackground: input.stopBackground === true,
+        });
         yield* analytics.record("provider.turn.interrupted", {
           provider: routed.adapter.provider,
         });

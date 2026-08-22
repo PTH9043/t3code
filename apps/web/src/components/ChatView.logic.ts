@@ -162,14 +162,24 @@ export function resolveVisibleThreadError(input: {
   return input.sessionError === input.dismissedSessionError ? null : input.sessionError;
 }
 
-export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "session">): {
+/**
+ * The composer's stop ends the reply and the agent work it spawned; only the
+ * background banner's 중지 passes `stopBackground` to take standing watch
+ * loops down too. Stopping a conversation is not stopping the watch.
+ */
+export function buildThreadTurnInterruptInput(
+  thread: Pick<Thread, "id" | "session">,
+  options?: { readonly stopBackground?: boolean },
+): {
   threadId: ThreadId;
   turnId?: TurnId;
+  stopBackground?: boolean;
 } {
   const runningTurnId = thread.session?.status === "running" ? thread.session.activeTurnId : null;
   return {
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
+    ...(options?.stopBackground === true ? { stopBackground: true } : {}),
   };
 }
 

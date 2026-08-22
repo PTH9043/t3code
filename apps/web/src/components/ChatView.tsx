@@ -4616,7 +4616,7 @@ function ChatViewContent(props: ChatViewProps) {
     setIsStoppingBackgroundWork(true);
     const result = await interruptThreadTurn({
       environmentId,
-      input: buildThreadTurnInterruptInput(activeThread),
+      input: buildThreadTurnInterruptInput(activeThread, { stopBackground: true }),
     });
     if (result._tag === "Failure") {
       // Every failure clears the pending state — an interrupted command

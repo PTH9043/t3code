@@ -1596,6 +1596,57 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("a plain stop keeps watch loops running; stop-everything takes them down", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const taskEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "watch", attachments: [] });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "watch-loop",
+        description: "tail the log",
+        task_type: "local_bash",
+        uuid: "watch-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "agent-fleet",
+        description: "Agent",
+        task_type: "local_agent",
+        uuid: "agent-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(taskEventsFiber);
+
+      // Composer stop: the agent goes, the watch loop stays.
+      yield* adapter.interruptTurn(session.threadId);
+      assert.deepEqual(harness.query.stopTaskCalls, ["agent-fleet"]);
+      assert.equal(harness.query.interruptCalls.length, 1);
+
+      // Banner stop: everything goes.
+      yield* adapter.interruptTurn(session.threadId, undefined, { stopBackground: true });
+      assert.deepEqual(harness.query.stopTaskCalls, ["agent-fleet", "watch-loop"]);
+      assert.equal(harness.query.interruptCalls.length, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("workflow member coalescing: identical snapshots suppress, changes emit", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

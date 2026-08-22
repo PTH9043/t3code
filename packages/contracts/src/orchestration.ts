@@ -2370,6 +2370,13 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  /**
+   * Stop scope. Absent/false: end the turn and the agent work it spawned,
+   * but leave standing background watch loops (Monitor loops, background
+   * shells) running — stopping a reply must not stop what the seat is
+   * watching for the person. True: stop everything, the banner's 중지.
+   */
+  stopBackground: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -3085,6 +3092,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  stopBackground: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

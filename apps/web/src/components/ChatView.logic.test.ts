@@ -220,6 +220,17 @@ describe("buildThreadTurnInterruptInput", () => {
       threadId,
     });
   });
+
+  it("only the explicit background stop asks the server to take watch loops down", () => {
+    const thread = makeThread({ session: readySession });
+    expect(buildThreadTurnInterruptInput(thread)).not.toHaveProperty("stopBackground");
+    expect(buildThreadTurnInterruptInput(thread, { stopBackground: false })).not.toHaveProperty(
+      "stopBackground",
+    );
+    expect(buildThreadTurnInterruptInput(thread, { stopBackground: true })).toMatchObject({
+      stopBackground: true,
+    });
+  });
 });
 
 describe("deriveComposerSendState", () => {
