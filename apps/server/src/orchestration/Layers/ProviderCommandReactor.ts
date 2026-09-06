@@ -24,7 +24,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker, makeKeyedDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
@@ -1431,7 +1431,15 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  // Keyed by thread: one thread's slow session spawn must not queue every
+  // other thread's turn start behind it (a wave of parallel graph nodes, or a
+  // hung spawn, previously stalled the whole server's turn starts). Events for
+  // the same thread still process strictly in order, which the meeting flow's
+  // stop→turn sequencing and ensureSessionForThread's binding rules rely on.
+  const worker = yield* makeKeyedDrainableWorker(
+    (event: ProviderIntentEvent) => event.payload.threadId,
+    processDomainEventSafely,
+  );
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(

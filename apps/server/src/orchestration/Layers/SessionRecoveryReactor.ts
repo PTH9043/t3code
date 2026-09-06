@@ -373,10 +373,26 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
     if (stranded.length === 0) return;
 
     // Threads a resumable collaboration run holds get settled only — the
-    // collaboration reactor restarts that work itself.
+    // collaboration reactor restarts that work itself. That includes the
+    // running graph-attempt and legacy-step threads, not just the shared
+    // meeting thread: a recovery turn injected into one of those would be
+    // read back by the collaboration reactor as the node's own output.
+    // Settled attempts' threads stay eligible for recovery — the reactor
+    // never re-drives those, so a person's own interrupted turn there still
+    // deserves its restart.
     const resumableRuns = yield* runRepository.listResumable();
     const runOwnedThreadIds = new Set(
-      resumableRuns.flatMap((run) => (run.meeting?.threadId ? [run.meeting.threadId] : [])),
+      resumableRuns.flatMap((run) => [
+        ...(run.meeting?.threadId ? [run.meeting.threadId] : []),
+        ...(run.graph?.nodes ?? []).flatMap((node) =>
+          node.attempts
+            .filter((attempt) => attempt.status === "running")
+            .map((attempt) => attempt.threadId),
+        ),
+        ...(run.steps ?? []).flatMap((step) =>
+          step.threadId !== null && step.status === "running" ? [step.threadId] : [],
+        ),
+      ]),
     );
 
     yield* Effect.logInfo("settling sessions stranded by the previous server process", {

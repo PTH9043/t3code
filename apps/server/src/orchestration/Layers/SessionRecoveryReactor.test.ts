@@ -248,6 +248,79 @@ it.effect("does not race the collaboration reactor for a resumable run's thread"
   }),
 );
 
+it.effect("does not inject a recovery turn into a resumable run's running attempt thread", () =>
+  Effect.gen(function* () {
+    const attemptThreadId = ThreadId.make("thread-graph-attempt");
+    const stepThreadId = ThreadId.make("thread-legacy-step");
+    const settledThreadId = ThreadId.make("thread-settled-attempt");
+    const harness = yield* makeHarness({
+      threads: [
+        threadShell({
+          id: "thread-graph-attempt",
+          session: session({
+            threadId: attemptThreadId,
+            status: "running",
+            activeTurnId: TurnId.make("turn-a"),
+          }),
+        }),
+        threadShell({
+          id: "thread-legacy-step",
+          session: session({
+            threadId: stepThreadId,
+            status: "running",
+            activeTurnId: TurnId.make("turn-s"),
+          }),
+        }),
+        // A person kept chatting on a finished attempt's thread: the
+        // collaboration reactor never re-drives it, so their interrupted
+        // turn still gets the normal recovery restart.
+        threadShell({
+          id: "thread-settled-attempt",
+          session: session({
+            threadId: settledThreadId,
+            status: "running",
+            activeTurnId: TurnId.make("turn-user"),
+          }),
+        }),
+      ],
+      resumableRuns: [
+        {
+          id: WorkspaceCollaborationRunId.make("run-g"),
+          projectId,
+          meeting: null,
+          graph: {
+            nodes: [
+              {
+                attempts: [
+                  { threadId: settledThreadId, status: "completed" },
+                  { threadId: attemptThreadId, status: "running" },
+                ],
+              },
+            ],
+          },
+          steps: [{ threadId: stepThreadId, status: "running" }],
+        } as unknown as WorkspaceCollaborationRun,
+      ],
+    });
+    yield* runSweep(harness);
+
+    // The running attempt and step threads settle only — the collaboration
+    // reactor owns resuming that work, and a recovery turn there would be
+    // read back as node output. The settled attempt's thread still gets its
+    // recovery turn.
+    const dispatched = yield* Ref.get(harness.dispatchedRef);
+    expect(dispatched.map((command) => command.type)).toEqual([
+      "thread.session.stop",
+      "thread.session.stop",
+      "thread.session.stop",
+      "thread.turn.start",
+    ]);
+    const turnStart = dispatched[3];
+    if (turnStart?.type !== "thread.turn.start") throw new Error("expected a turn start");
+    expect(turnStart.threadId).toBe(settledThreadId);
+  }),
+);
+
 it.effect("closes the questions the dead session left open and tells the seat to ask again", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread-asking");

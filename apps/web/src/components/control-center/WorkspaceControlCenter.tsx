@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   ProviderInstanceId,
   ThreadId,
-  WorkspaceCollaborationRunId,
   WorkspaceKnowledgeItemId,
   WorkspaceScheduleId,
   type ProviderInteractionMode,
@@ -24,29 +23,22 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
-  type AtomCommandResult,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   AlarmClockIcon,
   ActivityIcon,
   AlertTriangleIcon,
   ArchiveIcon,
   BotIcon,
-  BrainCircuitIcon,
   CalendarClockIcon,
   CheckIcon,
   CrownIcon,
   DatabaseIcon,
   FileStackIcon,
   FolderCogIcon,
-  PlayIcon,
   PlusIcon,
   RefreshCcwIcon,
   SearchIcon,
   ShieldCheckIcon,
   SparklesIcon,
-  SquareIcon,
   TerminalIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -60,19 +52,24 @@ import { useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useServerConfigs } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
-import ChatMarkdown from "../ChatMarkdown";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Card, CardAction, CardDescription, CardHeader, CardPanel, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
-import { stackedThreadToast, toastManager } from "../ui/toast";
+import { toastManager } from "../ui/toast";
 import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
 import { WorkspaceMonitoringSection } from "./WorkspaceMonitoringSection";
 import { WorkspaceProgramsSection } from "./WorkspaceProgramsSection";
-import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
-import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
+import { CollaborationSection } from "./CollaborationSection";
+import {
+  ROLE_LABELS,
+  SectionCard,
+  formatTimestamp,
+  notifyCommandFailure,
+  notifySuccess,
+  useOperationsRevisionRefresh,
+} from "./controlCenterShared";
 
 const SELECT_CLASS =
   "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-shadow focus:border-ring focus:ring-3 focus:ring-ring/20 dark:bg-input/32";
@@ -87,16 +84,6 @@ const KNOWLEDGE_KIND_LABELS: Readonly<Record<WorkspaceKnowledgeKind, string>> = 
   prompt: "프롬프트 조각",
 };
 
-const ROLE_LABELS: Readonly<Record<WorkspaceAgentRole, string>> = {
-  coordinator: "페이블 · 총괄 조정",
-  operator: "페이블 · 운영 진단",
-  planner: "페이블 · 계획 보조",
-  researcher: "그록 · 실시간 조사",
-  implementer: "코덱스 · 구현",
-  reviewer: "페이블 · 결과 검토",
-  verifier: "페이블 · 독립 검증",
-};
-
 const ALL_ROLES = Object.keys(ROLE_LABELS) as WorkspaceAgentRole[];
 const ALL_KNOWLEDGE_KINDS = Object.keys(KNOWLEDGE_KIND_LABELS) as WorkspaceKnowledgeKind[];
 
@@ -108,69 +95,11 @@ function providerStatusLabel(status: string): string {
   return status;
 }
 
-function runStatusLabel(status: string): string {
-  if (status === "queued") return "대기 중";
-  if (status === "running") return "실행 중";
-  if (status === "cancel-requested") return "취소 요청됨";
-  if (status === "cancelled") return "취소됨";
-  if (status === "completed") return "완료";
-  if (status === "failed") return "실패";
-  return status;
-}
-
-function notifyCommandFailure<A, E>(result: AtomCommandResult<A, E>, title: string): boolean {
-  if (result._tag === "Success") return false;
-  const error = squashAtomCommandFailure(result);
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title,
-      description: error instanceof Error ? error.message : "요청을 처리하지 못했습니다.",
-    }),
-  );
-  return true;
-}
-
-function notifySuccess(title: string, description?: string) {
-  toastManager.add({ type: "success", title, description });
-}
-
-function formatTimestamp(value: string | null): string {
-  if (value === null) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR");
-}
-
 function numericKnowledgeTag(tags: ReadonlyArray<string>, prefix: string): number | null {
   const value = tags.find((tag) => tag.startsWith(prefix))?.slice(prefix.length);
   if (value === undefined) return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function SectionCard(props: {
-  id?: string;
-  icon: typeof BrainCircuitIcon;
-  title: string;
-  description: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  const Icon = props.icon;
-  return (
-    <Card id={props.id} className="scroll-mt-24">
-      <CardHeader>
-        <div className="mb-1 flex items-center gap-2 text-primary">
-          <Icon className="size-4" />
-          <span className="text-xs font-semibold uppercase tracking-wide">프로젝트 전용</span>
-        </div>
-        <CardTitle>{props.title}</CardTitle>
-        <CardDescription className="leading-relaxed">{props.description}</CardDescription>
-        {props.action ? <CardAction>{props.action}</CardAction> : null}
-      </CardHeader>
-      <CardPanel>{props.children}</CardPanel>
-    </Card>
-  );
 }
 
 function runtimeStatusLabel(status: WorkspaceRuntimeStatus): string {
@@ -1380,256 +1309,6 @@ function RoleSection({ project }: { project: EnvironmentProject }) {
   );
 }
 
-function runBadgeVariant(status: string): "success" | "warning" | "error" | "outline" | "info" {
-  if (status === "completed") return "success";
-  if (status === "failed" || status === "cancelled") return "error";
-  if (status === "running") return "info";
-  if (status === "queued" || status === "cancel-requested") return "warning";
-  return "outline";
-}
-
-function CollaborationSection({ project }: { project: EnvironmentProject }) {
-  const navigate = useNavigate();
-  const runs = useEnvironmentQuery(
-    orchestrationEnvironment.workspaceCollaborationRuns({
-      environmentId: project.environmentId,
-      input: { projectId: project.id },
-    }),
-  );
-  const runtime = useEnvironmentQuery(
-    orchestrationEnvironment.workspaceRuntime({
-      environmentId: project.environmentId,
-      input: { projectId: project.id },
-    }),
-  );
-  const lastOperationsRevisionRef = useRef<string | null | undefined>(undefined);
-
-  useEffect(() => {
-    if (runtime.data === null) return;
-    const revision = runtime.data.operationsUpdatedAt;
-    if (lastOperationsRevisionRef.current === undefined) {
-      lastOperationsRevisionRef.current = revision;
-      return;
-    }
-    if (lastOperationsRevisionRef.current === revision) return;
-    lastOperationsRevisionRef.current = revision;
-    runs.refresh();
-  }, [runs.refresh, runtime.data]);
-  const requestRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
-    label: "프로젝트 협업 요청",
-    reportFailure: false,
-  });
-  const cancelRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
-    label: "프로젝트 협업 취소",
-    reportFailure: false,
-  });
-  const answerRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
-    label: "회의 질문 답변",
-    reportFailure: false,
-  });
-  const [task, setTask] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
-
-  const answer = async (runId: WorkspaceCollaborationRunId, question: string, text: string) => {
-    setAnsweringRunId(runId);
-    try {
-      const result = await answerRun({
-        environmentId: project.environmentId,
-        input: { projectId: project.id, runId, question, answer: text },
-      });
-      if (!notifyCommandFailure(result, "답변 전송 실패")) {
-        runs.refresh();
-        notifySuccess("답변을 전달했습니다.", "회의가 이어서 진행됩니다.");
-      }
-    } finally {
-      setAnsweringRunId(null);
-    }
-  };
-
-  const submit = async () => {
-    if (!task.trim()) return;
-    setSubmitting(true);
-    try {
-      const result = await requestRun({
-        environmentId: project.environmentId,
-        input: {
-          runId: WorkspaceCollaborationRunId.make(randomUUID()),
-          projectId: project.id,
-          task: task.trim(),
-        },
-      });
-      if (!notifyCommandFailure(result, "협업 실행 요청 실패")) {
-        setTask("");
-        runs.refresh();
-        notifySuccess(
-          "사용자 최우선 실행을 시작했습니다.",
-          "같은 프로젝트의 대기·실행 중 무인 작업보다 먼저 처리됩니다.",
-        );
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const cancel = async (runId: WorkspaceCollaborationRunId) => {
-    const result = await cancelRun({
-      environmentId: project.environmentId,
-      input: { projectId: project.id, runId },
-    });
-    if (!notifyCommandFailure(result, "협업 실행 취소 실패")) {
-      runs.refresh();
-      notifySuccess("취소 요청을 전달했습니다.");
-    }
-  };
-
-  return (
-    <SectionCard
-      id="project-runs"
-      icon={CrownIcon}
-      title="사용자 목표 기반 작업 그래프"
-      description="페이블이 목표를 의존성 그래프로 분해하고 코덱스·그록 작업을 필요한 순서와 병렬 경로로 실행합니다. 생성 결과는 별도 검증을 통과해야 종합되며, 실패하면 분류에 맞는 새 경로를 추가합니다. 사용자 요청은 같은 프로젝트의 무인 작업보다 항상 우선합니다."
-      action={<Badge variant="warning">사용자 최우선</Badge>}
-    >
-      <div className="grid gap-5">
-        <div className="rounded-xl border border-primary/25 bg-primary/4 p-4">
-          <Textarea
-            size="lg"
-            value={task}
-            onChange={(event) => setTask(event.currentTarget.value)}
-            placeholder="달성할 최종 목표를 입력하세요. 페이블이 작업 그래프를 설계합니다."
-          />
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-xs text-muted-foreground">
-              지침·목표·메모리·RAG는 이 폴더에서만 결합되며 사용자 명령을 덮어쓸 수 없습니다.
-            </p>
-            <Button size="lg" onClick={() => void submit()} disabled={!task.trim() || submitting}>
-              {submitting ? <RefreshCcwIcon /> : <PlayIcon />}
-              작업 그래프 실행
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold">실행 이력</h3>
-            <Button size="xs" variant="ghost" onClick={runs.refresh}>
-              <RefreshCcwIcon />
-              새로고침
-            </Button>
-          </div>
-          {runs.error ? <p className="text-xs text-destructive">{runs.error}</p> : null}
-          {runs.data?.runs.map((run) => (
-            <details
-              key={run.id}
-              className="group rounded-xl border border-border/65 p-3 open:bg-muted/15"
-            >
-              <summary className="flex cursor-pointer list-none items-start gap-3">
-                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                  {run.status === "running" ? (
-                    <RefreshCcwIcon className="size-4" />
-                  ) : run.status === "completed" ? (
-                    <CheckIcon className="size-4" />
-                  ) : (
-                    <BrainCircuitIcon className="size-4" />
-                  )}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="line-clamp-2 text-sm font-medium">{run.task}</span>
-                  <span className="mt-1 block text-[11px] text-muted-foreground">
-                    {run.source === "user"
-                      ? "사용자 명령"
-                      : run.source === "incident"
-                        ? `프로그램 장애 ${run.incidentId}`
-                        : run.source === "integrity"
-                          ? "무결성 수렴"
-                          : `스케줄 ${run.scheduleId}`}{" "}
-                    · {formatTimestamp(run.createdAt)}
-                  </span>
-                </span>
-                {run.meeting?.pendingQuestion ? <Badge variant="warning">답변 필요</Badge> : null}
-                <Badge variant={runBadgeVariant(run.status)}>{runStatusLabel(run.status)}</Badge>
-              </summary>
-              <div className="mt-4 grid gap-3 border-t border-border/50 pt-3">
-                {run.meeting ? (
-                  <WorkspaceMeetingView
-                    meeting={run.meeting}
-                    canAnswer={run.status === "queued" || run.status === "running"}
-                    answering={answeringRunId === run.id}
-                    onAnswer={(question, text) => void answer(run.id, question, text)}
-                  />
-                ) : null}
-                {run.graph ? (
-                  <WorkspaceTaskGraphView
-                    graph={run.graph}
-                    onOpenThread={({ threadId }) =>
-                      void navigate({
-                        to: "/$environmentId/$threadId",
-                        params: { environmentId: project.environmentId, threadId },
-                      })
-                    }
-                  />
-                ) : (
-                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                    {run.steps.map((step) => (
-                      <div key={step.index} className="rounded-lg bg-muted/35 p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-xs font-semibold">
-                            {step.index + 1}. {ROLE_LABELS[step.role]}
-                          </span>
-                          <Badge variant={runBadgeVariant(step.status)}>
-                            {runStatusLabel(step.status)}
-                          </Badge>
-                        </div>
-                        <p className="mt-1 truncate text-[10px] text-muted-foreground">
-                          {step.modelSelection.instanceId} · {step.modelSelection.model}
-                        </p>
-                        {step.output ? (
-                          <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-xs leading-relaxed">
-                            {step.output}
-                          </p>
-                        ) : null}
-                        {step.error ? (
-                          <p className="mt-2 text-xs text-destructive">{step.error}</p>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {run.finalOutput ? (
-                  <div>
-                    <h4 className="mb-1 text-xs font-semibold">최종 통합 결과</h4>
-                    <div className="max-h-96 overflow-auto rounded-lg bg-muted/40 p-3 text-xs leading-relaxed">
-                      <ChatMarkdown text={run.finalOutput} cwd={undefined} />
-                    </div>
-                  </div>
-                ) : null}
-                {run.error ? <p className="text-xs text-destructive">{run.error}</p> : null}
-                {run.status === "queued" || run.status === "running" ? (
-                  <Button
-                    variant="destructive-outline"
-                    size="sm"
-                    className="justify-self-end"
-                    onClick={() => void cancel(run.id)}
-                  >
-                    <SquareIcon />
-                    실행 취소
-                  </Button>
-                ) : null}
-              </div>
-            </details>
-          ))}
-          {runs.data && runs.data.runs.length === 0 ? (
-            <p className="rounded-xl border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
-              아직 협업 실행 이력이 없습니다.
-            </p>
-          ) : null}
-        </div>
-      </div>
-    </SectionCard>
-  );
-}
-
 function localDateTimeInputValue(date: Date): string {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
@@ -1656,19 +1335,7 @@ function ScheduleSection({ project }: { project: EnvironmentProject }) {
       input: { projectId: project.id },
     }),
   );
-  const lastOperationsRevisionRef = useRef<string | null | undefined>(undefined);
-
-  useEffect(() => {
-    if (runtime.data === null) return;
-    const revision = runtime.data.operationsUpdatedAt;
-    if (lastOperationsRevisionRef.current === undefined) {
-      lastOperationsRevisionRef.current = revision;
-      return;
-    }
-    if (lastOperationsRevisionRef.current === revision) return;
-    lastOperationsRevisionRef.current = revision;
-    schedules.refresh();
-  }, [runtime.data, schedules.refresh]);
+  useOperationsRevisionRefresh(runtime.data, schedules.refresh);
   const upsertSchedule = useAtomCommand(projectEnvironment.upsertWorkspaceSchedule, {
     label: "프로젝트 일정 저장",
     reportFailure: false,
