@@ -156,5 +156,35 @@ describe("workspace collaboration planning", () => {
     }
     expect(prompt).toContain("DIRECT DEPENDENCY EVIDENCE");
     expect(prompt).not.toContain("UNRELATED PRIVATE OUTPUT");
+    // No worktree on this node: the isolation rule must stay out of the prompt.
+    expect(prompt).not.toContain("dedicated git worktree");
+
+    const isolated = buildWorkspaceTaskNodePrompt({
+      workspacePrompt: "Workspace ID: workspace-a",
+      run: {
+        id: WorkspaceCollaborationRunId.make("run-graph"),
+        projectId,
+        source: "user",
+        scheduleId: null,
+        incidentId: null,
+        task: "ship it",
+        status: "running",
+        steps: [],
+        graph,
+        meeting: null,
+        orchestra: { maxParallel: 2, isolateWorktrees: true },
+        finalOutput: null,
+        error: null,
+        createdAt: "2026-08-08T00:00:00.000Z",
+        updatedAt: "2026-08-08T00:00:00.000Z",
+      },
+      graph,
+      node: { ...target, worktreePath: "E:/worktrees/chain-1", branch: "t3code/orch-run-1" },
+      availableAgents: ["coordinator: Fable"],
+    });
+    // A live replan wave escaped the isolation by editing the project root via
+    // its absolute path; the prompt now pins the agent to the worktree cwd.
+    expect(isolated).toContain("dedicated git worktree: E:/worktrees/chain-1");
+    expect(isolated).toContain("Never modify the project's original checkout");
   });
 });
