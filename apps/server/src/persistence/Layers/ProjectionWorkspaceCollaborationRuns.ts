@@ -5,6 +5,7 @@ import {
   WorkspaceCollaborationStep,
   WorkspaceMeeting,
   WorkspaceMeetingInterjection,
+  WorkspaceOrchestraSettings,
   WorkspaceTaskGraph,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -22,11 +23,14 @@ import {
 } from "../Services/ProjectionWorkspaceCollaborationRuns.ts";
 
 const MeetingColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceMeeting));
+// NULL is both "recorded before the orchestra" and "never opted in".
+const OrchestraColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceOrchestraSettings));
 const DbRow = WorkspaceCollaborationRun.mapFields(
   Struct.assign({
     steps: Schema.fromJsonString(Schema.Array(WorkspaceCollaborationStep)),
     graph: Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
     meeting: MeetingColumn,
+    orchestra: OrchestraColumn,
   }),
 );
 const RunLookup = Schema.Struct({ projectId: ProjectId, runId: WorkspaceCollaborationRunId });
@@ -38,6 +42,7 @@ const encodeGraph = Schema.encodeUnknownSync(
   Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
 );
 const encodeMeeting = Schema.encodeUnknownSync(MeetingColumn);
+const encodeOrchestra = Schema.encodeUnknownSync(OrchestraColumn);
 const decodeMeeting = Schema.decodeUnknownSync(MeetingColumn);
 
 const make = Effect.gen(function* () {
@@ -53,6 +58,7 @@ const make = Effect.gen(function* () {
     steps_json AS steps,
     graph_json AS graph,
     meeting_json AS meeting,
+    orchestra_json AS orchestra,
     final_output AS "finalOutput",
     error,
     created_at AS "createdAt",
@@ -122,11 +128,11 @@ const make = Effect.gen(function* () {
     sql`
       INSERT INTO projection_workspace_collaboration_runs (
         run_id, project_id, source, schedule_id, incident_id, task, status, steps_json, graph_json,
-        meeting_json, final_output, error, created_at, updated_at
+        meeting_json, orchestra_json, final_output, error, created_at, updated_at
       ) VALUES (
         ${run.id}, ${run.projectId}, ${run.source}, ${run.scheduleId}, ${run.incidentId},
         ${run.task}, ${run.status}, ${encodeSteps(run.steps)}, ${encodeGraph(run.graph)},
-        ${encodeMeeting(run.meeting)},
+        ${encodeMeeting(run.meeting)}, ${encodeOrchestra(run.orchestra)},
         ${run.finalOutput}, ${run.error}, ${run.createdAt}, ${run.updatedAt}
       )
       ON CONFLICT(run_id) DO UPDATE SET
@@ -138,6 +144,7 @@ const make = Effect.gen(function* () {
         steps_json = excluded.steps_json,
         graph_json = excluded.graph_json,
         meeting_json = excluded.meeting_json,
+        orchestra_json = excluded.orchestra_json,
         final_output = excluded.final_output,
         error = excluded.error,
         updated_at = excluded.updated_at

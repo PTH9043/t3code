@@ -56,6 +56,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting: null,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-08T01:00:00.000Z",
@@ -72,6 +73,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting: null,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-08T02:00:00.000Z",
@@ -114,6 +116,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting: null,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-08T01:00:00.000Z",
@@ -135,6 +138,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting: null,
+        orchestra: null,
         finalOutput: "foreign",
         error: null,
         createdAt: "2026-08-08T01:00:00.000Z",
@@ -171,6 +175,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: taskGraph,
         meeting: null,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-08T03:50:00.000Z",
@@ -187,6 +192,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: taskGraph,
         meeting: null,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-08T03:50:00.000Z",
@@ -217,6 +223,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: { ...taskGraph, status: "completed", overallConfidence: "high" },
         meeting: null,
+        orchestra: null,
         finalOutput: "repaired",
         error: null,
         createdAt: "2026-08-08T03:50:00.000Z",
@@ -233,6 +240,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting: null,
+        orchestra: null,
         finalOutput: "foreign",
         error: null,
         createdAt: "2026-08-08T03:50:00.000Z",
@@ -262,6 +270,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
           steps: [],
           graph: null,
           meeting: null,
+          orchestra: null,
           finalOutput: null,
           error: null,
           createdAt: "2026-08-08T04:00:00.000Z",
@@ -337,6 +346,7 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
         steps: [],
         graph: null,
         meeting,
+        orchestra: null,
         finalOutput: null,
         error: null,
         createdAt: "2026-08-17T01:00:00.000Z",
@@ -389,6 +399,48 @@ layer("ProjectionWorkspaceCollaborationRunRepository", (it) => {
           }),
         }),
       ]);
+    }),
+  );
+
+  it.effect("keeps the orchestra settings a run started with", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectionWorkspaceCollaborationRunRepository;
+      const projectId = ProjectId.make("workspace-orchestra");
+      const runId = WorkspaceCollaborationRunId.make("run-orchestra");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, workspace_control_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${projectId}, ${projectId}, ${`D:/${projectId}`}, NULL, '[]',
+          '{"isolationMode":"strict","longTermMemoryRoot":null}',
+          '2026-09-07T00:00:00.000Z', '2026-09-07T00:00:00.000Z', NULL
+        )
+      `;
+      const run = {
+        id: runId,
+        projectId,
+        source: "user",
+        scheduleId: null,
+        incidentId: null,
+        task: "병렬 조사",
+        status: "queued",
+        steps: [],
+        graph: null,
+        meeting: null,
+        orchestra: { maxParallel: 2, isolateWorktrees: false },
+        finalOutput: null,
+        error: null,
+        createdAt: "2026-09-07T00:00:00.000Z",
+        updatedAt: "2026-09-07T00:00:00.000Z",
+      } as const;
+      yield* repository.upsert(run);
+      const stored = Option.getOrThrow(yield* repository.getById({ projectId, runId }));
+      expect(stored.orchestra).toEqual({ maxParallel: 2, isolateWorktrees: false });
+      expect(
+        (yield* repository.list({ projectId })).map((candidate) => candidate.orchestra),
+      ).toEqual([{ maxParallel: 2, isolateWorktrees: false }]);
     }),
   );
 });

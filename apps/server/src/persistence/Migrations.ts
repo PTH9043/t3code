@@ -69,6 +69,7 @@ import Migration0053 from "./Migrations/053_ProjectionWorkspaceKnowledgeCompacti
 import Migration0054 from "./Migrations/054_ProjectionWorkspaceCollaborationMeeting.ts";
 import Migration0055 from "./Migrations/055_ProjectionWorkspaceCollaborationInterjections.ts";
 import Migration0056 from "./Migrations/056_ProjectionWorkspaceProgramRunHealthFailure.ts";
+import Migration0059 from "./Migrations/059_WorkspaceCollaborationRunOrchestra.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -137,6 +138,7 @@ export const migrationEntries = [
   [54, "ProjectionWorkspaceCollaborationMeeting", Migration0054],
   [55, "ProjectionWorkspaceCollaborationInterjections", Migration0055],
   [56, "ProjectionWorkspaceProgramRunHealthFailure", Migration0056],
+  [59, "WorkspaceCollaborationRunOrchestra", Migration0059],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
