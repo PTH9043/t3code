@@ -44,6 +44,11 @@ export interface MeetingComposerConfig {
   readonly orchestraEnabled: boolean;
   /** 오케스트라 병렬 폭 (1–6). */
   readonly maxParallel: number;
+  /**
+   * 쓰기 연쇄(worktree) 격리: 수정 작업 묶음마다 전용 git worktree를 만들어
+   * 병렬 수정을 허용한다. 꺼져 있으면 수정 작업은 한 번에 하나씩 실행된다.
+   */
+  readonly isolateWorktrees: boolean;
   readonly userInLoop: boolean;
   /** Null elects the first seat, mirroring the server's chair election. */
   readonly chairSeatId: string | null;
@@ -58,6 +63,7 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   maxRevisions: 8,
   orchestraEnabled: false,
   maxParallel: 3,
+  isolateWorktrees: false,
   userInLoop: false,
   chairSeatId: null,
   seats: [],
@@ -74,12 +80,13 @@ function normalizeMeetingComposerConfig(
     | MeetingComposerConfig
     | (Omit<
         MeetingComposerConfig,
-        "style" | "maxRevisions" | "orchestraEnabled" | "maxParallel"
+        "style" | "maxRevisions" | "orchestraEnabled" | "maxParallel" | "isolateWorktrees"
       > & {
         style?: unknown;
         maxRevisions?: unknown;
         orchestraEnabled?: unknown;
         maxParallel?: unknown;
+        isolateWorktrees?: unknown;
       }),
 ): MeetingComposerConfig {
   const style: MeetingComposerStyle =
@@ -102,6 +109,7 @@ function normalizeMeetingComposerConfig(
         : DEFAULT_MEETING_COMPOSER_CONFIG.maxRevisions,
     // Persisted before the orchestra existed: off, at the default width.
     orchestraEnabled: config.orchestraEnabled === true,
+    isolateWorktrees: config.isolateWorktrees === true,
     maxParallel:
       typeof config.maxParallel === "number" &&
       Number.isInteger(config.maxParallel) &&

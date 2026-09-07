@@ -1,4 +1,5 @@
 import {
+  ThreadId,
   WorkspaceMeetingParticipantId,
   WorkspaceTaskNodeId,
   type WorkspaceMeetingParticipant,
@@ -9,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   parkedQuestionNodes,
+  runKeptWorktreeCount,
   runsAwaitingPerson,
   seatLookupFrom,
   summarizeTaskGraphNodes,
@@ -28,6 +30,8 @@ function taskNode(
     participantId: null,
     threadId: null,
     parkedQuestion,
+    worktreePath: null,
+    branch: null,
     title: id,
     handoff: {
       task: id,
@@ -172,6 +176,28 @@ describe("runsAwaitingPerson", () => {
         liveQuestion: "alpha를 지울까요?",
         queuedQuestions: 1,
         awaitingUser: 2,
+        blockedNodeThreads: 0,
+      },
+    ]);
+  });
+
+  it("surfaces a run whose only signal is a node conversation blocked on provider input", () => {
+    const blockedNode = {
+      ...taskNode("a", "running"),
+      threadId: ThreadId.make("thread-blocked"),
+    };
+    const items = runsAwaitingPerson(
+      [run({ id: "r1", status: "running", nodes: [blockedNode, taskNode("b", "running")] })],
+      new Set(["thread-blocked"]),
+    );
+    expect(items).toEqual([
+      {
+        runId: "r1",
+        task: "task r1",
+        liveQuestion: null,
+        queuedQuestions: 0,
+        awaitingUser: 0,
+        blockedNodeThreads: 1,
       },
     ]);
   });
@@ -189,5 +215,17 @@ describe("runsAwaitingPerson", () => {
       run({ id: "busy", status: "running", nodes: [taskNode("a", "running")] }),
     ]);
     expect(items).toEqual([]);
+  });
+});
+
+describe("runKeptWorktreeCount", () => {
+  it("counts distinct chain worktrees, not the nodes sharing them", () => {
+    const chainA1 = { ...taskNode("a1", "completed"), worktreePath: "E:/worktrees/chain-a" };
+    const chainA2 = { ...taskNode("a2", "completed"), worktreePath: "E:/worktrees/chain-a" };
+    const chainB = { ...taskNode("b", "failed"), worktreePath: "E:/worktrees/chain-b" };
+    expect(
+      runKeptWorktreeCount({ nodes: [chainA1, chainA2, chainB, taskNode("r", "completed")] }),
+    ).toBe(2);
+    expect(runKeptWorktreeCount(null)).toBe(0);
   });
 });

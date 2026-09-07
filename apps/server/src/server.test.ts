@@ -136,6 +136,9 @@ import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as WorktreeProvisionService from "./git/WorktreeProvisionService.ts";
+import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -719,7 +722,20 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(gitManagerLayer),
       Layer.provide(gitVcsDriverLayer),
-      Layer.provide(gitWorkflowLayer),
+      Layer.provide(
+        Layer.mergeAll(
+          WorktreeProvisionService.layer.pipe(
+            Layer.provide(gitWorkflowLayer),
+            Layer.provide(ProcessRunner.layer),
+          ),
+          Layer.mock(WorkspaceWorktreeCleanup.WorkspaceWorktreeCleanup)({
+            cleanupByRef: () => Effect.die("WorkspaceWorktreeCleanup not stubbed in this test"),
+            cleanupRunWorktrees: () => Effect.void,
+            sweepOrphans: () => Effect.void,
+          }),
+          gitWorkflowLayer,
+        ),
+      ),
       Layer.provide(reviewLayer),
       Layer.provide(vcsProvisioningLayer),
       Layer.provide(

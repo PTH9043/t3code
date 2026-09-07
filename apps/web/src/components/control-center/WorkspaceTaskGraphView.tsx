@@ -469,6 +469,47 @@ function NodeResult({
   );
 }
 
+export interface WorktreeNodeAction {
+  readonly node: WorkspaceTaskNode;
+  readonly worktreePath: string;
+}
+
+/**
+ * The write-chain worktree this node worked in: the branch, a diff review of
+ * everything the chain changed against its base, and — once the run settled —
+ * the cleanup a dirty worktree deliberately blocks.
+ */
+function WorktreeInfo({
+  node,
+  onOpenDiff,
+  onCleanupWorktree,
+}: {
+  node: WorkspaceTaskNode;
+  onOpenDiff?: ((input: WorktreeNodeAction) => void) | undefined;
+  onCleanupWorktree?: ((input: WorktreeNodeAction) => void) | undefined;
+}) {
+  const worktreePath = node.worktreePath;
+  if (worktreePath === null) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-muted/30 px-2.5 py-2">
+      <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <code className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+        {node.branch ?? worktreePath}
+      </code>
+      {onOpenDiff ? (
+        <Button size="xs" variant="outline" onClick={() => onOpenDiff({ node, worktreePath })}>
+          diff 보기
+        </Button>
+      ) : null}
+      {onCleanupWorktree ? (
+        <Button size="xs" variant="ghost" onClick={() => onCleanupWorktree({ node, worktreePath })}>
+          정리
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function TaskNodeCard({
   node,
   idPrefix,
@@ -478,6 +519,8 @@ function TaskNodeCard({
   layout,
   seats,
   onOpenThread,
+  onOpenDiff,
+  onCleanupWorktree,
 }: {
   node: WorkspaceTaskNode;
   idPrefix: string;
@@ -493,6 +536,8 @@ function TaskNodeCard({
         readonly attempt: WorkspaceTaskAttempt;
       }) => void)
     | undefined;
+  onOpenDiff?: ((input: WorktreeNodeAction) => void) | undefined;
+  onCleanupWorktree?: ((input: WorktreeNodeAction) => void) | undefined;
 }) {
   const attempt = latestAttempt(node);
   const confidence = node.validation?.confidence ?? node.confidence ?? attempt?.confidence ?? null;
@@ -557,6 +602,7 @@ function TaskNodeCard({
       <NodeDependencies node={node} layout={layout} />
       <ParkedQuestion node={node} />
       <CurrentAssignment node={node} attempt={attempt} seats={seats} />
+      <WorktreeInfo node={node} onOpenDiff={onOpenDiff} onCleanupWorktree={onCleanupWorktree} />
       <ValidationReceipt node={node} />
       <NodeResult node={node} attempt={attempt} />
       <AttemptHistory node={node} onOpenThread={onOpenThread} />
@@ -747,6 +793,10 @@ export interface WorkspaceTaskGraphViewProps {
         readonly attempt: WorkspaceTaskAttempt;
       }) => void)
     | undefined;
+  /** Opens the write-chain worktree's diff against its base branch. */
+  readonly onOpenDiff?: ((input: WorktreeNodeAction) => void) | undefined;
+  /** Present only when the run settled — a live chain must keep its checkout. */
+  readonly onCleanupWorktree?: ((input: WorktreeNodeAction) => void) | undefined;
 }
 
 /** Static, read-only Workspace task graph shared by web and desktop. */
@@ -755,6 +805,8 @@ export function WorkspaceTaskGraphView({
   participants,
   className,
   onOpenThread,
+  onOpenDiff,
+  onCleanupWorktree,
 }: WorkspaceTaskGraphViewProps) {
   const headingId = useId();
   const seats = useMemo(() => seatLookupFrom(participants), [participants]);
@@ -868,6 +920,8 @@ export function WorkspaceTaskGraphView({
                       layout={layout}
                       seats={seats}
                       onOpenThread={onOpenThread}
+                      onOpenDiff={onOpenDiff}
+                      onCleanupWorktree={onCleanupWorktree}
                     />
                   ))}
                 </section>

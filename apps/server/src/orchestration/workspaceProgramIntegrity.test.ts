@@ -41,6 +41,8 @@ function completedGraph(verifierInstanceId = "claude-review"): WorkspaceTaskGrap
         participantId: null,
         threadId: null,
         parkedQuestion: null,
+        worktreePath: null,
+        branch: null,
         title: "오류 수정",
         handoff: {
           task: "오류 수정",
@@ -95,6 +97,8 @@ function completedGraph(verifierInstanceId = "claude-review"): WorkspaceTaskGrap
         participantId: null,
         threadId: null,
         parkedQuestion: null,
+        worktreePath: null,
+        branch: null,
         title: "독립 검증",
         handoff: {
           task: "독립 검증",

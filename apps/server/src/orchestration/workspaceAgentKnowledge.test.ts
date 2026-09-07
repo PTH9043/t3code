@@ -35,6 +35,8 @@ function node(input: {
     participantId: null,
     threadId: null,
     parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
     title: `${input.id} 제목`,
     handoff: {
       task: `${input.id} 작업`,

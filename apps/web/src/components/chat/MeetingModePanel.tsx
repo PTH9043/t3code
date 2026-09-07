@@ -340,27 +340,43 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           />
         </label>
         {config.orchestraEnabled ? (
-          <label className="flex items-center justify-between gap-2 text-xs font-medium">
-            <span>
-              병렬 폭
-              <span className="ml-1 font-normal text-muted-foreground">
-                동시에 실행할 노드 수 · 수정 작업은 하나씩
+          <>
+            <label className="flex items-center justify-between gap-2 text-xs font-medium">
+              <span>
+                병렬 폭
+                <span className="ml-1 font-normal text-muted-foreground">
+                  동시에 실행할 노드 수{config.isolateWorktrees ? "" : " · 수정 작업은 하나씩"}
+                </span>
               </span>
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={6}
-              value={config.maxParallel}
-              onChange={(event) => {
-                const parsed = Number.parseInt(event.currentTarget.value, 10);
-                if (!Number.isInteger(parsed)) return;
-                const maxParallel = Math.min(6, Math.max(1, parsed));
-                updateMeetingComposerConfig((current) => ({ ...current, maxParallel }));
-              }}
-              className={cn(SELECT_CLASS, "w-16 text-center")}
-            />
-          </label>
+              <input
+                type="number"
+                min={1}
+                max={6}
+                value={config.maxParallel}
+                onChange={(event) => {
+                  const parsed = Number.parseInt(event.currentTarget.value, 10);
+                  if (!Number.isInteger(parsed)) return;
+                  const maxParallel = Math.min(6, Math.max(1, parsed));
+                  updateMeetingComposerConfig((current) => ({ ...current, maxParallel }));
+                }}
+                className={cn(SELECT_CLASS, "w-16 text-center")}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-2 text-xs font-medium">
+              <span>
+                worktree 격리
+                <span className="ml-1 font-normal text-muted-foreground">
+                  수정 묶음마다 전용 체크아웃 · 병합 전 diff 검토
+                </span>
+              </span>
+              <Switch
+                checked={config.isolateWorktrees}
+                onCheckedChange={(isolateWorktrees) =>
+                  updateMeetingComposerConfig((current) => ({ ...current, isolateWorktrees }))
+                }
+              />
+            </label>
+          </>
         ) : null}
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span className="flex items-center gap-1">

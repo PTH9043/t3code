@@ -53,6 +53,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  cleanupWorkspaceWorktree: "orchestration.cleanupWorkspaceWorktree",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -788,6 +789,20 @@ export const WorkspaceTaskNode = Schema.Struct({
    */
   threadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   parkedQuestion: Schema.NullOr(WorkspaceTaskParkedQuestion).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /**
+   * The write-chain worktree this node runs in when the run isolates
+   * worktrees. Stored exactly as the provisioner returned it — never
+   * re-normalized, because a junctioned drive makes two spellings of the same
+   * directory compare unequal and restart sessions in a loop. Null for
+   * read-only nodes, non-isolating runs, and every pre-orchestra record.
+   */
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** The write-chain branch checked out at {@link worktreePath}. */
+  branch: Schema.NullOr(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
@@ -3722,6 +3737,34 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedErrorClass
   }
 }
 
+export const WorkspaceWorktreeCleanupInput = Schema.Struct({
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  /** The worktree to clean, spelled exactly as stored on the run's graph nodes. */
+  worktreePath: TrimmedNonEmptyString,
+  /** Remove even when the worktree still differs from its base branch. */
+  force: Schema.optionalKey(Schema.Boolean),
+});
+export type WorkspaceWorktreeCleanupInput = typeof WorkspaceWorktreeCleanupInput.Type;
+
+export const WorkspaceWorktreeCleanupResult = Schema.Struct({
+  /**
+   * `kept-dirty` means the worktree still holds unmerged work, so it was left
+   * in place for review instead of being deleted — not an error.
+   */
+  status: Schema.Literals(["removed", "kept-dirty"]),
+  detail: Schema.NullOr(Schema.String),
+});
+export type WorkspaceWorktreeCleanupResult = typeof WorkspaceWorktreeCleanupResult.Type;
+
+export class OrchestrationWorktreeCleanupError extends Schema.TaggedErrorClass<OrchestrationWorktreeCleanupError>()(
+  "OrchestrationWorktreeCleanupError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -3802,6 +3845,10 @@ export const OrchestrationRpcSchemas = {
   subscribeShell: {
     input: OrchestrationSubscribeShellInput,
     output: OrchestrationShellStreamItem,
+  },
+  cleanupWorkspaceWorktree: {
+    input: WorkspaceWorktreeCleanupInput,
+    output: WorkspaceWorktreeCleanupResult,
   },
 } as const;
 

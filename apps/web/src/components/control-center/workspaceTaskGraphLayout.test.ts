@@ -17,6 +17,8 @@ function taskNode(
     participantId: null,
     threadId: null,
     parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
     title: id,
     handoff: {
       task: id,

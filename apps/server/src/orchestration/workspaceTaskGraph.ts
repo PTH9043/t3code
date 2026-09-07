@@ -441,6 +441,8 @@ function emptyNode(input: {
     participantId: input.participantId ?? null,
     threadId: null,
     parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
     title: input.title,
     handoff: {
       task: input.task,
@@ -753,6 +755,93 @@ export const WRITE_NODE_KINDS: ReadonlySet<WorkspaceTaskNode["kind"]> = new Set(
 ]);
 
 /**
+ * One write chain: the connected component of write nodes, the validation
+ * gates that check them, and the writes that depend on those members. The
+ * whole chain works in a single worktree/branch, so a follow-up write sees
+ * its parent's edits and a validator reads the tree it is actually judging —
+ * a per-node worktree would fork every child from the base and let the gate
+ * pass an empty checkout.
+ */
+export interface WorkspaceWriteChain {
+  /**
+   * Branch-safe stable key: the smallest `order` among members. Orders are
+   * assigned once at node creation and never reused, so the key survives
+   * graph growth while the earliest member stays in the chain.
+   */
+  readonly key: string;
+  readonly nodeIds: ReadonlyArray<WorkspaceTaskNode["id"]>;
+}
+
+/** Group the graph's nodes into write chains (see {@link WorkspaceWriteChain}). */
+export function computeWriteChains(
+  nodes: ReadonlyArray<WorkspaceTaskNode>,
+): ReadonlyArray<WorkspaceWriteChain> {
+  const byId = new Map(nodes.map((node) => [String(node.id), node]));
+  const members = nodes.filter((node) => {
+    if (WRITE_NODE_KINDS.has(node.kind)) return true;
+    if (node.kind !== "validation" || node.validationTargetId === null) return false;
+    const target = byId.get(String(node.validationTargetId));
+    return target !== undefined && WRITE_NODE_KINDS.has(target.kind);
+  });
+  const memberIds = new Set(members.map((node) => String(node.id)));
+  const parents = new Map<string, string>();
+  const find = (id: string): string => {
+    let root = id;
+    while ((parents.get(root) ?? root) !== root) root = parents.get(root) ?? root;
+    let cursor = id;
+    while (cursor !== root) {
+      const next = parents.get(cursor) ?? root;
+      parents.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  };
+  const union = (left: string, right: string) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parents.set(leftRoot, rightRoot);
+  };
+  for (const member of members) {
+    const id = String(member.id);
+    if (member.kind === "validation" && member.validationTargetId !== null) {
+      union(id, String(member.validationTargetId));
+    }
+    for (const dependencyId of member.dependsOn) {
+      if (memberIds.has(String(dependencyId))) union(id, String(dependencyId));
+    }
+  }
+  const components = new Map<string, WorkspaceTaskNode[]>();
+  for (const member of members) {
+    const root = find(String(member.id));
+    const bucket = components.get(root);
+    if (bucket === undefined) components.set(root, [member]);
+    else bucket.push(member);
+  }
+  return [...components.values()]
+    .map((chainNodes) => {
+      const anchor = chainNodes.toSorted(
+        (left, right) => left.order - right.order || left.id.localeCompare(right.id),
+      )[0]!;
+      return {
+        key: String(anchor.order),
+        nodeIds: chainNodes.map((node) => node.id),
+      };
+    })
+    .toSorted((left, right) => Number(left.key) - Number(right.key));
+}
+
+/** Index chains by member node id for wave selection and provisioning. */
+export function chainKeyByNodeId(
+  chains: ReadonlyArray<WorkspaceWriteChain>,
+): ReadonlyMap<string, string> {
+  const index = new Map<string, string>();
+  for (const chain of chains) {
+    for (const nodeId of chain.nodeIds) index.set(String(nodeId), chain.key);
+  }
+  return index;
+}
+
+/**
  * The ready nodes one wave runs together.
  *
  * `soloWrites` keeps a write node out of any shared wave: parallel edits to
@@ -760,17 +849,42 @@ export const WRITE_NODE_KINDS: ReadonlySet<WorkspaceTaskNode["kind"]> = new Set(
  * for the wrong reason and burns the retry budget. The frontier is already
  * priority-ordered, so a write node at the head runs alone and one further
  * back simply waits for the next wave.
+ *
+ * `chainByNodeId` is the isolating-run replacement for `soloWrites`: chain
+ * members no longer need to run alone, but two members of the *same* chain
+ * share one worktree, so a wave admits at most one node per chain. Graph
+ * dependencies serialize the usual linear chain; this guard covers the
+ * diamond a planner may emit, where two parallel writes share a chain.
  */
 export function selectGraphWaveNodes(
   ready: ReadonlyArray<WorkspaceTaskNode>,
-  options: { readonly width: number; readonly soloWrites: boolean },
+  options: {
+    readonly width: number;
+    readonly soloWrites: boolean;
+    readonly chainByNodeId?: ReadonlyMap<string, string>;
+  },
 ): ReadonlyArray<WorkspaceTaskNode> {
   const width = Math.max(1, options.width);
-  if (!options.soloWrites) return ready.slice(0, width);
-  const head = ready[0];
-  if (head === undefined) return [];
-  if (WRITE_NODE_KINDS.has(head.kind)) return [head];
-  return ready.filter((node) => !WRITE_NODE_KINDS.has(node.kind)).slice(0, width);
+  if (options.soloWrites) {
+    const head = ready[0];
+    if (head === undefined) return [];
+    if (WRITE_NODE_KINDS.has(head.kind)) return [head];
+    return ready.filter((node) => !WRITE_NODE_KINDS.has(node.kind)).slice(0, width);
+  }
+  const chainByNodeId = options.chainByNodeId;
+  if (chainByNodeId === undefined || chainByNodeId.size === 0) return ready.slice(0, width);
+  const takenChains = new Set<string>();
+  const wave: WorkspaceTaskNode[] = [];
+  for (const node of ready) {
+    if (wave.length >= width) break;
+    const chain = chainByNodeId.get(String(node.id));
+    if (chain !== undefined) {
+      if (takenChains.has(chain)) continue;
+      takenChains.add(chain);
+    }
+    wave.push(node);
+  }
+  return wave;
 }
 
 /** Keep queued/blocked presentation in sync with the current dependency frontier. */

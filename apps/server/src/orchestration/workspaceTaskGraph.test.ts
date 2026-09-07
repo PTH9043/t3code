@@ -10,6 +10,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildInitialWorkspaceTaskGraph,
   buildMeetingSeededTaskGraph,
+  chainKeyByNodeId,
+  computeWriteChains,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -246,6 +248,8 @@ describe("Workspace orchestra wave selection", () => {
     participantId: null,
     threadId: null,
     parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
     title: id,
     handoff: {
       task: id,
@@ -302,5 +306,148 @@ describe("Workspace orchestra wave selection", () => {
       selectGraphWaveNodes(onlyWrites, { width: 2, soloWrites: true }).map((n) => n.id),
     ).toEqual(["write-b"]);
     expect(selectGraphWaveNodes([], { width: 2, soloWrites: true })).toEqual([]);
+  });
+});
+
+describe("Workspace orchestra write chains", () => {
+  const chainNode = (input: {
+    readonly id: string;
+    readonly order: number;
+    readonly kind: WorkspaceTaskNode["kind"];
+    readonly dependsOn?: ReadonlyArray<string>;
+    readonly validationTargetId?: string;
+    readonly worktreePath?: string;
+  }): WorkspaceTaskNode => ({
+    id: WorkspaceTaskNodeId.make(input.id),
+    order: input.order,
+    kind: input.kind,
+    agent: "codex",
+    role: input.kind === "validation" ? "verifier" : "implementer",
+    participantId: null,
+    threadId: null,
+    parkedQuestion: null,
+    worktreePath: input.worktreePath ?? null,
+    branch: null,
+    title: input.id,
+    handoff: {
+      task: input.id,
+      goal: input.id,
+      context: "",
+      input: "",
+      constraints: [],
+      expectedOutput: "결과",
+      successCriteria: [],
+    },
+    dependsOn: (input.dependsOn ?? []).map((id) => WorkspaceTaskNodeId.make(id)),
+    validationTargetId:
+      input.validationTargetId === undefined
+        ? null
+        : WorkspaceTaskNodeId.make(input.validationTargetId),
+    priority: 0,
+    status: "queued",
+    maxAttempts: 2,
+    attempts: [],
+    output: null,
+    error: null,
+    failureClassification: null,
+    confidence: null,
+    validation: null,
+    startedAt: null,
+    completedAt: null,
+  });
+
+  it("chains a write, its validation gate, and the dependent follow-up write", () => {
+    const nodes = [
+      chainNode({ id: "research", order: 0, kind: "research" }),
+      chainNode({ id: "write-a", order: 1, kind: "implementation", dependsOn: ["research"] }),
+      chainNode({
+        id: "check-a",
+        order: 2,
+        kind: "validation",
+        dependsOn: ["write-a"],
+        validationTargetId: "write-a",
+      }),
+      chainNode({ id: "write-b", order: 3, kind: "debug", dependsOn: ["check-a"] }),
+      chainNode({ id: "synthesize", order: 4, kind: "synthesis", dependsOn: ["write-b"] }),
+    ];
+    const chains = computeWriteChains(nodes);
+    expect(chains).toHaveLength(1);
+    expect(chains[0]?.key).toBe("1");
+    expect([...(chains[0]?.nodeIds ?? [])].toSorted()).toEqual(["check-a", "write-a", "write-b"]);
+  });
+
+  it("keeps independent writes in separate chains", () => {
+    const nodes = [
+      chainNode({ id: "write-a", order: 0, kind: "implementation" }),
+      chainNode({ id: "write-b", order: 1, kind: "implementation" }),
+      chainNode({
+        id: "check-b",
+        order: 2,
+        kind: "validation",
+        dependsOn: ["write-b"],
+        validationTargetId: "write-b",
+      }),
+    ];
+    const chains = computeWriteChains(nodes);
+    expect(chains.map((chain) => chain.key)).toEqual(["0", "1"]);
+    expect(chainKeyByNodeId(chains).get("check-b")).toBe("1");
+  });
+
+  it("leaves a validation of a read node out of every chain", () => {
+    const nodes = [
+      chainNode({ id: "research", order: 0, kind: "research" }),
+      chainNode({
+        id: "check-research",
+        order: 1,
+        kind: "validation",
+        dependsOn: ["research"],
+        validationTargetId: "research",
+      }),
+      chainNode({ id: "write-a", order: 2, kind: "implementation" }),
+    ];
+    const chains = computeWriteChains(nodes);
+    expect(chains).toHaveLength(1);
+    expect(chains[0]?.nodeIds).toEqual(["write-a"]);
+  });
+
+  it("keeps the chain key stable while the graph grows", () => {
+    const base = [
+      chainNode({ id: "write-a", order: 1, kind: "implementation" }),
+      chainNode({
+        id: "check-a",
+        order: 2,
+        kind: "validation",
+        dependsOn: ["write-a"],
+        validationTargetId: "write-a",
+      }),
+    ];
+    const before = computeWriteChains(base);
+    const grown = [
+      ...base,
+      chainNode({ id: "write-fix", order: 7, kind: "debug", dependsOn: ["check-a"] }),
+    ];
+    const after = computeWriteChains(grown);
+    expect(before[0]?.key).toBe("1");
+    expect(after[0]?.key).toBe("1");
+    expect(after[0]?.nodeIds).toContain("write-fix");
+  });
+
+  it("admits at most one node per chain into a shared wave", () => {
+    // A planner diamond: two parallel writes in one chain must not edit the
+    // same worktree at once, so the second waits for the next wave.
+    const nodes = [
+      chainNode({ id: "write-a", order: 0, kind: "implementation" }),
+      chainNode({ id: "write-b", order: 1, kind: "implementation", dependsOn: ["write-a"] }),
+      chainNode({ id: "write-c", order: 2, kind: "implementation", dependsOn: ["write-a"] }),
+      chainNode({ id: "read-d", order: 3, kind: "research" }),
+    ];
+    const chains = computeWriteChains(nodes);
+    expect(chains).toHaveLength(1);
+    const wave = selectGraphWaveNodes([nodes[1]!, nodes[2]!, nodes[3]!], {
+      width: 3,
+      soloWrites: false,
+      chainByNodeId: chainKeyByNodeId(chains),
+    });
+    expect(wave.map((node) => node.id)).toEqual(["write-b", "read-d"]);
   });
 });

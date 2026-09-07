@@ -141,29 +141,28 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
     }),
   );
 
-  it.effect("rejects unimplemented worktree isolation for meeting and role-bound requests", () =>
+  it.effect("accepts worktree isolation for meeting and role-bound requests", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();
       for (const withMeeting of [true, false]) {
         const { meeting, ...base } = requestCommand();
-        const error = yield* decideOrchestrationCommand({
-          command: {
-            ...base,
-            ...(withMeeting ? { meeting } : {}),
-            orchestra: { maxParallel: 2, isolateWorktrees: true },
-          },
-          readModel,
-        }).pipe(Effect.flip);
-        expect(error._tag).toBe("OrchestrationCommandInvariantError");
-        expect(error.message).toContain("isolateWorktrees=false");
+        const accepted = asSingleEvent(
+          yield* decideOrchestrationCommand({
+            command: {
+              ...base,
+              ...(withMeeting ? { meeting } : {}),
+              orchestra: { maxParallel: 2, isolateWorktrees: true },
+            },
+            readModel,
+          }),
+        );
+        expect(accepted.type).toBe("project.collaboration-run-requested");
+        expect(
+          accepted.type === "project.collaboration-run-requested"
+            ? accepted.payload.run.orchestra
+            : null,
+        ).toEqual({ maxParallel: 2, isolateWorktrees: true });
       }
-      const accepted = asSingleEvent(
-        yield* decideOrchestrationCommand({
-          command: { ...requestCommand(), orchestra: { maxParallel: 2, isolateWorktrees: false } },
-          readModel,
-        }),
-      );
-      expect(accepted.type).toBe("project.collaboration-run-requested");
     }),
   );
 

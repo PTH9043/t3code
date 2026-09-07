@@ -13,6 +13,8 @@ function node(id: string, order: number, dependsOn: ReadonlyArray<string> = []):
     participantId: null,
     threadId: null,
     parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
     title: id,
     handoff: {
       task: id,

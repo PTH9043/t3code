@@ -108,6 +108,31 @@ export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
 }
 
+export const ORCHESTRA_WORKTREE_BRANCH_PREFIX = `${WORKTREE_BRANCH_PREFIX}/orch-`;
+
+/**
+ * Deterministic branch name for one write chain of an orchestra run, so a
+ * crash-and-resume reattaches to the same branch instead of colliding on a
+ * fresh `-b`.
+ */
+export function buildOrchestraWorktreeBranchName(runId: string, chainKey: string): string {
+  const runToken =
+    runId
+      .toLowerCase()
+      .replace(/[^0-9a-z]/g, "")
+      .slice(0, 8) || "run";
+  const chainToken =
+    chainKey
+      .toLowerCase()
+      .replace(/[^0-9a-z]/g, "")
+      .slice(0, 12) || "0";
+  return `${ORCHESTRA_WORKTREE_BRANCH_PREFIX}${runToken}-${chainToken}`;
+}
+
+export function isOrchestraWorktreeBranch(refName: string): boolean {
+  return refName.trim().toLowerCase().startsWith(ORCHESTRA_WORKTREE_BRANCH_PREFIX);
+}
+
 /**
  * Normalize a git remote URL into a stable comparison key.
  */

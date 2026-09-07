@@ -33,6 +33,21 @@ import {
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReactor.ts";
+import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts";
+import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
+
+/** Non-isolating harness runs never provision; terminal cleanup is a no-op. */
+const orchestraWorktreeStubs = Layer.mergeAll(
+  Layer.mock(WorktreeProvisionService.WorktreeProvisionService)({
+    runSetupGate: () => Effect.succeed({ status: "ok" as const }),
+  }),
+  Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+  Layer.mock(WorkspaceWorktreeCleanup)({
+    cleanupRunWorktrees: () => Effect.void,
+    sweepOrphans: () => Effect.void,
+  }),
+);
 
 function responseForGraphPrompt(prompt: string): string {
   if (prompt.includes("Return one strict receipt between <t3_validation>")) {
@@ -483,6 +498,7 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
         } as unknown as ProjectionTurnRepository["Service"]),
       ),
       Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
+      Layer.provideMerge(orchestraWorktreeStubs),
       Layer.provideMerge(NodeServices.layer),
     );
 

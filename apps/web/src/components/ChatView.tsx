@@ -5733,7 +5733,12 @@ function ChatViewContent(props: ChatViewProps) {
             },
             // Opt-in: absent keeps the one-node-at-a-time meeting execution.
             ...(meetingDraft.orchestraEnabled
-              ? { orchestra: { maxParallel: meetingDraft.maxParallel, isolateWorktrees: false } }
+              ? {
+                  orchestra: {
+                    maxParallel: meetingDraft.maxParallel,
+                    isolateWorktrees: meetingDraft.isolateWorktrees,
+                  },
+                }
               : {}),
           },
         });

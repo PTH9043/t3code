@@ -53,6 +53,21 @@ export const parkedQuestionNodes = (
 ): ReadonlyArray<WorkspaceTaskNode> =>
   Array.from(nodes).filter((node) => node.parkedQuestion !== null);
 
+/**
+ * How many distinct write-chain worktrees the run still holds. On a settled
+ * run these are the checkouts kept back for diff review — the "정리 대기"
+ * badge — because deleting unmerged work is the one thing cleanup must never
+ * do on its own.
+ */
+export const runKeptWorktreeCount = (
+  graph: { readonly nodes: ReadonlyArray<WorkspaceTaskNode> } | null,
+): number =>
+  new Set(
+    (graph?.nodes ?? [])
+      .map((node) => node.worktreePath)
+      .filter((path): path is string => path !== null),
+  ).size;
+
 export interface RunAttentionItem {
   readonly runId: string;
   readonly task: string;
@@ -62,6 +77,12 @@ export interface RunAttentionItem {
   readonly queuedQuestions: number;
   /** Nodes parked on the person, including the one asking `liveQuestion`. */
   readonly awaitingUser: number;
+  /**
+   * Node conversations blocked on provider input (an approval prompt inside
+   * the thread, not a meeting question). Without this signal a run looks
+   * merely "running" while an agent sits waiting for a click.
+   */
+  readonly blockedNodeThreads: number;
 }
 
 interface AttentionRunInput {
@@ -82,6 +103,7 @@ interface AttentionRunInput {
  */
 export const runsAwaitingPerson = (
   runs: Iterable<AttentionRunInput>,
+  blockedThreadIds?: ReadonlySet<string>,
 ): ReadonlyArray<RunAttentionItem> => {
   const items: Array<RunAttentionItem> = [];
   for (const run of runs) {
@@ -89,14 +111,21 @@ export const runsAwaitingPerson = (
     const nodes = run.graph?.nodes ?? [];
     const awaitingUser = nodes.filter((node) => node.status === "awaiting-user").length;
     const queuedQuestions = nodes.filter((node) => node.parkedQuestion !== null).length;
+    const blockedNodeThreads =
+      blockedThreadIds === undefined
+        ? 0
+        : nodes.filter(
+            (node) => node.threadId !== null && blockedThreadIds.has(String(node.threadId)),
+          ).length;
     const liveQuestion = run.meeting?.pendingQuestion?.question ?? null;
-    if (liveQuestion === null && awaitingUser === 0) continue;
+    if (liveQuestion === null && awaitingUser === 0 && blockedNodeThreads === 0) continue;
     items.push({
       runId: run.id,
       task: run.task,
       liveQuestion,
       queuedQuestions,
       awaitingUser,
+      blockedNodeThreads,
     });
   }
   return items;

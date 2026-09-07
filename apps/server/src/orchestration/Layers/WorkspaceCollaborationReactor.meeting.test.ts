@@ -42,6 +42,40 @@ import {
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReactor.ts";
+import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts";
+import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
+
+/**
+ * Deterministic provisioning fakes: non-isolating runs never touch them, and
+ * an isolating run gets a stable per-branch path. Terminal cleanup is a no-op.
+ */
+const orchestraWorktreeStubs = Layer.mergeAll(
+  Layer.mock(WorktreeProvisionService.WorktreeProvisionService)({
+    provision: (request) =>
+      Effect.succeed({
+        worktreePath: `E:/worktrees/${request.branch ?? "detached"}`,
+        refName: request.branch ?? request.baseBranch,
+        reused: false,
+      }),
+    runSetupGate: () => Effect.succeed({ status: "ok" as const }),
+  }),
+  Layer.mock(GitWorkflowService.GitWorkflowService)({
+    localStatus: () =>
+      Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: false,
+        isDefaultRef: false,
+        refName: "main",
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      }),
+  }),
+  Layer.mock(WorkspaceWorktreeCleanup)({
+    cleanupRunWorktrees: () => Effect.void,
+    sweepOrphans: () => Effect.void,
+  }),
+);
 
 const projectId = ProjectId.make("workspace-m");
 const runId = WorkspaceCollaborationRunId.make("run-m");
@@ -214,8 +248,8 @@ function makeHarness(input: {
                 modelSelection: command.modelSelection,
                 runtimeMode: command.runtimeMode,
                 interactionMode: command.interactionMode,
-                branch: null,
-                worktreePath: null,
+                branch: command.branch,
+                worktreePath: command.worktreePath,
                 latestTurn: null,
                 createdAt: command.createdAt,
                 updatedAt: command.createdAt,
@@ -352,6 +386,10 @@ function makeHarness(input: {
         Ref.get(threadsRef).pipe(
           Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
         ),
+      getProjectShellById: () =>
+        Effect.succeed(
+          Option.some({ id: projectId, workspaceRoot: "D:/repo", scripts: [] } as never),
+        ),
     } as unknown as ProjectionSnapshotQueryShape;
     const providerInstances = [
       {
@@ -381,6 +419,7 @@ function makeHarness(input: {
         } as unknown as ProjectionTurnRepository["Service"]),
       ),
       Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
+      Layer.provideMerge(orchestraWorktreeStubs),
       Layer.provideMerge(NodeServices.layer),
     );
     return { runRef, promptsRef, threadsRef, sessionStopsRef, pubsub, layer };
@@ -488,6 +527,44 @@ it.effect("runs the meeting, plans onto the roster, and executes with the same s
       expect(buildPrompt).toContain("p1: Claude -> claude-a / claude-fable");
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
+);
+
+it.effect(
+  "isolating orchestra run gives the write chain a worktree and pins its threads there",
+  () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        run: {
+          ...meetingRun({ answers: [executeWrapUp(1)] }),
+          orchestra: { maxParallel: 2, isolateWorktrees: true },
+        },
+        respond: respondForMeetingPrompt,
+      });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+        yield* reactor.start();
+        yield* reactor.drain;
+
+        const run = yield* Ref.get(harness.runRef);
+        expect(run.status).toBe("completed");
+        const nodes = new Map(run.graph?.nodes.map((node) => [String(node.id), node]));
+        const build = nodes.get("build");
+        const validate = nodes.get("validate-build");
+        // The write node and its validation gate share one chain worktree, so
+        // the gate judges the tree the write actually edited; readers stay in
+        // the project root.
+        expect(build?.worktreePath).toContain("E:/worktrees/t3code/orch-runm-");
+        expect(build?.branch).toContain("t3code/orch-runm-");
+        expect(validate?.worktreePath).toBe(build?.worktreePath);
+        expect(nodes.get("plan")?.worktreePath ?? null).toBeNull();
+        // The node's pinned conversation was created inside the chain worktree.
+        const threads = yield* Ref.get(harness.threadsRef);
+        const buildThread = build?.threadId != null ? threads.get(build.threadId) : undefined;
+        expect(buildThread?.worktreePath).toBe(build?.worktreePath);
+        expect(buildThread?.branch).toBe(build?.branch);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
 );
 
 it.effect("holds the meeting in the conversation the person sent it from", () =>
@@ -1025,7 +1102,7 @@ it.effect("orchestra: runs nodes side by side, each in its own fixed conversatio
   }),
 );
 
-it.effect("orchestra: recovered isolation=true runs still execute write nodes alone", () =>
+it.effect("orchestra: isolation=true runs write chains in parallel, each in its own worktree", () =>
   Effect.gen(function* () {
     const writeWaves: string[][] = [];
     const harness = yield* makeHarness({
@@ -1040,7 +1117,7 @@ it.effect("orchestra: recovered isolation=true runs still execute write nodes al
           if (!prompt.includes("# Workspace Task Graph Assignment")) return;
           const running = run.graph?.nodes.filter((node) => node.status === "running") ?? [];
           if (running.some((node) => node.kind === "implementation" || node.kind === "debug")) {
-            writeWaves.push(running.map((node) => String(node.id)));
+            writeWaves.push(running.map((node) => String(node.id)).toSorted());
           }
         }),
     });
@@ -1048,8 +1125,18 @@ it.effect("orchestra: recovered isolation=true runs still execute write nodes al
       const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
       yield* reactor.start();
       yield* reactor.drain;
-      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
-      expect(writeWaves).toEqual([["research-p1"], ["research-p2"]]);
+      const done = yield* Ref.get(harness.runRef);
+      expect(done.status).toBe("completed");
+      // Two independent write chains share one wave now that each edits its
+      // own worktree instead of the shared checkout.
+      expect(writeWaves).toEqual([
+        ["research-p1", "research-p2"],
+        ["research-p1", "research-p2"],
+      ]);
+      const writes = done.graph?.nodes.filter((node) => node.kind === "implementation") ?? [];
+      expect(writes).toHaveLength(2);
+      expect(writes.every((node) => node.worktreePath !== null)).toBe(true);
+      expect(new Set(writes.map((node) => node.worktreePath)).size).toBe(2);
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );

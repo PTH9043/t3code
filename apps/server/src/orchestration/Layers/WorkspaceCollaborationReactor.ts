@@ -68,6 +68,8 @@ import {
 import {
   buildInitialWorkspaceTaskGraph,
   buildMeetingSeededTaskGraph,
+  chainKeyByNodeId,
+  computeWriteChains,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -77,7 +79,13 @@ import {
   refreshWorkspaceTaskGraphQueue,
   WorkspaceTaskGraphError,
   type WorkspaceMeetingPlanContext,
+  type WorkspaceWriteChain,
 } from "../workspaceTaskGraph.ts";
+import { buildOrchestraWorktreeBranchName } from "@t3tools/shared/git";
+import { projectScriptRuntimeEnv, setupProjectScript } from "@t3tools/shared/projectScripts";
+import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts";
+import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -113,9 +121,17 @@ function graphWaveWidth(run: WorkspaceCollaborationRun): number {
   return run.meeting === null ? MAX_PARALLEL_GRAPH_NODES : 1;
 }
 
-/** Write isolation is not implemented yet, including for recovered opted-in runs. */
+/**
+ * Whether write nodes must run alone. With `isolateWorktrees` each write
+ * chain edits its own worktree, so writes may share a wave — bounded to one
+ * node per chain at selection time.
+ */
 function soloWriteWaves(run: WorkspaceCollaborationRun): boolean {
-  return run.orchestra !== null;
+  return run.orchestra !== null && !run.orchestra.isolateWorktrees;
+}
+
+function isolatesWorktrees(run: WorkspaceCollaborationRun): boolean {
+  return run.orchestra?.isolateWorktrees === true;
 }
 
 /** On an orchestra run every node executes in its own fixed conversation. */
@@ -337,6 +353,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
   const providerInstanceRegistry = yield* ProviderInstanceRegistry;
+  const worktreeProvision = yield* WorktreeProvisionService.WorktreeProvisionService;
+  const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+  const worktreeCleanup = yield* WorkspaceWorktreeCleanup;
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4;
   const workspaceLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
@@ -521,6 +540,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly expectedAgent?: "fable" | "codex" | "grok";
       readonly usageContext?: import("@t3tools/contracts").TokenUsageContext;
       /**
+       * The write-chain checkout this node works in. The thread is created
+       * with it, and an existing thread whose recorded worktree drifted (a
+       * cleanup nulled it, then the chain was re-provisioned) is pointed back
+       * before the turn starts — the session cwd is read from the thread.
+       */
+      readonly worktree?: { readonly worktreePath: string; readonly branch: string | null };
+      /**
        * The turn this call awaits must have been requested at or after this
        * instant. On a reused thread (a meeting seat's single conversation) it
        * separates this attempt's turn from the turns already in the window: an
@@ -563,8 +589,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           modelSelection: input.step.modelSelection,
           runtimeMode: input.step.runtimeMode,
           interactionMode: input.step.interactionMode,
-          branch: null,
-          worktreePath: null,
+          branch: input.worktree?.branch ?? null,
+          worktreePath: input.worktree?.worktreePath ?? null,
           createdAt,
         });
         thread = yield* loadThread(runRef, input.step.threadId);
@@ -574,6 +600,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         return yield* executionError(
           `Collaboration thread '${input.step.threadId}' was not projected after creation.`,
         );
+      }
+      if (
+        input.worktree !== undefined &&
+        thread.value.worktreePath !== input.worktree.worktreePath
+      ) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(yield* randomUUID),
+          threadId: input.step.threadId,
+          branch: input.worktree.branch,
+          worktreePath: input.worktree.worktreePath,
+        });
       }
       const latestTurn = thread.value.latestTurn;
       // `<=` on the boundary: a latest turn stamped in the same millisecond as
@@ -1422,6 +1460,105 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     },
   );
 
+  /**
+   * Ensure every write chain represented in the wave has its worktree before
+   * any of its nodes start. Failures do not fail the wave here — they come
+   * back as per-chain errors and surface through the nodes' normal failure
+   * path, so the retry budget and the intervention question still apply.
+   */
+  const provisionWaveChains = Effect.fn("WorkspaceCollaborationReactor.provisionWaveChains")(
+    function* (input: {
+      readonly run: WorkspaceCollaborationRun;
+      readonly graph: WorkspaceTaskGraph;
+      readonly waveNodes: ReadonlyArray<WorkspaceTaskNode>;
+      readonly chains: ReadonlyArray<WorkspaceWriteChain>;
+      readonly chainIndex: ReadonlyMap<string, string>;
+    }) {
+      const assignments = new Map<string, { worktreePath: string; branch: string }>();
+      const errors = new Map<string, string>();
+      const waveChainKeys = [
+        ...new Set(
+          input.waveNodes
+            .map((node) => input.chainIndex.get(String(node.id)))
+            .filter((key): key is string => key !== undefined),
+        ),
+      ];
+      if (waveChainKeys.length === 0) return { assignments, errors };
+      const failAll = (message: string) => {
+        for (const key of waveChainKeys) if (!assignments.has(key)) errors.set(key, message);
+        return { assignments, errors };
+      };
+      const project = yield* projectionSnapshotQuery.getProjectShellById(input.run.projectId).pipe(
+        Effect.map(Option.getOrNull),
+        Effect.orElseSucceed(() => null),
+      );
+      if (project === null) return failAll("Workspace is unavailable for worktree provisioning.");
+      const status = yield* gitWorkflow
+        .localStatus({ cwd: project.workspaceRoot })
+        .pipe(Effect.orElseSucceed(() => null));
+      const baseBranch = status?.isRepo === true ? status.refName : null;
+      if (baseBranch === null) {
+        return failAll(
+          "Worktree isolation needs the project root on a git branch; none was found.",
+        );
+      }
+      const nodesById = new Map(input.graph.nodes.map((node) => [String(node.id), node]));
+      for (const chainKey of waveChainKeys) {
+        const chain = input.chains.find((candidate) => candidate.key === chainKey);
+        if (chain === undefined) continue;
+        const members = chain.nodeIds
+          .map((id) => nodesById.get(String(id)))
+          .filter((node): node is WorkspaceTaskNode => node !== undefined);
+        const existing = members.find((member) => member.worktreePath !== null) ?? null;
+        const branch =
+          existing?.branch ?? buildOrchestraWorktreeBranchName(String(input.run.id), chainKey);
+        const provisioned = yield* worktreeProvision
+          .provision({
+            projectCwd: project.workspaceRoot,
+            baseBranch,
+            branch,
+            existingWorktreePath: existing?.worktreePath ?? null,
+            reattachExisting: true,
+          })
+          .pipe(
+            Effect.map((result) => ({ ok: true as const, result })),
+            Effect.catch((error) => Effect.succeed({ ok: false as const, error })),
+          );
+        if (!provisioned.ok) {
+          errors.set(chainKey, `Worktree provisioning failed: ${provisioned.error.message}`);
+          continue;
+        }
+        if (!provisioned.result.reused) {
+          const script = setupProjectScript(project.scripts);
+          if (script !== null) {
+            const setup = yield* worktreeProvision.runSetupGate({
+              script: { id: script.id, name: script.name, command: script.command },
+              worktreePath: provisioned.result.worktreePath,
+              env: projectScriptRuntimeEnv({
+                project: { cwd: project.workspaceRoot },
+                worktreePath: provisioned.result.worktreePath,
+              }),
+            });
+            if (setup.status === "failed") {
+              errors.set(
+                chainKey,
+                `Worktree setup script '${script.name}' failed (${
+                  setup.timedOut ? "timed out" : `exit ${setup.exitCode ?? "unknown"}`
+                }): ${setup.outputTail}`,
+              );
+              continue;
+            }
+          }
+        }
+        assignments.set(chainKey, {
+          worktreePath: provisioned.result.worktreePath,
+          branch: provisioned.result.refName,
+        });
+      }
+      return { assignments, errors };
+    },
+  );
+
   const startGraphWave = Effect.fn("WorkspaceCollaborationReactor.startGraphWave")(
     function* (input: {
       readonly run: WorkspaceCollaborationRun;
@@ -1433,12 +1570,29 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       // Without an orchestra a meeting is one shared conversation, and one
       // conversation runs one turn at a time — its waves take a single node.
       // Role-bound runs keep their parallel per-attempt threads. An orchestra
-      // run takes its own width, and keeps write nodes alone until Phase 2
-      // gives write chains their own worktrees.
+      // run takes its own width; writes run alone unless the run isolates
+      // write chains into their own worktrees, in which case a wave admits at
+      // most one node per chain.
+      const isolated = isolatesWorktrees(input.run);
+      const chains = isolated ? computeWriteChains(input.run.graph.nodes) : [];
+      const chainIndex = chainKeyByNodeId(chains);
       const waveNodes = selectGraphWaveNodes(input.nodes, {
         width: graphWaveWidth(input.run),
         soloWrites: soloWriteWaves(input.run),
+        chainByNodeId: chainIndex,
       });
+      const provisioning = isolated
+        ? yield* provisionWaveChains({
+            run: input.run,
+            graph: input.run.graph,
+            waveNodes,
+            chains,
+            chainIndex,
+          })
+        : {
+            assignments: new Map<string, { worktreePath: string; branch: string }>(),
+            errors: new Map<string, string>(),
+          };
       const ownThread = nodeOwnsThread(input.run);
       const startedNodes = yield* Effect.forEach(
         waveNodes,
@@ -1446,6 +1600,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           Effect.gen(function* () {
             const route = yield* chooseAttemptRoute(node, input.bindings, input.run.meeting);
             const startedAt = yield* nowIso;
+            const chainKey = chainIndex.get(String(node.id));
+            const assignment =
+              chainKey === undefined ? undefined : provisioning.assignments.get(chainKey);
             const meetingThreadId =
               !ownThread && meeting !== null && node.participantId !== null
                 ? meeting.threadId
@@ -1475,6 +1632,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             };
             return {
               ...node,
+              ...(assignment !== undefined
+                ? { worktreePath: assignment.worktreePath, branch: assignment.branch }
+                : {}),
               threadId: nodeThreadId ?? node.threadId,
               status: "running" as const,
               attempts: [...node.attempts, attempt],
@@ -1494,14 +1654,32 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           : startedNodes.some((node) => node.kind === "synthesis")
             ? ("synthesizing" as const)
             : input.run.graph.status,
-        nodes: input.run.graph.nodes.map((node) => replacements.get(String(node.id)) ?? node),
+        nodes: input.run.graph.nodes.map((node) => {
+          const started = replacements.get(String(node.id));
+          if (started !== undefined) return started;
+          // Chain members outside the wave adopt the chain's worktree now, so
+          // a validation gate scheduled later already knows where to run and
+          // the dashboard can offer the diff before the whole chain settles.
+          const chainKey = chainIndex.get(String(node.id));
+          const assignment =
+            chainKey === undefined ? undefined : provisioning.assignments.get(chainKey);
+          if (assignment === undefined || node.worktreePath !== null) return node;
+          return { ...node, worktreePath: assignment.worktreePath, branch: assignment.branch };
+        }),
         nextAction: `실행 중: ${startedNodes.map((node) => node.title).join(", ")}`,
       };
-      return yield* persistGraphRun(input.run, graph, input.bindings, {
+      const persisted = yield* persistGraphRun(input.run, graph, input.bindings, {
         status: "running",
         error: null,
         updatedAt: yield* nowIso,
       });
+      const provisionErrors = new Map<string, string>();
+      for (const node of waveNodes) {
+        const chainKey = chainIndex.get(String(node.id));
+        const error = chainKey === undefined ? undefined : provisioning.errors.get(chainKey);
+        if (error !== undefined) provisionErrors.set(String(node.id), error);
+      }
+      return { run: persisted, provisionErrors };
     },
   );
 
@@ -1510,10 +1688,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly run: WorkspaceCollaborationRun;
       readonly bindings: ReadonlyArray<WorkspaceAgentRoleBinding>;
       readonly workspacePrompt: string;
+      readonly provisionErrors?: ReadonlyMap<string, string>;
     }) {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
       const graph = input.run.graph;
       const running = graph.nodes.filter((node) => node.status === "running");
+      const isolated = isolatesWorktrees(input.run);
+      const chainIndex = isolated ? chainKeyByNodeId(computeWriteChains(graph.nodes)) : null;
       const compatibilitySteps = graphCompatibilitySteps(graph, input.bindings, input.run.meeting);
       // On a meeting run the roster is the cast; the project's role bindings are
       // not consulted and must not be advertised as available executors.
@@ -1541,6 +1722,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       return yield* Effect.forEach(
         running,
         (node) => {
+          const provisionError = input.provisionErrors?.get(String(node.id));
+          if (provisionError !== undefined) {
+            return Effect.succeed({ nodeId: String(node.id), error: provisionError });
+          }
+          // A crash between marking the wave and persisting its provisioning
+          // can resume a chain node without a worktree; running it would edit
+          // the project root the isolation promised to protect.
+          if (isolated && chainIndex?.has(String(node.id)) === true && node.worktreePath === null) {
+            return Effect.succeed({
+              nodeId: String(node.id),
+              error: `Node '${node.id}' resumed without its chain worktree; it will be re-provisioned on retry.`,
+            });
+          }
           const attempt = node.attempts.at(-1);
           if (attempt === undefined) {
             return Effect.succeed({
@@ -1573,6 +1767,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             // A seat's account is whatever the person picked; only role-bound
             // nodes pin the provider driver to the agent.
             ...(node.participantId === null ? { expectedAgent: node.agent } : {}),
+            ...(node.worktreePath !== null
+              ? { worktree: { worktreePath: node.worktreePath, branch: node.branch } }
+              : {}),
             // Anchors this attempt's turn inside the seat's reused conversation.
             turnAfter: attempt.startedAt,
             usageContext: {
@@ -2414,6 +2611,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         }
       }
       let running = run.graph.nodes.filter((node) => node.status === "running");
+      let provisionErrors: ReadonlyMap<string, string> = new Map();
       if (running.length === 0) {
         const ready = readyWorkspaceTaskNodes(run.graph);
         if (ready.length === 0) {
@@ -2421,7 +2619,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             `Task graph is deadlocked at revision ${run.graph.revision}: ${run.graph.nextAction}`,
           );
         }
-        run = yield* startGraphWave({ run, bindings, nodes: ready });
+        const wave = yield* startGraphWave({ run, bindings, nodes: ready });
+        run = wave.run;
+        provisionErrors = wave.provisionErrors;
         running = run.graph?.nodes.filter((node) => node.status === "running") ?? [];
       }
       if (running.length === 0) return yield* executionError("Task graph wave did not start.");
@@ -2429,6 +2629,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         run,
         bindings,
         workspacePrompt: workspacePrompt.prompt,
+        provisionErrors,
       });
       run = yield* applyGraphWaveResults({ run, bindings, results });
     }
@@ -2660,6 +2861,27 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     });
   });
 
+  /**
+   * D7 trigger ②: a run that just settled releases the worktrees whose chains
+   * hold no unmerged work; dirty ones stay for the person's diff review. A
+   * parked run is not terminal and keeps its checkouts.
+   */
+  const cleanupTerminalRunWorktrees = (runRef: RunRef) =>
+    getRun(runRef).pipe(
+      Effect.flatMap((run) =>
+        ["completed", "failed", "cancelled"].includes(run.status)
+          ? worktreeCleanup.cleanupRunWorktrees(run)
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Workspace collaboration worktree cleanup was skipped", {
+          projectId: runRef.projectId,
+          runId: runRef.runId,
+          cause: conciseCause(cause),
+        }),
+      ),
+    );
+
   const executeSafely = (runRef: RunRef) =>
     executeRun(runRef).pipe(
       Effect.catchTag("WorkspaceCollaborationCancelled", () => finalizeCancelled(runRef)),
@@ -2677,6 +2899,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           ),
         );
       }),
+      Effect.andThen(cleanupTerminalRunWorktrees(runRef)),
     );
 
   const releaseClaim = (key: string) =>
@@ -2845,6 +3068,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       startImmediately: true,
     });
     yield* enqueueStartupRuns;
+    // D7 startup sweep: the live-event cleanup misses worktrees a crash left
+    // behind. Deferred past boot so it never competes with startup recovery.
+    yield* forkParked(
+      Effect.sleep("15 seconds").pipe(Effect.andThen(worktreeCleanup.sweepOrphans())),
+    );
   });
 
   const drain: WorkspaceCollaborationReactorShape["drain"] = TxRef.get(outstanding).pipe(

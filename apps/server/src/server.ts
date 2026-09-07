@@ -58,6 +58,7 @@ import { SessionRecoveryReactorLive } from "./orchestration/Layers/SessionRecove
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
+import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
 import * as ServerSelfSignals from "./diagnostics/ServerSelfSignals.ts";
 import { WorkspaceMonitoringReactorLive } from "./orchestration/Layers/WorkspaceMonitoringReactor.ts";
 import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceSchedulerReactor.ts";
@@ -80,6 +81,7 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as WorktreeProvisionService from "./git/WorktreeProvisionService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -268,6 +270,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(WorkspaceCollaborationReactorLive),
   Layer.provideMerge(WorkspaceSchedulerReactorLive),
   Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
+  Layer.provideMerge(WorkspaceWorktreeCleanup.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -332,6 +335,12 @@ const VcsLayerLive = Layer.empty.pipe(
   Layer.provideMerge(VcsProjectConfig.layer),
   Layer.provideMerge(VcsDriverRegistryLayerLive),
   Layer.provideMerge(VcsProvisioningService.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
+  Layer.provideMerge(
+    WorktreeProvisionService.layer.pipe(
+      Layer.provide(GitWorkflowLayerLive),
+      Layer.provide(ProcessRunner.layer),
+    ),
+  ),
   Layer.provideMerge(GitWorkflowLayerLive),
   Layer.provideMerge(ReviewLayerLive),
   Layer.provideMerge(SourceControlRepositoryServiceLayerLive),

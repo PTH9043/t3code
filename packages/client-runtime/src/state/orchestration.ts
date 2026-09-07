@@ -2,6 +2,7 @@ import { ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import {
+  createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
@@ -89,6 +90,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:workspace-incidents",
       tag: ORCHESTRATION_WS_METHODS.listWorkspaceIncidents,
       staleTimeMs: 500,
+    }),
+    cleanupWorkspaceWorktree: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:orchestration:cleanup-workspace-worktree",
+      tag: ORCHESTRATION_WS_METHODS.cleanupWorkspaceWorktree,
     }),
   };
 }

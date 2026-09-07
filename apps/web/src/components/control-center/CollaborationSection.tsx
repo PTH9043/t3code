@@ -23,7 +23,8 @@ import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
 import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
-import { runsAwaitingPerson } from "./taskGraphPresentation";
+import { WorktreeDiffDialog, type WorktreeDiffTarget } from "./WorktreeDiffDialog";
+import { runKeptWorktreeCount, runsAwaitingPerson } from "./taskGraphPresentation";
 import {
   ROLE_LABELS,
   SectionCard,
@@ -62,10 +63,46 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
     label: "회의 질문 답변",
     reportFailure: false,
   });
+  const cleanupWorktree = useAtomCommand(orchestrationEnvironment.cleanupWorkspaceWorktree, {
+    label: "worktree 정리",
+    reportFailure: false,
+  });
   const [task, setTask] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
-  const attention = useMemo(() => runsAwaitingPerson(runs.data?.runs ?? []), [runs.data]);
+  const [diffTarget, setDiffTarget] = useState<WorktreeDiffTarget | null>(null);
+  // A node conversation stuck on a provider approval parks the person just
+  // like a meeting question; the runtime's thread evidence carries it.
+  const blockedThreadIds = useMemo(
+    () =>
+      new Set(
+        (runtime.data?.evidence ?? [])
+          .filter((entry) => entry.source === "thread" && entry.status === "blocked")
+          .map((entry) => entry.sourceId),
+      ),
+    [runtime.data],
+  );
+  const attention = useMemo(
+    () => runsAwaitingPerson(runs.data?.runs ?? [], blockedThreadIds),
+    [runs.data, blockedThreadIds],
+  );
+
+  const cleanup = async (runId: WorkspaceCollaborationRunId, worktreePath: string) => {
+    const result = await cleanupWorktree({
+      environmentId: project.environmentId,
+      input: { projectId: project.id, runId, worktreePath },
+    });
+    if (notifyCommandFailure(result, "worktree 정리 실패")) return;
+    if (result._tag === "Success" && result.value.status === "kept-dirty") {
+      notifySuccess(
+        "worktree를 보존했습니다.",
+        result.value.detail ?? "병합되지 않은 변경이 남아 있습니다. diff를 먼저 검토하세요.",
+      );
+      return;
+    }
+    runs.refresh();
+    notifySuccess("worktree를 정리했습니다.", "브랜치는 저장소에 그대로 남습니다.");
+  };
 
   const answer = async (
     runId: WorkspaceCollaborationRunId,
@@ -177,12 +214,19 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                     </p>
                   ) : null}
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    <Badge size="sm" variant="warning">
-                      답변 대기 노드 {item.awaitingUser}
-                    </Badge>
+                    {item.awaitingUser > 0 ? (
+                      <Badge size="sm" variant="warning">
+                        답변 대기 노드 {item.awaitingUser}
+                      </Badge>
+                    ) : null}
                     {item.queuedQuestions > 0 ? (
                       <Badge size="sm" variant="outline">
                         뒤이어 물을 질문 {item.queuedQuestions}
+                      </Badge>
+                    ) : null}
+                    {item.blockedNodeThreads > 0 ? (
+                      <Badge size="sm" variant="error">
+                        대화 승인 대기 {item.blockedNodeThreads}
                       </Badge>
                     ) : null}
                   </div>
@@ -233,7 +277,14 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                   </span>
                 </span>
                 {run.orchestra ? (
-                  <Badge variant="info">오케스트라 · 폭 {run.orchestra.maxParallel}</Badge>
+                  <Badge variant="info">
+                    오케스트라 · 폭 {run.orchestra.maxParallel}
+                    {run.orchestra.isolateWorktrees ? " · 격리" : ""}
+                  </Badge>
+                ) : null}
+                {["completed", "failed", "cancelled"].includes(run.status) &&
+                runKeptWorktreeCount(run.graph) > 0 ? (
+                  <Badge variant="warning">정리 대기 {runKeptWorktreeCount(run.graph)}</Badge>
                 ) : null}
                 {run.meeting?.pendingQuestion ? <Badge variant="warning">답변 필요</Badge> : null}
                 <Badge variant={runBadgeVariant(run.status)}>{runStatusLabel(run.status)}</Badge>
@@ -256,6 +307,19 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                         to: "/$environmentId/$threadId",
                         params: { environmentId: project.environmentId, threadId },
                       })
+                    }
+                    onOpenDiff={({ node, worktreePath }) =>
+                      setDiffTarget({
+                        environmentId: project.environmentId,
+                        worktreePath,
+                        branch: node.branch,
+                        nodeTitle: node.title,
+                      })
+                    }
+                    onCleanupWorktree={
+                      ["completed", "failed", "cancelled"].includes(run.status)
+                        ? ({ worktreePath }) => void cleanup(run.id, worktreePath)
+                        : undefined
                     }
                   />
                 ) : (
@@ -315,6 +379,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
           ) : null}
         </div>
       </div>
+      <WorktreeDiffDialog target={diffTarget} onClose={() => setDiffTarget(null)} />
     </SectionCard>
   );
 }

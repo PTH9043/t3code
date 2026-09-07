@@ -71,6 +71,7 @@ import {
   OrchestrationGetTurnDiffInput,
   OrchestrationRpcSchemas,
   OrchestrationGetWorkflowScriptError,
+  OrchestrationWorktreeCleanupError,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
@@ -877,6 +878,15 @@ export const WsOrchestrationSubscribeThreadRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationCleanupWorkspaceWorktreeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.cleanupWorkspaceWorktree,
+  {
+    payload: OrchestrationRpcSchemas.cleanupWorkspaceWorktree.input,
+    success: OrchestrationRpcSchemas.cleanupWorkspaceWorktree.output,
+    error: Schema.Union([OrchestrationWorktreeCleanupError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -1021,4 +1031,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
+  WsOrchestrationCleanupWorkspaceWorktreeRpc,
 );
