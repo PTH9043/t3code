@@ -646,6 +646,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
+      if (command.orchestra?.isolateWorktrees === true) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Orchestra worktree isolation is not available yet. Start with isolateWorktrees=false; write nodes will run one at a time.",
+        });
+      }
       if (command.meeting !== undefined) {
         yield* requireCoherentMeetingSetup({
           commandType: command.type,
@@ -768,6 +775,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           runId: command.runId,
           question: command.question,
+          questionRef: command.questionRef,
           answer: command.answer,
           answeredAt: command.createdAt,
         },
@@ -1820,6 +1828,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
+          ...(command.usageContext !== undefined ? { usageContext: command.usageContext } : {}),
           threadId: command.threadId,
           messageId: command.message.messageId,
           inputOrigin: command.inputOrigin ?? "user",

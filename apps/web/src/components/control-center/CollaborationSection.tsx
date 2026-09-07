@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { WorkspaceCollaborationRunId } from "@t3tools/contracts";
+import { WorkspaceCollaborationRunId, type WorkspaceMeetingQuestion } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   AlertTriangleIcon,
@@ -67,12 +67,22 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
   const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
   const attention = useMemo(() => runsAwaitingPerson(runs.data?.runs ?? []), [runs.data]);
 
-  const answer = async (runId: WorkspaceCollaborationRunId, question: string, text: string) => {
+  const answer = async (
+    runId: WorkspaceCollaborationRunId,
+    question: WorkspaceMeetingQuestion,
+    text: string,
+  ) => {
     setAnsweringRunId(runId);
     try {
       const result = await answerRun({
         environmentId: project.environmentId,
-        input: { projectId: project.id, runId, question, answer: text },
+        input: {
+          projectId: project.id,
+          runId,
+          question: question.question,
+          questionRef: { nodeId: question.nodeId, askedAt: question.askedAt },
+          answer: text,
+        },
       });
       if (!notifyCommandFailure(result, "답변 전송 실패")) {
         runs.refresh();

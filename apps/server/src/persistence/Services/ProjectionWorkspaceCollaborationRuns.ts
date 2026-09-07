@@ -3,6 +3,7 @@ import type {
   WorkspaceCollaborationRun,
   WorkspaceCollaborationRunId,
   WorkspaceCollaborationRunListInput,
+  WorkspaceMeetingQuestionRef,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -27,6 +28,7 @@ export interface ProjectionWorkspaceCollaborationRunRepositoryShape {
     readonly projectId: ProjectId;
     readonly runId: WorkspaceCollaborationRunId;
     readonly question: string;
+    readonly questionRef?: WorkspaceMeetingQuestionRef | undefined;
     readonly answer: string;
     readonly answeredAt: string;
   }) => Effect.Effect<void, ProjectionRepositoryError>;

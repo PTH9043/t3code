@@ -113,9 +113,9 @@ function graphWaveWidth(run: WorkspaceCollaborationRun): number {
   return run.meeting === null ? MAX_PARALLEL_GRAPH_NODES : 1;
 }
 
-/** Orchestra runs without worktree isolation serialize their write nodes. */
+/** Write isolation is not implemented yet, including for recovered opted-in runs. */
 function soloWriteWaves(run: WorkspaceCollaborationRun): boolean {
-  return run.orchestra !== null && !run.orchestra.isolateWorktrees;
+  return run.orchestra !== null;
 }
 
 /** On an orchestra run every node executes in its own fixed conversation. */

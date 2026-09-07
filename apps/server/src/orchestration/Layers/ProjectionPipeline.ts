@@ -1003,6 +1003,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             runId: event.payload.runId,
             question: event.payload.question,
+            questionRef: event.payload.questionRef,
             answer: event.payload.answer,
             answeredAt: event.payload.answeredAt,
           });

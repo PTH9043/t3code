@@ -1,10 +1,12 @@
 import {
   CommandId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   WorkspaceCollaborationRunId,
   WorkspaceMeetingParticipantId,
+  WorkspaceTaskNodeId,
   type OrchestrationEvent,
   type WorkspaceMeetingSetup,
 } from "@t3tools/contracts";
@@ -106,6 +108,91 @@ function seedReadModel() {
 }
 
 it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
+  it.effect("retains a node attempt's usage context on its durable turn request", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const usageContext = {
+        workId: "run-a",
+        nodeId: "node-a",
+        phase: "verification" as const,
+        attempt: 2,
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("node-attempt"),
+          threadId,
+          message: {
+            messageId: MessageId.make("attempt-message"),
+            role: "user",
+            text: "verify",
+            attachments: [],
+          },
+          usageContext,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const requested = events.find((event) => event.type === "thread.turn-start-requested");
+      expect(requested?.payload.usageContext).toEqual(usageContext);
+    }),
+  );
+
+  it.effect("rejects unimplemented worktree isolation for meeting and role-bound requests", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      for (const withMeeting of [true, false]) {
+        const { meeting, ...base } = requestCommand();
+        const error = yield* decideOrchestrationCommand({
+          command: {
+            ...base,
+            ...(withMeeting ? { meeting } : {}),
+            orchestra: { maxParallel: 2, isolateWorktrees: true },
+          },
+          readModel,
+        }).pipe(Effect.flip);
+        expect(error._tag).toBe("OrchestrationCommandInvariantError");
+        expect(error.message).toContain("isolateWorktrees=false");
+      }
+      const accepted = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: { ...requestCommand(), orchestra: { maxParallel: 2, isolateWorktrees: false } },
+          readModel,
+        }),
+      );
+      expect(accepted.type).toBe("project.collaboration-run-requested");
+    }),
+  );
+
+  it.effect("carries the displayed question identity into the durable answer event", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const questionRef = { nodeId: WorkspaceTaskNodeId.make("node-a"), askedAt: now };
+      const event = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.collaboration.run.answer",
+            commandId: CommandId.make("answer-1"),
+            runId: WorkspaceCollaborationRunId.make("run-a"),
+            projectId,
+            question: "계속할까요?",
+            questionRef,
+            answer: "계속",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      expect(event.type).toBe("project.collaboration-run-answered");
+      if (event.type === "project.collaboration-run-answered") {
+        expect(event.payload.questionRef).toEqual(questionRef);
+      }
+    }),
+  );
+
   it.effect("seeds the meeting with the conversation the person sent it from", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();

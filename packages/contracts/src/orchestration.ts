@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { TokenUsageContext } from "./tokenUsage.ts";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -957,6 +958,13 @@ export const WorkspaceMeetingRound = Schema.Struct({
   consensusReached: Schema.NullOr(Schema.Boolean),
 });
 export type WorkspaceMeetingRound = typeof WorkspaceMeetingRound.Type;
+
+/** Identifies the displayed question even when another node asks the same text. */
+export const WorkspaceMeetingQuestionRef = Schema.Struct({
+  nodeId: Schema.NullOr(WorkspaceTaskNodeId),
+  askedAt: IsoDateTime,
+});
+export type WorkspaceMeetingQuestionRef = typeof WorkspaceMeetingQuestionRef.Type;
 
 /**
  * A question that stops the run until the person answers. One shape serves both
@@ -2107,8 +2115,8 @@ const ProjectCollaborationRunInterjectCommand = Schema.Struct({
 
 /**
  * Settles the run's `pendingQuestion` and lets it continue. Carries the question
- * text it answers so a stale client cannot answer a question that has already
- * been superseded.
+ * text and identity so a stale client cannot answer a replacement question,
+ * including one with the same text. Older clients must refresh before answering.
  */
 const ProjectCollaborationRunAnswerCommand = Schema.Struct({
   type: Schema.Literal("project.collaboration.run.answer"),
@@ -2116,6 +2124,7 @@ const ProjectCollaborationRunAnswerCommand = Schema.Struct({
   runId: WorkspaceCollaborationRunId,
   projectId: ProjectId,
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  questionRef: WorkspaceMeetingQuestionRef,
   answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   createdAt: IsoDateTime,
 });
@@ -2402,6 +2411,7 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  usageContext: Schema.optional(TokenUsageContext),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -2932,6 +2942,8 @@ export const ProjectCollaborationRunAnsweredPayload = Schema.Struct({
   projectId: ProjectId,
   runId: WorkspaceCollaborationRunId,
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  // Absent on persisted events from clients predating question identity.
+  questionRef: Schema.optionalKey(WorkspaceMeetingQuestionRef),
   answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   answeredAt: IsoDateTime,
 });
@@ -3154,6 +3166,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 });
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  usageContext: Schema.optional(TokenUsageContext),
   threadId: ThreadId,
   messageId: MessageId,
   inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),

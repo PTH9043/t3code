@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -159,6 +160,10 @@ function respondForMeetingPrompt(prompt: string): string {
 function makeHarness(input: {
   readonly run: WorkspaceCollaborationRun;
   readonly respond: (prompt: string) => string;
+  readonly onTurnStart?: (input: {
+    readonly prompt: string;
+    readonly run: WorkspaceCollaborationRun;
+  }) => Effect.Effect<void>;
   /**
    * Mutable on purpose: the projection writes interjections outside the run
    * snapshot, so the fake mirrors that by grafting this array onto every read.
@@ -228,6 +233,12 @@ function makeHarness(input: {
             });
             break;
           case "thread.turn.start": {
+            if (input.onTurnStart !== undefined) {
+              yield* input.onTurnStart({
+                prompt: command.message.text,
+                run: yield* Ref.get(runRef),
+              });
+            }
             yield* Ref.update(promptsRef, (current) => [...current, command.message.text]);
             yield* Ref.update(threadsRef, (current) => {
               const existing = current.get(command.threadId)!;
@@ -971,9 +982,21 @@ const seatQuestion = (question: string) =>
 
 it.effect("orchestra: runs nodes side by side, each in its own fixed conversation", () =>
   Effect.gen(function* () {
+    const firstStarted = yield* Deferred.make<void>();
+    const secondStarted = yield* Deferred.make<void>();
     const harness = yield* makeHarness({
       run: orchestraRun(),
       respond: respondForOrchestraPrompt,
+      onTurnStart: ({ prompt }) =>
+        Effect.gen(function* () {
+          if (prompt.includes("Node: research-p1\n")) {
+            yield* Deferred.succeed(firstStarted, undefined);
+            yield* Deferred.await(secondStarted);
+          } else if (prompt.includes("Node: research-p2\n")) {
+            yield* Deferred.succeed(secondStarted, undefined);
+            yield* Deferred.await(firstStarted);
+          }
+        }),
     });
 
     yield* Effect.gen(function* () {
@@ -998,6 +1021,35 @@ it.effect("orchestra: runs nodes side by side, each in its own fixed conversatio
       const prompts = yield* Ref.get(harness.promptsRef);
       const researchPrompts = prompts.filter((prompt) => prompt.includes("Node: research-"));
       expect(researchPrompts).toHaveLength(2);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("orchestra: recovered isolation=true runs still execute write nodes alone", () =>
+  Effect.gen(function* () {
+    const writeWaves: string[][] = [];
+    const harness = yield* makeHarness({
+      run: { ...orchestraRun(), orchestra: { maxParallel: 2, isolateWorktrees: true } },
+      respond: (prompt) =>
+        respondForOrchestraPrompt(prompt).replaceAll(
+          '"kind":"research"',
+          '"kind":"implementation"',
+        ),
+      onTurnStart: ({ prompt, run }) =>
+        Effect.sync(() => {
+          if (!prompt.includes("# Workspace Task Graph Assignment")) return;
+          const running = run.graph?.nodes.filter((node) => node.status === "running") ?? [];
+          if (running.some((node) => node.kind === "implementation" || node.kind === "debug")) {
+            writeWaves.push(running.map((node) => String(node.id)));
+          }
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+      expect(writeWaves).toEqual([["research-p1"], ["research-p2"]]);
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );

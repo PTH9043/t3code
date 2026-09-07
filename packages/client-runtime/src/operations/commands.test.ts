@@ -4,6 +4,8 @@ import {
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
+  WorkspaceCollaborationRunId,
+  WorkspaceTaskNodeId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -23,6 +25,7 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
+  answerWorkspaceCollaborationRun,
   createProject,
   settleThread,
   stopThreadSession,
@@ -73,6 +76,29 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("environment commands", () => {
+  it.effect("preserves the question reference when sending an answer to a remote environment", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const questionRef = {
+        nodeId: WorkspaceTaskNodeId.make("node-a"),
+        askedAt: "2026-09-07T00:00:00.000Z",
+      };
+      yield* answerWorkspaceCollaborationRun({
+        projectId: ProjectId.make("project-1"),
+        runId: WorkspaceCollaborationRunId.make("run-1"),
+        question: "계속할까요?",
+        questionRef,
+        answer: "계속",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({
+        type: "project.collaboration.run.answer",
+        questionRef,
+      });
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("adds generated command metadata", () =>
     Effect.gen(function* () {
       const dispatched: ClientOrchestrationCommand[] = [];

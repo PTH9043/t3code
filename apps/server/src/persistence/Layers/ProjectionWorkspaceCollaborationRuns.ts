@@ -209,7 +209,8 @@ const make = Effect.gen(function* () {
       const rows = yield* sql<{
         readonly meeting: string | null;
       }>`SELECT meeting_json AS meeting FROM projection_workspace_collaboration_runs
-         WHERE project_id = ${input.projectId} AND run_id = ${input.runId} LIMIT 1`.pipe(
+         WHERE project_id = ${input.projectId} AND run_id = ${input.runId}
+           AND status IN ('queued', 'running') LIMIT 1`.pipe(
         Effect.mapError(
           toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordAnswer:select"),
         ),
@@ -221,14 +222,26 @@ const make = Effect.gen(function* () {
         try: () => decodeMeeting(raw),
         catch: decodeError("ProjectionWorkspaceCollaborationRuns.recordAnswer"),
       });
-      if (meeting === null || meeting.pendingQuestion?.question !== input.question) return;
+      const pending = meeting?.pendingQuestion;
+      if (meeting === null || pending == null || pending.question !== input.question) return;
+      if (
+        input.questionRef !== undefined &&
+        (input.questionRef.nodeId !== pending.nodeId ||
+          input.questionRef.askedAt !== pending.askedAt)
+      )
+        return;
 
       const next = {
         ...meeting,
         pendingQuestion: null,
         answers: [
           ...meeting.answers,
-          { question: input.question, answer: input.answer, answeredAt: input.answeredAt },
+          {
+            question: input.question,
+            answer: input.answer,
+            answeredAt: input.answeredAt,
+            nodeId: pending.nodeId,
+          },
         ],
       };
       yield* sql`

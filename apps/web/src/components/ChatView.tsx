@@ -5554,6 +5554,10 @@ function ChatViewContent(props: ChatViewProps) {
               runId: liveMeetingRunHere.id,
               projectId: liveMeetingRunHere.projectId,
               question: meetingPendingQuestion.question,
+              questionRef: {
+                nodeId: meetingPendingQuestion.nodeId,
+                askedAt: meetingPendingQuestion.askedAt,
+              },
               answer: answerText,
             },
           });

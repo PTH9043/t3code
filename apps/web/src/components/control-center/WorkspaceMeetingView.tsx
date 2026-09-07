@@ -1,4 +1,4 @@
-import type { WorkspaceMeeting } from "@t3tools/contracts";
+import type { WorkspaceMeeting, WorkspaceMeetingQuestion } from "@t3tools/contracts";
 import { useState } from "react";
 import { CrownIcon, MessageCircleQuestionIcon, UsersIcon } from "lucide-react";
 
@@ -77,11 +77,14 @@ export function WorkspaceMeetingView(props: {
   /** Answering is only offered while the run can still resume. */
   readonly canAnswer: boolean;
   readonly answering: boolean;
-  readonly onAnswer: (question: string, answer: string) => void;
+  readonly onAnswer: (question: WorkspaceMeetingQuestion, answer: string) => void;
 }) {
   const { meeting } = props;
-  const [draftAnswer, setDraftAnswer] = useState("");
   const pending = meeting.pendingQuestion;
+  const questionKey = pending === null ? "" : JSON.stringify([pending.nodeId, pending.askedAt]);
+  const [draft, setDraft] = useState({ questionKey: "", text: "" });
+  const draftAnswer = draft.questionKey === questionKey ? draft.text : "";
+  const setDraftAnswer = (text: string) => setDraft({ questionKey, text });
 
   return (
     <div className="grid gap-3">
@@ -125,7 +128,7 @@ export function WorkspaceMeetingView(props: {
                       size="xs"
                       variant="outline"
                       disabled={props.answering}
-                      onClick={() => props.onAnswer(pending.question, option)}
+                      onClick={() => props.onAnswer(pending, option)}
                     >
                       {option}
                     </Button>
@@ -145,7 +148,7 @@ export function WorkspaceMeetingView(props: {
                   onClick={() => {
                     const answer = draftAnswer.trim();
                     if (answer.length === 0) return;
-                    props.onAnswer(pending.question, answer);
+                    props.onAnswer(pending, answer);
                     setDraftAnswer("");
                   }}
                 >
