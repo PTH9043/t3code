@@ -166,6 +166,64 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
     }),
   );
 
+  it.effect("applies the project's stored orchestra defaults when the request carries none", () =>
+    Effect.gen(function* () {
+      let readModel = yield* seedReadModel();
+      const runOrchestraOf = (event: ReturnType<typeof asSingleEvent>) =>
+        event.type === "project.collaboration-run-requested" ? event.payload.run.orchestra : null;
+
+      // Nothing stored: the request-level absence keeps the pre-orchestra shape.
+      const { meeting: _unused, ...bare } = requestCommand();
+      expect(
+        runOrchestraOf(
+          asSingleEvent(yield* decideOrchestrationCommand({ command: bare, readModel })),
+        ),
+      ).toBeNull();
+
+      // The person opts the project in; the stored defaults round-trip.
+      const updated = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.workspace-control.update",
+            commandId: CommandId.make("control-orchestra"),
+            projectId,
+            longTermMemoryRoot: null,
+            orchestra: { enabled: true, maxParallel: 4, isolateWorktrees: true },
+          },
+          readModel,
+        }),
+      );
+      expect(
+        updated.type === "project.workspace-control-updated"
+          ? updated.payload.workspaceControl.orchestra
+          : null,
+      ).toEqual({ enabled: true, maxParallel: 4, isolateWorktrees: true });
+      readModel = yield* projectEvent(readModel, {
+        ...updated,
+        sequence: 90,
+      } as OrchestrationEvent);
+
+      // An unattended-style request without orchestra now inherits the defaults…
+      expect(
+        runOrchestraOf(
+          asSingleEvent(yield* decideOrchestrationCommand({ command: bare, readModel })),
+        ),
+      ).toEqual({ maxParallel: 4, isolateWorktrees: true });
+
+      // …while an explicit request-level setting still wins.
+      expect(
+        runOrchestraOf(
+          asSingleEvent(
+            yield* decideOrchestrationCommand({
+              command: { ...bare, orchestra: { maxParallel: 1, isolateWorktrees: false } },
+              readModel,
+            }),
+          ),
+        ),
+      ).toEqual({ maxParallel: 1, isolateWorktrees: false });
+    }),
+  );
+
   it.effect("carries the displayed question identity into the durable answer event", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();

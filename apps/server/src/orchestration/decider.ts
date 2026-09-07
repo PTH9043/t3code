@@ -2,11 +2,14 @@ import {
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+  DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
   EventId,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationProject,
   type OrchestrationReadModel,
   type WorkspaceMonitoringSettings,
+  type WorkspaceOrchestraSettings,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -224,6 +227,20 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
  * whatever the AI had proposed; `plan: null` clears it and asks for nothing
  * until the switch is turned on again (the reactor proposes on "none").
  */
+/**
+ * The orchestra shape for a run whose request carries none of its own: the
+ * project's stored defaults, when the person opted the project in. Schedules
+ * and the integrity loop start runs with nobody at the keyboard, so this is
+ * their only path into parallel execution and worktree isolation.
+ */
+function orchestraFromWorkspaceDefaults(
+  project: OrchestrationProject,
+): WorkspaceOrchestraSettings | null {
+  const defaults = project.workspaceControl?.orchestra;
+  if (defaults === undefined || !defaults.enabled) return null;
+  return { maxParallel: defaults.maxParallel, isolateWorktrees: defaults.isolateWorktrees };
+}
+
 function applyMonitoringUserSettings(
   current: WorkspaceMonitoringSettings,
   update:
@@ -397,6 +414,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               command.monitoring,
               occurredAt,
             ),
+            orchestra:
+              command.orchestra ??
+              project.workspaceControl?.orchestra ??
+              DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
           },
           updatedAt: occurredAt,
         },
@@ -641,7 +662,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.collaboration.run.request": {
-      yield* requireProject({
+      const runProject = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -700,7 +721,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                     interjections: [],
                   },
             // Fixed here: a later settings change never re-shapes a run under way.
-            orchestra: command.orchestra ?? null,
+            orchestra: command.orchestra ?? orchestraFromWorkspaceDefaults(runProject),
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -714,7 +735,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.collaboration.run.schedule": {
-      yield* requireProject({
+      const scheduleProject = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -740,7 +761,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             graph: null,
             // Schedules carry no roster: nobody is at the keyboard to pick one.
             meeting: null,
-            orchestra: null,
+            // The keyboard is empty here too, so the project's stored
+            // orchestra defaults are the only way to opt a schedule in.
+            orchestra: orchestraFromWorkspaceDefaults(scheduleProject),
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -1091,7 +1114,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.collaboration.run.incident": {
-      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const incidentProject = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
       return {
         ...(yield* withEventBase({
           aggregateKind: "project",
@@ -1111,9 +1138,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             status: "queued",
             steps: [],
             graph: null,
-            // Incident repair is started by the integrity loop, not a person.
+            // Incident repair is started by the integrity loop, not a person,
+            // so the project's stored orchestra defaults decide the shape.
             meeting: null,
-            orchestra: null,
+            orchestra: orchestraFromWorkspaceDefaults(incidentProject),
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,

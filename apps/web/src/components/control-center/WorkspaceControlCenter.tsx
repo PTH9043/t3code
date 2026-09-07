@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
+  DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
   ProviderInstanceId,
   ThreadId,
   WorkspaceKnowledgeItemId,
@@ -439,6 +440,8 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     project.workspaceControl?.conversationRag ?? DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS;
   const configuredAgentKnowledge =
     project.workspaceControl?.agentKnowledge ?? DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS;
+  const configuredOrchestra =
+    project.workspaceControl?.orchestra ?? DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS;
   const [memoryRoot, setMemoryRoot] = useState(configuredRoot);
   const [conversationRagEnabled, setConversationRagEnabled] = useState(
     configuredConversationRag.enabled,
@@ -458,6 +461,11 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
   const [maxOutputChars, setMaxOutputChars] = useState(
     String(configuredAgentKnowledge.maxOutputChars),
   );
+  const [orchestraEnabled, setOrchestraEnabled] = useState(configuredOrchestra.enabled);
+  const [orchestraMaxParallel, setOrchestraMaxParallel] = useState(
+    String(configuredOrchestra.maxParallel),
+  );
+  const [orchestraIsolate, setOrchestraIsolate] = useState(configuredOrchestra.isolateWorktrees);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -468,7 +476,16 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     setAgentKnowledgeEnabled(configuredAgentKnowledge.enabled);
     setAgentKnowledgeRedact(configuredAgentKnowledge.redactSensitiveData);
     setMaxOutputChars(String(configuredAgentKnowledge.maxOutputChars));
-  }, [configuredAgentKnowledge, configuredConversationRag, configuredRoot, project.id]);
+    setOrchestraEnabled(configuredOrchestra.enabled);
+    setOrchestraMaxParallel(String(configuredOrchestra.maxParallel));
+    setOrchestraIsolate(configuredOrchestra.isolateWorktrees);
+  }, [
+    configuredAgentKnowledge,
+    configuredConversationRag,
+    configuredOrchestra,
+    configuredRoot,
+    project.id,
+  ]);
 
   const normalizedMaxInputChars = Math.min(
     120_000,
@@ -478,6 +495,10 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     120_000,
     Math.max(2_000, Number.parseInt(maxOutputChars, 10) || configuredAgentKnowledge.maxOutputChars),
   );
+  const normalizedOrchestraMaxParallel = Math.min(
+    6,
+    Math.max(1, Number.parseInt(orchestraMaxParallel, 10) || configuredOrchestra.maxParallel),
+  );
   const settingsChanged =
     memoryRoot !== configuredRoot ||
     conversationRagEnabled !== configuredConversationRag.enabled ||
@@ -485,7 +506,10 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     normalizedMaxInputChars !== configuredConversationRag.maxInputChars ||
     agentKnowledgeEnabled !== configuredAgentKnowledge.enabled ||
     agentKnowledgeRedact !== configuredAgentKnowledge.redactSensitiveData ||
-    normalizedMaxOutputChars !== configuredAgentKnowledge.maxOutputChars;
+    normalizedMaxOutputChars !== configuredAgentKnowledge.maxOutputChars ||
+    orchestraEnabled !== configuredOrchestra.enabled ||
+    normalizedOrchestraMaxParallel !== configuredOrchestra.maxParallel ||
+    orchestraIsolate !== configuredOrchestra.isolateWorktrees;
 
   const save = async () => {
     setSaving(true);
@@ -504,6 +528,11 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
             enabled: agentKnowledgeEnabled,
             redactSensitiveData: agentKnowledgeRedact,
             maxOutputChars: normalizedMaxOutputChars,
+          },
+          orchestra: {
+            enabled: orchestraEnabled,
+            maxParallel: normalizedOrchestraMaxParallel,
+            isolateWorktrees: orchestraIsolate,
           },
           createLongTermMemoryRootIfMissing: true,
         },
@@ -632,6 +661,48 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
               페이블이 고른 기억 후보와 별개로, 조사·구현·검증 결과 자체가
               <span className="font-mono"> collaboration-outputs </span>
               폴더에 등록됩니다. 끄면 이후 실행부터 등록하지 않으며 이미 등록된 자료는 남습니다.
+            </p>
+          </div>
+          <div className="grid gap-3 border-t border-border/50 pt-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">무인 실행 오케스트라 기본값</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  스케줄·장애 복구처럼 사람이 보내지 않는 실행에 적용됩니다. 회의에서 직접 보낸
+                  실행은 전송 시 설정이 우선합니다.
+                </p>
+              </div>
+              <Switch
+                checked={orchestraEnabled}
+                onCheckedChange={setOrchestraEnabled}
+                aria-label="무인 실행 오케스트라 기본값"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-xs font-medium">
+                병렬 폭 (1–6)
+                <Input
+                  type="number"
+                  min={1}
+                  max={6}
+                  step={1}
+                  value={orchestraMaxParallel}
+                  onChange={(event) => setOrchestraMaxParallel(event.currentTarget.value)}
+                  disabled={!orchestraEnabled}
+                />
+              </label>
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <Switch
+                  checked={orchestraIsolate}
+                  onCheckedChange={setOrchestraIsolate}
+                  disabled={!orchestraEnabled}
+                />
+                worktree 격리
+              </label>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              격리를 켜면 파일 수정 묶음마다 전용 체크아웃에서 병렬로 작업하고, 결과는 diff 검토 후
+              병합합니다. 끄면 무인 실행은 기존처럼 오케스트라 없이 진행됩니다.
             </p>
           </div>
         </div>

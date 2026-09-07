@@ -433,6 +433,25 @@ export const DEFAULT_WORKSPACE_MONITORING_SETTINGS: WorkspaceMonitoringSettings 
   lastCheckedAt: null,
 };
 
+/**
+ * Server-stored orchestra defaults for runs no person configures at send
+ * time. Schedules and the integrity loop have nobody at the keyboard to flip
+ * the composer toggle, so the opt-in lives on the project; a request that
+ * carries its own orchestra settings always wins.
+ */
+export const WorkspaceOrchestraDefaults = Schema.Struct({
+  enabled: Schema.Boolean,
+  maxParallel: PositiveInt.check(Schema.isLessThanOrEqualTo(6)),
+  isolateWorktrees: Schema.Boolean,
+});
+export type WorkspaceOrchestraDefaults = typeof WorkspaceOrchestraDefaults.Type;
+
+export const DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS: WorkspaceOrchestraDefaults = {
+  enabled: false,
+  maxParallel: 3,
+  isolateWorktrees: false,
+};
+
 export const WorkspaceControlSettings = Schema.Struct({
   isolationMode: Schema.Literal("strict"),
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
@@ -445,6 +464,9 @@ export const WorkspaceControlSettings = Schema.Struct({
   monitoring: WorkspaceMonitoringSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_MONITORING_SETTINGS)),
   ),
+  orchestra: WorkspaceOrchestraDefaults.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS)),
+  ),
 });
 export type WorkspaceControlSettings = typeof WorkspaceControlSettings.Type;
 
@@ -454,6 +476,7 @@ export const DEFAULT_WORKSPACE_CONTROL_SETTINGS: WorkspaceControlSettings = {
   conversationRag: DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   agentKnowledge: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   monitoring: DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+  orchestra: DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
 };
 
 export const WorkspaceKnowledgeKind = Schema.Literals([
@@ -2001,6 +2024,8 @@ const ProjectWorkspaceControlUpdateCommand = Schema.Struct({
       plan: Schema.optionalKey(Schema.NullOr(WorkspaceMonitoringPlan)),
     }),
   ),
+  /** Orchestra defaults for unattended runs. Omitted → unchanged. */
+  orchestra: Schema.optionalKey(WorkspaceOrchestraDefaults),
   createLongTermMemoryRootIfMissing: Schema.optional(Schema.Boolean),
 });
 
