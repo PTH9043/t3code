@@ -37,6 +37,13 @@ export interface MeetingComposerConfig {
   readonly maxRounds: number;
   /** 협업의 횟수 제한: 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
   readonly maxRevisions: number;
+  /**
+   * 오케스트라: 실행 단계의 노드들을 각자의 대화에서 병렬로 돌린다. 꺼져
+   * 있으면 서버는 기존대로 회의 대화 하나에서 한 노드씩 실행한다.
+   */
+  readonly orchestraEnabled: boolean;
+  /** 오케스트라 병렬 폭 (1–6). */
+  readonly maxParallel: number;
   readonly userInLoop: boolean;
   /** Null elects the first seat, mirroring the server's chair election. */
   readonly chairSeatId: string | null;
@@ -49,6 +56,8 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   mode: "fixed-rounds",
   maxRounds: 2,
   maxRevisions: 8,
+  orchestraEnabled: false,
+  maxParallel: 3,
   userInLoop: false,
   chairSeatId: null,
   seats: [],
@@ -63,9 +72,14 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
 function normalizeMeetingComposerConfig(
   config:
     | MeetingComposerConfig
-    | (Omit<MeetingComposerConfig, "style" | "maxRevisions"> & {
+    | (Omit<
+        MeetingComposerConfig,
+        "style" | "maxRevisions" | "orchestraEnabled" | "maxParallel"
+      > & {
         style?: unknown;
         maxRevisions?: unknown;
+        orchestraEnabled?: unknown;
+        maxParallel?: unknown;
       }),
 ): MeetingComposerConfig {
   const style: MeetingComposerStyle =
@@ -86,6 +100,15 @@ function normalizeMeetingComposerConfig(
       config.maxRevisions <= 8
         ? config.maxRevisions
         : DEFAULT_MEETING_COMPOSER_CONFIG.maxRevisions,
+    // Persisted before the orchestra existed: off, at the default width.
+    orchestraEnabled: config.orchestraEnabled === true,
+    maxParallel:
+      typeof config.maxParallel === "number" &&
+      Number.isInteger(config.maxParallel) &&
+      config.maxParallel >= 1 &&
+      config.maxParallel <= 6
+        ? config.maxParallel
+        : DEFAULT_MEETING_COMPOSER_CONFIG.maxParallel,
   };
 }
 

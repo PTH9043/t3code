@@ -699,6 +699,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                     answers: [],
                     interjections: [],
                   },
+            // Fixed here: a later settings change never re-shapes a run under way.
+            orchestra: command.orchestra ?? null,
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -738,6 +740,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             graph: null,
             // Schedules carry no roster: nobody is at the keyboard to pick one.
             meeting: null,
+            orchestra: null,
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -1109,6 +1112,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             graph: null,
             // Incident repair is started by the integrity loop, not a person.
             meeting: null,
+            orchestra: null,
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,

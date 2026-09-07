@@ -255,6 +255,12 @@ export function buildWorkspaceTaskNodePrompt(input: {
   // same way and burn the node's last attempt. Say what was wrong.
   const lastFailure =
     input.node.attempts.findLast((attempt) => attempt.status === "failed") ?? null;
+  // Meeting-wide decisions apply to every node; a decision bound to a node is
+  // that node's alone, so a sibling parked on its own question never acts on it.
+  const nodeDecisions =
+    meeting?.answers.filter(
+      (answer) => answer.nodeId === null || answer.nodeId === input.node.id,
+    ) ?? [];
   return [
     "# Workspace Task Graph Assignment",
     `Run ID: ${input.run.id}`,
@@ -275,11 +281,11 @@ export function buildWorkspaceTaskNodePrompt(input: {
     "",
     "AVAILABLE AGENTS:",
     formatList(input.availableAgents),
-    ...(meeting !== null && meeting.answers.length > 0
+    ...(nodeDecisions.length > 0
       ? [
           "",
           "USER DECISIONS:",
-          meeting.answers
+          nodeDecisions
             .map((answer) => `- Q: ${answer.question}\n  A: ${answer.answer}`)
             .join("\n"),
         ]

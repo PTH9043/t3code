@@ -1,4 +1,10 @@
-import { ProjectId, ProviderInstanceId, WorkspaceMeetingParticipantId } from "@t3tools/contracts";
+import {
+  ProjectId,
+  ProviderInstanceId,
+  WorkspaceMeetingParticipantId,
+  WorkspaceTaskNodeId,
+  type WorkspaceTaskNode,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -9,6 +15,7 @@ import {
   parseWorkspaceTaskGraphProposal,
   parseWorkspaceValidationDecision,
   readyWorkspaceTaskNodes,
+  selectGraphWaveNodes,
 } from "./workspaceTaskGraph.ts";
 
 const taggedPlan = (nodes: ReadonlyArray<Record<string, unknown>>) =>
@@ -226,5 +233,74 @@ describe("Workspace meeting task graph", () => {
         occurredAt: "2026-08-17T00:00:00.000Z",
       }),
     ).toThrow(/binding/);
+  });
+});
+
+describe("Workspace orchestra wave selection", () => {
+  const taskNode = (id: string, kind: WorkspaceTaskNode["kind"]): WorkspaceTaskNode => ({
+    id: WorkspaceTaskNodeId.make(id),
+    order: 0,
+    kind,
+    agent: kind === "implementation" ? "codex" : "grok",
+    role: kind === "implementation" ? "implementer" : "researcher",
+    participantId: null,
+    threadId: null,
+    parkedQuestion: null,
+    title: id,
+    handoff: {
+      task: id,
+      goal: id,
+      context: "",
+      input: "",
+      constraints: [],
+      expectedOutput: "결과",
+      successCriteria: [],
+    },
+    dependsOn: [],
+    validationTargetId: null,
+    priority: 0,
+    status: "queued",
+    maxAttempts: 2,
+    attempts: [],
+    output: null,
+    error: null,
+    failureClassification: null,
+    confidence: null,
+    validation: null,
+    startedAt: null,
+    completedAt: null,
+  });
+  // Already in frontier order, the way readyWorkspaceTaskNodes hands it over.
+  const ready = [
+    taskNode("read-a", "research"),
+    taskNode("write-b", "implementation"),
+    taskNode("read-c", "research"),
+    taskNode("write-d", "implementation"),
+  ];
+
+  it("fills the width in frontier order when writes may share a wave", () => {
+    expect(selectGraphWaveNodes(ready, { width: 3, soloWrites: false }).map((n) => n.id)).toEqual([
+      "read-a",
+      "write-b",
+      "read-c",
+    ]);
+  });
+
+  it("keeps write nodes out of a shared wave until one leads the frontier", () => {
+    expect(selectGraphWaveNodes(ready, { width: 3, soloWrites: true }).map((n) => n.id)).toEqual([
+      "read-a",
+      "read-c",
+    ]);
+    expect(
+      selectGraphWaveNodes(ready.slice(1), { width: 3, soloWrites: true }).map((n) => n.id),
+    ).toEqual(["write-b"]);
+  });
+
+  it("never returns an empty wave while the frontier has a write node", () => {
+    const onlyWrites = ready.filter((n) => n.kind === "implementation");
+    expect(
+      selectGraphWaveNodes(onlyWrites, { width: 2, soloWrites: true }).map((n) => n.id),
+    ).toEqual(["write-b"]);
+    expect(selectGraphWaveNodes([], { width: 2, soloWrites: true })).toEqual([]);
   });
 });

@@ -33,6 +33,8 @@ function node(input: {
     agent: input.agent ?? "grok",
     role: "researcher",
     participantId: null,
+    threadId: null,
+    parkedQuestion: null,
     title: `${input.id} 제목`,
     handoff: {
       task: `${input.id} 작업`,
@@ -80,6 +82,7 @@ function runWith(nodes: ReadonlyArray<WorkspaceTaskNode>): WorkspaceCollaboratio
     status: "completed",
     steps: [],
     meeting: null,
+    orchestra: null,
     graph,
     finalOutput: "완료",
     error: null,

@@ -62,6 +62,7 @@ it.effect("triggers one deterministic unattended run and durably advances the sc
               steps: [],
               graph: null,
               meeting: null,
+              orchestra: null,
               finalOutput: null,
               error: null,
               createdAt: command.createdAt,

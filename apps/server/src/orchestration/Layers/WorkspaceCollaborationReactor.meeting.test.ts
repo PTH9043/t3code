@@ -6,6 +6,7 @@ import {
   MessageId,
   WorkspaceCollaborationRunId,
   WorkspaceMeetingParticipantId,
+  WorkspaceTaskNodeId,
   type OrchestrationEvent,
   type OrchestrationThread,
   type WorkspaceCollaborationRun,
@@ -85,6 +86,7 @@ function meetingRun(meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollabora
       interjections: [],
       ...meeting,
     },
+    orchestra: null,
     finalOutput: null,
     error: null,
     createdAt: at,
@@ -400,6 +402,7 @@ const executeWrapUp = (roundCount: number) => ({
   question: meetingWrapUpQuestion(roundCount),
   answer: "합의대로 실행 시작",
   answeredAt: at,
+  nodeId: null,
 });
 
 it.effect("runs the meeting, plans onto the roster, and executes with the same seats", () =>
@@ -608,7 +611,12 @@ it.effect("parks on the round check-in and resumes when the person answers", () 
           pendingQuestion: null,
           answers: [
             executeWrapUp(1),
-            { question: roundCheckInQuestion(0), answer: "계속 진행", answeredAt: at },
+            {
+              question: roundCheckInQuestion(0),
+              answer: "계속 진행",
+              answeredAt: at,
+              nodeId: null,
+            },
           ],
         },
       }));
@@ -660,6 +668,7 @@ it.effect("parks at the wrap-up gate and concludes without execution when the pe
               question: meetingWrapUpQuestion(1),
               answer: "여기서 종료 (실행 없음)",
               answeredAt: at,
+              nodeId: null,
             },
           ],
         },
@@ -755,7 +764,7 @@ it.effect("parks a node whose seat asks the person and re-runs it with the answe
         meeting: {
           ...run.meeting!,
           pendingQuestion: null,
-          answers: [{ question, answer: "SQLite", answeredAt: at }],
+          answers: [{ question, answer: "SQLite", answeredAt: at, nodeId: null }],
         },
       }));
       yield* PubSub.publish(harness.pubsub, answeredEvent(question, "SQLite"));
@@ -830,7 +839,7 @@ it.effect("parks on the node instead of failing the run when its retries run out
         meeting: {
           ...run.meeting!,
           pendingQuestion: null,
-          answers: [...run.meeting!.answers, { question, answer, answeredAt: at }],
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId: null }],
         },
       }));
       yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
@@ -907,7 +916,7 @@ it.effect("hands a parked node to another seat when the person asks for one", ()
         meeting: {
           ...run.meeting!,
           pendingQuestion: null,
-          answers: [...run.meeting!.answers, { question, answer, answeredAt: at }],
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId: null }],
         },
       }));
       yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
@@ -924,4 +933,239 @@ it.effect("hands a parked node to another seat when the person asks for one", ()
       ).toBe(true);
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
+);
+
+/** Two independent research nodes, one per seat, for the orchestra tests. */
+function respondForOrchestraPrompt(prompt: string): string {
+  if (prompt.startsWith("# Workspace Meeting Plan")) {
+    return `<t3_task_graph>${JSON.stringify({
+      summary: "조사 계획",
+      nextAction: "조사 실행",
+      nodes: ["p1", "p2"].map((participantId, index) => ({
+        id: `research-${participantId}`,
+        kind: "research",
+        participantId,
+        title: `조사 ${index + 1}`,
+        task: "조사한다.",
+        goal: "근거 확보",
+        context: "회의 합의",
+        input: "합의 내용",
+        constraints: [],
+        expectedOutput: "조사 결과",
+        successCriteria: ["근거 제시"],
+        dependsOn: [],
+        priority: 1,
+      })),
+    })}</t3_task_graph>`;
+  }
+  return respondForMeetingPrompt(prompt);
+}
+
+const orchestraRun = (meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollaborationRun => ({
+  ...meetingRun({ answers: [executeWrapUp(1)], ...meeting }),
+  orchestra: { maxParallel: 2, isolateWorktrees: false },
+});
+
+const seatQuestion = (question: string) =>
+  `<t3_question>${JSON.stringify({ question, options: ["A", "B"], context: "선택이 남았다." })}</t3_question>`;
+
+it.effect("orchestra: runs nodes side by side, each in its own fixed conversation", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      respond: respondForOrchestraPrompt,
+    });
+
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+
+      const done = yield* Ref.get(harness.runRef);
+      expect(done.status).toBe("completed");
+      const nodes = done.graph?.nodes.filter((node) => node.kind === "research") ?? [];
+      expect(nodes).toHaveLength(2);
+      const meetingThread = done.meeting?.threadId;
+      for (const node of nodes) {
+        // The node's conversation is its own, not the meeting's.
+        expect(node.threadId).not.toBeNull();
+        expect(node.threadId).not.toBe(meetingThread);
+        expect(node.attempts.every((attempt) => attempt.threadId === node.threadId)).toBe(true);
+      }
+      expect(new Set(nodes.map((node) => node.threadId)).size).toBe(2);
+      // Both research prompts were issued in the same wave: the second one
+      // went out before either result could have been applied.
+      const prompts = yield* Ref.get(harness.promptsRef);
+      const researchPrompts = prompts.filter((prompt) => prompt.includes("Node: research-"));
+      expect(researchPrompts).toHaveLength(2);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "orchestra: binds a seat's question to its node and resumes only that node on its own thread",
+  () =>
+    Effect.gen(function* () {
+      const question = "조사 범위는 어디까지?";
+      let asked = false;
+      const harness = yield* makeHarness({
+        run: orchestraRun(),
+        respond: (prompt) => {
+          if (prompt.includes("Node: research-p1\n") && !asked) {
+            asked = true;
+            return seatQuestion(question);
+          }
+          if (prompt.includes("Node: research-p1\n")) {
+            // Only this node's own decision reaches it.
+            expect(prompt).toContain(`A: 전체 범위`);
+            return "전체 범위로 조사를 마쳤다.";
+          }
+          if (prompt.includes("Node: research-p2\n")) {
+            expect(prompt).not.toContain("전체 범위");
+            return "조사를 마쳤다.";
+          }
+          return respondForOrchestraPrompt(prompt);
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+        yield* reactor.start();
+        yield* reactor.drain;
+
+        const parked = yield* Ref.get(harness.runRef);
+        expect(parked.status).toBe("running");
+        expect(parked.meeting?.pendingQuestion).toMatchObject({
+          askedByParticipantId: "p1",
+          question,
+          nodeId: "research-p1",
+        });
+        const p1 = parked.graph?.nodes.find((node) => node.id === "research-p1");
+        const p2 = parked.graph?.nodes.find((node) => node.id === "research-p2");
+        expect(p1?.status).toBe("awaiting-user");
+        expect(p1?.parkedQuestion).toBeNull();
+        // The sibling finished in the same wave and was not held by p1's question.
+        expect(p2?.status).not.toBe("awaiting-user");
+        const p1Thread = p1?.threadId;
+        expect(p1Thread).not.toBeNull();
+
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [
+              ...run.meeting!.answers,
+              {
+                question,
+                answer: "전체 범위",
+                answeredAt: at,
+                nodeId: WorkspaceTaskNodeId.make("research-p1"),
+              },
+            ],
+          },
+        }));
+        yield* PubSub.publish(harness.pubsub, answeredEvent(question, "전체 범위"));
+
+        const resumed = yield* awaitRunStatus(harness.runRef, "completed");
+        const resumedP1 = resumed.graph?.nodes.find((node) => node.id === "research-p1");
+        expect(resumedP1?.status).toBe("completed");
+        expect(resumedP1?.attempts).toHaveLength(2);
+        // Same conversation before and after the park.
+        expect(resumedP1?.threadId).toBe(p1Thread);
+        expect(resumedP1?.attempts.every((attempt) => attempt.threadId === p1Thread)).toBe(true);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect(
+  "orchestra: a second question waits on its node and is asked once the first is answered",
+  () =>
+    Effect.gen(function* () {
+      const questionA = "p1 질문";
+      const questionB = "p2 질문";
+      const askedFor = new Set<string>();
+      const harness = yield* makeHarness({
+        run: orchestraRun(),
+        respond: (prompt) => {
+          for (const participantId of ["p1", "p2"]) {
+            if (!prompt.includes(`Node: research-${participantId}\n`)) continue;
+            if (askedFor.has(participantId)) return `${participantId} 조사를 마쳤다.`;
+            askedFor.add(participantId);
+            return seatQuestion(participantId === "p1" ? questionA : questionB);
+          }
+          return respondForOrchestraPrompt(prompt);
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+        yield* reactor.start();
+        yield* reactor.drain;
+
+        const parked = yield* Ref.get(harness.runRef);
+        const pending = parked.meeting?.pendingQuestion;
+        expect(pending?.nodeId).not.toBeNull();
+        const firstId = pending!.nodeId!;
+        const secondId = firstId === "research-p1" ? "research-p2" : "research-p1";
+        const second = parked.graph?.nodes.find((node) => node.id === secondId);
+        // Both asked in one wave: one holds the slot, the other keeps its
+        // question on the node instead of losing it.
+        expect(second?.status).toBe("awaiting-user");
+        expect(second?.parkedQuestion?.question).toBe(
+          secondId === "research-p1" ? questionA : questionB,
+        );
+
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [
+              ...run.meeting!.answers,
+              { question: pending!.question, answer: "A", answeredAt: at, nodeId: firstId },
+            ],
+          },
+        }));
+        yield* PubSub.publish(harness.pubsub, answeredEvent(pending!.question, "A"));
+
+        // The slot frees and the parked question is published for its own node.
+        const republished = yield* awaitRunStatus(
+          harness.runRef,
+          "running",
+          (run) => run.meeting?.pendingQuestion?.nodeId === secondId,
+        );
+        const secondNow = republished.graph?.nodes.find((node) => node.id === secondId);
+        expect(secondNow?.parkedQuestion).toBeNull();
+        expect(secondNow?.status).toBe("awaiting-user");
+        const firstNow = republished.graph?.nodes.find((node) => node.id === firstId);
+        expect(firstNow?.status).not.toBe("awaiting-user");
+
+        const secondQuestion = republished.meeting!.pendingQuestion!.question;
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [
+              ...run.meeting!.answers,
+              {
+                question: secondQuestion,
+                answer: "B",
+                answeredAt: at,
+                nodeId: WorkspaceTaskNodeId.make(secondId),
+              },
+            ],
+          },
+        }));
+        yield* PubSub.publish(harness.pubsub, answeredEvent(secondQuestion, "B"));
+
+        const done = yield* awaitRunStatus(harness.runRef, "completed");
+        expect(
+          done.graph?.nodes
+            .filter((node) => node.kind === "research")
+            .every((node) => node.status === "completed"),
+        ).toBe(true);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
 );

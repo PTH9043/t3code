@@ -121,6 +121,7 @@ describe("nextMeetingStep", () => {
           options: [],
           context: "",
           askedAt: "2026-08-18T00:00:00.000Z",
+          nodeId: null,
         },
       }),
     );
@@ -147,6 +148,7 @@ describe("nextMeetingStep", () => {
           options: [],
           context: "",
           askedAt: at,
+          nodeId: null,
         },
       }),
     );
@@ -230,7 +232,7 @@ describe("nextMeetingStep", () => {
     const answered = (answer: string) =>
       meeting({
         rounds: spentRounds,
-        answers: [{ question: meetingWrapUpQuestion(2), answer, answeredAt: at }],
+        answers: [{ question: meetingWrapUpQuestion(2), answer, answeredAt: at, nodeId: null }],
       });
 
     it("plans once the person says to execute", () => {
@@ -257,7 +259,12 @@ describe("nextMeetingStep", () => {
         meeting({
           rounds: [...spentRounds, round({ index: 2, ...closed })],
           answers: [
-            { question: meetingWrapUpQuestion(2), answer: "라운드 1회 추가", answeredAt: at },
+            {
+              question: meetingWrapUpQuestion(2),
+              answer: "라운드 1회 추가",
+              answeredAt: at,
+              nodeId: null,
+            },
           ],
         }),
       );
@@ -273,7 +280,12 @@ describe("nextMeetingStep", () => {
             round({ index: 0, spoke: ["p1", "p2"], chairSummary: "합의", consensusReached: true }),
           ],
           answers: [
-            { question: meetingWrapUpQuestion(1), answer: "2라운드 더 해", answeredAt: at },
+            {
+              question: meetingWrapUpQuestion(1),
+              answer: "2라운드 더 해",
+              answeredAt: at,
+              nodeId: null,
+            },
           ],
         }),
       );
@@ -368,7 +380,9 @@ describe("nextMeetingStep", () => {
         meeting({
           userInLoop: true,
           rounds: [round({ index: 0, spoke: ["p1", "p2"], chairSummary: "정리" })],
-          answers: [{ question: roundCheckInQuestion(0), answer: "계속", answeredAt: at }],
+          answers: [
+            { question: roundCheckInQuestion(0), answer: "계속", answeredAt: at, nodeId: null },
+          ],
         }),
       );
       expect(step).toEqual({ kind: "open-round", roundIndex: 1 });
@@ -379,7 +393,9 @@ describe("nextMeetingStep", () => {
         meeting({
           userInLoop: true,
           rounds: [round({ index: 0, spoke: ["p1", "p2"], chairSummary: "정리" })],
-          answers: [{ question: "예산 상한이 있나요?", answer: "없음", answeredAt: at }],
+          answers: [
+            { question: "예산 상한이 있나요?", answer: "없음", answeredAt: at, nodeId: null },
+          ],
         }),
       );
       expect(step).toEqual({
@@ -398,7 +414,9 @@ describe("nextMeetingStep", () => {
             round({ index: 0, spoke: ["p1", "p2"], chairSummary: "정리" }),
             round({ index: 1, spoke: ["p1", "p2"], chairSummary: "정리" }),
           ],
-          answers: [{ question: roundCheckInQuestion(0), answer: "계속", answeredAt: at }],
+          answers: [
+            { question: roundCheckInQuestion(0), answer: "계속", answeredAt: at, nodeId: null },
+          ],
         }),
       );
       expect(step).toEqual({
@@ -607,7 +625,9 @@ describe("renderMeetingTranscript", () => {
     const transcript = renderMeetingTranscript(
       meeting({
         rounds: [round({ index: 0, spoke: ["p1", "p2"], chairSummary: "의장 정리 내용" })],
-        answers: [{ question: roundCheckInQuestion(0), answer: "B안으로", answeredAt: at }],
+        answers: [
+          { question: roundCheckInQuestion(0), answer: "B안으로", answeredAt: at, nodeId: null },
+        ],
       }),
     );
     expect(transcript).toContain("## 1라운드");

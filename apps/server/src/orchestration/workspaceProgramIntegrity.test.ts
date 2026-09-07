@@ -39,6 +39,8 @@ function completedGraph(verifierInstanceId = "claude-review"): WorkspaceTaskGrap
         agent: "codex",
         role: "implementer",
         participantId: null,
+        threadId: null,
+        parkedQuestion: null,
         title: "오류 수정",
         handoff: {
           task: "오류 수정",
@@ -91,6 +93,8 @@ function completedGraph(verifierInstanceId = "claude-review"): WorkspaceTaskGrap
         agent: "fable",
         role: "verifier",
         participantId: null,
+        threadId: null,
+        parkedQuestion: null,
         title: "독립 검증",
         handoff: {
           task: "독립 검증",

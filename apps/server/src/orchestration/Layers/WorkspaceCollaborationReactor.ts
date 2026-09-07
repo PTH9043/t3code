@@ -73,6 +73,7 @@ import {
   parseWorkspaceTaskGraphProposal,
   parseWorkspaceValidationDecision,
   readyWorkspaceTaskNodes,
+  selectGraphWaveNodes,
   refreshWorkspaceTaskGraphQueue,
   WorkspaceTaskGraphError,
   type WorkspaceMeetingPlanContext,
@@ -101,6 +102,26 @@ class WorkspaceCollaborationExecutionError extends Data.TaggedError(
 }> {}
 
 const MAX_PARALLEL_GRAPH_NODES = 3;
+
+/**
+ * How many execution nodes a wave of this run may hold. An orchestra run says
+ * so itself; without one a meeting keeps its single shared conversation to one
+ * turn at a time and a role-bound run keeps the server's fixed width.
+ */
+function graphWaveWidth(run: WorkspaceCollaborationRun): number {
+  if (run.orchestra !== null) return run.orchestra.maxParallel;
+  return run.meeting === null ? MAX_PARALLEL_GRAPH_NODES : 1;
+}
+
+/** Orchestra runs without worktree isolation serialize their write nodes. */
+function soloWriteWaves(run: WorkspaceCollaborationRun): boolean {
+  return run.orchestra !== null && !run.orchestra.isolateWorktrees;
+}
+
+/** On an orchestra run every node executes in its own fixed conversation. */
+function nodeOwnsThread(run: WorkspaceCollaborationRun): boolean {
+  return run.orchestra !== null;
+}
 const MAX_GRAPH_REVISIONS = 8;
 /** Mirrors the contract's ceiling on `WorkspaceTaskNode.maxAttempts`. */
 const MAX_NODE_ATTEMPTS = 10;
@@ -498,6 +519,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly prompt: string;
       readonly title: string;
       readonly expectedAgent?: "fable" | "codex" | "grok";
+      readonly usageContext?: import("@t3tools/contracts").TokenUsageContext;
       /**
        * The turn this call awaits must have been requested at or after this
        * instant. On a reused thread (a meeting seat's single conversation) it
@@ -591,6 +613,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           },
           inputOrigin: "automation",
           modelSelection: input.step.modelSelection,
+          usageContext: input.usageContext ?? {
+            workId: input.run.id,
+            phase:
+              input.step.phase === "kickoff"
+                ? "planning"
+                : input.step.phase === "finalization"
+                  ? "finalization"
+                  : "implementation",
+            nodeId: null,
+            attempt: 1,
+          },
           runtimeMode: input.step.runtimeMode,
           interactionMode: input.step.interactionMode,
           createdAt,
@@ -817,6 +850,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly title: string;
       readonly prompt: string;
+      readonly usagePhase?: import("@t3tools/contracts").TokenUsagePhase;
     }) {
       const runRef = { projectId: input.run.projectId, runId: input.run.id };
       const instance = yield* providerInstanceRegistry.getInstance(
@@ -872,6 +906,12 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         },
         inputOrigin: "automation",
         modelSelection: input.route.modelSelection,
+        usageContext: {
+          workId: input.run.id,
+          phase: input.usagePhase ?? "discussion",
+          nodeId: null,
+          attempt: 1,
+        },
         runtimeMode: input.route.runtimeMode,
         interactionMode: input.route.interactionMode,
         createdAt,
@@ -1057,6 +1097,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                           options: raised.options,
                           context: raised.context,
                           askedAt: recordedAt,
+                          nodeId: null,
                         },
                 },
                 updatedAt: recordedAt,
@@ -1131,6 +1172,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                         options: verdict.question.options,
                         context: verdict.question.context,
                         askedAt: closedAt,
+                        nodeId: null,
                       },
               },
               updatedAt: closedAt,
@@ -1151,6 +1193,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                   options: ["계속 진행", "방향 수정"],
                   context: round?.chairSummary ?? "",
                   askedAt,
+                  nodeId: null,
                 },
               },
               updatedAt: askedAt,
@@ -1175,6 +1218,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                   options: ["합의대로 실행 시작", "라운드 1회 추가", "여기서 종료 (실행 없음)"],
                   context: `${consensusNote}${finalRound?.chairSummary ?? ""}`,
                   askedAt,
+                  nodeId: null,
                 },
               },
               updatedAt: askedAt,
@@ -1229,6 +1273,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 task: run.task,
                 meeting,
               }),
+              usagePhase: "planning",
             }).pipe(
               Effect.map((value) => ({ ok: true as const, ...value })),
               Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
@@ -1252,6 +1297,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                     options: raised.options,
                     context: raised.context,
                     askedAt,
+                    nodeId: null,
                   },
                 },
                 updatedAt: askedAt,
@@ -1384,11 +1430,16 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }) {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
       const meeting = input.run.meeting;
-      // A meeting is one shared conversation, and one conversation runs one
-      // turn at a time — its waves take a single node and leave the rest for
-      // the next wave. Role-bound runs keep their parallel per-attempt threads.
-      const waveNodes =
-        meeting === null ? input.nodes.slice(0, MAX_PARALLEL_GRAPH_NODES) : input.nodes.slice(0, 1);
+      // Without an orchestra a meeting is one shared conversation, and one
+      // conversation runs one turn at a time — its waves take a single node.
+      // Role-bound runs keep their parallel per-attempt threads. An orchestra
+      // run takes its own width, and keeps write nodes alone until Phase 2
+      // gives write chains their own worktrees.
+      const waveNodes = selectGraphWaveNodes(input.nodes, {
+        width: graphWaveWidth(input.run),
+        soloWrites: soloWriteWaves(input.run),
+      });
+      const ownThread = nodeOwnsThread(input.run);
       const startedNodes = yield* Effect.forEach(
         waveNodes,
         (node) =>
@@ -1396,7 +1447,15 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const route = yield* chooseAttemptRoute(node, input.bindings, input.run.meeting);
             const startedAt = yield* nowIso;
             const meetingThreadId =
-              meeting !== null && node.participantId !== null ? meeting.threadId : null;
+              !ownThread && meeting !== null && node.participantId !== null
+                ? meeting.threadId
+                : null;
+            // An orchestra node keeps one conversation for its whole life —
+            // retries and a resume after a question continue where the
+            // previous attempt left off instead of starting cold.
+            const nodeThreadId = ownThread
+              ? (node.threadId ?? ThreadId.make(yield* randomUUID))
+              : null;
             const attempt: WorkspaceTaskAttempt = {
               number: node.attempts.length + 1,
               agent: node.agent,
@@ -1405,7 +1464,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               runtimeMode: route.route.runtimeMode,
               interactionMode: route.route.interactionMode,
               strategy: route.strategy,
-              threadId: meetingThreadId ?? ThreadId.make(yield* randomUUID),
+              threadId: nodeThreadId ?? meetingThreadId ?? ThreadId.make(yield* randomUUID),
               status: "running",
               output: null,
               error: null,
@@ -1416,6 +1475,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             };
             return {
               ...node,
+              threadId: nodeThreadId ?? node.threadId,
               status: "running" as const,
               attempts: [...node.attempts, attempt],
               output: null,
@@ -1515,6 +1575,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             ...(node.participantId === null ? { expectedAgent: node.agent } : {}),
             // Anchors this attempt's turn inside the seat's reused conversation.
             turnAfter: attempt.startedAt,
+            usageContext: {
+              workId: input.run.id,
+              nodeId: node.id,
+              phase:
+                node.kind === "validation"
+                  ? "verification"
+                  : node.kind === "orchestration" || node.kind === "research"
+                    ? "planning"
+                    : node.kind === "synthesis"
+                      ? "finalization"
+                      : "implementation",
+              attempt: attempt.number,
+            },
           }).pipe(
             Effect.map((output) => ({ nodeId: String(node.id), output })),
             Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
@@ -1522,7 +1595,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             ),
           );
         },
-        { concurrency: MAX_PARALLEL_GRAPH_NODES },
+        { concurrency: graphWaveWidth(input.run) },
       );
     },
   );
@@ -1685,7 +1758,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
       let graph = input.run.graph;
       let finalOutput = input.run.finalOutput;
-      let meeting = input.run.meeting;
+      // The wave ran for minutes; the meeting recorded in that time (the
+      // person's interjections and answers land outside this fiber) must not
+      // be overwritten by the snapshot the wave started from.
+      const freshRun = yield* getRun({ projectId: input.run.projectId, runId: input.run.id });
+      let meeting = freshRun.meeting ?? input.run.meeting;
       const planContext = meeting === null ? null : meetingPlanContext(meeting);
       const revisionCap = graphRevisionCap(meeting);
 
@@ -1720,29 +1797,37 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           consumesRevision: refused ? false : (failure.consumesRevision ?? true),
         });
         const settled = retried.nodes.find((node) => node.id === failure.node.id);
-        // Only one question can be open at a time, and a run with no meeting
-        // has no channel to ask through; both keep the old failing behaviour.
+        // A run with no meeting has no channel to ask through and keeps the
+        // old failing behaviour.
         if (
           settled === undefined ||
           (settled.status !== "failed" && !refused) ||
-          meeting === null ||
-          meeting.pendingQuestion !== null
+          meeting === null
         ) {
           return retried;
         }
         const question = refused
           ? nodeRefusalQuestion(settled.title)
           : nodeInterventionQuestion(settled.title);
-        meeting = {
-          ...meeting,
-          pendingQuestion: {
-            askedByParticipantId: settled.participantId,
-            question,
-            options: [...NODE_INTERVENTION_OPTIONS],
-            context: failure.error.slice(0, 20_000),
-            askedAt: completedAt,
-          },
-        };
+        const context = failure.error.slice(0, 20_000);
+        // Only one question is open at a time. A second node out of retries
+        // parks its intervention on itself and is asked once the slot frees —
+        // it used to fail the whole run instead, taking every sibling's
+        // finished work with it.
+        const slotFree = meeting.pendingQuestion === null;
+        if (slotFree) {
+          meeting = {
+            ...meeting,
+            pendingQuestion: {
+              askedByParticipantId: settled.participantId,
+              question,
+              options: [...NODE_INTERVENTION_OPTIONS],
+              context,
+              askedAt: completedAt,
+              nodeId: settled.id,
+            },
+          };
+        }
         return refreshWorkspaceTaskGraphQueue({
           ...replaceGraphNode(retried, String(settled.id), {
             ...settled,
@@ -1751,9 +1836,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             // with `error: null`. The resume path reads that difference.
             status: "awaiting-user",
             completedAt: null,
+            parkedQuestion: slotFree
+              ? null
+              : {
+                  question,
+                  options: [...NODE_INTERVENTION_OPTIONS],
+                  context,
+                  intervention: true,
+                  raisedAt: completedAt,
+                },
           }),
           status: "executing",
-          nextAction: question,
+          nextAction: slotFree ? question : graph.nextAction,
         });
       };
 
@@ -2038,16 +2132,27 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           ) {
             const raised = parseMeetingQuestion(result.output);
             if (raised !== null) {
+              // First asker wins the single question slot; a later asker keeps
+              // its question on the node and is asked once the slot frees,
+              // rather than re-running to raise it again.
+              const slotFree = meeting.pendingQuestion === null;
               graph = replaceGraphNode(graph, result.nodeId, {
                 ...withCompletedAttempt,
                 status: "awaiting-user",
                 output: null,
                 error: null,
                 completedAt: null,
+                parkedQuestion: slotFree
+                  ? null
+                  : {
+                      question: raised.question,
+                      options: [...raised.options],
+                      context: raised.context,
+                      intervention: false,
+                      raisedAt: completedAt,
+                    },
               });
-              // First asker wins the single question slot; later askers stay
-              // parked and can re-raise on their re-run.
-              if (meeting.pendingQuestion === null) {
+              if (slotFree) {
                 meeting = {
                   ...meeting,
                   pendingQuestion: {
@@ -2056,6 +2161,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                     options: raised.options,
                     context: raised.context,
                     askedAt: completedAt,
+                    nodeId: current.id,
                   },
                 };
               }
@@ -2097,8 +2203,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           nextAction:
             ready.length === 0
               ? graph.nextAction
-              : `다음 실행: ${ready
-                  .slice(0, MAX_PARALLEL_GRAPH_NODES)
+              : `다음 실행: ${selectGraphWaveNodes(ready, {
+                  width: graphWaveWidth(input.run),
+                  soloWrites: soloWriteWaves(input.run),
+                })
                   .map((node) => node.title)
                   .join(", ")}`,
         };
@@ -2112,7 +2220,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       if (status === "completed" && meeting !== null) {
         meeting = { ...meeting, phase: "done" };
       }
-      return yield* persistGraphRun({ ...input.run, meeting }, graph, input.bindings, {
+      return yield* persistGraphRun({ ...freshRun, meeting }, graph, input.bindings, {
         status,
         finalOutput: status === "completed" ? finalOutput : null,
         error: status === "failed" ? graph.nextAction : null,
@@ -2203,6 +2311,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const isParkedFailure = (node: WorkspaceTaskNode): boolean =>
             node.status === "awaiting-user" && node.error !== null;
           const answeredAt = yield* nowIso;
+          // An answer bound to a node resumes that node alone; a sibling still
+          // holding its own question stays parked until it is asked. An
+          // unbound (older) answer keeps the pre-orchestra reading and resumes
+          // every parked node that has nothing of its own to ask.
+          const answeredNodeId = lastAnswer?.nodeId ?? null;
+          const answered = (node: WorkspaceTaskNode): boolean =>
+            node.status === "awaiting-user" &&
+            (answeredNodeId !== null ? node.id === answeredNodeId : node.parkedQuestion === null);
+          const parkedNext =
+            run.graph.nodes
+              .filter((node) => node.status === "awaiting-user" && node.parkedQuestion !== null)
+              .toSorted((left, right) => left.order - right.order)
+              .find((node) => !answered(node)) ?? null;
 
           if (verdict?.kind === "stop") {
             const stopped = refreshWorkspaceTaskGraphQueue({
@@ -2226,7 +2347,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const graph = refreshWorkspaceTaskGraphQueue({
             ...run.graph,
             nodes: run.graph.nodes.map((node) => {
-              if (node.status !== "awaiting-user") return node;
+              if (!answered(node)) return node;
               if (!isParkedFailure(node)) return { ...node, status: "queued" as const };
               if (verdict?.kind === "skip") {
                 return {
@@ -2251,9 +2372,43 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               const nextSeat = run.meeting!.participants.find(
                 (participant) => participant.id !== node.participantId,
               );
-              return nextSeat === undefined ? granted : { ...granted, participantId: nextSeat.id };
+              // A new seat is a new driver: its conversation starts fresh.
+              return nextSeat === undefined
+                ? granted
+                : { ...granted, participantId: nextSeat.id, threadId: null };
             }),
           });
+          // The slot is free again: the next node waiting with a question of
+          // its own is asked now, and the run parks until that answer lands.
+          if (parkedNext !== null && parkedNext.parkedQuestion !== null) {
+            const parked = parkedNext.parkedQuestion;
+            run = yield* persistGraphRun(
+              {
+                ...run,
+                meeting: {
+                  ...run.meeting,
+                  pendingQuestion: {
+                    askedByParticipantId: parkedNext.participantId,
+                    question: parked.question,
+                    options: parked.options,
+                    context: parked.context,
+                    askedAt: answeredAt,
+                    nodeId: parkedNext.id,
+                  },
+                },
+              },
+              refreshWorkspaceTaskGraphQueue({
+                ...graph,
+                nodes: graph.nodes.map((node) =>
+                  node.id === parkedNext.id ? { ...node, parkedQuestion: null } : node,
+                ),
+                nextAction: parked.question,
+              }),
+              bindings,
+              { updatedAt: answeredAt },
+            );
+            return;
+          }
           run = yield* persistGraphRun(run, graph, bindings, { updatedAt: answeredAt });
           continue;
         }

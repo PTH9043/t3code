@@ -326,6 +326,43 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           </>
         ) : null}
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>
+            오케스트라
+            <span className="ml-1 font-normal text-muted-foreground">
+              실행 단계를 노드별 대화에서 병렬 진행
+            </span>
+          </span>
+          <Switch
+            checked={config.orchestraEnabled}
+            onCheckedChange={(orchestraEnabled) =>
+              updateMeetingComposerConfig((current) => ({ ...current, orchestraEnabled }))
+            }
+          />
+        </label>
+        {config.orchestraEnabled ? (
+          <label className="flex items-center justify-between gap-2 text-xs font-medium">
+            <span>
+              병렬 폭
+              <span className="ml-1 font-normal text-muted-foreground">
+                동시에 실행할 노드 수 · 수정 작업은 하나씩
+              </span>
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={6}
+              value={config.maxParallel}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.currentTarget.value, 10);
+                if (!Number.isInteger(parsed)) return;
+                const maxParallel = Math.min(6, Math.max(1, parsed));
+                updateMeetingComposerConfig((current) => ({ ...current, maxParallel }));
+              }}
+              className={cn(SELECT_CLASS, "w-16 text-center")}
+            />
+          </label>
+        ) : null}
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span className="flex items-center gap-1">
             <CrownIcon className="size-3.5 text-muted-foreground" />
             의장

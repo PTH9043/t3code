@@ -5727,6 +5727,10 @@ function ChatViewContent(props: ChatViewProps) {
               userInLoop: meetingDraft.userInLoop,
               ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },
+            // Opt-in: absent keeps the one-node-at-a-time meeting execution.
+            ...(meetingDraft.orchestraEnabled
+              ? { orchestra: { maxParallel: meetingDraft.maxParallel, isolateWorktrees: false } }
+              : {}),
           },
         });
         if (result._tag === "Failure") {

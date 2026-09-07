@@ -439,6 +439,8 @@ function emptyNode(input: {
     agent: input.agent,
     role: input.role,
     participantId: input.participantId ?? null,
+    threadId: null,
+    parkedQuestion: null,
     title: input.title,
     handoff: {
       task: input.task,
@@ -742,6 +744,33 @@ export function readyWorkspaceTaskNodes(
         left.order - right.order ||
         left.id.localeCompare(right.id),
     );
+}
+
+/** Node kinds that edit the project. While write chains have no worktree of their own, these run alone. */
+export const WRITE_NODE_KINDS: ReadonlySet<WorkspaceTaskNode["kind"]> = new Set([
+  "implementation",
+  "debug",
+]);
+
+/**
+ * The ready nodes one wave runs together.
+ *
+ * `soloWrites` keeps a write node out of any shared wave: parallel edits to
+ * the same checkout collide, and a validator reading a tree mid-edit fails
+ * for the wrong reason and burns the retry budget. The frontier is already
+ * priority-ordered, so a write node at the head runs alone and one further
+ * back simply waits for the next wave.
+ */
+export function selectGraphWaveNodes(
+  ready: ReadonlyArray<WorkspaceTaskNode>,
+  options: { readonly width: number; readonly soloWrites: boolean },
+): ReadonlyArray<WorkspaceTaskNode> {
+  const width = Math.max(1, options.width);
+  if (!options.soloWrites) return ready.slice(0, width);
+  const head = ready[0];
+  if (head === undefined) return [];
+  if (WRITE_NODE_KINDS.has(head.kind)) return [head];
+  return ready.filter((node) => !WRITE_NODE_KINDS.has(node.kind)).slice(0, width);
 }
 
 /** Keep queued/blocked presentation in sync with the current dependency frontier. */
