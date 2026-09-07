@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   parkedQuestionNodes,
+  runsAwaitingPerson,
   seatLookupFrom,
   summarizeTaskGraphNodes,
 } from "./taskGraphPresentation";
@@ -125,5 +126,68 @@ describe("parkedQuestionNodes", () => {
     ]);
 
     expect(nodes.map((node) => String(node.id))).toEqual(["b"]);
+  });
+});
+
+describe("runsAwaitingPerson", () => {
+  const run = (input: {
+    readonly id: string;
+    readonly status: string;
+    readonly question?: string | null;
+    readonly nodes?: ReadonlyArray<WorkspaceTaskNode>;
+  }) => ({
+    id: input.id,
+    status: input.status,
+    task: `task ${input.id}`,
+    meeting: input.question ? { pendingQuestion: { question: input.question } } : null,
+    graph: input.nodes ? { nodes: input.nodes } : null,
+  });
+
+  const parked = {
+    question: "계속할까요?",
+    options: [],
+    context: "",
+    intervention: false,
+    raisedAt: "2026-09-07T00:00:00.000Z",
+  } as WorkspaceTaskNode["parkedQuestion"];
+
+  it("counts the questions queued behind the live one so answering once does not look final", () => {
+    const items = runsAwaitingPerson([
+      run({
+        id: "r1",
+        status: "running",
+        question: "alpha를 지울까요?",
+        nodes: [
+          taskNode("a", "awaiting-user"),
+          taskNode("b", "awaiting-user", parked),
+          taskNode("c", "running"),
+        ],
+      }),
+    ]);
+
+    expect(items).toEqual([
+      {
+        runId: "r1",
+        task: "task r1",
+        liveQuestion: "alpha를 지울까요?",
+        queuedQuestions: 1,
+        awaitingUser: 2,
+      },
+    ]);
+  });
+
+  it("ignores runs that are not live, whose questions are history", () => {
+    const items = runsAwaitingPerson([
+      run({ id: "done", status: "completed", question: "이미 끝난 질문" }),
+      run({ id: "cancelled", status: "cancelled", question: "취소된 질문" }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it("skips a live run that is simply working", () => {
+    const items = runsAwaitingPerson([
+      run({ id: "busy", status: "running", nodes: [taskNode("a", "running")] }),
+    ]);
+    expect(items).toEqual([]);
   });
 });

@@ -52,3 +52,52 @@ export const parkedQuestionNodes = (
   nodes: Iterable<WorkspaceTaskNode>,
 ): ReadonlyArray<WorkspaceTaskNode> =>
   Array.from(nodes).filter((node) => node.parkedQuestion !== null);
+
+export interface RunAttentionItem {
+  readonly runId: string;
+  readonly task: string;
+  /** The question the run is parked on right now, if any. */
+  readonly liveQuestion: string | null;
+  /** Questions other nodes raised while the slot was taken. */
+  readonly queuedQuestions: number;
+  /** Nodes parked on the person, including the one asking `liveQuestion`. */
+  readonly awaitingUser: number;
+}
+
+interface AttentionRunInput {
+  readonly id: string;
+  readonly status: string;
+  readonly task: string;
+  readonly meeting: { readonly pendingQuestion: { readonly question: string } | null } | null;
+  readonly graph: { readonly nodes: ReadonlyArray<WorkspaceTaskNode> } | null;
+}
+
+/**
+ * The runs waiting on the person, newest first. A parallel run can hold one
+ * live question and several parked behind it, so a person scanning the
+ * control centre needs the count as much as the question itself — otherwise
+ * answering once looks like the run is unblocked when it is not.
+ *
+ * Cancelled and finished runs are excluded: their questions are history.
+ */
+export const runsAwaitingPerson = (
+  runs: Iterable<AttentionRunInput>,
+): ReadonlyArray<RunAttentionItem> => {
+  const items: Array<RunAttentionItem> = [];
+  for (const run of runs) {
+    if (run.status !== "queued" && run.status !== "running") continue;
+    const nodes = run.graph?.nodes ?? [];
+    const awaitingUser = nodes.filter((node) => node.status === "awaiting-user").length;
+    const queuedQuestions = nodes.filter((node) => node.parkedQuestion !== null).length;
+    const liveQuestion = run.meeting?.pendingQuestion?.question ?? null;
+    if (liveQuestion === null && awaitingUser === 0) continue;
+    items.push({
+      runId: run.id,
+      task: run.task,
+      liveQuestion,
+      queuedQuestions,
+      awaitingUser,
+    });
+  }
+  return items;
+};

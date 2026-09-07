@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { WorkspaceCollaborationRunId } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
+  AlertTriangleIcon,
   BrainCircuitIcon,
   CheckIcon,
   CrownIcon,
@@ -22,6 +23,7 @@ import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
 import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
+import { runsAwaitingPerson } from "./taskGraphPresentation";
 import {
   ROLE_LABELS,
   SectionCard,
@@ -63,6 +65,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
   const [task, setTask] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
+  const attention = useMemo(() => runsAwaitingPerson(runs.data?.runs ?? []), [runs.data]);
 
   const answer = async (runId: WorkspaceCollaborationRunId, question: string, text: string) => {
     setAnsweringRunId(runId);
@@ -142,6 +145,45 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
             </Button>
           </div>
         </div>
+
+        {attention.length > 0 ? (
+          <div className="grid gap-2 rounded-xl border border-amber-500/45 bg-amber-500/8 p-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangleIcon
+                className="size-4 text-amber-600 dark:text-amber-400"
+                aria-hidden
+              />
+              <h3 className="text-sm font-semibold">
+                내 답변을 기다리는 실행 {attention.length}건
+              </h3>
+            </div>
+            <ul className="grid gap-2">
+              {attention.map((item) => (
+                <li key={item.runId} className="rounded-lg bg-background/70 p-2.5">
+                  <p className="line-clamp-1 text-xs font-medium">{item.task}</p>
+                  {item.liveQuestion ? (
+                    <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                      {item.liveQuestion}
+                    </p>
+                  ) : null}
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    <Badge size="sm" variant="warning">
+                      답변 대기 노드 {item.awaitingUser}
+                    </Badge>
+                    {item.queuedQuestions > 0 ? (
+                      <Badge size="sm" variant="outline">
+                        뒤이어 물을 질문 {item.queuedQuestions}
+                      </Badge>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-muted-foreground">
+              아래 실행 이력에서 해당 실행을 펼치면 답변할 수 있습니다.
+            </p>
+          </div>
+        ) : null}
 
         <div className="grid gap-2">
           <div className="flex items-center justify-between gap-2">
