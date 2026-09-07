@@ -4,6 +4,7 @@ import type {
   WorkspaceAgentRole,
   WorkspaceFailureClassification,
   WorkspaceMemoryCategory,
+  WorkspaceMeetingParticipant,
   WorkspaceOrchestrationAgent,
   WorkspaceTaskAttempt,
   WorkspaceTaskAttemptStatus,
@@ -38,6 +39,7 @@ import {
   layoutWorkspaceTaskGraph,
   type WorkspaceTaskGraphLayout,
 } from "./workspaceTaskGraphLayout";
+import { seatLookupFrom, summarizeTaskGraphNodes, type SeatLookup } from "./taskGraphPresentation";
 
 type BadgeVariant = "success" | "warning" | "error" | "outline" | "info";
 
@@ -244,16 +246,19 @@ function NodeDependencies({
 function CurrentAssignment({
   node,
   attempt,
+  seats,
 }: {
   node: WorkspaceTaskNode;
   attempt: WorkspaceTaskAttempt | null;
+  seats: SeatLookup;
 }) {
+  const seatName = node.participantId === null ? undefined : seats.get(String(node.participantId));
   return (
     <div className="rounded-lg border border-border/55 bg-muted/20 p-2.5">
       <div className="flex flex-wrap items-center gap-1.5">
         <BotIcon className="size-3.5 text-muted-foreground" aria-hidden />
         <Badge size="sm" variant="info">
-          {AGENT_LABELS[attempt?.agent ?? node.agent]}
+          {seatName ?? AGENT_LABELS[attempt?.agent ?? node.agent]}
         </Badge>
         <Badge size="sm" variant="outline">
           {ROLE_LABELS[attempt?.role ?? node.role]}
@@ -471,6 +476,7 @@ function TaskNodeCard({
   laneCount,
   unresolved,
   layout,
+  seats,
   onOpenThread,
 }: {
   node: WorkspaceTaskNode;
@@ -479,6 +485,7 @@ function TaskNodeCard({
   laneCount: number;
   unresolved: boolean;
   layout: WorkspaceTaskGraphLayout;
+  seats: SeatLookup;
   onOpenThread?:
     | ((input: {
         readonly threadId: ThreadId;
@@ -548,7 +555,8 @@ function TaskNodeCard({
       </header>
 
       <NodeDependencies node={node} layout={layout} />
-      <CurrentAssignment node={node} attempt={attempt} />
+      <ParkedQuestion node={node} />
+      <CurrentAssignment node={node} attempt={attempt} seats={seats} />
       <ValidationReceipt node={node} />
       <NodeResult node={node} attempt={attempt} />
       <AttemptHistory node={node} onOpenThread={onOpenThread} />
@@ -560,6 +568,42 @@ function TaskNodeCard({
         </span>
       </footer>
     </article>
+  );
+}
+
+/**
+ * A question this node raised while another node held the run's single
+ * question slot. It is not the live prompt — that one is answered in the
+ * meeting panel — but showing it here means a person can see what is queued
+ * behind the current question instead of meeting it one at a time.
+ */
+function ParkedQuestion({ node }: { node: WorkspaceTaskNode }) {
+  const parked = node.parkedQuestion;
+  if (parked === null) return null;
+  return (
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/8 p-2.5">
+      <div className="flex items-center gap-1.5">
+        <AlertTriangleIcon className="size-3.5 text-amber-600 dark:text-amber-400" aria-hidden />
+        <span className="text-[11px] font-semibold">
+          {parked.intervention ? "개입 대기" : "질문 대기"}
+        </span>
+        <Badge size="sm" variant="outline">
+          앞 질문이 끝나면 표시
+        </Badge>
+      </div>
+      <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed">{parked.question}</p>
+      {parked.options.length > 0 ? (
+        <ul className="mt-1.5 flex flex-wrap gap-1">
+          {parked.options.map((option) => (
+            <li key={option}>
+              <Badge size="sm" variant="outline">
+                {option}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -693,6 +737,8 @@ function MemoryCandidates({
 
 export interface WorkspaceTaskGraphViewProps {
   readonly graph: WorkspaceTaskGraph;
+  /** The run roster, when it has one — seat names beat generic agent labels. */
+  readonly participants?: ReadonlyArray<WorkspaceMeetingParticipant> | undefined;
   readonly className?: string | undefined;
   readonly onOpenThread?:
     | ((input: {
@@ -706,24 +752,14 @@ export interface WorkspaceTaskGraphViewProps {
 /** Static, read-only Workspace task graph shared by web and desktop. */
 export function WorkspaceTaskGraphView({
   graph,
+  participants,
   className,
   onOpenThread,
 }: WorkspaceTaskGraphViewProps) {
   const headingId = useId();
+  const seats = useMemo(() => seatLookupFrom(participants), [participants]);
   const layout = useMemo(() => layoutWorkspaceTaskGraph(graph.nodes), [graph.nodes]);
-  const counts = useMemo(() => {
-    let active = 0;
-    let completed = 0;
-    let failedOrBlocked = 0;
-    let waiting = 0;
-    for (const node of layout.nodeById.values()) {
-      if (node.status === "running" || node.status === "awaiting-validation") active += 1;
-      else if (node.status === "completed") completed += 1;
-      else if (node.status === "failed" || node.status === "blocked") failedOrBlocked += 1;
-      else waiting += 1;
-    }
-    return { active, completed, failedOrBlocked, waiting, total: layout.nodeById.size };
-  }, [layout]);
+  const counts = useMemo(() => summarizeTaskGraphNodes(layout.nodeById.values()), [layout]);
 
   return (
     <section aria-labelledby={headingId} className={cn("grid gap-4", className)}>
@@ -754,6 +790,9 @@ export function WorkspaceTaskGraphView({
             <Badge variant="info">진행 {counts.active}</Badge>
             <Badge variant="success">완료 {counts.completed}</Badge>
             <Badge variant="warning">대기 {counts.waiting}</Badge>
+            {counts.awaitingUser > 0 ? (
+              <Badge variant="error">답변 필요 {counts.awaitingUser}</Badge>
+            ) : null}
             <Badge variant={counts.failedOrBlocked > 0 ? "error" : "outline"}>
               실패·차단 {counts.failedOrBlocked}
             </Badge>
@@ -827,6 +866,7 @@ export function WorkspaceTaskGraphView({
                       laneCount={column.nodes.length}
                       unresolved={column.unresolved}
                       layout={layout}
+                      seats={seats}
                       onOpenThread={onOpenThread}
                     />
                   ))}

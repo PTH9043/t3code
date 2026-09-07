@@ -11,6 +11,8 @@ function node(id: string, order: number, dependsOn: ReadonlyArray<string> = []):
     agent: "grok",
     role: "researcher",
     participantId: null,
+    threadId: null,
+    parkedQuestion: null,
     title: id,
     handoff: {
       task: id,

@@ -180,6 +180,9 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                     · {formatTimestamp(run.createdAt)}
                   </span>
                 </span>
+                {run.orchestra ? (
+                  <Badge variant="info">오케스트라 · 폭 {run.orchestra.maxParallel}</Badge>
+                ) : null}
                 {run.meeting?.pendingQuestion ? <Badge variant="warning">답변 필요</Badge> : null}
                 <Badge variant={runBadgeVariant(run.status)}>{runStatusLabel(run.status)}</Badge>
               </summary>
@@ -195,6 +198,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                 {run.graph ? (
                   <WorkspaceTaskGraphView
                     graph={run.graph}
+                    participants={run.meeting?.participants}
                     onOpenThread={({ threadId }) =>
                       void navigate({
                         to: "/$environmentId/$threadId",
