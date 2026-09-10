@@ -15,7 +15,7 @@
     "scope": "project",
     "appliesToFolder": null,
     "title": "2026-09-11 오케스트라 실제 실행 검증",
-    "content": "분리된 검증 환경에서 실제 Codex와 Claude로 README 제목 조사 및 단어 수 확인을 실행했다. 계획, 두 작업, 두 검증, 최종 종합까지 6개 노드가 성공했고 전부 한 대화방 ID를 사용했다. 실제 브라우저에서 작업 블록 접기·펼치기, 지시 표시, 실패 및 재시도 기록, 공용·프로젝트·폴더 RAG 검색을 확인했다. 실사용 DB는 직접 수정하지 않는다. 검증 증거와 한계는 orchestra-repair-validation 문서를 참고한다.",
+    "content": "분리된 검증 환경에서 실제 Codex와 Claude로 README 제목 조사 및 단어 수 확인을 실행했다. 계획, 두 작업, 두 검증, 최종 종합까지 6개 노드가 성공했고 전부 한 대화방 ID를 사용했다. 추가 실검증에서 Codex에 의도적으로 지원하지 않는 모델을 배정해 두 번의 실제 오류와 자동 재시도를 발생시켰다. 화면의 다른 좌석에게 맡기기를 눌러 선택된 Claude 지휘 AI가 세 번째 시도를 완료했고 전체 실행도 성공했다. 같은 방의 다른 실행은 오케스트라 중지 버튼으로 취소하여 실행·블록의 cancelled 상태와 대화방 개수 4개 유지를 확인했다. 실제 브라우저에서 블록 접기·펼치기, 지시 표시, 실패 및 재시도 기록, 공용·프로젝트·폴더 RAG 검색도 확인했다. 실사용 DB는 직접 수정하지 않고 허용된 기억 저장은 인증된 앱 API를 사용한다.",
     "sources": [
       "docs/internals/orchestra-repair-validation.md",
       "apps/server/src/orchestration/Layers/WorkspaceAgentExecutor.test.ts"
@@ -26,10 +26,11 @@
     "scope": "folder",
     "appliesToFolder": "apps/web",
     "title": "Vite export 오류와 탭·창 제어 영역 및 연결 메뉴",
-    "content": "새 client-runtime 하위 경로 state/orchestra의 exports 해석 오류는 기존 state/presentation export로 공통 도우미를 제공해 해결했다. Electron에서 작업 탭이 네이티브 최소화·닫기 영역과 겹치지 않도록 탭 앞에 별도 창 제목 영역을 둔다. 1440·900·600px 폭에서 제목 영역 52px, 탭 y=52를 확인했다. 프로젝트 추가 메뉴는 연결 상태를 저장된 스냅샷으로 표시하면 연결 중에서 멈추므로 현재 환경 목록을 구독해 갱신한다.",
+    "content": "새 client-runtime 하위 경로 state/orchestra의 exports 해석 오류는 기존 state/presentation export로 공통 도우미를 제공해 해결했다. Electron 탭 앞에는 네이티브 제목 영역을 따로 둔다. 실제 Windows overlay는 40px이며 브라우저 CSS 모의 검증의 52px은 fallback이다. 여러 탭의 가로 스크롤바가 h-9 고정 높이를 차지하면 bottom 정렬된 탭이 위로 밀려 22px 글자에서 y=29.5로 겹친다. min-h-9로 내용 높이를 허용하면 y=45.5로 정상 표시된다. 실제 Electron에서 폭 1500·1000·640과 글자 12·16·22·32px의 12개 조합 및 탭 전환·닫기·새 탭을 검증했다. 프로젝트 추가 메뉴는 연결 상태를 저장된 스냅샷으로 표시하면 연결 중에서 멈추므로 현재 환경 목록을 구독해 갱신한다.",
     "sources": [
       "packages/client-runtime/src/state/presentation.ts",
       "apps/web/src/components/tabs/WorkspaceTabsHost.tsx",
+      "apps/web/src/components/tabs/WorkspaceTabBar.tsx",
       "apps/web/src/index.css",
       "apps/web/src/components/CommandPalette.tsx"
     ]
@@ -87,7 +88,7 @@
     "scope": "folder",
     "appliesToFolder": "apps/mobile",
     "title": "모바일 오케스트라 블록과 공통 프로토콜 표시",
-    "content": "웹과 모바일은 client-runtime state/presentation의 블록 메타데이터 및 프로토콜 텍스트 변환을 공유한다. 모바일 메시지 목록에 담당 AI, 모델, 상태, 재시도, 작업 지시를 표시하고 빈 스트리밍 블록도 유지한다. 활동 압축 시 orchestra.block의 지시와 메타데이터를 보존하고, 일반 활동 한도 밖의 오래된 블록도 메시지 보존 한도 내에서 유지한다. 후속 도구 로그 3100개 뒤에도 블록이 유지되는 테스트를 통과했다. 현재 설치된 native TypeScript preview는 React Navigation 제네릭에서 기존 오류를 보고하므로 TypeScript 6.0.3의 타입 검사도 사용한다. 모바일 네이티브 기기 UI 검증과 네이티브 창 버튼 조작 검증은 이번 환경에서 수행하지 못했다.",
+    "content": "웹과 모바일은 client-runtime state/presentation의 블록 메타데이터 및 프로토콜 텍스트 변환을 공유한다. 모바일 메시지 목록에 담당 AI, 모델, 상태, 재시도, 작업 지시를 표시하고 빈 스트리밍 블록도 유지한다. 활동 압축 시 orchestra.block의 지시와 메타데이터를 보존하고, 일반 활동 한도 밖의 오래된 블록도 메시지 보존 한도 내에서 유지한다. 후속 도구 로그 3100개 뒤에도 블록이 유지되는 테스트를 통과했다. 현재 설치된 native TypeScript preview는 React Navigation 제네릭에서 기존 오류를 보고하므로 TypeScript 6.0.3의 타입 검사도 사용한다. 모바일 네이티브 기기 UI 검증은 이번 환경에서 수행하지 못했다.",
     "sources": [
       "apps/mobile/src/lib/threadActivity.ts",
       "apps/mobile/src/features/threads/ThreadFeed.tsx",
@@ -100,7 +101,7 @@
     "scope": "folder",
     "appliesToFolder": "apps/desktop",
     "title": "개발용 Electron 프로세스 정리의 소유권",
-    "content": "개발 앱 정리에서 이름이나 작업 경로로 프로세스를 찾아 일괄 종료하면 사용 중인 앱 또는 에이전트까지 종료할 수 있다. dev-electron 스크립트의 패턴 기반 오래된 앱 종료를 제거하고 시작 시 확보한 프로세스만 정리한다. 현재 사용 중인 앱의 데이터 디렉터리에 검증 서버를 시작하지 않는다. 탭과 caption controls 사이 영역은 웹의 Electron 스타일과 함께 확인한다.",
+    "content": "개발 앱 정리에서 이름이나 작업 경로로 프로세스를 찾아 일괄 종료하면 사용 중인 앱 또는 에이전트까지 종료할 수 있다. dev-electron 스크립트의 패턴 기반 오래된 앱 종료를 제거하고 시작 시 확보한 프로세스만 정리한다. 현재 사용 중인 앱의 데이터 디렉터리에 검증 서버를 시작하지 않는다. APPDATA·T3CODE_HOME·포트를 분리한 실제 Electron에서 BrowserWindow API로 최소화·복원·최대화·최대화 해제·소유한 창 닫기 이벤트를 확인했다. 실사용 앱은 CDP로 화면을 확인하고 연결한 브라우저의 close를 호출하지 않는다. Windows native caption overlay의 실제 40px 영역과 탭의 개별 위치까지 확인해야 한다. 물리적 caption 버튼 클릭은 computer-use bridge 부재로 검증하지 못했지만 네이티브 창 동작 이벤트는 검증했다.",
     "sources": [
       "apps/desktop/scripts/dev-electron.mjs",
       "apps/web/src/components/tabs/WorkspaceTabsHost.tsx"

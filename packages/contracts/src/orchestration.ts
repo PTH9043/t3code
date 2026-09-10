@@ -1794,14 +1794,11 @@ export const ThreadTitleRegeneration = Schema.Struct({
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
 /**
- * The orchestra conversation a node conversation belongs to, or null for an
- * ordinary conversation. An orchestra run executes its graph nodes in parallel,
- * which needs one provider session — and therefore one conversation — per node.
- * Those node conversations are the run's internals: clients keep them out of
- * their conversation lists and reach them from this conversation instead.
- * Optional so conversations, commands and payloads written before the
- * orchestra still decode, and so every unrelated `thread.create` call site
- * stays untouched. Read it as `?? null`.
+ * The owner of a legacy orchestra node conversation. New executions keep
+ * independent provider sessions and append blocks to the owner's conversation
+ * without creating node conversations. Retained for reading existing history;
+ * optional so older conversations and unrelated commands still decode.
+ * Read it as `?? null`.
  */
 export const OrchestraRunThreadId = Schema.optional(Schema.NullOr(ThreadId));
 

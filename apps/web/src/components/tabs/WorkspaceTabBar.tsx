@@ -332,7 +332,7 @@ export function WorkspaceTabBar() {
   return (
     <div
       role="tablist"
-      className="flex h-9 flex-none items-end gap-1 overflow-x-auto border-b border-border/60 bg-muted/20 px-2 pt-1"
+      className="flex min-h-9 flex-none items-end gap-1 overflow-x-auto border-b border-border/60 bg-muted/20 px-2 pt-1"
     >
       {tabs.map((tab, index) =>
         tab.view.kind === "thread" ? (
