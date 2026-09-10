@@ -31,3 +31,9 @@ Authenticated WebSocket requests saved and queried three memory scopes. General 
 Focused regression tests cover execution isolation, request routing, retries, search capture/redaction, token attribution, old-memory migration, source usage, provider startup and Windows shim resolution. Web and server use their scoped typechecks. Mobile additionally uses TypeScript 6.0.3 because the installed native preview reports unrelated React Navigation generic errors.
 
 Machine-local screenshots, browser sessions and test databases remain in the ignored validation home. Browser credentials, pairing tokens and copied conversation contents are not committed. The accompanying [memory records](./knowledge/orchestra-repair-notes.json) contain only reusable findings and source paths for storage through the application's knowledge API.
+
+## Live memory persistence
+
+After the developer explicitly authorized the required live-state write, the existing `t3 pair` command issued a temporary credential for the running application. All nine prepared records were stored through its authenticated orchestration API: one environment record, one project record and seven folder records. No validation server was started against the live home.
+
+The application returned the saved content, scope and revision-pinned source links unchanged. Each record was retrieved through RAG search. Searches from another existing project included only the environment record; disabling sharing excluded that record as well. General and sibling-folder contexts excluded folder records, while matching child paths included them. Prompt composition for `apps/web/src` included the web repair memory. This verification completed on September 11, 2026 (Korea time).
