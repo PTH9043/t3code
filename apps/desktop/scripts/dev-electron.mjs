@@ -1,5 +1,4 @@
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -9,6 +8,7 @@ import {
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
+import { watchDesktopBundles } from "./watch-desktop-bundles.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
 if (!devServerUrl) {
@@ -25,10 +25,6 @@ const requiredFiles = [
   "dist-electron/main.cjs",
   "dist-electron/preload.cjs",
   "../server/dist/bin.mjs",
-];
-const watchedDirectories = [
-  { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
-  { directory: "../server/dist", files: new Set(["bin.mjs"]) },
 ];
 const forcedShutdownTimeoutMs = 1_500;
 // Long enough to swallow a rebuild burst: one contracts edit rewrites
@@ -47,10 +43,6 @@ const rapidCrashLimit = 3;
 // a second streak holds for a new bundle.
 const rapidCrashCooldownMs = 10_000;
 const mainLoadFailureMarker = "App threw an error during load";
-// fs.watch on Windows (and on some editors' atomic writes) occasionally misses
-// a rebuilt bundle, leaving the app on stale code after a server build. A
-// slow mtime/size poll is the backstop; the watcher stays for fast restarts.
-const watchPollIntervalMs = 1_000;
 const childTreeGracePeriodMs = 1_200;
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
@@ -83,42 +75,7 @@ let cooldownRetryTimer = null;
 let cooldownRetryUsed = false;
 let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
-const watchers = [];
-/** Last mtime+size seen per watched file path; refreshed whenever a restart is scheduled. */
-const watchedFileStamps = new Map();
-let watchPollTimer = null;
-
-function watchedFilePaths() {
-  return watchedDirectories.flatMap(({ directory, files }) =>
-    [...files].map((file) => NodePath.join(desktopDir, directory, file)),
-  );
-}
-
-function stampOf(filePath) {
-  try {
-    const stat = NodeFS.statSync(filePath);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return null;
-  }
-}
-
-function refreshWatchedFileStamps() {
-  for (const filePath of watchedFilePaths()) {
-    watchedFileStamps.set(filePath, stampOf(filePath));
-  }
-}
-
-function pollWatchedFiles() {
-  if (shuttingDown) return;
-  for (const filePath of watchedFilePaths()) {
-    const stamp = stampOf(filePath);
-    if (stamp === null || stamp === watchedFileStamps.get(filePath)) continue;
-    console.log(`[dev-electron] change to ${NodePath.basename(filePath)} seen by poll`);
-    scheduleRestart({ bundleChanged: true });
-    return;
-  }
-}
+let stopWatchingBundles = null;
 
 function killChildTreeByPid(pid, signal) {
   if (typeof pid !== "number") {
@@ -288,7 +245,6 @@ function scheduleRestart({ bundleChanged = false } = {}) {
 
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    refreshWatchedFileStamps();
     restartQueue = restartQueue
       .catch(() => undefined)
       .then(async () => {
@@ -301,24 +257,11 @@ function scheduleRestart({ bundleChanged = false } = {}) {
 }
 
 function startWatchers() {
-  for (const { directory, files } of watchedDirectories) {
-    const watcher = NodeFS.watch(
-      NodePath.join(desktopDir, directory),
-      { persistent: true },
-      (_eventType, filename) => {
-        if (typeof filename !== "string" || !files.has(filename)) {
-          return;
-        }
-
-        scheduleRestart({ bundleChanged: true });
-      },
-    );
-
-    watchers.push(watcher);
-  }
-  refreshWatchedFileStamps();
-  watchPollTimer = setInterval(pollWatchedFiles, watchPollIntervalMs);
-  watchPollTimer.unref();
+  stopWatchingBundles = watchDesktopBundles({
+    files: requiredFiles.map((file) => NodePath.resolve(desktopDir, file)),
+    platform: hostPlatform,
+    onChange: () => scheduleRestart({ bundleChanged: true }),
+  });
 }
 
 function killChildTree(signal) {
@@ -341,13 +284,8 @@ async function shutdown(exitCode) {
     restartTimer = null;
   }
 
-  for (const watcher of watchers) {
-    watcher.close();
-  }
-  if (watchPollTimer) {
-    clearInterval(watchPollTimer);
-    watchPollTimer = null;
-  }
+  stopWatchingBundles?.();
+  stopWatchingBundles = null;
 
   await stopApp();
   killChildTree("TERM");

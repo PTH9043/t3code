@@ -46,6 +46,12 @@ An isolated browser reproduced the wrong return before the fix. Afterward it pas
 
 An isolated native Electron instance also passed the actual menu sequence: open OnChainBot's conversation, use the project filter to visit another project's conversation, open OnChainBot's control center, and click “대화로 돌아가기”. The selected tab returned to OnChainBot's original conversation with no uncaught page errors. All 24 focused tests, the web typecheck, targeted lint, and the production web build passed.
 
+## Windows launcher CPU saturation
+
+The running desktop launcher consumed 100.5% of one CPU core while the renderer used about 1.9%. A five-second event sample recorded 711,900 repeated `rename` notifications naming the `dist-electron` directory itself. Ignoring those filenames did not stop native event processing. Closing the two launcher FSWatcher handles while retaining its existing file polling reduced measured launcher CPU time from 4.86 seconds to zero over the next five-second sample.
+
+Windows now polls only the three runnable bundles once per second. Other platforms retain native notifications with polling as a fallback. Bundle fingerprints include inode, modification time and size; output-directory replacement and temporarily missing files are handled without restarting against an incomplete set of bundles. Focused tests cover idle operation without native Windows watchers, disposal, coalesced edits, directory replacement and incomplete builds. This follows Node's documented warning that filesystem watching varies by platform and may not survive directory or inode replacement. See the [Node filesystem watcher caveats](https://nodejs.org/api/fs.html#caveats).
+
 ## Live memory persistence
 
 After the developer explicitly authorized the required live-state write, the existing `t3 pair` command issued a temporary credential for the running application. All nine prepared records were stored through its authenticated orchestration API: one environment record, one project record and seven folder records. No validation server was started against the live home.
