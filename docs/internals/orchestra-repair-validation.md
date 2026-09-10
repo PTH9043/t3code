@@ -14,6 +14,7 @@ Memory has explicit environment, project and folder scopes. Existing records rem
 - Provider subscriptions could miss events emitted immediately after startup. Subscription fibers now start immediately before provider work is dispatched.
 - Workers reusing a provider usage source ID could share token cursors. Orchestra usage now identifies each block independently, including retries.
 - Client activity compaction could erase older block headers and instructions. Bounded retention now preserves block metadata alongside retained messages; a regression test covers 3,100 subsequent tool rows.
+- Research capture masked credentials in the body and query but left the title unmasked. Titles now use the same redaction, with a regression assertion against the entire persisted record.
 - SQLite connections did not tolerate brief contention with another application process. They now configure a five-second busy timeout.
 - A 15,270-character Windows PATH made `cmd.exe` unable to launch `node`, producing failed Codex probes. Stock npm Node shims now launch their resolved Node executable and script directly. Custom batch scripts retain their behavior; no global PATH or registry setting is changed.
 

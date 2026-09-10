@@ -35,6 +35,7 @@ import { WorkspaceAgentExecutorLive } from "./WorkspaceAgentExecutor.ts";
 const at = "2026-09-11T00:00:00.000Z";
 const decodeEvent = (input: unknown) => decodeEventEffect(input).pipe(Effect.orDie);
 const decodeEventEffect = Schema.decodeUnknownEffect(OrchestrationEvent);
+const encodeCapture = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const ownerId = ThreadId.make("one-conversation");
 const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "test-model" };
 const owner = Schema.decodeUnknownSync(OrchestrationThread)({
@@ -138,7 +139,7 @@ const harness = (mode: "parallel" | "failure" | "retry" | "research" | "cancel")
                   type: "item.completed",
                   payload: {
                     itemType: "web_search",
-                    title: "Routing documentation",
+                    title: "Routing documentation sk-test123456789012345678901234567890",
                     detail:
                       "Verified locally against https://example.com/routing. api_key=sk-test123456789012345678901234567890",
                   },
@@ -307,7 +308,7 @@ it.live("retains reported search evidence with source links and masked credentia
         research: { verification: "unverified" },
       });
       expect(captures[0]?.content).toContain("https://example.com/routing");
-      expect(captures[0]?.content).not.toContain("sk-test123456789012345678901234567890");
+      expect(encodeCapture(captures[0])).not.toContain("sk-test123456789012345678901234567890");
     }).pipe(Effect.provide(state.layer), Effect.scoped);
   }),
 );

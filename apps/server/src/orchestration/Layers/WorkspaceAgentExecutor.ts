@@ -157,7 +157,9 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
                     `research-${knowledgeContentDigest(`${blockKey}:${event.eventId}`, 32)}`,
                   ),
                   kind: "long-term-memory",
-                  title: `${input.title}: ${event.payload.title ?? "검색 기록"}`.slice(0, 200),
+                  title: redactConversationRagSensitiveData(
+                    `${input.title}: ${event.payload.title ?? "검색 기록"}`,
+                  ).content.slice(0, 200),
                   content: detail,
                   status: "active",
                   origin: "agent",
