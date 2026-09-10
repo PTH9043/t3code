@@ -308,6 +308,14 @@ export const ProviderRegistryLive = Layer.effect(
       liveSubsRef,
     ).pipe(Effect.map((map) => Array.from(map.values(), buildSnapshotSource)));
 
+    // Serialize cache writes. `upsertProviders` runs its persists with
+    // unbounded concurrency, and two upserts for the same instance (e.g. the
+    // boot snapshot read racing the instance's first live update) would
+    // otherwise each rename their own temp file into place — whichever
+    // rename lands last wins, so an older snapshot could overwrite a newer
+    // one on disk. Each write also re-reads the aggregator's *current*
+    // entry, so the last write always reflects the latest in-memory state.
+    const persistSemaphore = yield* Semaphore.make(1);
     const persistProvider = (provider: ServerProvider) =>
       Effect.gen(function* () {
         // Persist every instance — the file name is the instance id, so
@@ -317,17 +325,21 @@ export const ProviderRegistryLive = Layer.effect(
         // without the aggregator holding a stale `cachePathByInstance`
         // entry.
         const key = snapshotInstanceKey(provider);
+        const current =
+          (yield* Ref.get(providersRef)).find(
+            (candidate) => snapshotInstanceKey(candidate) === key,
+          ) ?? provider;
         const filePath = yield* resolveProviderStatusCachePath({
           cacheDir: config.providerStatusCacheDir,
           instanceId: key,
         }).pipe(Effect.provideService(Path.Path, path));
-        yield* writeProviderStatusCache({ filePath, provider }).pipe(
+        yield* writeProviderStatusCache({ filePath, provider: current }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.tapError(Effect.logError),
           Effect.ignore,
         );
-      });
+      }).pipe(persistSemaphore.withPermits(1));
 
     const applyProviderUpdateState = Effect.fn("applyProviderUpdateState")(function* (
       provider: ServerProvider,
@@ -567,13 +579,19 @@ export const ProviderRegistryLive = Layer.effect(
         // change stream before reading its current snapshot. If the
         // driver's own initial probe finishes during this sync, either
         // the current read or the active subscriber observes the result.
+        //
+        // `startImmediately` runs each consumer synchronously up to its
+        // first suspension, which is past `Stream.fromPubSub`'s subscribe
+        // step — so the subscription exists before this sync continues.
+        // A plain fork only *schedules* the consumer, and a snapshot the
+        // instance published before the consumer got to run was dropped
+        // (an unbounded PubSub does not buffer for future subscribers).
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
             correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
-          ).pipe(Effect.forkScoped);
+          ).pipe(Effect.forkScoped({ startImmediately: true }));
         }
-        yield* Effect.yieldNow;
 
         // Snapshot current state without starting a probe. Managed providers
         // launch their startup refresh independently, so this closes the

@@ -78,6 +78,20 @@ export interface ProjectionFullThreadDiffContext {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Explicit user choices before a handoff, even when the provider emitted no acknowledgement. */
+  readonly getThreadHandoffDecisions?: (input: {
+    readonly threadId: ThreadId;
+    readonly beforeSequence: number;
+  }) => Effect.Effect<
+    ReadonlyArray<import("@t3tools/contracts").OrchestrationThreadActivity>,
+    ProjectionRepositoryError
+  >;
+  readonly getThreadTokenUsage?: (
+    input: import("@t3tools/contracts").GetThreadTokenUsageInput,
+  ) => Effect.Effect<
+    import("@t3tools/contracts").ThreadTokenUsageReport,
+    ProjectionRepositoryError
+  >;
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.

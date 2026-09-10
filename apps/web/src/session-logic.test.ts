@@ -458,6 +458,24 @@ describe("deriveTurnPlans", () => {
     });
     expect(turnPlans[0]?.plan.steps).toEqual([{ step: "Inspect code", status: "completed" }]);
     expect(turnPlans[1]?.plan.steps).toEqual([{ step: "Ship it", status: "pending" }]);
+
+    // A compacted row has no steps because compaction blanked them, not because the
+    // agent withdrew the plan. Reading it as a withdrawal wiped the chip off every
+    // turn once the thread passed the payload retention window.
+    const compacted = deriveTurnPlans([
+      ...activities,
+      makeActivity({
+        id: "plan-1c",
+        createdAt: "2026-02-23T00:02:00.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: { __payloadCompacted: true },
+      }),
+    ]);
+    expect(compacted).toHaveLength(2);
+    expect(compacted[0]?.plan.steps).toEqual([{ step: "Inspect code", status: "completed" }]);
   });
 
   it("skips activities without parseable steps", () => {

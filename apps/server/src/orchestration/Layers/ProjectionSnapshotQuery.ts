@@ -22,7 +22,7 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationProject,
   type OrchestrationSession,
-  type OrchestrationThreadActivity,
+  OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type SharedLibraryMatch,
   ModelSelection,
@@ -30,6 +30,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   WorkspaceKnowledgeItem,
+  WorkspaceResearchRecord,
   WorkspaceKnowledgeListInput,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
@@ -41,6 +42,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeTokenUsageProjection } from "./TokenUsageProjection.ts";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
@@ -99,6 +101,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
 );
 const ProjectionWorkspaceKnowledgeDbRowSchema = WorkspaceKnowledgeItem.mapFields(
   Struct.assign({
+    research: Schema.NullOr(Schema.fromJsonString(WorkspaceResearchRecord)),
     tags: Schema.fromJsonString(Schema.Array(TrimmedNonEmptyString)),
   }),
 );
@@ -373,6 +376,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 }
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
+  const tokenUsage = yield* makeTokenUsageProjection;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
@@ -393,10 +397,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     projectId: row.projectId,
     title: row.title,
     modelSelection: row.modelSelection,
+    handoffMode: row.handoffMode ?? "standard",
     runtimeMode: row.runtimeMode,
     interactionMode: row.interactionMode,
     branch: row.branch,
     worktreePath: row.worktreePath,
+    orchestraRunThreadId: row.orchestraRunThreadId ?? null,
     latestTurn,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -473,7 +479,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listWorkspaceKnowledgeRows = SqlSchema.findAll({
     Request: WorkspaceKnowledgeListInput,
     Result: ProjectionWorkspaceKnowledgeDbRowSchema,
-    execute: ({ projectId }) =>
+    execute: ({ projectId, includeShared }) =>
       sql`
         SELECT
           item_id AS "id",
@@ -484,11 +490,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           origin,
           relative_folder AS "relativeFolder",
+          scope,
+          applies_to_folder AS "appliesToFolder",
+          research_json AS "research",
           tags_json AS "tags",
+          prompt_uses AS "promptUses",
+          last_used_at AS "lastUsedAt",
+          original_chars AS "originalChars",
+          stored_chars AS "storedChars",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
         FROM projection_workspace_knowledge_items
-        WHERE project_id = ${projectId}
+        WHERE project_id = ${projectId} OR (${includeShared === true ? 1 : 0} = 1 AND scope = 'environment')
         ORDER BY updated_at DESC, item_id ASC
       `,
   });
@@ -503,10 +516,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          handoff_mode AS "handoffMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          orchestra_run_thread_id AS "orchestraRunThreadId",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -539,10 +554,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          handoff_mode AS "handoffMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          orchestra_run_thread_id AS "orchestraRunThreadId",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -577,10 +594,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          handoff_mode AS "handoffMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          orchestra_run_thread_id AS "orchestraRunThreadId",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -822,10 +841,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          handoff_mode AS "handoffMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          orchestra_run_thread_id AS "orchestraRunThreadId",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1114,10 +1135,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          handoff_mode AS "handoffMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          orchestra_run_thread_id AS "orchestraRunThreadId",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1747,10 +1770,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                handoffMode: row.handoffMode ?? "standard",
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
                 worktreePath: row.worktreePath,
+                orchestraRunThreadId: row.orchestraRunThreadId ?? null,
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1954,10 +1979,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  handoffMode: row.handoffMode ?? "standard",
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  orchestraRunThreadId: row.orchestraRunThreadId ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2212,10 +2239,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  handoffMode: row.handoffMode ?? "standard",
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  orchestraRunThreadId: row.orchestraRunThreadId ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2382,6 +2411,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Effect.gen(function* () {
       const knowledge = yield* listWorkspaceKnowledge!({
         projectId: input.projectId,
+        includeShared: input.includeShared !== false,
         statuses: ["active"],
       });
       const rag =
@@ -2389,6 +2419,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ? { matches: [] }
           : yield* projectionWorkspaceRagRepository.search({
               projectId: input.projectId,
+              includeShared: input.includeShared !== false,
+              ...(input.contextPaths === undefined ? {} : { contextPaths: input.contextPaths }),
               query: input.task,
               ...(input.ragLimit !== undefined ? { limit: input.ragLimit } : {}),
               ...(input.includeLongTermMemory !== undefined
@@ -2808,10 +2840,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        handoffMode: threadRow.value.handoffMode ?? "standard",
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        orchestraRunThreadId: threadRow.value.orchestraRunThreadId ?? null,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -3021,7 +3055,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  const readHandoffDecisions = SqlSchema.findAll({
+    Request: Schema.Struct({ threadId: ThreadId, beforeSequence: NonNegativeInt }),
+    Result: OrchestrationThreadActivity.mapFields(
+      Struct.assign({ payload: Schema.fromJsonString(Schema.Unknown) }),
+    ),
+    execute: ({ threadId, beforeSequence }) => sql`
+      SELECT event_id AS id, event_type AS kind, occurred_at AS "createdAt", sequence,
+        'info' AS tone, 'User decision' AS summary, NULL AS "turnId", payload_json AS payload
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread' AND stream_id = ${threadId} AND sequence < ${beforeSequence}
+        AND event_type IN ('thread.user-input-response-requested', 'thread.approval-response-requested', 'thread.reverted')
+      ORDER BY sequence ASC LIMIT 1001
+    `,
+  });
+
   return {
+    getThreadHandoffDecisions: (input) =>
+      readHandoffDecisions(input).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getThreadHandoffDecisions")),
+      ),
     getCommandReadModel,
     getSnapshot,
     getShellSnapshot,
@@ -3030,6 +3083,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getSnapshotSequence,
     getCounts,
     listWorkspaceKnowledge,
+    getThreadTokenUsage: tokenUsage.getReport,
     searchWorkspaceRag,
     composeWorkspacePrompt,
     listWorkspaceAgentRoles,

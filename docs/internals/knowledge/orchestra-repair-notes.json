@@ -1,0 +1,109 @@
+[
+  {
+    "id": "repair-shared-orchestra-preferences",
+    "scope": "environment",
+    "appliesToFolder": null,
+    "title": "사용자 오케스트라 및 장기기억 운영 원칙",
+    "content": "오케스트라는 하나의 대화방에서 지휘 AI의 계획, 작업 AI의 지시와 출력, 검증, 최종 결과를 블록으로 쌓는다. 숨겨진 작업용 대화방도 새로 만들지 않는다. 사용자가 지휘 AI와 초기 작업 AI를 고르고 지휘 AI는 연결된 계정·모델 중에서 계획에 필요한 작업자를 배정한다. 사용자 선택 지휘 AI는 유지한다. 조사·발견 내용은 출처와 검증 상태를 함께 남기고 공용, 프로젝트, 실제 폴더 적용 범위를 구분한다.",
+    "sources": [
+      "docs/user/workspace-orchestration.md",
+      "packages/contracts/src/workspaceOrchestra.ts"
+    ]
+  },
+  {
+    "id": "repair-project-integrated-validation",
+    "scope": "project",
+    "appliesToFolder": null,
+    "title": "2026-09-11 오케스트라 실제 실행 검증",
+    "content": "분리된 검증 환경에서 실제 Codex와 Claude로 README 제목 조사 및 단어 수 확인을 실행했다. 계획, 두 작업, 두 검증, 최종 종합까지 6개 노드가 성공했고 전부 한 대화방 ID를 사용했다. 실제 브라우저에서 작업 블록 접기·펼치기, 지시 표시, 실패 및 재시도 기록, 공용·프로젝트·폴더 RAG 검색을 확인했다. 실사용 DB는 직접 수정하지 않는다. 검증 증거와 한계는 orchestra-repair-validation 문서를 참고한다.",
+    "sources": [
+      "docs/internals/orchestra-repair-validation.md",
+      "apps/server/src/orchestration/Layers/WorkspaceAgentExecutor.test.ts"
+    ]
+  },
+  {
+    "id": "repair-web-vite-tabs-menu",
+    "scope": "folder",
+    "appliesToFolder": "apps/web",
+    "title": "Vite export 오류와 탭·창 제어 영역 및 연결 메뉴",
+    "content": "새 client-runtime 하위 경로 state/orchestra의 exports 해석 오류는 기존 state/presentation export로 공통 도우미를 제공해 해결했다. Electron에서 작업 탭이 네이티브 최소화·닫기 영역과 겹치지 않도록 탭 앞에 별도 창 제목 영역을 둔다. 1440·900·600px 폭에서 제목 영역 52px, 탭 y=52를 확인했다. 프로젝트 추가 메뉴는 연결 상태를 저장된 스냅샷으로 표시하면 연결 중에서 멈추므로 현재 환경 목록을 구독해 갱신한다.",
+    "sources": [
+      "packages/client-runtime/src/state/presentation.ts",
+      "apps/web/src/components/tabs/WorkspaceTabsHost.tsx",
+      "apps/web/src/index.css",
+      "apps/web/src/components/CommandPalette.tsx"
+    ]
+  },
+  {
+    "id": "repair-server-scoped-execution",
+    "scope": "folder",
+    "appliesToFolder": "apps/server/src/orchestration",
+    "title": "한 대화방에서 독립 AI 실행·승인·재시도 처리",
+    "content": "WorkspaceAgentExecutor는 ownerThreadId와 별개인 executionId로 provider 세션을 실행하며 메시지와 활동은 소유 대화에만 기록한다. executionId에 시도 번호를 포함해 이전 시도의 늦은 이벤트를 배제한다. 승인·질문 ID도 실행별로 분리하고 원래 providerRequestId로 응답한다. 종료 시 미완료 요청을 닫고 출력 블록을 완료 처리한다. 출력은 50ms 단위로 모아 저장한다. 스트림 구독은 작업 시작 전에 즉시 설치해야 첫 이벤트가 유실되지 않는다.",
+    "sources": [
+      "apps/server/src/orchestration/Layers/WorkspaceAgentExecutor.ts",
+      "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+      "apps/server/src/provider/Layers/ProviderService.ts"
+    ]
+  },
+  {
+    "id": "repair-memory-scope-migration",
+    "scope": "folder",
+    "appliesToFolder": "apps/server/src/persistence",
+    "title": "공용·프로젝트·폴더 기억의 검색 경계와 이전 자료 보존",
+    "content": "migration 065는 기존 기억과 FTS 청크를 보존하며 project 범위를 기본값으로 부여한다. environment 범위만 다른 프로젝트와 공유한다. folder 범위는 contextPaths의 경로 구성요소 경계로 매칭하며 빈 경로에는 포함하지 않는다. itemId만으로 공유 기록을 식별하지 않고 소유 projectId를 함께 사용한다. 일반·apps/web/src·apps/server 검색에서 해당 폴더 기록의 포함과 제외를 실제 API로 확인했다. SQLite 연결에는 짧은 교차 프로세스 쓰기 경합을 위한 busy_timeout 5000ms를 설정한다.",
+    "sources": [
+      "apps/server/src/persistence/Migrations/065_WorkspaceKnowledgeScope.ts",
+      "apps/server/src/persistence/Migrations/065_WorkspaceKnowledgeScope.test.ts",
+      "apps/server/src/persistence/Layers/ProjectionWorkspaceRag.ts",
+      "apps/server/src/persistence/NodeSqliteClient.ts"
+    ]
+  },
+  {
+    "id": "repair-windows-npm-shim-path",
+    "scope": "folder",
+    "appliesToFolder": "packages/shared",
+    "title": "긴 Windows PATH에서 AI CLI 실행 실패 복구",
+    "content": "이 환경의 PATH 길이 15270에서 cmd를 통해 실행한 node와 Codex npm shim이 명령을 찾지 못했다. 짧은 PATH와 Node 직접 실행에서는 정상 동작했다. stock npm Node .cmd 템플릿만 식별해 동일 Node 실행파일과 JavaScript 진입점을 shell 없이 실행하면 긴 PATH와 인수의 특수문자를 유지한다. 사용자 지정 batch 내용은 최적화하지 않는다. 변경 후 앱의 Codex·Claude 연결과 실제 오케스트라 실행을 확인했다. 전역 PATH나 레지스트리를 수정하지 않았다.",
+    "sources": [
+      "packages/shared/src/shell.ts",
+      "packages/shared/src/shell.test.ts",
+      "packages/shared/src/fixtures/npm-node-shim.cmd"
+    ]
+  },
+  {
+    "id": "repair-token-cursor-per-execution",
+    "scope": "folder",
+    "appliesToFolder": "apps/server/src/orchestration",
+    "title": "병렬 AI와 재시도의 토큰 사용량 분리",
+    "content": "한 대화방에서 여러 provider 실행이 동일한 sourceId를 보고할 수 있다. orchestra.block의 messageId를 사용량 요청과 누적 커서 키에 포함해 작업 간 사용량이 섞이거나 재시도 카운터가 이전 작업에 차감되지 않도록 한다. 알 수 없는 사용량은 null로 유지하고 이전 시도의 비용을 지우지 않는다. 별도 실행 100·150·50 토큰이 각각 보존되는 회귀 테스트가 있다.",
+    "sources": [
+      "apps/server/src/orchestration/Layers/TokenUsageProjection.ts",
+      "apps/server/src/orchestration/Layers/TokenUsageProjection.test.ts"
+    ]
+  },
+  {
+    "id": "repair-mobile-shared-presentation",
+    "scope": "folder",
+    "appliesToFolder": "apps/mobile",
+    "title": "모바일 오케스트라 블록과 공통 프로토콜 표시",
+    "content": "웹과 모바일은 client-runtime state/presentation의 블록 메타데이터 및 프로토콜 텍스트 변환을 공유한다. 모바일 메시지 목록에 담당 AI, 모델, 상태, 재시도, 작업 지시를 표시하고 빈 스트리밍 블록도 유지한다. 활동 압축 시 orchestra.block의 지시와 메타데이터를 보존하고, 일반 활동 한도 밖의 오래된 블록도 메시지 보존 한도 내에서 유지한다. 후속 도구 로그 3100개 뒤에도 블록이 유지되는 테스트를 통과했다. 현재 설치된 native TypeScript preview는 React Navigation 제네릭에서 기존 오류를 보고하므로 TypeScript 6.0.3의 타입 검사도 사용한다. 모바일 네이티브 기기 UI 검증과 네이티브 창 버튼 조작 검증은 이번 환경에서 수행하지 못했다.",
+    "sources": [
+      "apps/mobile/src/lib/threadActivity.ts",
+      "apps/mobile/src/features/threads/ThreadFeed.tsx",
+      "packages/client-runtime/src/state/presentation.ts",
+      "packages/client-runtime/src/state/threadReducer.ts"
+    ]
+  },
+  {
+    "id": "repair-desktop-process-ownership",
+    "scope": "folder",
+    "appliesToFolder": "apps/desktop",
+    "title": "개발용 Electron 프로세스 정리의 소유권",
+    "content": "개발 앱 정리에서 이름이나 작업 경로로 프로세스를 찾아 일괄 종료하면 사용 중인 앱 또는 에이전트까지 종료할 수 있다. dev-electron 스크립트의 패턴 기반 오래된 앱 종료를 제거하고 시작 시 확보한 프로세스만 정리한다. 현재 사용 중인 앱의 데이터 디렉터리에 검증 서버를 시작하지 않는다. 탭과 caption controls 사이 영역은 웹의 Electron 스타일과 함께 확인한다.",
+    "sources": [
+      "apps/desktop/scripts/dev-electron.mjs",
+      "apps/web/src/components/tabs/WorkspaceTabsHost.tsx"
+    ]
+  }
+]

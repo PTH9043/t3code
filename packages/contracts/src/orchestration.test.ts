@@ -115,6 +115,92 @@ it.effect("defaults legacy collaboration runs to no task graph", () =>
   }),
 );
 
+it.effect("defaults pre-orchestra runs, nodes, questions and answers", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeWorkspaceCollaborationRun({
+      id: "run-pre-orchestra",
+      projectId: "project-a",
+      source: "user",
+      scheduleId: null,
+      incidentId: null,
+      task: "Legacy task",
+      status: "running",
+      steps: [],
+      graph: {
+        revision: 0,
+        status: "executing",
+        nodes: [
+          {
+            id: "build",
+            order: 0,
+            kind: "implementation",
+            agent: "codex",
+            role: "implementer",
+            title: "구현",
+            handoff: {
+              task: "구현",
+              goal: "완성",
+              context: "",
+              input: "",
+              constraints: [],
+              expectedOutput: "결과",
+              successCriteria: [],
+            },
+            dependsOn: [],
+            validationTargetId: null,
+            priority: 0,
+            status: "awaiting-user",
+            maxAttempts: 2,
+            attempts: [],
+            output: null,
+            error: null,
+            failureClassification: null,
+            confidence: null,
+            validation: null,
+            startedAt: null,
+            completedAt: null,
+          },
+        ],
+        changes: [],
+        nextAction: "실행",
+        overallConfidence: null,
+        repairApproved: null,
+        memoryCandidates: [],
+      },
+      meeting: {
+        mode: "fixed-rounds",
+        phase: "executing",
+        participants: [
+          { id: "p1", displayName: "A", modelSelection: { instanceId: "a", model: "m" } },
+          { id: "p2", displayName: "B", modelSelection: { instanceId: "b", model: "m" } },
+        ],
+        threadId: null,
+        chairParticipantId: null,
+        maxRounds: 1,
+        userInLoop: false,
+        rounds: [],
+        pendingQuestion: {
+          askedByParticipantId: "p2",
+          question: "DB?",
+          options: [],
+          context: "",
+          askedAt: "2026-08-09T00:00:00.000Z",
+        },
+        answers: [{ question: "계속?", answer: "네", answeredAt: "2026-08-09T00:00:00.000Z" }],
+      },
+      finalOutput: null,
+      error: null,
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.orchestra, null);
+    assert.strictEqual(parsed.graph?.nodes[0]?.threadId, null);
+    assert.strictEqual(parsed.graph?.nodes[0]?.parkedQuestion, null);
+    assert.strictEqual(parsed.meeting?.pendingQuestion?.nodeId, null);
+    assert.strictEqual(parsed.meeting?.answers[0]?.nodeId, null);
+  }),
+);
+
 it.effect("decodes structured Workspace task graphs", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeWorkspaceTaskGraph({

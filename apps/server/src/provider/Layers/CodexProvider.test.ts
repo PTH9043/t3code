@@ -3,23 +3,46 @@ import { assert, it } from "@effect/vitest";
 import {
   applyPreferredCodexDefaultModel,
   codexAccountUsage,
-  isLegacyCodexModel,
+  legacyCodexModelSlugs,
   mapCodexModelCapabilities,
 } from "./CodexProvider.ts";
 
-it("keeps only the GPT-5.6 Codex family out of legacy models", () => {
-  assert.deepStrictEqual(
-    ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.4"].map((model) => [
-      model,
-      isLegacyCodexModel(model),
-    ]),
-    [
-      ["gpt-5.6-luna", false],
-      ["gpt-5.6-terra", false],
-      ["gpt-5.6-sol", false],
-      ["gpt-5.4", true],
-    ],
-  );
+it("keeps the two newest Codex version lines current and folds the rest into legacy", () => {
+  const catalog = [
+    { model: "gpt-6-astra", upgrade: null },
+    { model: "gpt-5.6-sol", upgrade: null },
+    { model: "gpt-5.6-terra", upgrade: null },
+    { model: "gpt-5.6-luna", upgrade: null },
+    { model: "gpt-5.5", upgrade: null },
+    { model: "gpt-5.4-mini", upgrade: "gpt-5.6-luna" },
+    { model: "gpt-5.3-codex-spark", upgrade: null },
+  ];
+
+  assert.deepStrictEqual([...legacyCodexModelSlugs(catalog)].sort(), [
+    "gpt-5.3-codex-spark",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+  ]);
+});
+
+it("treats a model Codex points at a successor as legacy even on the newest line", () => {
+  const catalog = [
+    { model: "gpt-6-astra", upgrade: null },
+    { model: "gpt-6-nova", upgrade: "gpt-6-astra" },
+    { model: "gpt-5.6-sol", upgrade: null },
+  ];
+
+  assert.deepStrictEqual([...legacyCodexModelSlugs(catalog)], ["gpt-6-nova"]);
+});
+
+it("keeps everything current when the catalog has only one or two version lines", () => {
+  const catalog = [
+    { model: "gpt-5.6-sol", upgrade: null },
+    { model: "gpt-5.6-terra", upgrade: null },
+    { model: "codex-mini-latest", upgrade: null },
+  ];
+
+  assert.deepStrictEqual(legacyCodexModelSlugs(catalog).size, 0);
 });
 
 it("maps current Codex model capability fields", () => {
@@ -126,7 +149,14 @@ it("uses standard routing when the catalog has no default service tier", () => {
 it("marks the most preferred available model as default", () => {
   const models = applyPreferredCodexDefaultModel([
     { slug: "gpt-5.6-terra", name: "GPT-5.6-Terra", isCustom: false, capabilities: null },
-    { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, isDefault: true, capabilities: null },
+    {
+      slug: "gpt-5.4",
+      name: "GPT-5.4",
+      isCustom: false,
+      isDefault: true,
+      isLegacy: true,
+      capabilities: null,
+    },
   ]);
 
   assert.deepStrictEqual(
@@ -136,6 +166,21 @@ it("marks the most preferred available model as default", () => {
       { slug: "gpt-5.4", isDefault: undefined },
     ],
   );
+});
+
+it("keeps Codex's own current default over the preferred ranking", () => {
+  const models = applyPreferredCodexDefaultModel([
+    {
+      slug: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      isCustom: false,
+      isDefault: true,
+      capabilities: null,
+    },
+    { slug: "gpt-5.6-sol", name: "GPT-5.6-Sol", isCustom: false, capabilities: null },
+  ]);
+
+  assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-6-astra");
 });
 
 it("prefers sol over terra when both are available", () => {

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -51,6 +52,14 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+
+// The poll loops below wait on real filesystem and child-process callbacks.
+// `Effect.yieldNow` only rotates fibers on the Effect scheduler, so a tight
+// poll can starve libuv completions (visible on Windows, where they are
+// slower); hand the event loop a macrotask turn on every iteration as well.
+const yieldToEventLoop = Effect.promise(
+  () => new Promise<void>((resolve) => setImmediate(resolve)),
+);
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
@@ -496,10 +505,23 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(
-            status.message,
-            "Codex CLI (`codex`) is not installed or not on PATH.",
+          assert.include(status.message ?? "", "Codex CLI(`codex`)를 찾을 수 없습니다");
+        }),
+      );
+
+      it.effect("reports an unfinished probe as unverified rather than unavailable", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32000,
+                errorMessage: "app-server closed the connection.",
+              }),
+            ),
           );
+          assert.strictEqual(status.status, "warning");
+          assert.strictEqual(status.installed, true);
+          assert.include(status.message ?? "", "Codex 상태 확인에 실패했습니다");
         }),
       );
 
@@ -516,11 +538,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           yield* Effect.yieldNow;
 
           const status = yield* Fiber.join(statusFiber);
-          assert.strictEqual(status.status, "error");
-          assert.strictEqual(
-            status.message,
-            "Timed out while checking Codex app-server provider status.",
-          );
+          assert.strictEqual(status.status, "warning");
+          assert.strictEqual(status.installed, true);
+          assert.include(status.message ?? "", "10초 안에 끝나지 않았습니다");
           assert.strictEqual(yield* Ref.get(killCalls), 1);
         }),
       );
@@ -1058,11 +1078,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             let cachedProvider = yield* readProviderStatusCache(filePath);
             for (
               let attempt = 0;
-              attempt < 50 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
+              attempt < 500 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
               attempt += 1
             ) {
               yield* TestClock.adjust("10 millis");
               yield* Effect.yieldNow;
+              yield* yieldToEventLoop;
               cachedProvider = yield* readProviderStatusCache(filePath);
             }
 
@@ -1183,11 +1204,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               let cachedProvider = yield* readProviderStatusCache(filePath);
               for (
                 let attempt = 0;
-                attempt < 50 && cachedProvider?.checkedAt !== authoritativeProvider.checkedAt;
+                attempt < 500 && cachedProvider?.checkedAt !== authoritativeProvider.checkedAt;
                 attempt += 1
               ) {
                 yield* TestClock.adjust("10 millis");
                 yield* Effect.yieldNow;
+                yield* yieldToEventLoop;
                 cachedProvider = yield* readProviderStatusCache(filePath);
               }
 
@@ -1196,11 +1218,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               yield* PubSub.publish(changes, failedProvider);
               for (
                 let attempt = 0;
-                attempt < 50 && cachedProvider?.checkedAt !== failedProvider.checkedAt;
+                attempt < 500 && cachedProvider?.checkedAt !== failedProvider.checkedAt;
                 attempt += 1
               ) {
                 yield* TestClock.adjust("10 millis");
                 yield* Effect.yieldNow;
+                yield* yieldToEventLoop;
                 cachedProvider = yield* readProviderStatusCache(filePath);
               }
 
@@ -1399,7 +1422,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             let providers = yield* registry.getProviders;
             for (
               let attempt = 0;
-              attempt < 50 &&
+              attempt < 500 &&
               !providers.some((provider) => provider.instanceId === claudeInstanceId);
               attempt += 1
             ) {
@@ -1502,7 +1525,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             let providers = yield* registry.getProviders;
             for (
               let attempts = 0;
-              attempts < 50 &&
+              attempts < 500 &&
               providers.find((provider) => provider.instanceId === "codex_personal")?.status !==
                 "error";
               attempts += 1
@@ -1526,10 +1549,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               "Real Codex probe against a missing binary should surface as 'error' in the aggregator",
             );
             assert.strictEqual(codexPersonal?.installed, false);
-            assert.strictEqual(
-              codexPersonal?.message,
-              "Codex CLI (`codex`) is not installed or not on PATH.",
-            );
+            assert.include(codexPersonal?.message ?? "", "Codex CLI(`codex`)를 찾을 수 없습니다");
           }).pipe(Effect.provide(runtimeServices));
         }),
       );
@@ -1553,6 +1573,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   codex: { enabled: true, binaryPath: firstMissing },
                   claudeAgent: { enabled: false },
                   cursor: { enabled: false },
+                  gemini: { enabled: false },
                   grok: { enabled: false },
                   opencode: { enabled: false },
                 },
@@ -1600,13 +1621,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             let initialProviders = yield* registry.getProviders;
             for (
               let attempts = 0;
-              attempts < 50 &&
+              attempts < 500 &&
               initialProviders.find((provider) => provider.instanceId === "codex")?.status !==
                 "error";
               attempts += 1
             ) {
               yield* TestClock.adjust("10 millis");
               yield* Effect.yieldNow;
+              yield* yieldToEventLoop;
               initialProviders = yield* registry.getProviders;
             }
             const initialCodex = initialProviders.find(
@@ -1634,7 +1656,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             // executable. This verifies the public settings-to-probe behavior
             // without depending on timestamps assigned by TestClock.
             const refreshed = yield* Effect.gen(function* () {
-              for (let attempts = 0; attempts < 60; attempts += 1) {
+              for (let attempts = 0; attempts < 500; attempts += 1) {
                 const providers = yield* registry.getProviders;
                 const codex = providers.find((provider) => provider.instanceId === "codex");
                 if (
@@ -1646,6 +1668,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 }
                 yield* TestClock.adjust("50 millis");
                 yield* Effect.yieldNow;
+                yield* yieldToEventLoop;
               }
               return yield* registry.getProviders;
             });
@@ -1806,6 +1829,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "claudeAgent",
                 "codex",
                 "cursor",
+                "gemini",
                 "grok",
                 "opencode",
               ]);
@@ -2192,9 +2216,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             claudeCapabilities(),
           );
           assert.strictEqual(status.status, "ready");
+          // `makeClaudeEnvironment` resolves the home path against the host
+          // filesystem, so compare the host-resolved form (drive-rooted on
+          // Windows) rather than the literal POSIX string.
           assert.deepStrictEqual(
             recorded.commands.map((command) => command.env?.CLAUDE_CONFIG_DIR),
-            [claudeConfigDir],
+            [(yield* Path.Path).resolve(claudeConfigDir)],
           );
         }).pipe(Effect.provide(recorded.layer));
       });

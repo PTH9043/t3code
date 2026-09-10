@@ -1,4 +1,8 @@
 import { ApprovalRequestId, isToolLifecycleItemType } from "@t3tools/contracts";
+import {
+  orchestraBlocksByMessage,
+  formatMeetingProtocolText,
+} from "@t3tools/client-runtime/state/presentation";
 import type {
   OrchestrationLatestTurn,
   OrchestrationThread,
@@ -6,6 +10,7 @@ import type {
   ToolLifecycleItemType,
   TurnId,
   UserInputQuestion,
+  WorkspaceOrchestraBlock,
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 
@@ -90,6 +95,7 @@ type RawThreadFeedEntry =
       readonly id: string;
       readonly createdAt: string;
       readonly message: OrchestrationThread["messages"][number];
+      readonly orchestraBlock?: WorkspaceOrchestraBlock;
     }
   | {
       readonly type: "activity";
@@ -1042,6 +1048,7 @@ function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
   if (entry.type !== "message") {
     return false;
   }
+  if (entry.orchestraBlock !== undefined) return false;
   const hasText = entry.message.text.trim().length > 0;
   const hasAttachments = (entry.message.attachments ?? []).length > 0;
   return !hasText && !hasAttachments;
@@ -1460,14 +1467,21 @@ export function buildThreadFeed(
   const loadedMessages = options?.loadedMessages ?? thread.messages;
   const oldestLoadedMessageCreatedAt =
     options?.loadedMessages !== undefined ? (loadedMessages[0]?.createdAt ?? null) : null;
-  const workLogEntries = deriveWorkLogEntries(thread.activities);
+  const blocks = orchestraBlocksByMessage(thread.activities);
+  const workLogEntries = deriveWorkLogEntries(
+    thread.activities.filter((activity) => activity.kind !== "orchestra.block"),
+  );
   const entries = Arr.sortWith(
     [
       ...loadedMessages.map<RawThreadFeedEntry>((message) => ({
         type: "message",
         id: message.id,
         createdAt: message.createdAt,
-        message,
+        message:
+          message.role === "assistant" && message.text.includes("<t3_")
+            ? { ...message, text: formatMeetingProtocolText(message.text) }
+            : message,
+        ...(blocks.has(message.id) ? { orchestraBlock: blocks.get(message.id)! } : {}),
       })),
       ...workLogEntries
         .filter((entry) => {

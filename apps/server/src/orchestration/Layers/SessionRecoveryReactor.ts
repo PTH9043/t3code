@@ -54,6 +54,10 @@ import {
   ProjectionThreadActivityRepository,
   type ProjectionThreadActivity,
 } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import {
+  ProjectionThreadMessageRepository,
+  type ProjectionThreadMessage,
+} from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -62,8 +66,9 @@ import {
   type SessionRecoveryReactorShape,
 } from "../Services/SessionRecoveryReactor.ts";
 
+const RECOVERY_TURN_TEXT_PREFIX = "[자동 복구]";
 const RECOVERY_TURN_TEXT = [
-  "[자동 복구] 서버가 재시작되면서 직전 턴이 중단되었습니다.",
+  `${RECOVERY_TURN_TEXT_PREFIX} 서버가 재시작되면서 직전 턴이 중단되었습니다.`,
   "중단 전까지의 대화와 작업 상태를 직접 확인한 뒤, 끝나지 않은 작업이 있으면 이어서 완료해 주세요.",
   "이미 완료된 작업은 반복하지 말고, 확인 결과와 이어서 한 작업을 정리해 보고해 주세요.",
 ].join(" ");
@@ -73,6 +78,36 @@ const ABANDONED_QUESTION_TEXT =
 
 const ABANDONED_QUESTION_SUMMARY =
   "서버가 재시작되어 이 질문은 사라졌습니다. 답이 필요하면 다시 묻습니다.";
+
+/**
+ * Recovery storm guard. A recovery turn that itself dies to the next restart
+ * is evidence the thread's own work is what keeps killing the server — an
+ * in-app seat editing a bundled contract, say, restarts the desktop host
+ * mid-edit, and the recovery turn then redoes the same edit. Past this many
+ * recovery turns inside the window the sweep settles the session but leaves
+ * the thread parked; the person resumes it with a message when they are ready.
+ */
+export const RECOVERY_STORM_WINDOW_MS = 15 * 60 * 1_000;
+export const RECOVERY_STORM_LIMIT = 3;
+
+/** Recovery turns the server already injected into this thread inside the window, newest first. */
+export function recentRecoveryTurnCount(
+  messages: ReadonlyArray<Pick<ProjectionThreadMessage, "role" | "text" | "createdAt">>,
+  nowMs: number,
+  windowMs: number = RECOVERY_STORM_WINDOW_MS,
+): number {
+  let count = 0;
+  for (const message of messages) {
+    if (message.role !== "user" || !message.text.startsWith(RECOVERY_TURN_TEXT_PREFIX)) continue;
+    const at = Date.parse(message.createdAt);
+    if (Number.isNaN(at) || nowMs - at > windowMs) continue;
+    count += 1;
+  }
+  return count;
+}
+
+const recoveryHeldText = (recoveries: number): string =>
+  `자동 복구 보류: ${Math.round(RECOVERY_STORM_WINDOW_MS / 60_000)}분 안에 서버가 ${recoveries}번 재시작되어 이 대화는 자동으로 재개하지 않습니다. 이 대화의 작업이 재시작의 원인일 수 있습니다. 계속하려면 직접 메시지를 보내세요.`;
 
 /** Background work the dead session was running, read back from the activity log. */
 export interface OrphanedBackgroundWork {
@@ -218,6 +253,7 @@ export function openUserInputRequestIds(
 
 export const makeSessionRecoveryReactor = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
+  const messageRepository = yield* ProjectionThreadMessageRepository;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
   const activityRepository = yield* ProjectionThreadActivityRepository;
@@ -334,6 +370,40 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
     const orphaned = yield* settleOrphanedWork(thread.id, activities);
     if (!startRecoveryTurn) return;
 
+    const recentRecoveries = recentRecoveryTurnCount(
+      yield* messageRepository.listByThreadId({ threadId: thread.id }),
+      DateTime.toEpochMillis(yield* DateTime.now),
+    );
+    if (recentRecoveries >= RECOVERY_STORM_LIMIT) {
+      const createdAt = yield* nowIso;
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* randomUUID),
+        threadId: thread.id,
+        activity: {
+          id: EventId.make(yield* randomUUID),
+          tone: "info",
+          kind: "session.recovery-held",
+          summary: recoveryHeldText(recentRecoveries),
+          payload: {
+            recentRecoveries,
+            windowMs: RECOVERY_STORM_WINDOW_MS,
+            limit: RECOVERY_STORM_LIMIT,
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      yield* Effect.logWarning("recovery turn held: the thread keeps dying to restarts", {
+        threadId: thread.id,
+        projectId: thread.projectId,
+        recentRecoveries,
+        windowMs: RECOVERY_STORM_WINDOW_MS,
+      });
+      return;
+    }
+
     yield* engine.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.make(yield* randomUUID),
@@ -384,11 +454,13 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
     const runOwnedThreadIds = new Set(
       resumableRuns.flatMap((run) => [
         ...(run.meeting?.threadId ? [run.meeting.threadId] : []),
-        ...(run.graph?.nodes ?? []).flatMap((node) =>
-          node.attempts
+        ...(run.graph?.nodes ?? []).flatMap((node) => [
+          ...node.attempts
             .filter((attempt) => attempt.status === "running")
             .map((attempt) => attempt.threadId),
-        ),
+          // An orchestra node's fixed conversation, while the node is live.
+          ...(node.status === "running" && node.threadId !== null ? [node.threadId] : []),
+        ]),
         ...(run.steps ?? []).flatMap((step) =>
           step.threadId !== null && step.status === "running" ? [step.threadId] : [],
         ),

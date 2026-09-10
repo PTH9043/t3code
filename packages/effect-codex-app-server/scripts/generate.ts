@@ -145,6 +145,13 @@ const ManualSchemas: Record<string, Schema.Json> = {
   },
 };
 
+// Newer Codex versions persist this terminal activity in thread history and
+// return it from thread/resume, even when the rest of the protocol stays compatible.
+const SubAgentActivityKindSchema = {
+  enum: ["started", "interacted", "interrupted", "completed"],
+  type: "string",
+} as const satisfies Schema.Json;
+
 const getGeneratedPaths = Effect.fn("getGeneratedPaths")(function* () {
   const path = yield* Path.Path;
   const generatedDir = path.join(import.meta.dirname, "..", "src", "_generated");
@@ -556,10 +563,12 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     );
 
     for (const [definitionName, definitionSchema] of Object.entries(parsed.definitions ?? {})) {
+      const compatibleDefinitionSchema =
+        definitionName === "SubAgentActivityKind" ? SubAgentActivityKindSchema : definitionSchema;
       aggregateSchemas[localDefinitionNames.get(definitionName)!] = stripNullDefaults(
         normalizeNullableTypes(
           rewriteExternalRefs(
-            definitionSchema,
+            compatibleDefinitionSchema,
             localDefinitionNames,
             file.namespace,
             exportNameByQualifiedName,

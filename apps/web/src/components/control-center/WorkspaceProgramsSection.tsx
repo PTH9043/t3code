@@ -516,7 +516,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
         input: { projectId: project.id, incidentId: incident.id, instruction },
       });
       if (!notifyFailure(result, "오류 수정 작업을 시작하지 못했습니다")) {
-        toastManager.add({ type: "success", title: "수정·검증 협업을 시작했습니다." });
+        toastManager.add({ type: "success", title: "수정·검증 오케스트라를 시작했습니다." });
         incidents.refresh();
       }
     } finally {

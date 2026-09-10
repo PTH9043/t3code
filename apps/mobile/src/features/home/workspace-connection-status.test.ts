@@ -34,7 +34,7 @@ describe("workspace connection status", () => {
     const state = workspaceState({ networkStatus: "offline", hasReadyEnvironment: false });
 
     expect(shouldShowWorkspaceConnectionStatus(state)).toBe(true);
-    expect(workspaceConnectionStatusLabel(state)).toBe("You are offline");
+    expect(workspaceConnectionStatusLabel(state)).toBe("오프라인 상태입니다");
   });
 
   it("names the environment while reconnecting", () => {
@@ -113,7 +113,7 @@ describe("workspace connection status", () => {
 
     const offline = workspaceState({ networkStatus: "offline", hasReadyEnvironment: false });
     expect(workspaceConnectionStatusPresentation(offline)).toEqual({
-      label: "You are offline",
+      label: "오프라인 상태입니다",
       showsProgress: false,
     });
   });

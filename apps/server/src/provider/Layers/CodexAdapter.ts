@@ -11,6 +11,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
+  EventId,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -24,9 +25,11 @@ import {
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
+  TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { codexTokenConsumption } from "../tokenConsumption.ts";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -1009,15 +1012,22 @@ function mapToRuntimeEvents(
       event.payload,
     );
     const normalizedUsage = payload ? normalizeCodexTokenUsage(payload.tokenUsage) : undefined;
-    if (!normalizedUsage) {
+    if (!payload) {
       return [];
     }
     return [
       {
         type: "thread.token-usage.updated",
         ...runtimeEventBase(event, canonicalThreadId),
+        // codex reports usage per THREAD, so the notification envelope carries no turn
+        // and runtimeEventBase leaves turnId unset. The usage projection attributes a
+        // sample by turn, so without this every codex thread read back as "unreported"
+        // and turn/completed never matched the pending counter to mark it final. The
+        // notification body names the turn that spent the tokens; use it.
+        turnId: TurnId.make(payload.turnId),
         payload: {
-          usage: normalizedUsage,
+          usage: normalizedUsage ?? { usedTokens: 0 },
+          consumption: codexTokenConsumption(payload.threadId, payload.tokenUsage.total),
         },
       },
     ];
@@ -1718,22 +1728,98 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
-        const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
-          Effect.gen(function* () {
-            yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
-            if (runtimeEvents.length === 0) {
-              yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
+        // The final notification follows the last usage counter in the native stream.
+        // Keep only the active turn's small observation; a resumed stream without
+        // another usage notification remains provisional.
+        let latestConsumption:
+          | Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
+          | undefined;
+        // codex's cumulative counter lives in the app-server SESSION, not in the native
+        // thread: resuming the same thread restarts it from zero (observed on one thread
+        // 4,506,367 -> 727,411 -> 81,717 across two restarts). Keyed on the native thread
+        // alone the cursor keeps the old high-water mark, reads every later session as a
+        // regression and drops its usage for good, so the counter's lifetime has to be
+        // part of the source identity.
+        const counterEpoch = yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: "Could not derive a token usage counter epoch.",
+                cause,
+              }),
+          ),
+        );
+        const eventFiber = yield* Stream.runForEach(
+          runtime.events,
+          (event) =>
+            Effect.gen(function* () {
+              yield* writeNativeEvent(event);
+              const runtimeEvents = mapToRuntimeEvents(
+                event,
+                event.threadId,
+              ).flatMap<ProviderRuntimeEvent>((mapped) => {
+                if (mapped.type === "thread.token-usage.updated") {
+                  latestConsumption = {
+                    ...mapped,
+                    payload: {
+                      ...mapped.payload,
+                      consumption: mapped.payload.consumption?.map((observation) => ({
+                        ...observation,
+                        sourceId: `${observation.sourceId}#${counterEpoch}`,
+                        // Every codex session counts from zero, resumed or not, so the
+                        // first notification is this session's own spend, not a carried
+                        // balance we would be double counting.
+                        startsAtZero: true,
+                      })),
+                    },
+                  };
+                  return [latestConsumption];
+                }
+                if (
+                  mapped.type === "turn.completed" &&
+                  latestConsumption?.turnId === mapped.turnId &&
+                  latestConsumption?.payload.consumption?.length
+                ) {
+                  const finalUsage = latestConsumption;
+                  latestConsumption = undefined;
+                  return [
+                    {
+                      ...finalUsage,
+                      eventId: EventId.make(`${mapped.eventId}:final-usage`),
+                      createdAt: mapped.createdAt,
+                      payload: {
+                        ...finalUsage.payload,
+                        consumption: finalUsage.payload.consumption?.map((observation) => ({
+                          ...observation,
+                          isFinal: mapped.payload.state === "completed",
+                        })),
+                      },
+                    },
+                    mapped,
+                  ];
+                }
+                return [mapped];
               });
-              return;
-            }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
-          }),
-        ).pipe(Effect.forkChild);
+              if (runtimeEvents.length === 0) {
+                yield* Effect.logDebug("ignoring unhandled Codex provider event", {
+                  method: event.method,
+                  threadId: event.threadId,
+                  turnId: event.turnId,
+                  itemId: event.itemId,
+                });
+                return;
+              }
+              yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            }),
+          // The event pump must live as long as the SESSION, not the caller:
+          // forkChild tied it to whichever fiber happened to run startSession,
+          // and a short-lived caller (a forked sendTurn recovery, or any
+          // handler run inside a timeout race) killed it the moment that fiber
+          // settled — codex kept running turns while every notification after
+          // session-ready silently vanished (observed 2026-08-29).
+        ).pipe(Effect.forkIn(sessionScope));
 
         const started = yield* runtime.start().pipe(
           Effect.mapError(

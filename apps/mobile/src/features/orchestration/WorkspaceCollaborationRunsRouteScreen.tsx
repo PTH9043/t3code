@@ -150,7 +150,7 @@ function evidenceSourceLabel(source: WorkspaceRuntimeEvidence["source"]): string
   if (source === "thread") return "대화";
   if (source === "program") return "프로그램";
   if (source === "incident") return "장애";
-  if (source === "collaboration") return "협업 실행";
+  if (source === "collaboration") return "오케스트라 실행";
   return "자동화";
 }
 
@@ -613,7 +613,7 @@ function RunCard({
           {canCancel ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="협업 실행 취소"
+              accessibilityLabel="오케스트라 실행 취소"
               disabled={cancelling}
               className="min-h-9 justify-center rounded-full border border-rose-300/70 px-3 dark:border-rose-400/30"
               onPress={() => onCancel(run)}
@@ -704,7 +704,7 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
     reportFailure: false,
   });
   const cancelRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
-    label: "모바일 협업 실행 취소",
+    label: "모바일 오케스트라 실행 취소",
     reportFailure: false,
   });
   const [cancellingRunIds, setCancellingRunIds] = useState<ReadonlySet<string>>(new Set());
@@ -824,7 +824,7 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
   const requestCancel = useCallback(
     (run: WorkspaceCollaborationRun) => {
       Alert.alert(
-        "협업 실행을 취소할까요?",
+        "오케스트라 실행을 취소할까요?",
         "실행 중인 에이전트 대화에도 취소 요청이 전달됩니다.",
         [
           { text: "계속 실행", style: "cancel" },
@@ -854,7 +854,8 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
               <View className="min-w-0 flex-1 gap-1">
                 <Text className="text-lg font-t3-bold text-foreground">프로젝트 운영 현황</Text>
                 <Text className="text-sm leading-normal text-foreground-muted">
-                  대화·프로그램·장애·자동화와 협업 실행의 현재 상태를 한 프로젝트 안에서 확인합니다.
+                  대화·프로그램·장애·자동화와 오케스트라 실행의 현재 상태를 한 프로젝트 안에서
+                  확인합니다.
                 </Text>
               </View>
               <Pressable
@@ -1012,10 +1013,10 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
           !runsQuery.isPending && runsQuery.error === null ? (
             <View className="rounded-2xl border border-dashed border-border px-4 py-10">
               <Text className="text-center text-base font-t3-bold text-foreground">
-                아직 협업 실행이 없습니다.
+                아직 오케스트라 실행이 없습니다.
               </Text>
               <Text className="mt-1 text-center text-sm text-foreground-muted">
-                웹 또는 데스크톱의 프로젝트 운영 화면에서 새 협업 작업을 시작할 수 있습니다.
+                웹 또는 데스크톱의 프로젝트 운영 화면에서 새 오케스트라 작업을 시작할 수 있습니다.
               </Text>
             </View>
           ) : null

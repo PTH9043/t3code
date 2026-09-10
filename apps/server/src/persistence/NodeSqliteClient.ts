@@ -127,6 +127,18 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
           }),
       }).pipe(Effect.orDie),
     );
+    // The pairing CLI and running server can write the same database. Wait for
+    // short transactions in the other process instead of immediately failing.
+    yield* Effect.try({
+      try: () => db.exec("PRAGMA busy_timeout = 5000"),
+      catch: (cause) =>
+        new SqlError({
+          reason: classifySqliteError(cause, {
+            message: "Failed to configure SQLite lock wait",
+            operation: "configure",
+          }),
+        }),
+    });
 
     const statementReaderCache = new WeakMap<NodeSqlite.StatementSync, boolean>();
     const hasRows = (statement: NodeSqlite.StatementSync): boolean => {

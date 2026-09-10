@@ -1,5 +1,6 @@
 import {
   WorkspaceTaskNodeId,
+  WorkspaceKnowledgeRelativeFolder,
   type WorkspaceAgentRoleBinding,
   type WorkspaceFailureClassification,
   type WorkspaceMeetingParticipantId,
@@ -11,8 +12,10 @@ import {
   type WorkspaceValidationConfidence,
   type WorkspaceValidationVerdict,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
 const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const isRelativeFolder = Schema.is(WorkspaceKnowledgeRelativeFolder);
 const MAX_PLAN_NODES = 24;
 const MAX_FOLLOW_UP_NODES = 8;
 // Full agent output is captured separately as searchable knowledge, so this cap
@@ -45,6 +48,7 @@ const MEMORY_CATEGORIES = [
 ] as const;
 
 export interface WorkspaceTaskPlanNodeProposal {
+  readonly contextPaths?: ReadonlyArray<string>;
   readonly id: string;
   readonly kind: (typeof TASK_NODE_KINDS)[number];
   readonly agent: WorkspaceOrchestrationAgent;
@@ -243,6 +247,11 @@ function parsePlanNode(
     constraints: stringArray(source.constraints ?? [], `${path}.constraints`),
     expectedOutput: text(source.expectedOutput, `${path}.expectedOutput`),
     successCriteria: stringArray(source.successCriteria, `${path}.successCriteria`),
+    contextPaths: stringArray(source.contextPaths ?? [], `${path}.contextPaths`).map((path) => {
+      const normalized = path.replaceAll("\\", "/");
+      if (!isRelativeFolder(normalized)) return fail("contextPaths must stay inside the project.");
+      return normalized;
+    }),
     dependsOn: stringArray(source.dependsOn ?? [], `${path}.dependsOn`).map((dependency) => {
       if (!NODE_ID_PATTERN.test(dependency)) {
         return fail(`${path}.dependsOn contains an invalid node slug.`);
@@ -319,6 +328,165 @@ function parsePlanNodes(
   return nodes;
 }
 
+const FOLLOW_UP_KIND_ALIASES = new Map<string, WorkspaceTaskPlanNodeProposal["kind"]>([
+  ...TASK_NODE_KINDS.map((kind) => [kind, kind] as const),
+  ["plan", "orchestration"],
+  ["planning", "orchestration"],
+  ["redesign", "orchestration"],
+  ["investigation", "research"],
+  ["investigate", "research"],
+  ["analysis", "research"],
+  ["audit", "research"],
+  ["review", "research"],
+  ["validation", "research"],
+  ["verification", "research"],
+  ["verify", "research"],
+  ["cross-validation", "research"],
+  ["implement", "implementation"],
+  ["build", "implementation"],
+  ["fix", "debug"],
+  ["bugfix", "debug"],
+  ["repair", "debug"],
+]);
+
+function firstText(...values: ReadonlyArray<unknown>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function listOrSingle(value: unknown): ReadonlyArray<unknown> {
+  if (Array.isArray(value)) return value;
+  return typeof value === "string" && value.trim().length > 0 ? [value] : [];
+}
+
+function slugify(value: string, fallback: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/[._-]+$/, "")
+    .slice(0, 64);
+  return NODE_ID_PATTERN.test(slug) ? slug : fallback;
+}
+
+/** The first sentence of a task, as the title its author left out. */
+function titleFrom(task: string): string {
+  const line =
+    task
+      .split(/\r?\n/)
+      .find((candidate) => candidate.trim().length > 0)
+      ?.trim() ?? task;
+  const cut = line.search(/[.!?。](?:\s|$)|[:：]\s/u);
+  const head = cut >= 8 ? line.slice(0, cut) : line;
+  return head.length > 120 ? `${head.slice(0, 119)}…` : head;
+}
+
+/**
+ * Loosen one validator-proposed follow-up node into the planner's shape.
+ * Validators write these from a schema they were only told "matches a plan
+ * node", so field names drift (`description` for task, `dependencies` for
+ * dependsOn, `deliverable` for expectedOutput), the kind goes missing or reads
+ * "validation", and the title is left out. Each of those used to reject the
+ * whole receipt — the verdict the node exists to deliver — and spend an
+ * attempt on a formatting miss (observed live: four attempts, three verdicts
+ * lost that way). The proposal is coerced where its intent is clear and
+ * dropped where it is not; a receipt with no usable follow-ups still stands,
+ * and the chair re-plans from its verdict.
+ */
+function normalizeFollowUpNode(
+  value: unknown,
+  index: number,
+  defaultKind: WorkspaceTaskPlanNodeProposal["kind"],
+  meeting: WorkspaceMeetingPlanContext | null,
+): Readonly<Record<string, unknown>> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const source = value as Readonly<Record<string, unknown>>;
+  const task = firstText(
+    source.task,
+    source.description,
+    source.deliverable,
+    source.goal,
+    source.summary,
+  );
+  if (task === undefined) return null;
+  const rawKind = typeof source.kind === "string" ? source.kind.trim().toLowerCase() : "";
+  const kindFromAgent =
+    source.agent === "grok"
+      ? "research"
+      : source.agent === "codex"
+        ? defaultKind === "debug"
+          ? "debug"
+          : "implementation"
+        : source.agent === "fable"
+          ? "orchestration"
+          : defaultKind;
+  const kind =
+    FOLLOW_UP_KIND_ALIASES.get(rawKind) ?? (meeting === null ? kindFromAgent : defaultKind);
+  const title = firstText(source.title, source.name) ?? titleFrom(task);
+  const fallbackId = `follow-up-${index + 1}`;
+  const id = slugify(firstText(source.id) ?? title, fallbackId);
+  const priority = source.priority;
+  return {
+    id,
+    kind,
+    // Routing follows the kind; a mismatched or missing seat/agent is the
+    // proposal's least reliable field and the strict parser judges it next.
+    ...(meeting === null
+      ? { agent: expectedAgentForKind(kind) }
+      : {
+          participantId: firstText(
+            source.participantId,
+            source.participant,
+            source.seat,
+            source.assignee,
+            source.agent,
+          ),
+        }),
+    title,
+    task,
+    goal: firstText(source.goal, source.objective) ?? task,
+    context: typeof source.context === "string" ? source.context : undefined,
+    input: typeof source.input === "string" ? source.input : undefined,
+    constraints: listOrSingle(source.constraints),
+    expectedOutput:
+      firstText(source.expectedOutput, source.expected_output, source.deliverable, source.output) ??
+      task,
+    successCriteria: listOrSingle(
+      source.successCriteria ?? source.success_criteria ?? source.acceptanceCriteria,
+    ),
+    dependsOn: listOrSingle(source.dependsOn ?? source.dependencies ?? source.depends_on),
+    priority: Number.isInteger(priority) && (priority as number) >= 0 ? priority : 0,
+  };
+}
+
+/**
+ * Follow-up nodes are advice attached to a verdict, not the verdict: each is
+ * salvaged or skipped on its own, and only what survives is held to the graph
+ * rules (duplicate ids, cycles) that would corrupt the plan.
+ */
+function parseFollowUpNodes(
+  value: unknown,
+  path: string,
+  defaultKind: WorkspaceTaskPlanNodeProposal["kind"],
+  meeting: WorkspaceMeetingPlanContext | null,
+): ReadonlyArray<WorkspaceTaskPlanNodeProposal> {
+  if (!Array.isArray(value)) return [];
+  const nodes: WorkspaceTaskPlanNodeProposal[] = [];
+  value.slice(0, MAX_FOLLOW_UP_NODES).forEach((entry, index) => {
+    const normalized = normalizeFollowUpNode(entry, index, defaultKind, meeting);
+    if (normalized === null) return;
+    try {
+      nodes.push(parsePlanNode(normalized, `${path}[${index}]`, meeting));
+    } catch (error) {
+      if (!(error instanceof WorkspaceTaskGraphError)) throw error;
+    }
+  });
+  validateNodeIdsAndDependencies(nodes, true);
+  return nodes;
+}
+
 /** Decode and validate one graph proposal — Fable's, or the meeting chair's when `meeting` is set. */
 export function parseWorkspaceTaskGraphProposal(
   output: string,
@@ -338,28 +506,44 @@ export function parseWorkspaceValidationDecision(
   meeting: WorkspaceMeetingPlanContext | null = null,
 ): WorkspaceValidationDecision {
   const source = record(extractTaggedJson(output, "t3_validation"), "validation");
+  const failureClassification = nullableFailureClassification(
+    source.failureClassification ?? null,
+    "validation.failureClassification",
+  );
   return {
     verdict: oneOf(source.verdict, VALIDATION_VERDICTS, "validation.verdict"),
     confidence: oneOf(source.confidence, VALIDATION_CONFIDENCES, "validation.confidence"),
     summary: text(source.summary, "validation.summary", 8_000),
     evidence: stringArray(source.evidence ?? [], "validation.evidence", 32),
-    failureClassification: nullableFailureClassification(
-      source.failureClassification ?? null,
-      "validation.failureClassification",
-    ),
+    failureClassification,
     nextAction: text(source.nextAction, "validation.nextAction"),
-    followUpNodes:
-      source.followUpNodes === undefined ||
-      (Array.isArray(source.followUpNodes) && source.followUpNodes.length === 0)
-        ? []
-        : parsePlanNodes(
-            source.followUpNodes,
-            "validation.followUpNodes",
-            MAX_FOLLOW_UP_NODES,
-            true,
-            meeting,
-          ),
+    // A kind the validator left out follows the failure it found, which is
+    // also what the recovery rules expect of the follow-up.
+    followUpNodes: parseFollowUpNodes(
+      source.followUpNodes,
+      "validation.followUpNodes",
+      failureClassification === "implementation" ? "debug" : "research",
+      meeting,
+    ),
   };
+}
+
+/** The error a node attempt records when its turn was cut off from outside. */
+export const INTERRUPTED_TURN_ERROR_SUFFIX = "was interrupted.";
+
+/**
+ * Whether a node whose latest turn was cut off from outside — the server
+ * restarted under it, or a person stopped its thread without stopping the
+ * run — may retry without spending its budget. Only the first cut in a row is
+ * free: a seat whose turns never survive still runs out instead of looping.
+ */
+export function grantsFreeRetryAfterInterruption(node: WorkspaceTaskNode): boolean {
+  const previous = node.attempts.at(-2);
+  return (
+    previous === undefined ||
+    previous.status !== "failed" ||
+    !(previous.error ?? "").endsWith(INTERRUPTED_TURN_ERROR_SUFFIX)
+  );
 }
 
 /** Decode one Fable synthesis payload and bounded durable-memory candidates. */
@@ -428,6 +612,7 @@ function emptyNode(input: {
   readonly successCriteria: ReadonlyArray<string>;
   readonly dependsOn: ReadonlyArray<string>;
   readonly validationTargetId?: string | null;
+  readonly contextPaths?: ReadonlyArray<string>;
   readonly priority: number;
   readonly status: WorkspaceTaskNode["status"];
   readonly participantId?: WorkspaceMeetingParticipantId | null;
@@ -445,6 +630,7 @@ function emptyNode(input: {
     branch: null,
     title: input.title,
     handoff: {
+      ...(input.contextPaths === undefined ? {} : { contextPaths: input.contextPaths }),
       task: input.task,
       goal: input.goal,
       context: input.context,
@@ -660,6 +846,7 @@ export function materializeWorkspaceTaskGraphPlan(input: {
         successCriteria: proposal.successCriteria,
         dependsOn: [proposal.id],
         validationTargetId: proposal.id,
+        ...(proposal.contextPaths === undefined ? {} : { contextPaths: proposal.contextPaths }),
         priority: proposal.priority,
         status: "blocked",
       }),

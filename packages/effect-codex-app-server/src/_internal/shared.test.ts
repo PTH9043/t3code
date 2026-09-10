@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import * as CodexRpc from "../_generated/meta.gen.ts";
 import * as CodexError from "../errors.ts";
 import * as Shared from "./shared.ts";
 
@@ -9,6 +10,57 @@ const decodeNestedNumberPayload = Schema.decodeUnknownEffect(
   Schema.Struct({ profile: Schema.Struct({ token: Schema.Number }) }),
 );
 const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+it.effect("decodes completed sub-agent activity from resumed thread history", () =>
+  Effect.gen(function* () {
+    const response = yield* Shared.decodeOptionalPayload(
+      "thread/resume",
+      CodexRpc.CLIENT_REQUEST_RESPONSES["thread/resume"],
+      {
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        cwd: "C:\\workspace",
+        model: "gpt-5.6-codex",
+        modelProvider: "openai",
+        sandbox: { type: "dangerFullAccess" },
+        thread: {
+          cliVersion: "0.150.1",
+          createdAt: 1,
+          cwd: "C:\\workspace",
+          ephemeral: false,
+          id: "provider-thread-1",
+          modelProvider: "openai",
+          preview: "Resume a thread with completed sub-agent activity",
+          sessionId: "session-1",
+          source: "appServer",
+          status: { type: "idle" },
+          turns: [
+            {
+              id: "turn-1",
+              items: [
+                {
+                  agentPath: "/root/reviewer",
+                  agentThreadId: "provider-child-thread-1",
+                  id: "subagent-completed-1",
+                  kind: "completed",
+                  type: "subAgentActivity",
+                },
+              ],
+              status: "completed",
+            },
+          ],
+          updatedAt: 2,
+        },
+      },
+    );
+
+    const item = response.thread.turns[0]?.items[0];
+    assert.equal(item?.type, "subAgentActivity");
+    if (item?.type === "subAgentActivity") {
+      assert.equal(item.kind, "completed");
+    }
+  }),
+);
 
 it.effect("preserves schema decode diagnostics without deriving the message from the cause", () =>
   Effect.gen(function* () {

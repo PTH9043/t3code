@@ -100,6 +100,7 @@ import { getAnchoredTurnMetrics, type TimelineScrollMode } from "./chat/timeline
 import {
   buildPendingUserInputAnswers,
   derivePendingUserInputProgress,
+  resolvePendingUserInputAdvance,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
@@ -280,6 +281,7 @@ import {
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { resolveThreadPr } from "./ThreadStatusIndicators";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { orchestraBlocksByMessage } from "@t3tools/client-runtime/state/presentation";
 import { ThreadSyncStatusPill } from "./chat/ThreadSyncStatusPill";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
@@ -1814,6 +1816,55 @@ function ChatViewContent(props: ChatViewProps) {
       );
   }, [activeThread, isServerThread, meetingRunsQuery.data]);
   const liveMeetingRun = liveMeetingRuns[0];
+  // The live run's pending question, surfaced as a composer card so a person
+  // never misses that the run is parked waiting on them. Clicking an option
+  // answers it directly; a free-typed message still answers via the send path.
+  const orchestraPendingQuestion = liveMeetingRun?.meeting?.pendingQuestion ?? null;
+  const [answeringOrchestraQuestion, setAnsweringOrchestraQuestion] = useState(false);
+  const handleAnswerOrchestraQuestion = useCallback(
+    async (answer: string) => {
+      const run = liveMeetingRun;
+      const question = run?.meeting?.pendingQuestion;
+      const trimmed = answer.trim().slice(0, 8_000);
+      if (run === undefined || !question || trimmed.length === 0) return;
+      setAnsweringOrchestraQuestion(true);
+      try {
+        const answered = await answerMeetingRun({
+          environmentId,
+          input: {
+            runId: run.id,
+            projectId: run.projectId,
+            question: question.question,
+            questionRef: { nodeId: question.nodeId, askedAt: question.askedAt },
+            answer: trimmed,
+          },
+        });
+        if (answered._tag === "Failure") {
+          if (!isAtomCommandInterrupted(answered)) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "오케스트라 질문에 답변을 보내지 못했습니다",
+                description: "연결 상태를 확인하고 다시 시도하세요.",
+              }),
+            );
+          }
+          return;
+        }
+        meetingRunsQuery.refresh();
+        toastManager.add(
+          stackedThreadToast({
+            type: "success",
+            title: "오케스트라 질문에 답변했습니다",
+            description: "답변을 반영해 오케스트라가 이어집니다.",
+          }),
+        );
+      } finally {
+        setAnsweringOrchestraQuestion(false);
+      }
+    },
+    [answerMeetingRun, environmentId, liveMeetingRun, meetingRunsQuery.refresh],
+  );
   // Stopping stops EVERYTHING live in this conversation — a running meeting
   // and anything queued behind it — in one act.
   const handleStopMeetingRun = useCallback(async () => {
@@ -1823,11 +1874,13 @@ function ChatViewContent(props: ChatViewProps) {
         stackedThreadToast({
           type: "warning",
           title:
-            liveMeetingRuns.length > 0 ? "이미 중지 요청이 전달됐습니다" : "중지할 회의가 없습니다",
+            liveMeetingRuns.length > 0
+              ? "이미 중지 요청이 전달됐습니다"
+              : "중지할 오케스트라가 없습니다",
           description:
             liveMeetingRuns.length > 0
-              ? "진행 중인 발언이 끊기는 대로 회의가 종료됩니다."
-              : "이 대화에서 진행 중인 회의가 없어 아무것도 보내지 않았습니다.",
+              ? "진행 중인 발언이 끊기는 대로 오케스트라가 종료됩니다."
+              : "이 대화에서 진행 중인 오케스트라가 없어 아무것도 보내지 않았습니다.",
         }),
       );
       return;
@@ -1844,13 +1897,15 @@ function ChatViewContent(props: ChatViewProps) {
       failed
         ? stackedThreadToast({
             type: "error",
-            title: "회의를 중지하지 못했습니다",
+            title: "오케스트라를 중지하지 못했습니다",
             description: "연결 상태를 확인하고 다시 시도하세요.",
           })
         : stackedThreadToast({
             type: "success",
             title:
-              targets.length > 1 ? `회의 ${targets.length}건을 중지합니다` : "회의를 중지합니다",
+              targets.length > 1
+                ? `오케스트라 ${targets.length}건을 중지합니다`
+                : "오케스트라를 중지합니다",
             description: "진행 중인 발언을 끊고 실행을 취소합니다.",
           }),
     );
@@ -1877,7 +1932,7 @@ function ChatViewContent(props: ChatViewProps) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "회의 모드는 껐지만 회의를 중지하지 못했습니다",
+              title: "오케스트라는 껐지만 실행을 중지하지 못했습니다",
               description: "제어 센터에서 남은 실행을 취소하세요.",
             }),
           );
@@ -1892,9 +1947,9 @@ function ChatViewContent(props: ChatViewProps) {
           type: "success",
           title:
             stopped > 1
-              ? `회의 모드 종료 — 진행 중이던 회의 ${stopped}건을 중지합니다`
-              : "회의 모드 종료 — 진행 중이던 회의를 중지합니다",
-          description: "회의 모드를 끄면 이 폴더의 회의도 함께 멈춥니다.",
+              ? `오케스트라 종료 — 진행 중이던 실행 ${stopped}건을 중지합니다`
+              : "오케스트라 종료 — 진행 중이던 실행을 중지합니다",
+          description: "오케스트라를 끄면 이 폴더의 실행도 함께 멈춥니다.",
         }),
       );
     })();
@@ -2019,7 +2074,6 @@ function ChatViewContent(props: ChatViewProps) {
     async (environmentId: EnvironmentId) => {
       const result = await retryEnvironment(environmentId);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -2383,7 +2437,17 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  const orchestraBlocks = useMemo(
+    () => orchestraBlocksByMessage(threadActivities),
+    [threadActivities],
+  );
+  const workLogEntries = useMemo(
+    () =>
+      deriveWorkLogEntries(
+        threadActivities.filter((activity) => activity.kind !== "orchestra.block"),
+      ),
+    [threadActivities],
+  );
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
   // Native subagent fold: memoized by activity-list identity, shared by the
   // Agents surface, live strip, and workflow cards. v2Projection is null
@@ -3418,7 +3482,6 @@ function ChatViewContent(props: ChatViewProps) {
           title: `작업 "${deletedName ?? "이름 없음"}"을 삭제했습니다`,
         });
       } else if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -4859,7 +4922,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (liveMeetingRun === undefined) return null;
     const cancelling = liveMeetingRun.status === "cancel-requested";
     const isDirectCollaboration = liveMeetingRun.meeting?.maxRounds === 0;
-    const kindLabel = isDirectCollaboration ? "AI 협업" : "AI 회의";
+    const kindLabel = isDirectCollaboration ? "오케스트라 · 바로 실행" : "오케스트라 · 토론";
     const phaseLabel = cancelling
       ? "중지 중"
       : liveMeetingRun.meeting?.phase === "executing"
@@ -4881,7 +4944,40 @@ function ChatViewContent(props: ChatViewProps) {
             {kindLabel} · {phaseLabel}
           </span>
           <span className="min-w-0 truncate font-normal text-muted-foreground">
-            보내는 메시지는 {isDirectCollaboration ? "협업으로" : "회의로"} 전달됩니다
+            보내는 메시지는 오케스트라{isDirectCollaboration ? "" : " 토론"}으로 전달됩니다
+          </span>
+        </span>
+      ),
+      className: "dark:shadow-none",
+      actions: (
+        <>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={cancelling}
+            onClick={() => void handleStopMeetingRun()}
+          >
+            <SquareIcon />
+            {cancelling ? "중지 중..." : "오케스트라 중지"}
+          </Button>
+        </>
+      ),
+    };
+  }, [handleStopMeetingRun, liveMeetingRun]);
+  // The way back out of a node conversation. It is not in the conversation
+  // list, so without this the person who opened one is stranded in it.
+  const orchestraOwnerThreadId = activeServerThread?.orchestraRunThreadId ?? null;
+  const orchestraNodeOriginBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (orchestraOwnerThreadId === null) return null;
+    return {
+      id: `orchestra-node-of:${orchestraOwnerThreadId}`,
+      variant: "info",
+      icon: <UsersIcon />,
+      title: (
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="shrink-0 font-medium">오케스트라 노드 대화</span>
+          <span className="min-w-0 truncate font-normal text-muted-foreground">
+            오케스트라가 이 작업을 실행한 대화입니다
           </span>
         </span>
       ),
@@ -4889,16 +4985,19 @@ function ChatViewContent(props: ChatViewProps) {
       actions: (
         <Button
           size="xs"
-          variant="ghost"
-          disabled={cancelling}
-          onClick={() => void handleStopMeetingRun()}
+          variant="outline"
+          onClick={() =>
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: { environmentId, threadId: orchestraOwnerThreadId },
+            })
+          }
         >
-          <SquareIcon />
-          {cancelling ? "중지 중..." : "회의 중지"}
+          오케스트라 대화 열기
         </Button>
       ),
     };
-  }, [handleStopMeetingRun, liveMeetingRun]);
+  }, [environmentId, navigate, orchestraOwnerThreadId]);
   // This conversation is the project's monitoring thread and the AI has put a
   // watch plan on the table: approval is a button here, not a chat reply — a
   // reply cannot be validated as consent and would cost a turn to interpret.
@@ -4963,7 +5062,10 @@ function ChatViewContent(props: ChatViewProps) {
       item.urgent === true || item.variant === "error" || item.variant === "warning";
     const urgentSystemItems = systemComposerBannerItems.filter(isUrgentSystemItem);
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
-    const meetingRunItems = meetingRunBannerItem === null ? [] : [meetingRunBannerItem];
+    const meetingRunItems = [
+      ...(orchestraNodeOriginBannerItem === null ? [] : [orchestraNodeOriginBannerItem]),
+      ...(meetingRunBannerItem === null ? [] : [meetingRunBannerItem]),
+    ];
     const monitoringPlanItems = monitoringPlanBannerItem === null ? [] : [monitoringPlanBannerItem];
     const backgroundLivenessItems = [
       ...(backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem]),
@@ -5044,6 +5146,7 @@ function ChatViewContent(props: ChatViewProps) {
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
     meetingRunBannerItem,
+    orchestraNodeOriginBannerItem,
     parkedThreadBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
@@ -5513,7 +5616,7 @@ function ChatViewContent(props: ChatViewProps) {
     // when the runs query is mid-flight and no live run is visible yet.
     const stopIntentText = promptForSend.trim().replace(/[\s.!?~…ㅋㅎ;,]+$/g, "");
     const stopIntentPattern =
-      /^(애|얘|야)?\s*(회의|미팅)?\s*(멈춰|멈춰라|멈춰줘|멈추라고|중지|중지해|중지해줘|중단|중단해|중단해줘|그만|그만해|그만해라|스탑|스톱|stop|cancel)$/i;
+      /^(애|얘|야)?\s*(회의|미팅|오케스트라)?\s*(멈춰|멈춰라|멈춰줘|멈추라고|중지|중지해|중지해줘|중단|중단해|중단해줘|그만|그만해|그만해라|스탑|스톱|stop|cancel)$/i;
     if (
       !directAnnotation &&
       stopIntentPattern.test(stopIntentText) &&
@@ -5533,7 +5636,7 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "회의를 중지하는 중입니다",
+            title: "오케스트라를 중지하는 중입니다",
             description: "중지가 끝난 뒤 다시 보내면 일반 메시지로 전달됩니다.",
           }),
         );
@@ -5566,7 +5669,7 @@ function ChatViewContent(props: ChatViewProps) {
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
-                  title: "회의 질문에 답변을 보내지 못했습니다",
+                  title: "오케스트라 질문에 답변을 보내지 못했습니다",
                   description: "연결 상태를 확인하고 다시 시도하세요.",
                 }),
               );
@@ -5579,8 +5682,8 @@ function ChatViewContent(props: ChatViewProps) {
           toastManager.add(
             stackedThreadToast({
               type: "success",
-              title: "회의 질문에 답변했습니다",
-              description: "답변을 반영해 회의가 이어집니다.",
+              title: "오케스트라 질문에 답변했습니다",
+              description: "답변을 반영해 오케스트라가 이어집니다.",
             }),
           );
         } finally {
@@ -5592,9 +5695,9 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "회의가 이미 실행 단계입니다",
+            title: "오케스트라가 이미 실행 단계입니다",
             description:
-              "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 위의 '회의 중지' 버튼을 누르거나 '멈춰'라고 보내세요.",
+              "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 위의 '오케스트라 중지' 버튼을 누르거나 '멈춰'라고 보내세요.",
           }),
         );
         return;
@@ -5616,7 +5719,7 @@ function ChatViewContent(props: ChatViewProps) {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "회의에 발언을 전달하지 못했습니다",
+                title: "오케스트라에 발언을 전달하지 못했습니다",
                 description: "연결 상태를 확인하고 다시 시도하세요.",
               }),
             );
@@ -5629,7 +5732,7 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: "회의에 발언을 전달했습니다",
+            title: "오케스트라에 발언을 전달했습니다",
             description: "다음 발언자부터 즉시 반영됩니다.",
           }),
         );
@@ -5653,7 +5756,7 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "회의 상태를 확인하는 중입니다",
+            title: "오케스트라 상태를 확인하는 중입니다",
             description: "잠시 후 다시 보내면 전달됩니다.",
           }),
         );
@@ -5663,8 +5766,8 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "회의 주제에는 이미지를 첨부할 수 없습니다",
-            description: "이미지를 제거하거나 회의 모드를 끄고 보내세요.",
+            title: "오케스트라 주제에는 이미지를 첨부할 수 없습니다",
+            description: "이미지를 제거하거나 오케스트라를 끄고 보내세요.",
           }),
         );
         return;
@@ -5673,8 +5776,8 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "회의 참가자가 부족합니다",
-            description: "모델 선택기의 회의 모드에서 참가자를 2명 이상 선택하세요.",
+            title: "오케스트라 참가자가 부족합니다",
+            description: "모델 선택기의 오케스트라에서 참가자를 2명 이상 선택하세요.",
           }),
         );
         return;
@@ -5731,15 +5834,12 @@ function ChatViewContent(props: ChatViewProps) {
               userInLoop: meetingDraft.userInLoop,
               ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },
-            // Opt-in: absent keeps the one-node-at-a-time meeting execution.
-            ...(meetingDraft.orchestraEnabled
-              ? {
-                  orchestra: {
-                    maxParallel: meetingDraft.maxParallel,
-                    isolateWorktrees: meetingDraft.isolateWorktrees,
-                  },
-                }
-              : {}),
+            // 오케스트라는 상시 모드다: armed면 항상 병렬 실행 설정을 싣는다
+            // (폭 1이면 순차 실행과 동일). 예전 opt-in 플래그는 보지 않는다.
+            orchestra: {
+              maxParallel: meetingDraft.maxParallel,
+              isolateWorktrees: meetingDraft.isolateWorktrees,
+            },
           },
         });
         if (result._tag === "Failure") {
@@ -5747,7 +5847,7 @@ function ChatViewContent(props: ChatViewProps) {
             toastManager.add(
               stackedThreadToast({
                 type: "error",
-                title: "회의를 시작하지 못했습니다",
+                title: "오케스트라를 시작하지 못했습니다",
                 description: "연결 상태를 확인하고 다시 시도하세요.",
               }),
             );
@@ -5757,15 +5857,15 @@ function ChatViewContent(props: ChatViewProps) {
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
         composerRef.current?.resetCursorState();
-        // The toggle survives the send: meeting mode is a state the person
-        // turns off, not a one-shot — the next topic goes to the same table.
+        // The toggle survives the send: 오케스트라 is a state the person turns
+        // off, not a one-shot — the next topic goes to the same table.
         toastManager.add(
           stackedThreadToast({
             type: "success",
             title:
               meetingDraft.style === "collaboration"
-                ? "AI 협업을 시작했습니다"
-                : "AI 회의를 시작했습니다",
+                ? "오케스트라(바로 실행)를 시작했습니다"
+                : "오케스트라 토론을 시작했습니다",
             description:
               meetingThreadId !== undefined
                 ? `${meetingDraft.seats.map((seat) => seat.displayName).join(", ")} — ${
@@ -6073,7 +6173,6 @@ function ChatViewContent(props: ChatViewProps) {
         });
       }
       if (!isAtomCommandInterrupted(failure)) {
-        const error = squashAtomCommandFailure(failure);
         setThreadError(threadIdForSend, "메시지를 보내지 못했습니다.");
       }
     }
@@ -6088,12 +6187,15 @@ function ChatViewContent(props: ChatViewProps) {
 
   const onInterrupt = async () => {
     if (!activeThread) return;
+    if (liveMeetingRun !== undefined) {
+      await handleStopMeetingRun();
+      return;
+    }
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
     });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
       setThreadError(activeThread.id, "현재 턴을 중단하지 못했습니다.");
     }
   };
@@ -6114,7 +6216,6 @@ function ChatViewContent(props: ChatViewProps) {
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         setThreadError(activeThreadId, "승인 결정을 제출하지 못했습니다.");
       }
       setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
@@ -6139,7 +6240,6 @@ function ChatViewContent(props: ChatViewProps) {
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         setThreadError(activeThreadId, "입력 내용을 제출하지 못했습니다.");
       }
       setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
@@ -6232,14 +6332,37 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activePendingUserInput || !activePendingProgress) {
       return;
     }
-    if (activePendingProgress.isLastQuestion) {
+    // The primary button is disabled until the question is answered, but Enter
+    // in the composer lands here ungated — so it used to walk past unanswered
+    // questions and then sit dead on the last one. Resolve both through the
+    // same rule, and say something instead of swallowing the keystroke.
+    const advance = resolvePendingUserInputAdvance(
+      activePendingUserInput.questions,
+      activePendingDraftAnswers,
+      activePendingProgress.questionIndex,
+    );
+    if (advance.kind === "submit") {
       if (activePendingResolvedAnswers) {
         void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
       }
       return;
     }
-    setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
+    if (advance.kind === "next") {
+      setActivePendingUserInputQuestionIndex(advance.questionIndex);
+      return;
+    }
+    if (advance.questionIndex !== activePendingProgress.questionIndex) {
+      setActivePendingUserInputQuestionIndex(advance.questionIndex);
+    }
+    toastManager.add(
+      stackedThreadToast({
+        type: "warning",
+        title: "아직 답하지 않은 질문이 있습니다",
+        description: "보기를 고르거나 직접 답변을 입력한 뒤 계속하세요.",
+      }),
+    );
   }, [
+    activePendingDraftAnswers,
     activePendingProgress,
     activePendingResolvedAnswers,
     activePendingUserInput,
@@ -6384,7 +6507,6 @@ function ChatViewContent(props: ChatViewProps) {
         existing.filter((message) => message.id !== messageIdForSend),
       );
       if (!isAtomCommandInterrupted(failure)) {
-        const error = squashAtomCommandFailure(failure);
         setThreadError(threadIdForSend, "계획 후속 메시지를 보내지 못했습니다.");
       }
       sendInFlightRef.current = false;
@@ -6533,7 +6655,6 @@ function ChatViewContent(props: ChatViewProps) {
         );
       }
       if (!isAtomCommandInterrupted(failure)) {
-        const error = squashAtomCommandFailure(failure);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -6873,6 +6994,7 @@ function ChatViewContent(props: ChatViewProps) {
             <div className="relative flex min-h-0 flex-1 flex-col">
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
+                orchestraBlocks={orchestraBlocks}
                 agentPanelModel={agentPanelModel}
                 onOpenAgents={addAgentsSurface}
                 key={activeThread.id}
@@ -7017,6 +7139,16 @@ function ChatViewContent(props: ChatViewProps) {
                             activePendingDraftAnswers={activePendingDraftAnswers}
                             activePendingQuestionIndex={activePendingQuestionIndex}
                             respondingRequestIds={respondingRequestIds}
+                            orchestraQuestion={
+                              orchestraPendingQuestion
+                                ? {
+                                    question: orchestraPendingQuestion.question,
+                                    options: orchestraPendingQuestion.options,
+                                  }
+                                : null
+                            }
+                            orchestraQuestionAnswering={answeringOrchestraQuestion}
+                            onAnswerOrchestraQuestion={handleAnswerOrchestraQuestion}
                             showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                             activeProposedPlan={activeProposedPlan}
                             runtimeMode={runtimeMode}

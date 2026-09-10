@@ -31,7 +31,22 @@ const watchedDirectories = [
   { directory: "../server/dist", files: new Set(["bin.mjs"]) },
 ];
 const forcedShutdownTimeoutMs = 1_500;
-const restartDebounceMs = 120;
+// Long enough to swallow a rebuild burst: one contracts edit rewrites
+// main.cjs, preload.cjs and bin.mjs within about a second, and every restart
+// kills the backend — and any in-app agent turn running on it — so restarting
+// once per burst matters.
+const restartDebounceMs = 1_000;
+// A main process that dies (or fails to load) this soon after launch is a
+// broken bundle, not a transient. After `rapidCrashLimit` such launches the
+// loop waits for the next bundle change instead of respawning forever.
+const rapidCrashWindowMs = 15_000;
+const rapidCrashLimit = 3;
+// A rebuild burst can make healthy launches look like crashes: an instance
+// started while its predecessor is still releasing the single-instance lock
+// quits at once. One relaunch after a quiet spell tells the two apart; only
+// a second streak holds for a new bundle.
+const rapidCrashCooldownMs = 10_000;
+const mainLoadFailureMarker = "App threw an error during load";
 // fs.watch on Windows (and on some editors' atomic writes) occasionally misses
 // a rebuilt bundle, leaving the app on stale code after a server build. A
 // slow mtime/size poll is the backstop; the watcher stays for fast restarts.
@@ -59,6 +74,13 @@ if (devProtocolClient) {
 let shuttingDown = false;
 let restartTimer = null;
 let currentApp = null;
+let currentAppStartedAt = 0;
+let rapidCrashCount = 0;
+/** Set when the bundle proved unloadable; cleared by the next bundle change. */
+let heldForBundleChange = false;
+let cooldownRetryTimer = null;
+/** True once the post-streak relaunch has been spent on this bundle. */
+let cooldownRetryUsed = false;
 let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
 const watchers = [];
@@ -93,27 +115,32 @@ function pollWatchedFiles() {
     const stamp = stampOf(filePath);
     if (stamp === null || stamp === watchedFileStamps.get(filePath)) continue;
     console.log(`[dev-electron] change to ${NodePath.basename(filePath)} seen by poll`);
-    scheduleRestart();
+    scheduleRestart({ bundleChanged: true });
     return;
   }
 }
 
 function killChildTreeByPid(pid, signal) {
-  if (hostPlatform === "win32" || typeof pid !== "number") {
+  if (typeof pid !== "number") {
+    return;
+  }
+
+  if (hostPlatform === "win32") {
+    // Windows has no signals: `ChildProcess.kill` terminates only the main
+    // process and leaves its renderer/GPU children and the backend it spawned
+    // running. taskkill /T takes the whole tree down.
+    NodeChildProcess.spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+    });
     return;
   }
 
   NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
 }
 
-function cleanupStaleDevApps() {
-  if (hostPlatform === "win32") {
-    return;
-  }
-
-  NodeChildProcess.spawnSync("pkill", ["-f", "--", `--t3code-dev-root=${desktopDir}`], {
-    stdio: "ignore",
-  });
+function holdForBundleChange(reason) {
+  heldForBundleChange = true;
+  console.error(`[dev-electron] ${reason}; waiting for the next bundle change before relaunching`);
 }
 
 function startApp() {
@@ -128,13 +155,31 @@ function startApp() {
     ? electronArgs
     : [...electronArgs, `--t3code-dev-root=${desktopDir}`, "dist-electron/main.cjs"];
   const electronCommand = resolveElectronLaunchCommand(launchArgs);
+  // stderr is piped (and echoed) so a main-process load failure can be
+  // recognised: Electron reports it there and then sits on a modal error
+  // dialog instead of exiting, which no exit-code check would ever see.
   const app = NodeChildProcess.spawn(electronCommand.electronPath, electronCommand.args, {
     cwd: desktopDir,
     env: childEnv,
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "pipe"],
   });
 
   currentApp = app;
+  currentAppStartedAt = Date.now();
+
+  let loadFailed = false;
+  app.stderr?.on("data", (chunk) => {
+    process.stderr.write(chunk);
+    if (loadFailed || !chunk.toString().includes(mainLoadFailureMarker)) {
+      return;
+    }
+    loadFailed = true;
+    if (shuttingDown || currentApp !== app) {
+      return;
+    }
+    holdForBundleChange("main process failed to load the bundle");
+    restartQueue = restartQueue.catch(() => undefined).then(() => stopApp());
+  });
 
   app.once("error", () => {
     if (currentApp === app) {
@@ -152,9 +197,33 @@ function startApp() {
     }
 
     const exitedAbnormally = signal !== null || code !== 0;
-    if (!shuttingDown && !expectedExits.has(app) && exitedAbnormally) {
-      scheduleRestart();
+    if (shuttingDown || expectedExits.has(app) || !exitedAbnormally) {
+      return;
     }
+    const diedQuickly = Date.now() - currentAppStartedAt < rapidCrashWindowMs;
+    rapidCrashCount = diedQuickly ? rapidCrashCount + 1 : 1;
+    if (rapidCrashCount >= rapidCrashLimit) {
+      if (cooldownRetryUsed) {
+        holdForBundleChange(
+          `app exited ${rapidCrashCount} times within ${rapidCrashWindowMs}ms of launch`,
+        );
+        return;
+      }
+      cooldownRetryUsed = true;
+      heldForBundleChange = true;
+      console.error(
+        `[dev-electron] app exited ${rapidCrashCount} times within ${rapidCrashWindowMs}ms of launch; relaunching once after ${rapidCrashCooldownMs}ms`,
+      );
+      cooldownRetryTimer = setTimeout(() => {
+        cooldownRetryTimer = null;
+        if (shuttingDown || !heldForBundleChange) return;
+        heldForBundleChange = false;
+        rapidCrashCount = 0;
+        scheduleRestart();
+      }, rapidCrashCooldownMs);
+      return;
+    }
+    scheduleRestart();
   });
 }
 
@@ -182,7 +251,6 @@ async function stopApp() {
     app.once("exit", finish);
     app.kill("SIGTERM");
     killChildTreeByPid(app.pid, "TERM");
-    cleanupStaleDevApps();
 
     setTimeout(() => {
       if (settled) {
@@ -191,14 +259,26 @@ async function stopApp() {
 
       app.kill("SIGKILL");
       killChildTreeByPid(app.pid, "KILL");
-      cleanupStaleDevApps();
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });
 }
 
-function scheduleRestart() {
+function scheduleRestart({ bundleChanged = false } = {}) {
   if (shuttingDown) {
+    return;
+  }
+
+  if (bundleChanged) {
+    // A fresh bundle is a fresh chance: forget the crash streak and any hold.
+    rapidCrashCount = 0;
+    heldForBundleChange = false;
+    cooldownRetryUsed = false;
+    if (cooldownRetryTimer) {
+      clearTimeout(cooldownRetryTimer);
+      cooldownRetryTimer = null;
+    }
+  } else if (heldForBundleChange) {
     return;
   }
 
@@ -230,7 +310,7 @@ function startWatchers() {
           return;
         }
 
-        scheduleRestart();
+        scheduleRestart({ bundleChanged: true });
       },
     );
 
@@ -280,7 +360,6 @@ async function shutdown(exitCode) {
 }
 
 startWatchers();
-cleanupStaleDevApps();
 startApp();
 
 process.once("SIGINT", () => {

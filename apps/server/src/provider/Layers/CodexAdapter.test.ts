@@ -1191,6 +1191,118 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
       });
+      NodeAssert.equal(firstEvent.value.payload.consumption?.[0]?.counts.total, 11_839);
+      NodeAssert.equal(firstEvent.value.payload.consumption?.[0]?.counts.cacheRead, 3456);
+      NodeAssert.equal(firstEvent.value.payload.consumption?.[0]?.startsAtZero, true);
+    }),
+  );
+
+  it.effect("stamps the turn named by a thread-scoped Codex token usage notification", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      // Codex reports usage per THREAD: the notification envelope carries no turn id,
+      // only the body does. Without picking it up the usage never reaches a turn and
+      // the thread reads back as "unreported" forever.
+      yield* runtime.emit({
+        id: asEventId("evt-thread-scoped-token-usage"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "thread/tokenUsage/updated",
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          tokenUsage: {
+            total: {
+              inputTokens: 200,
+              cachedInputTokens: 0,
+              outputTokens: 10,
+              reasoningOutputTokens: 0,
+              totalTokens: 210,
+            },
+            last: {
+              inputTokens: 200,
+              cachedInputTokens: 0,
+              outputTokens: 10,
+              reasoningOutputTokens: 0,
+              totalTokens: 210,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "thread.token-usage.updated") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.turnId, "turn-1");
+      NodeAssert.equal(firstEvent.value.payload.consumption?.[0]?.counts.total, 210);
+    }),
+  );
+
+  it.effect("scopes the Codex usage counter to the session that owns it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      // A resumed thread gets a fresh app-server session, and codex restarts the
+      // cumulative counter with it. Sharing one source id across sessions makes the
+      // stored high-water mark reject every later session as a regression.
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+        resumeCursor: { threadId: "native-thread-1" },
+      });
+      const runtime = lifecycleRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-resumed-token-usage"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "thread/tokenUsage/updated",
+        payload: {
+          threadId: "native-thread-1",
+          turnId: "turn-1",
+          tokenUsage: {
+            total: {
+              inputTokens: 90,
+              cachedInputTokens: 0,
+              outputTokens: 10,
+              reasoningOutputTokens: 0,
+              totalTokens: 100,
+            },
+            last: {
+              inputTokens: 90,
+              cachedInputTokens: 0,
+              outputTokens: 10,
+              reasoningOutputTokens: 0,
+              totalTokens: 100,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "thread.token-usage.updated") {
+        return;
+      }
+      const observation = firstEvent.value.payload.consumption?.[0];
+      NodeAssert.ok(observation);
+      NodeAssert.notEqual(observation.sourceId, "codex:native-thread-1");
+      NodeAssert.ok(observation.sourceId.startsWith("codex:native-thread-1#"));
+      // Resumed or not, this session counted from zero, so its first notification is
+      // spend to record rather than a carried balance to subtract.
+      NodeAssert.equal(observation.startsAtZero, true);
     }),
   );
 });

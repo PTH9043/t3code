@@ -2,13 +2,19 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RotatingFileSink,
   RotatingFileSinkConfigurationError,
   RotatingFileSinkError,
 } from "./logging.ts";
+
+// Passthrough mock so a single test can make statSync fail; every other export
+// stays the real node:fs implementation.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+}));
 
 const tempDirectories: string[] = [];
 
@@ -71,13 +77,23 @@ describe("RotatingFileSink", () => {
 
   it("only treats a missing log file as an empty current size", () => {
     const directory = makeTempDirectory();
-    const filePath = NodePath.join(directory, "a".repeat(300));
+    const filePath = NodePath.join(directory, "log.ndjson");
+    const failure = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    const statSpy = vi.spyOn(NodeFS, "statSync").mockImplementation(() => {
+      throw failure;
+    });
 
-    const thrown = captureError(() => new RotatingFileSink({ filePath, maxBytes: 1, maxFiles: 1 }));
+    try {
+      const thrown = captureError(
+        () => new RotatingFileSink({ filePath, maxBytes: 1, maxFiles: 1 }),
+      );
 
-    expect(thrown).toBeInstanceOf(RotatingFileSinkError);
-    expect(thrown).toMatchObject({ operation: "read", filePath });
-    expect((thrown as RotatingFileSinkError).cause).toMatchObject({ code: "ENAMETOOLONG" });
+      expect(thrown).toBeInstanceOf(RotatingFileSinkError);
+      expect(thrown).toMatchObject({ operation: "read", filePath });
+      expect((thrown as RotatingFileSinkError).cause).toBe(failure);
+    } finally {
+      statSpy.mockRestore();
+    }
   });
 
   it("starts an absent log file at zero bytes", () => {

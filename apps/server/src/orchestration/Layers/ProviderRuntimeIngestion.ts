@@ -245,13 +245,21 @@ function assistantSegmentMessageId(baseKey: string, segmentIndex: number): Messa
     segmentIndex === 0 ? `assistant:${baseKey}` : `assistant:${baseKey}:segment:${segmentIndex}`,
   );
 }
-function buildContextWindowActivityPayload(
-  event: ProviderRuntimeEvent,
-): ThreadTokenUsageSnapshot | undefined {
-  if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens <= 0) {
+function buildContextWindowActivityPayload(event: ProviderRuntimeEvent):
+  | (ThreadTokenUsageSnapshot & {
+      consumption?: import("@t3tools/contracts").TokenUsageObservation[];
+    })
+  | undefined {
+  if (
+    event.type !== "thread.token-usage.updated" ||
+    (event.payload.usage.usedTokens <= 0 && !event.payload.consumption?.length)
+  ) {
     return undefined;
   }
-  return event.payload.usage;
+  return {
+    ...event.payload.usage,
+    ...(event.payload.consumption ? { consumption: [...event.payload.consumption] } : {}),
+  };
 }
 
 function normalizeRuntimeTurnState(
@@ -2042,7 +2050,9 @@ const make = Effect.gen(function* () {
       // in the gap are lost to this consumer.
       yield* forkParked(
         Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
+          event.execution === undefined
+            ? worker.enqueue({ source: "runtime", event })
+            : Effect.void,
         ),
         { startImmediately: true },
       );

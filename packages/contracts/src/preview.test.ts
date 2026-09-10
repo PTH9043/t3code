@@ -14,6 +14,7 @@ import {
   PreviewAutomationOpenInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
+  PreviewAutomationSnapshot,
   PreviewAutomationStatus,
 } from "./previewAutomation.ts";
 
@@ -27,6 +28,7 @@ const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
+const decodeAutomationSnapshot = Schema.decodeUnknownSync(PreviewAutomationSnapshot);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
 describe("PreviewAutomationOpenInput", () => {
@@ -216,6 +218,32 @@ describe("PreviewAutomationStatus", () => {
         viewport: { width: 412, height: 915 },
       }).viewport,
     ).toEqual({ width: 412, height: 915 });
+  });
+});
+
+describe("PreviewAutomationSnapshot", () => {
+  const base = {
+    url: "https://example.com",
+    title: "Example",
+    loading: false,
+    visibleText: "Example",
+    interactiveElements: [],
+    accessibilityTree: {},
+    consoleEntries: [],
+    networkEntries: [],
+    actionTimeline: [],
+  };
+
+  it("accepts a snapshot whose capture failed", () => {
+    expect(decodeAutomationSnapshot({ ...base, screenshotError: "UnknownVizError" })).toEqual({
+      ...base,
+      screenshotError: "UnknownVizError",
+    });
+  });
+
+  it("still accepts a snapshot carrying a screenshot", () => {
+    const screenshot = { mimeType: "image/png", data: "cG5n", width: 10, height: 5 };
+    expect(decodeAutomationSnapshot({ ...base, screenshot }).screenshot).toEqual(screenshot);
   });
 });
 

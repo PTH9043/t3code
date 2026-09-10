@@ -51,7 +51,7 @@ it("normalizes empty successful notification responses to accepted", () => {
   expect(resultResponse.status).toBe(200);
 });
 
-it.effect("returns bounded structural preview snapshot failures", () =>
+it.effect("reports the host's reason for a preview snapshot failure", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
@@ -69,9 +69,16 @@ it.effect("returns bounded structural preview snapshot failures", () =>
               requestId: event.request.requestId,
               ok: false,
               error: {
-                _tag: "PreviewAutomationExecutionError",
-                message: "sensitive renderer failure",
-                detail: { consoleOutput: "sensitive browser output" },
+                _tag: "PreviewAutomationTabNotFoundError",
+                message: `Preview automation target for snapshot request ${event.request.requestId} is unavailable on environment ${environmentId} thread ${threadId} (tab unassigned, bridge unavailable).`,
+                detail: {
+                  requestId: event.request.requestId,
+                  operation: "snapshot",
+                  environmentId,
+                  threadId,
+                  tabId: null,
+                  bridgeAvailable: false,
+                },
               },
             }),
       ).pipe(Effect.forkScoped);
@@ -85,14 +92,119 @@ it.effect("returns bounded structural preview snapshot failures", () =>
         );
 
       expect(snapshot.isError).toBe(true);
-      expect(snapshot.content).toEqual([{ type: "text", text: "Preview snapshot failed." }]);
-      expect(snapshot.structuredContent).toEqual({
+      expect(snapshot.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining("bridge unavailable"),
+        },
+      ]);
+      expect(snapshot.structuredContent).toMatchObject({
         error: {
-          _tag: "PreviewAutomationExecutionError",
+          _tag: "PreviewAutomationTabNotFoundError",
           operation: "snapshot",
           failureCount: 1,
+          detail: { bridgeAvailable: false, tabId: null },
         },
       });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("bounds what a preview host can put into the model's context", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const events = yield* broker.connect({
+        clientId: "mcp-hostile-client",
+        environmentId,
+      });
+      yield* Stream.runForEach(events, (event) =>
+        event.type === "connected"
+          ? Effect.void
+          : broker.respond({
+              clientId: "mcp-hostile-client",
+              connectionId: event.connectionId,
+              requestId: event.request.requestId,
+              ok: false,
+              error: {
+                _tag: "PreviewAutomationTabNotFoundError",
+                message: "x".repeat(50_000),
+                detail: {
+                  operation: "snapshot",
+                  consoleOutput: "sensitive browser output",
+                  pageText: "y".repeat(50_000),
+                },
+              },
+            }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const snapshot = yield* server
+        .callTool({ name: "preview_snapshot", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+      const text = snapshot.content[0];
+      expect(text?.type).toBe("text");
+      expect(text?.type === "text" ? text.text.length : -1).toBe(2_000);
+
+      const error = (snapshot.structuredContent as { readonly error: Record<string, unknown> })
+        .error;
+      expect(error.detail).toEqual({ operation: "snapshot" });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("returns a screenshot-less preview snapshot without an image block", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const events = yield* broker.connect({
+        clientId: "mcp-screenshotless-client",
+        environmentId,
+      });
+      yield* Stream.runForEach(events, (event) =>
+        event.type === "connected"
+          ? Effect.void
+          : broker.respond({
+              clientId: "mcp-screenshotless-client",
+              connectionId: event.connectionId,
+              requestId: event.request.requestId,
+              ok: true,
+              result: {
+                url: "http://example.test/",
+                title: "Example",
+                loading: false,
+                visibleText: "Example",
+                interactiveElements: [],
+                accessibilityTree: {},
+                consoleEntries: [],
+                networkEntries: [],
+                actionTimeline: [],
+                screenshotError: "UnknownVizError",
+              },
+            }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const snapshot = yield* server
+        .callTool({ name: "preview_snapshot", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+      expect(snapshot.isError).toBe(false);
+      expect(snapshot.content.some((content) => content.type === "image")).toBe(false);
+      expect(snapshot.structuredContent).toMatchObject({
+        visibleText: "Example",
+        screenshotError: "UnknownVizError",
+      });
+      expect(snapshot.structuredContent).not.toHaveProperty("screenshot");
     }),
   ).pipe(Effect.provide(TestLayer)),
 );

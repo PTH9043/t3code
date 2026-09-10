@@ -14,6 +14,9 @@ import {
   ApprovalRequestId,
   EventId,
   ProviderDriverKind,
+  ProviderExecutionId,
+  WorkspaceCollaborationRunId,
+  WorkspaceTaskNodeId,
   ProviderInstanceId,
   ProviderSessionStartInput,
   ThreadId,
@@ -23,6 +26,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -58,6 +62,7 @@ import {
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+import { forkParked } from "../../serverActivation.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 
@@ -1495,6 +1500,54 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {
+  it.effect(
+    "routes execution events to their owning conversation and keeps execution sessions out of thread recovery",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const execution = {
+          executionId: ProviderExecutionId.make("orchestra:fanout:node:1"),
+          ownerThreadId: ThreadId.make("orchestra-owner"),
+          runId: WorkspaceCollaborationRunId.make("fanout"),
+          nodeId: WorkspaceTaskNodeId.make("node"),
+          attempt: 1,
+        };
+        const sessionKey = ThreadId.make(execution.executionId);
+        const received = yield* Deferred.make<ProviderRuntimeEvent>();
+        yield* forkParked(
+          Stream.runForEach(provider.streamEvents, (event) => Deferred.succeed(received, event)),
+          { startImmediately: true },
+        );
+        yield* provider.startSession(sessionKey, {
+          threadId: sessionKey,
+          execution,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        fanout.codex.emit({
+          type: "content.delta",
+          eventId: EventId.make("execution-delta"),
+          provider: CODEX_DRIVER,
+          threadId: sessionKey,
+          createdAt: "2026-09-11T00:00:00.000Z",
+          payload: { streamKind: "assistant_text", delta: "Worker output" },
+        });
+        const event = yield* Deferred.await(received);
+        assert.equal(event.threadId, execution.ownerThreadId);
+        assert.deepEqual(event.execution, execution);
+        assert.equal(
+          (yield* provider.listSessions()).some((session) => session.threadId === sessionKey),
+          false,
+        );
+        yield* provider.respondToRequest({
+          threadId: sessionKey,
+          requestId: ApprovalRequestId.make("original-request"),
+          decision: "decline",
+        });
+        assert.equal(fanout.codex.respondToRequest.mock.calls.at(-1)?.[0], sessionKey);
+        yield* provider.stopSession({ threadId: sessionKey });
+      }),
+  );
   it.effect("fans out adapter turn completion events", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

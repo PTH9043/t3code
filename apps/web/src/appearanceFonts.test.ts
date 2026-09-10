@@ -2,6 +2,7 @@ import { MAX_INTERFACE_FONT_SIZE, MAX_PROMPT_FONT_SIZE } from "@t3tools/contract
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  applyAppearanceFontVariables,
   areFontAdvancesMonospace,
   BUNDLED_FONT_FAMILIES,
   clampCodeFontSize,
@@ -156,5 +157,52 @@ describe("bundled font families", () => {
 
   it("does not duplicate a bundled family the machine also has installed", () => {
     expect(withBundledFontFamilies(["Arial", "NanumSquare"])).toEqual(["Arial", "NanumSquare"]);
+  });
+});
+
+describe("applyAppearanceFontVariables", () => {
+  function fakeRoot() {
+    const properties = new Map<string, string>();
+    const style = {
+      fontSize: "",
+      setProperty: (name: string, value: string) => void properties.set(name, value),
+      removeProperty: (name: string) => void properties.delete(name),
+    };
+    return { element: { style } as unknown as HTMLElement, properties, style };
+  }
+
+  const preferences = {
+    sans: "NanumSquare",
+    code: "",
+    composer: "",
+    sizeInterface: 22,
+    sizePrompt: 14,
+    sizeCode: 22,
+    smoothing: true,
+  };
+
+  it("owns the root font size and writes every other preference as a variable", () => {
+    const root = fakeRoot();
+
+    applyAppearanceFontVariables(root.element, preferences);
+
+    // The interface size IS the root font size, so this module has to be its
+    // only writer: a second owner (the control center header once kept its own
+    // zoom) overwrites the saved size the moment it mounts.
+    expect(root.style.fontSize).toBe("22px");
+    expect(root.properties.get("--font-sans")).toBe(`NanumSquare, ${DEFAULT_SANS_FONT_STACK}`);
+    expect(root.properties.get("--font-size-prompt")).toBe("14px");
+    expect(root.properties.get("--font-size-code")).toBe("22px");
+    expect(root.properties.get("-webkit-font-smoothing")).toBe("antialiased");
+    // An unset family leaves the stylesheet default in charge.
+    expect(root.properties.has("--font-mono")).toBe(false);
+  });
+
+  it("clamps a size the settings file could hold but the UI cannot absorb", () => {
+    const root = fakeRoot();
+
+    applyAppearanceFontVariables(root.element, { ...preferences, sizeInterface: 999 });
+
+    expect(root.style.fontSize).toBe(`${MAX_INTERFACE_FONT_SIZE}px`);
   });
 });

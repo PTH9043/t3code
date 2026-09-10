@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Expectations mirror the host-native paths the showcase script builds.
+import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
 import { PNG } from "pngjs";
 
@@ -146,9 +148,11 @@ it("expands both appearances into independent upload-ready directories", () => {
       appearance: capture.appearance,
       directory: showcaseCaptureDirectory("/captures", capture),
     })),
+    // The directory is created on the host filesystem, so the expected value
+    // uses host-native separators.
     [
-      { appearance: "light", directory: "/captures/apple/iphone-test/light" },
-      { appearance: "dark", directory: "/captures/apple/iphone-test/dark" },
+      { appearance: "light", directory: NodePath.join("/captures", "apple/iphone-test", "light") },
+      { appearance: "dark", directory: NodePath.join("/captures", "apple/iphone-test", "dark") },
     ],
   );
 });

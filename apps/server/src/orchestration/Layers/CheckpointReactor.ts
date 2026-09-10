@@ -932,6 +932,7 @@ const make = Effect.gen(function* () {
 
     yield* forkParked(
       Stream.runForEach(providerService.streamEvents, (event) => {
+        if (event.execution !== undefined) return Effect.void;
         if (event.type !== "turn.started" && event.type !== "turn.completed") {
           return Effect.void;
         }

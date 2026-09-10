@@ -69,6 +69,7 @@ export function SectionCard(props: {
   id?: string;
   icon: typeof BrainCircuitIcon;
   title: string;
+  scopeLabel?: string;
   description: string;
   action?: ReactNode;
   children: ReactNode;
@@ -79,7 +80,9 @@ export function SectionCard(props: {
       <CardHeader>
         <div className="mb-1 flex items-center gap-2 text-primary">
           <Icon className="size-4" />
-          <span className="text-xs font-semibold uppercase tracking-wide">프로젝트 전용</span>
+          <span className="text-xs font-semibold uppercase tracking-wide">
+            {props.scopeLabel ?? "프로젝트 전용"}
+          </span>
         </div>
         <CardTitle>{props.title}</CardTitle>
         <CardDescription className="leading-relaxed">{props.description}</CardDescription>

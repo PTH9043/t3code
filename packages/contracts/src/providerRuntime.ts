@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { TokenUsageObservation } from "./tokenUsage.ts";
+import { ProviderExecutionContext } from "./providerExecution.ts";
 import {
   EventId,
   IsoDateTime,
@@ -249,6 +251,7 @@ const RuntimeErrorType = Schema.Literal("runtime.error");
 
 const ProviderRuntimeEventBase = Schema.Struct({
   eventId: EventId,
+  execution: Schema.optionalKey(ProviderExecutionContext),
   provider: ProviderDriverKind,
   // Optional during the driver/instance migration. See providerInstance.ts
   // for the routing-key-vs-driver-id distinction. Once every emitter
@@ -327,6 +330,7 @@ export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
+  consumption: Schema.optional(Schema.Array(TokenUsageObservation)),
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
 

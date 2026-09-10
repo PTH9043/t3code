@@ -2300,6 +2300,109 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
+  it("applies compact handoff only to opted-in human provider switches and reverses to standard", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.make("thread-1");
+    let index = 0;
+    const now = () => `2026-09-05T03:00:${String(index++).padStart(2, "0")}.000Z`;
+    const send = async (id: string, text: string, provider: string, automation = false) => {
+      const delivered = await harness.runEffect(Deferred.make<unknown>());
+      harness.sendTurn.mockImplementationOnce((value) =>
+        Deferred.succeed(delivered, value).pipe(Effect.as({ threadId, turnId: asTurnId(id) })),
+      );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(id),
+          threadId,
+          message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(provider),
+            model: provider === "codex" ? "gpt-5-codex" : "claude-opus-4-6",
+          },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          createdAt: now(),
+          ...(automation ? { inputOrigin: "automation" as const } : {}),
+        }),
+      );
+      const request = await harness.runEffect(Deferred.await(delivered));
+      await harness.drain();
+      return typeof request === "object" && request !== null && "input" in request
+        ? request.input
+        : undefined;
+    };
+    expect(await send("initial", "서버 실행은 보류하고 문서 정리만 진행해.", "codex")).toBe(
+      "서버 실행은 보류하고 문서 정리만 진행해.",
+    );
+    for (let n = 0; n < 12; n++) {
+      const messageId = asMessageId(`progress-${n}`);
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: CommandId.make(`delta-${n}`),
+          threadId,
+          messageId,
+          delta:
+            n < 10
+              ? `과거 조사 ${n}: ${"상세한 코드 검토 기록 ".repeat(220)}`
+              : "문서 정리를 이어가겠습니다.",
+          createdAt: now(),
+        }),
+      );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`complete-${n}`),
+          threadId,
+          messageId,
+          createdAt: now(),
+        }),
+      );
+    }
+    const setMode = (handoffMode: "standard" | "compact") =>
+      harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`mode-${index++}`),
+          threadId,
+          handoffMode,
+        }),
+      );
+    await setMode("compact");
+    expect(
+      (await harness.readModel()).threads.find((entry) => entry.id === threadId)?.handoffMode,
+    ).toBe("compact");
+    const compact = await send("switch", "계속 정리해.", "claudeAgent");
+    expect(
+      (await harness.readModel()).threads
+        .find((entry) => entry.id === threadId)
+        ?.activities.find((entry) => entry.kind === "conversation.handoff.prepared")?.payload,
+    ).toMatchObject({ status: "compact", reason: "reduced" });
+    expect(compact).toContain("서버 실행은 보류");
+    expect(compact).toContain("SHA-256:");
+    expect(compact).not.toContain("과거 조사 0:");
+    const snapshot = await harness.readModel();
+    const thread = snapshot.threads.find((entry) => entry.id === threadId)!;
+    expect(thread.handoffMode).toBe("compact");
+    expect(thread.messages.find((entry) => entry.id === "switch")?.text).toBe("계속 정리해.");
+    expect(
+      thread.activities.filter((entry) => entry.kind === "conversation.handoff.prepared"),
+    ).toHaveLength(1);
+    await setMode("standard");
+    const standard = await send("switch-back", "원래 인계로 이어가.", "codex");
+    expect(standard).toContain("<t3_conversation_handoff>");
+    expect(standard).not.toContain("SHA-256:");
+    await setMode("compact");
+    expect(await send("same-provider", "같은 세션의 다음 요청", "codex")).toBe(
+      "같은 세션의 다음 요청",
+    );
+    expect(await send("automation", "자동화가 준비한 문맥", "claudeAgent", true)).toBe(
+      "자동화가 준비한 문맥",
+    );
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+  });
+
   it("hands a live session across drivers with a conversation handoff instead of rejecting", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2591,6 +2694,64 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("routes concurrent orchestra approvals and input to their execution sessions without an owner session", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-09-11T00:00:00.000Z";
+    for (const executionId of ["worker-a", "worker-b"]) {
+      for (const kind of ["approval.requested", "user-input.requested"]) {
+        const requestId = `${executionId}:${kind}:same-request`;
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(requestId),
+            threadId: ThreadId.make("thread-1"),
+            createdAt,
+            activity: {
+              id: EventId.make(requestId),
+              kind,
+              tone: "info",
+              summary: "Request",
+              turnId: null,
+              createdAt,
+              payload: { requestId, executionId, providerRequestId: "same-request" },
+            },
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch(
+            kind === "approval.requested"
+              ? {
+                  type: "thread.approval.respond",
+                  commandId: CommandId.make(`respond:${requestId}`),
+                  threadId: ThreadId.make("thread-1"),
+                  requestId: ApprovalRequestId.make(requestId),
+                  decision: "accept",
+                  createdAt,
+                }
+              : {
+                  type: "thread.user-input.respond",
+                  commandId: CommandId.make(`respond:${requestId}`),
+                  threadId: ThreadId.make("thread-1"),
+                  requestId: ApprovalRequestId.make(requestId),
+                  answers: { choice: executionId },
+                  createdAt,
+                },
+          ),
+        );
+      }
+    }
+    await harness.drain();
+    expect(harness.respondToRequest.mock.calls.map(([request]) => request)).toEqual([
+      { threadId: "worker-a", requestId: "same-request", decision: "accept" },
+      { threadId: "worker-b", requestId: "same-request", decision: "accept" },
+    ]);
+    expect(harness.respondToUserInput.mock.calls.map(([request]) => request)).toEqual([
+      { threadId: "worker-a", requestId: "same-request", answers: { choice: "worker-a" } },
+      { threadId: "worker-b", requestId: "same-request", answers: { choice: "worker-b" } },
+    ]);
+    expect((await harness.readModel()).threads).toHaveLength(1);
+  });
+
   it("reacts to thread.approval.respond by forwarding provider approval response", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2803,7 +2964,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.activity.append",
         commandId: CommandId.make("cmd-user-input-requested"),
@@ -2836,7 +2997,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond-stale"),
@@ -2913,7 +3074,8 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+    expect(harness.stopSession).toHaveBeenCalledTimes(1);
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session).not.toBeNull();

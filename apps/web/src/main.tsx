@@ -29,6 +29,16 @@ if (isElectron) {
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
+// React's dev build emits a performance.measure() per committed fiber and Blink never reclaims those
+// entries, so a long-lived desktop session grows non-V8 renderer memory until Chromium OOMs it.
+// Production React compiles the track out.
+if (import.meta.env.DEV && typeof performance !== "undefined") {
+  window.setInterval(() => {
+    performance.clearMeasures();
+    performance.clearMarks();
+  }, 30_000);
+}
+
 const app = <AppRoot router={router} />;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

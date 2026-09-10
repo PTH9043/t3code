@@ -535,6 +535,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.knowledge.item.upsert": {
+      if ((command.scope === "folder") !== (command.appliesToFolder != null)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Folder-scoped knowledge requires an applicable folder; other scopes cannot specify one.",
+        });
+      }
       yield* requireProject({
         readModel,
         command,
@@ -557,6 +564,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           status: command.status,
           origin: command.origin,
           relativeFolder: command.relativeFolder,
+          scope: command.scope ?? "project",
+          appliesToFolder: command.appliesToFolder?.replaceAll("\\", "/") ?? null,
+          research: command.research ?? null,
           tags: command.tags,
           originalChars: command.originalChars ?? null,
           storedChars: command.storedChars ?? null,
@@ -1230,6 +1240,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          orchestraRunThreadId: command.orchestraRunThreadId ?? null,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -1694,6 +1705,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           ...(command.title !== undefined ? { title: command.title } : {}),
+          ...(command.handoffMode !== undefined ? { handoffMode: command.handoffMode } : {}),
           ...(command.regenerateTitle === true
             ? {
                 regenerateTitle: true as const,
@@ -1853,9 +1865,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           messageId: command.message.messageId,
           inputOrigin: command.inputOrigin ?? "user",
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
+          modelSelection: command.modelSelection ?? targetThread.modelSelection,
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,

@@ -15,7 +15,7 @@ import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hook
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Button } from "../ui/button";
-import { ACPRegistryIcon, Gemini, GithubCopilotIcon, PiAgentIcon, type Icon } from "../Icons";
+import { ACPRegistryIcon, GithubCopilotIcon, PiAgentIcon, type Icon } from "../Icons";
 import {
   Dialog,
   DialogDescription,
@@ -84,11 +84,6 @@ const COMING_SOON_DRIVER_OPTIONS: readonly ComingSoonDriverOption[] = [
     value: ProviderDriverKind.make("githubCopilot"),
     label: "Github Copilot",
     icon: GithubCopilotIcon,
-  },
-  {
-    value: ProviderDriverKind.make("gemini"),
-    label: "Gemini",
-    icon: Gemini,
   },
   {
     value: ProviderDriverKind.make("acpRegistry"),
@@ -229,7 +224,7 @@ export function AddProviderInstanceDialog({
         description: `${driverOption.label} 계정 '${instanceId}'을(를) 추가했습니다.`,
       });
       onOpenChange(false);
-    } catch (error) {
+    } catch {
       toastManager.add({
         type: "error",
         title: "CLI 계정을 추가하지 못했습니다",

@@ -122,6 +122,12 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     // Legacy `providers` struct is still hydrated with its per-driver defaults
     // so existing call sites keep working through the migration.
     expect(decoded.providers.codex.enabled).toBe(true);
+    expect(decoded.providers.gemini).toMatchObject({
+      enabled: false,
+      binaryPath: "gemini",
+      homePath: "",
+      googleCloudProject: "",
+    });
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -274,6 +280,11 @@ describe("ServerSettingsPatch string normalization", () => {
           homePath: "  ~/.codex  ",
           launchArgs: "  --strict-config --enable foo  ",
         },
+        gemini: {
+          binaryPath: "  /opt/homebrew/bin/gemini  ",
+          homePath: "  ~/.gemini-personal  ",
+          googleCloudProject: "  personal-project  ",
+        },
       },
       providerInstances: {
         codex_personal: {
@@ -290,6 +301,11 @@ describe("ServerSettingsPatch string normalization", () => {
     expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
     expect(patch.providers?.codex?.homePath).toBe("~/.codex");
     expect(patch.providers?.codex?.launchArgs).toBe("--strict-config --enable foo");
+    expect(patch.providers?.gemini).toMatchObject({
+      binaryPath: "/opt/homebrew/bin/gemini",
+      homePath: "~/.gemini-personal",
+      googleCloudProject: "personal-project",
+    });
     expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
       "codex",
     );

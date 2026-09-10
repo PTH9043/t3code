@@ -39,9 +39,10 @@ function defaultSeatModel(options: ReadonlyArray<ModelEsque> | undefined): strin
 }
 
 /**
- * The meeting side of the model picker: tick the accounts that take a seat,
- * then set how the discussion runs. The topic itself is typed in the composer
- * and sent like any other message.
+ * The 오케스트라 side of the model picker: tick the accounts that take a seat,
+ * then set how the run starts (discussion first, or straight to execution) and
+ * how execution parallelizes. The topic itself is typed in the composer and
+ * sent like any other message.
  */
 export const MeetingModePanel = memo(function MeetingModePanel(props: {
   readonly instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
@@ -50,9 +51,9 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   const config = useMeetingComposerConfig();
   const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
-  // 협업 skips discussion: the chair plans straight away and the seats split
-  // the work. The style is its own field, so picking it never touches the
-  // meeting side's rounds or mode.
+  // "바로 실행" skips discussion: the chair plans straight away and the seats
+  // split the work. The style is its own field, so picking it never touches the
+  // discussion side's rounds or mode.
   const isDirectCollaboration = config.style === "collaboration";
 
   // Self-heal selections a past bug stored as display LABELS ("Extra High")
@@ -83,7 +84,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2.5 text-sm">
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        작업 방식
+        시작 방식
       </div>
       <div className="mt-1.5 grid grid-cols-2 gap-1">
         <button
@@ -100,8 +101,10 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
               : "border-transparent hover:bg-muted/50",
           )}
         >
-          <span className="block">회의</span>
-          <span className="block font-normal text-muted-foreground">토론으로 합의 후 실행</span>
+          <span className="block">토론 먼저</span>
+          <span className="block font-normal text-muted-foreground">
+            토론으로 합의한 뒤 병렬 실행
+          </span>
         </button>
         <button
           type="button"
@@ -117,8 +120,10 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
               : "border-transparent hover:bg-muted/50",
           )}
         >
-          <span className="block">협업</span>
-          <span className="block font-normal text-muted-foreground">토론 없이 바로 분담 실행</span>
+          <span className="block">바로 실행</span>
+          <span className="block font-normal text-muted-foreground">
+            토론 없이 곧장 분담 병렬 실행
+          </span>
         </button>
       </div>
 
@@ -325,59 +330,45 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             </label>
           </>
         ) : null}
+        <div className="mt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          병렬 실행
+        </div>
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span>
-            오케스트라
+            병렬 폭
             <span className="ml-1 font-normal text-muted-foreground">
-              실행 단계를 노드별 대화에서 병렬 진행
+              동시에 실행할 노드 수{config.maxParallel <= 1 ? " · 1이면 순차" : ""}
+              {config.maxParallel > 1 && !config.isolateWorktrees ? " · 수정 작업은 하나씩" : ""}
+            </span>
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={6}
+            value={config.maxParallel}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.currentTarget.value, 10);
+              if (!Number.isInteger(parsed)) return;
+              const maxParallel = Math.min(6, Math.max(1, parsed));
+              updateMeetingComposerConfig((current) => ({ ...current, maxParallel }));
+            }}
+            className={cn(SELECT_CLASS, "w-16 text-center")}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>
+            worktree 격리
+            <span className="ml-1 font-normal text-muted-foreground">
+              수정 묶음마다 전용 체크아웃 · 병합 전 diff 검토
             </span>
           </span>
           <Switch
-            checked={config.orchestraEnabled}
-            onCheckedChange={(orchestraEnabled) =>
-              updateMeetingComposerConfig((current) => ({ ...current, orchestraEnabled }))
+            checked={config.isolateWorktrees}
+            onCheckedChange={(isolateWorktrees) =>
+              updateMeetingComposerConfig((current) => ({ ...current, isolateWorktrees }))
             }
           />
         </label>
-        {config.orchestraEnabled ? (
-          <>
-            <label className="flex items-center justify-between gap-2 text-xs font-medium">
-              <span>
-                병렬 폭
-                <span className="ml-1 font-normal text-muted-foreground">
-                  동시에 실행할 노드 수{config.isolateWorktrees ? "" : " · 수정 작업은 하나씩"}
-                </span>
-              </span>
-              <input
-                type="number"
-                min={1}
-                max={6}
-                value={config.maxParallel}
-                onChange={(event) => {
-                  const parsed = Number.parseInt(event.currentTarget.value, 10);
-                  if (!Number.isInteger(parsed)) return;
-                  const maxParallel = Math.min(6, Math.max(1, parsed));
-                  updateMeetingComposerConfig((current) => ({ ...current, maxParallel }));
-                }}
-                className={cn(SELECT_CLASS, "w-16 text-center")}
-              />
-            </label>
-            <label className="flex items-center justify-between gap-2 text-xs font-medium">
-              <span>
-                worktree 격리
-                <span className="ml-1 font-normal text-muted-foreground">
-                  수정 묶음마다 전용 체크아웃 · 병합 전 diff 검토
-                </span>
-              </span>
-              <Switch
-                checked={config.isolateWorktrees}
-                onCheckedChange={(isolateWorktrees) =>
-                  updateMeetingComposerConfig((current) => ({ ...current, isolateWorktrees }))
-                }
-              />
-            </label>
-          </>
-        ) : null}
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span className="flex items-center gap-1">
             <CrownIcon className="size-3.5 text-muted-foreground" />
@@ -408,8 +399,8 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
           : isDirectCollaboration
-            ? `입력창에 작업을 쓰고 보내면 의장이 곧장 계획을 세우고 참가자들이 분담 실행합니다. 협업 모드는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정은 ${config.maxRevisions}회에서 멈추므로 무한히 돌지 않습니다.`
-            : "입력창에 주제를 쓰고 보내면 이 대화창에서 회의가 시작됩니다. 설정한 라운드가 모두 끝나면 실행으로 넘어갈지, 라운드를 더 할지, 여기서 마칠지 물어봅니다. 회의 모드는 끌 때까지 유지됩니다."}
+            ? `입력창에 작업을 쓰고 보내면 오케스트라가 곧장 계획을 세우고 참가자들이 병렬로 분담 실행합니다. 오케스트라는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정은 ${config.maxRevisions}회에서 멈추므로 무한히 돌지 않습니다.`
+            : "입력창에 주제를 쓰고 보내면 이 대화창에서 오케스트라 토론이 시작됩니다. 설정한 라운드가 모두 끝나면 실행으로 넘어갈지, 라운드를 더 할지, 여기서 마칠지 물어봅니다. 오케스트라는 끌 때까지 유지됩니다."}
       </p>
     </div>
   );

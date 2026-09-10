@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   MAX_WORKSPACE_TABS,
+  selectStartupRestoreView,
   useWorkspaceTabStore,
   workspaceTabViewKey,
   type WorkspaceTabView,
@@ -13,8 +14,19 @@ const threadView = (threadId: string): WorkspaceTabView => ({
   threadId,
 });
 
+const controlCenterView = (projectId: string): WorkspaceTabView => ({
+  kind: "control-center",
+  environmentId: "env-1",
+  projectId,
+});
+
 function resetStore() {
-  useWorkspaceTabStore.setState({ tabs: [], activeTabId: null, seenTurnByTabId: {} });
+  useWorkspaceTabStore.setState({
+    tabs: [],
+    activeTabId: null,
+    seenTurnByTabId: {},
+    lastChatView: null,
+  });
 }
 
 describe("workspaceTabStore", () => {
@@ -157,6 +169,56 @@ describe("workspaceTabStore", () => {
     expect(state.tabs.find((tab) => tab.id === activeTabId)?.view).toEqual(
       threadView("thread-new"),
     );
+  });
+
+  it("remembers the conversation the control center was opened from", () => {
+    // Same-folder navigation retargets the tab, so the conversation is gone
+    // from the tabs — the sidebar's "대화로 돌아가기" needs this to return to.
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a"), { projectKey: "env-1:folder-a" });
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(controlCenterView("folder-a"), { projectKey: "env-1:folder-a" });
+
+    const state = useWorkspaceTabStore.getState();
+    expect(state.tabs.map((tab) => tab.view)).toEqual([controlCenterView("folder-a")]);
+    expect(state.lastChatView).toEqual(threadView("thread-a"));
+  });
+
+  it("forgets the conversation to go back to once its screen is gone", () => {
+    useWorkspaceTabStore.getState().syncRouteView(threadView("thread-a"));
+    useWorkspaceTabStore.getState().closeTabsForView(workspaceTabViewKey(threadView("thread-a")));
+    expect(useWorkspaceTabStore.getState().lastChatView).toBeNull();
+  });
+
+  it("follows a promoted draft to its thread", () => {
+    const draft: WorkspaceTabView = { kind: "draft", draftId: "draft-a" };
+    useWorkspaceTabStore.getState().syncRouteView(draft);
+    useWorkspaceTabStore
+      .getState()
+      .retargetTabView(workspaceTabViewKey(draft), threadView("thread-a"));
+    expect(useWorkspaceTabStore.getState().lastChatView).toEqual(threadView("thread-a"));
+  });
+
+  it("reopens the screen the window was left on", () => {
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(threadView("thread-a"), { projectKey: "env-1:folder-a" });
+    useWorkspaceTabStore
+      .getState()
+      .syncRouteView(controlCenterView("folder-a"), { projectKey: "env-1:folder-a" });
+
+    expect(selectStartupRestoreView(useWorkspaceTabStore.getState())).toEqual(
+      controlCenterView("folder-a"),
+    );
+    // With no tabs left it still knows the conversation.
+    useWorkspaceTabStore.setState({ tabs: [], activeTabId: null });
+    expect(selectStartupRestoreView(useWorkspaceTabStore.getState())).toEqual(
+      threadView("thread-a"),
+    );
+    useWorkspaceTabStore.setState({ lastChatView: null });
+    expect(selectStartupRestoreView(useWorkspaceTabStore.getState())).toBeNull();
   });
 
   it("drops every tab that shows a deleted view", () => {

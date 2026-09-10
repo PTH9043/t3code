@@ -1,5 +1,5 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -14,6 +14,8 @@ import {
   useProjects,
   useThreadShells,
 } from "../state/entities";
+import { navigateToTabView } from "../components/tabs/navigateToTabView";
+import { takeStartupRestoreView } from "../workspaceTabStore";
 import { useEnvironments } from "../state/environments";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
@@ -35,14 +37,26 @@ function ChatIndexRouteView() {
  * Landing on the index route drops straight into a draft thread for the most
  * recently active project, so the first screen is a prompt instead of a dead
  * end. Falls back to an add-project hero when no project exists yet.
+ *
+ * A cold start is the exception: the desktop shell opens the app at its bare
+ * origin, so a launch or reload arrives here even though the person was in
+ * the middle of something. That screen gets reopened instead — starting a
+ * new draft on top of their work is what "이상한 곳" felt like.
  */
 function IndexDraftLanding() {
+  const navigate = useNavigate();
   const projects = useProjects();
   const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
   const startingRef = useRef(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
+  const startupView = useMemo(() => takeStartupRestoreView(), []);
+
+  useEffect(() => {
+    if (startupView === null) return;
+    navigateToTabView(navigate, startupView, { replace: true });
+  }, [navigate, startupView]);
 
   const mostRecentProject = useMemo(
     () =>
@@ -53,7 +67,7 @@ function IndexDraftLanding() {
   );
 
   useEffect(() => {
-    if (mostRecentProject === null || startingRef.current) {
+    if (startupView !== null || mostRecentProject === null || startingRef.current) {
       return;
     }
     startingRef.current = true;
@@ -63,9 +77,9 @@ function IndexDraftLanding() {
       startingRef.current = false;
       setStartState((state) => ({ ...state, failed: true }));
     });
-  }, [handleNewThread, mostRecentProject, startState.retryRequest]);
+  }, [handleNewThread, mostRecentProject, startState.retryRequest, startupView]);
 
-  if (!bootstrapped) {
+  if (startupView !== null || !bootstrapped) {
     return null;
   }
   if (mostRecentProject !== null) {

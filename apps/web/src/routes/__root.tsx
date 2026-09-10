@@ -297,7 +297,12 @@ function errorMessage(error: unknown): string {
 
 function errorDetails(error: unknown): string {
   if (error instanceof Error) {
-    return error.stack ?? error.message;
+    // Structured errors build `message` from a getter, so V8 leaves it out of
+    // the captured stack. Print it (and the cause chain) alongside the stack so
+    // the panel says what actually failed instead of only where.
+    return [error.message, error.stack ?? "", describeErrorCauseChain(error)]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n");
   }
 
   if (typeof error === "string") {
@@ -309,6 +314,19 @@ function errorDetails(error: unknown): string {
   } catch {
     return "추가 오류 세부 정보가 없습니다.";
   }
+}
+
+function describeErrorCauseChain(error: Error): string {
+  const lines: string[] = [];
+  let cause: unknown = error.cause;
+  // Bounded so a self-referential cause chain cannot hang the error screen.
+  for (let depth = 0; depth < 5 && cause !== undefined && cause !== null; depth += 1) {
+    lines.push(
+      `caused by: ${cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)}`,
+    );
+    cause = cause instanceof Error ? cause.cause : undefined;
+  }
+  return lines.join("\n");
 }
 
 function AuthenticatedTracingBootstrap() {

@@ -8,6 +8,7 @@
  */
 import {
   CommandId,
+  ConversationHandoffMode,
   IsoDateTime,
   ModelSelection,
   NonNegativeInt,
@@ -25,6 +26,7 @@ import type * as Effect from "effect/Effect";
 import type { ProjectionRepositoryError } from "../Errors.ts";
 
 export const ProjectionThread = Schema.Struct({
+  handoffMode: Schema.optional(ConversationHandoffMode),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -33,6 +35,8 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  /** Set on the node conversations an orchestra run executes in. */
+  orchestraRunThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

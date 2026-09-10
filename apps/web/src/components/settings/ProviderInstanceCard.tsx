@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   isProviderDriverKind,
   type ProviderInstanceConfig,
@@ -148,6 +148,7 @@ interface ProviderInstanceCardProps {
    * omit it.
    */
   readonly headerAction?: ReactNode | undefined;
+  readonly authAction?: ReactNode | undefined;
   readonly hiddenModels: ReadonlyArray<string>;
   readonly favoriteModels: ReadonlyArray<string>;
   readonly modelOrder: ReadonlyArray<string>;
@@ -192,6 +193,7 @@ export function ProviderInstanceCard({
   onUpdate,
   onDelete,
   headerAction,
+  authAction,
   hiddenModels,
   favoriteModels,
   modelOrder,
@@ -356,6 +358,7 @@ export function ProviderInstanceCard({
 
   const titleTailNode = (
     <>
+      {authAction}
       {headerAction ? (
         <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center">
           {headerAction}

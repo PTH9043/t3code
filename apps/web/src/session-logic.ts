@@ -1,6 +1,7 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
+import { isCompactedActivityPayload } from "@t3tools/client-runtime/state/threads";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
@@ -49,6 +50,12 @@ export const PROVIDER_OPTIONS: Array<{
   {
     value: ProviderDriverKind.make("grok"),
     label: "Grok",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: ProviderDriverKind.make("gemini"),
+    label: "Gemini",
     available: true,
     pickerSidebarBadge: "new",
   },
@@ -761,6 +768,12 @@ export function deriveTurnPlans(
   const byTurn = new Map<string, TurnPlanEntry>();
   for (const activity of ordered) {
     if (activity.kind !== "turn.plan.updated") {
+      continue;
+    }
+    if (isCompactedActivityPayload(activity)) {
+      // Compaction blanked this row's steps; that is "unknown", not "withdrawn".
+      // Reading it as a withdrawal wiped the chip off every turn once the thread
+      // passed the payload retention window.
       continue;
     }
     const plan = planStateFromActivity(activity);

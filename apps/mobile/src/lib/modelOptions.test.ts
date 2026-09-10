@@ -10,6 +10,35 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("labels the default Gemini instance by provider name", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "gemini",
+          driver: "gemini",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "auto",
+              name: "Auto",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    expect(buildModelOptions(config, null)).toMatchObject([
+      {
+        providerLabel: "Gemini",
+        providerDriver: "gemini",
+      },
+    ]);
+  });
+
   it("folds legacy models into a provider-scoped menu", () => {
     const config = {
       providers: [

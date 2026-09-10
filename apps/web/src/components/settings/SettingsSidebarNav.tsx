@@ -35,6 +35,7 @@ import {
   useSidebar,
 } from "../ui/sidebar";
 import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
+import { navigateToTabView } from "../tabs/navigateToTabView";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
   searchSettings,
@@ -42,6 +43,7 @@ import {
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
+import { useWorkspaceTabStore } from "~/workspaceTabStore";
 
 const SETTINGS_SECTION_ICONS: Readonly<
   Record<SettingsPath, ComponentType<{ className?: string }>>
@@ -184,6 +186,13 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     }
     if (canGoBack) {
       window.history.back();
+      return;
+    }
+    // Opened straight into settings (deep link, restored window): the index
+    // route would start a fresh draft, so prefer the last conversation.
+    const lastChatView = useWorkspaceTabStore.getState().lastChatView;
+    if (lastChatView) {
+      navigateToTabView(navigate, lastChatView);
       return;
     }
     void navigate({ to: "/" });

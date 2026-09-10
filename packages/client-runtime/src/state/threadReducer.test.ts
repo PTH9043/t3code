@@ -281,6 +281,24 @@ describe("applyThreadDetailEvent", () => {
   });
 
   describe("thread.meta-updated", () => {
+    it("applies opt-in and reversal without changing the selected model", () => {
+      let thread = baseThread;
+      for (const handoffMode of ["compact", "standard"] as const) {
+        const result = applyThreadDetailEvent(thread, {
+          ...baseEventFields,
+          sequence: 5,
+          occurredAt: "2026-04-01T05:00:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: thread.id,
+          type: "thread.meta-updated",
+          payload: { threadId: thread.id, handoffMode, updatedAt: "2026-04-01T05:00:00.000Z" },
+        });
+        expect(result.kind).toBe("updated");
+        if (result.kind === "updated") thread = result.thread;
+        expect(thread.handoffMode).toBe(handoffMode);
+        expect(thread.modelSelection).toEqual(baseThread.modelSelection);
+      }
+    });
     it("patches title and branch", () => {
       const result = applyThreadDetailEvent(baseThread, {
         ...baseEventFields,
@@ -374,6 +392,48 @@ describe("applyThreadDetailEvent", () => {
       if (result.kind === "updated") {
         expect(result.thread.messages).toHaveLength(1);
         expect(result.thread.messages[0]?.text).toBe("Hello, world!");
+      }
+    });
+
+    it("caps retained message rows so an ever-appending thread stays bounded", () => {
+      const existingMessages = Array.from({ length: 1000 }, (_, index) => ({
+        id: MessageId.make(`bulk-${index}`),
+        role: "assistant" as const,
+        text: `report ${index}`,
+        turnId: TurnId.make("turn-1"),
+        streaming: false,
+        createdAt: "2026-04-01T06:00:00.000Z",
+        updatedAt: "2026-04-01T06:00:00.000Z",
+      }));
+
+      const result = applyThreadDetailEvent(
+        { ...baseThread, messages: existingMessages },
+        {
+          ...baseEventFields,
+          sequence: 7,
+          occurredAt: "2026-04-01T06:01:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.message-sent",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            messageId: MessageId.make("bulk-1000"),
+            role: "assistant",
+            text: "report 1000",
+            turnId: TurnId.make("turn-1"),
+            streaming: false,
+            createdAt: "2026-04-01T06:01:00.000Z",
+            updatedAt: "2026-04-01T06:01:00.000Z",
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages).toHaveLength(1000);
+        // Oldest row evicted, newest appended row kept.
+        expect(result.thread.messages[0]?.id).toBe("bulk-1");
+        expect(result.thread.messages[999]?.id).toBe("bulk-1000");
       }
     });
 
@@ -683,6 +743,223 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("compacts heavy payloads of activities older than the retention window while keeping rows, summaries, and routing markers", () => {
+      // 350 existing rows so appending pushes the oldest well past the 300-row
+      // payload-retention window. Each carries a heavy body plus routing markers.
+      const heavy = (index: number) => ({
+        data: { rawOutput: { content: "x".repeat(5000) }, item: { big: "y".repeat(5000) } },
+        detail: "z".repeat(5000),
+        agentId: `agent-${index}`,
+        timelineBypass: true,
+        taskId: `task-${index}`,
+      });
+      const existingActivities = Array.from({ length: 350 }, (_, index) => ({
+        id: EventId.make(`activity-${index}`),
+        tone: "tool" as const,
+        kind: "command",
+        summary: `Ran command ${index}`,
+        payload: heavy(index),
+        turnId: TurnId.make("turn-1"),
+        sequence: index,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      }));
+      const result = applyThreadDetailEvent(
+        { ...baseThread, activities: existingActivities },
+        {
+          ...baseEventFields,
+          sequence: 350,
+          occurredAt: "2026-04-01T11:01:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("activity-350"),
+              tone: "tool",
+              kind: "command",
+              summary: "Ran command 350",
+              payload: heavy(350),
+              turnId: TurnId.make("turn-1"),
+              sequence: 350,
+              createdAt: "2026-04-01T11:01:00.000Z",
+            },
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      const rows = result.thread.activities;
+      // No rows dropped — the row and its summary survive.
+      expect(rows).toHaveLength(351);
+      expect(rows[0]?.id).toBe("activity-0");
+      expect(rows[0]?.summary).toBe("Ran command 0");
+      // Oldest row: heavy body blanked, routing markers kept.
+      const oldest = rows[0]?.payload as Record<string, unknown>;
+      expect(oldest.data).toBeUndefined();
+      expect(oldest.detail).toBeUndefined();
+      expect(oldest.agentId).toBe("agent-0");
+      expect(oldest.timelineBypass).toBe(true);
+      expect(oldest.taskId).toBe("task-0");
+      // Newest rows (inside the window) keep the full heavy payload.
+      const newest = rows[350]?.payload as Record<string, unknown>;
+      expect((newest.data as Record<string, unknown>)?.rawOutput).toBeDefined();
+      expect(newest.detail).toBe("z".repeat(5000));
+    });
+
+    it("pools one shared frozen payload for compacted rows that have no markers", () => {
+      const existingActivities = Array.from({ length: 350 }, (_, index) => ({
+        id: EventId.make(`plain-${index}`),
+        tone: "tool" as const,
+        kind: "command",
+        summary: `Ran command ${index}`,
+        payload: { data: { rawOutput: { content: "x".repeat(4000) } } },
+        turnId: TurnId.make("turn-1"),
+        sequence: index,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      }));
+      const result = applyThreadDetailEvent(
+        { ...baseThread, activities: existingActivities },
+        {
+          ...baseEventFields,
+          sequence: 350,
+          occurredAt: "2026-04-01T11:01:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("plain-350"),
+              tone: "tool",
+              kind: "command",
+              summary: "Ran command 350",
+              payload: { data: { rawOutput: { content: "x".repeat(4000) } } },
+              turnId: TurnId.make("turn-1"),
+              sequence: 350,
+              createdAt: "2026-04-01T11:01:00.000Z",
+            },
+          },
+        },
+      );
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      const rows = result.thread.activities;
+      // Two different old rows must share the SAME payload object (pooled).
+      expect(rows[0]?.payload).toBe(rows[1]?.payload);
+      expect(Object.isFrozen(rows[0]?.payload)).toBe(true);
+    });
+
+    it("caps retained activity rows while keeping the most recent resolvable context-window past the cap", () => {
+      // One resolvable context-window row up front, then enough plain rows to
+      // push it far past the 2000-row cap.
+      const rows = [
+        {
+          id: EventId.make("cw-old"),
+          tone: "info" as const,
+          kind: "context-window.updated",
+          summary: "ctx",
+          payload: { usedTokens: 4242, maxTokens: 200000 },
+          turnId: TurnId.make("turn-0"),
+          sequence: 0,
+          createdAt: "2026-04-01T10:00:00.000Z",
+        },
+        ...Array.from({ length: 2100 }, (_, index) => ({
+          id: EventId.make(`row-${index}`),
+          tone: "tool" as const,
+          kind: "command",
+          summary: `cmd ${index}`,
+          payload: {},
+          turnId: TurnId.make("turn-1"),
+          sequence: index + 1,
+          createdAt: "2026-04-01T11:00:00.000Z",
+        })),
+      ];
+      const result = applyThreadDetailEvent(
+        { ...baseThread, activities: rows },
+        {
+          ...baseEventFields,
+          sequence: 2200,
+          occurredAt: "2026-04-01T11:05:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("row-2100"),
+              tone: "tool",
+              kind: "command",
+              summary: "cmd 2100",
+              payload: {},
+              turnId: TurnId.make("turn-1"),
+              sequence: 2102,
+              createdAt: "2026-04-01T11:05:00.000Z",
+            },
+          },
+        },
+      );
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      const kept = result.thread.activities;
+      // Cap holds (2000 tail + the preserved context-window survivor).
+      expect(kept.length).toBeLessThanOrEqual(2000 + 1);
+      expect(kept.length).toBeGreaterThan(1900);
+      const cw = kept.find((a) => a.kind === "context-window.updated");
+      expect(cw?.id).toBe("cw-old");
+      expect((cw?.payload as Record<string, unknown> | undefined)?.usedTokens).toBe(4242);
+      // Oldest plain rows were evicted.
+      expect(kept.some((a) => a.id === "row-0")).toBe(false);
+      expect(kept.some((a) => a.id === "row-2100")).toBe(true);
+    });
+
+    it("never compacts context-window.updated payloads so resolution keeps working", () => {
+      const existingActivities = Array.from({ length: 350 }, (_, index) => ({
+        id: EventId.make(`cw-${index}`),
+        tone: "info" as const,
+        kind: "context-window.updated",
+        summary: `context ${index}`,
+        payload: { usedTokens: 1000 + index, maxTokens: 200000 },
+        turnId: TurnId.make("turn-1"),
+        sequence: index,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      }));
+      const result = applyThreadDetailEvent(
+        { ...baseThread, activities: existingActivities },
+        {
+          ...baseEventFields,
+          sequence: 350,
+          occurredAt: "2026-04-01T11:01:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("cw-350"),
+              tone: "info",
+              kind: "context-window.updated",
+              summary: "context 350",
+              payload: { usedTokens: 1350, maxTokens: 200000 },
+              turnId: TurnId.make("turn-1"),
+              sequence: 350,
+              createdAt: "2026-04-01T11:01:00.000Z",
+            },
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      // The append supersedes earlier resolvable context-window rows for the
+      // same turn, leaving one; it must retain its real usedTokens (never blanked).
+      const cw = result.thread.activities.filter((a) => a.kind === "context-window.updated");
+      expect(cw.length).toBeGreaterThanOrEqual(1);
+      const latest = cw[cw.length - 1]?.payload as Record<string, unknown>;
+      expect(latest.usedTokens).toBe(1350);
+    });
+
     it("appends an in-order row without touching earlier rows, and re-sorts a late one", () => {
       const row = (id: string, sequence: number) => ({
         id: EventId.make(id),
@@ -941,6 +1218,108 @@ describe("applyThreadDetailEvent", () => {
         },
       } as any);
       expect(result.kind).toBe("unchanged");
+    });
+  });
+
+  describe("row caps and paginated history", () => {
+    const MESSAGE_ROW_CAP = 1000;
+    const ACTIVITY_ROW_CAP = 2000;
+
+    const messageAt = (index: number): OrchestrationThread["messages"][number] => ({
+      id: MessageId.make(`old-msg-${index}`),
+      role: "assistant",
+      text: `line ${index}`,
+      turnId: null,
+      streaming: false,
+      createdAt: `2026-04-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      updatedAt: `2026-04-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+    });
+    const activityAt = (index: number): OrchestrationThread["activities"][number] => ({
+      id: EventId.make(`old-activity-${index}`),
+      kind: "tool.completed",
+      tone: "info",
+      summary: "old",
+      payload: { output: "verbose" },
+      turnId: null,
+      createdAt: `2026-04-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+    });
+    const messageSent = {
+      ...baseEventFields,
+      sequence: 9999,
+      occurredAt: "2026-04-01T09:00:00.000Z",
+      aggregateKind: "thread" as const,
+      aggregateId: ThreadId.make("thread-1"),
+      type: "thread.message-sent" as const,
+      payload: {
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("fresh-msg"),
+        role: "user" as const,
+        text: "newest",
+        turnId: null,
+        streaming: false,
+        createdAt: "2026-04-01T09:00:00.000Z",
+        updatedAt: "2026-04-01T09:00:00.000Z",
+      },
+    };
+    const activityAppended = {
+      ...baseEventFields,
+      sequence: 9998,
+      occurredAt: "2026-04-01T09:00:00.000Z",
+      aggregateKind: "thread" as const,
+      aggregateId: ThreadId.make("thread-1"),
+      type: "thread.activity-appended" as const,
+      payload: {
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("fresh-activity"),
+          kind: "tool.completed",
+          tone: "info" as const,
+          summary: "newest",
+          payload: { output: "fresh" },
+          turnId: null,
+          createdAt: "2026-04-01T09:00:00.000Z",
+        },
+      },
+    };
+
+    it("caps messages by default, dropping the oldest", () => {
+      const thread = {
+        ...baseThread,
+        messages: Array.from({ length: MESSAGE_ROW_CAP }, (_, index) => messageAt(index)),
+      };
+      const result = applyThreadDetailEvent(thread, messageSent as never);
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      expect(result.thread.messages).toHaveLength(MESSAGE_ROW_CAP);
+      expect(result.thread.messages.some((m) => m.id === "old-msg-0")).toBe(false);
+    });
+
+    it("keeps loaded history when capRows is false (older page merged)", () => {
+      const thread = {
+        ...baseThread,
+        messages: Array.from({ length: MESSAGE_ROW_CAP }, (_, index) => messageAt(index)),
+      };
+      const result = applyThreadDetailEvent(thread, messageSent as never, { capRows: false });
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      // The just-loaded older page (old-msg-0) survives the new message instead
+      // of being trimmed into an unreachable gap.
+      expect(result.thread.messages).toHaveLength(MESSAGE_ROW_CAP + 1);
+      expect(result.thread.messages.some((m) => m.id === "old-msg-0")).toBe(true);
+    });
+
+    it("caps activities by default but retains them with capRows false", () => {
+      const thread = {
+        ...baseThread,
+        activities: Array.from({ length: ACTIVITY_ROW_CAP }, (_, index) => activityAt(index)),
+      };
+      const capped = applyThreadDetailEvent(thread, activityAppended as never);
+      const kept = applyThreadDetailEvent(thread, activityAppended as never, { capRows: false });
+      expect(capped.kind === "updated" && capped.thread.activities.length).toBe(ACTIVITY_ROW_CAP);
+      expect(kept.kind === "updated" && kept.thread.activities.length).toBe(ACTIVITY_ROW_CAP + 1);
+      if (kept.kind === "updated") {
+        expect(kept.thread.activities.some((a) => a.id === "old-activity-0")).toBe(true);
+      }
     });
   });
 });

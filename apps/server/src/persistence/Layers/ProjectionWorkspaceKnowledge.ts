@@ -3,6 +3,7 @@ import {
   WorkspaceKnowledgeOrigin,
   WorkspaceKnowledgeStatus,
   WorkspaceKnowledgeKind,
+  WorkspaceResearchRecord,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -27,6 +28,7 @@ const ProjectionWorkspaceKnowledgeDbRow = WorkspaceKnowledgeItem.mapFields(
     status: WorkspaceKnowledgeStatus,
     origin: WorkspaceKnowledgeOrigin,
     tags: Schema.fromJsonString(Schema.Array(Schema.String)),
+    research: Schema.NullOr(Schema.fromJsonString(WorkspaceResearchRecord)),
   }),
 );
 
@@ -45,6 +47,9 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         status,
         origin,
         relative_folder,
+        scope,
+        applies_to_folder,
+        research_json,
         tags_json,
         original_chars,
         stored_chars,
@@ -59,6 +64,9 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         ${item.status},
         ${item.origin},
         ${item.relativeFolder},
+        ${item.scope ?? "project"},
+        ${item.appliesToFolder ?? null},
+        ${item.research == null ? null : JSON.stringify(item.research)},
         ${JSON.stringify(item.tags)},
         ${item.originalChars},
         ${item.storedChars},
@@ -73,6 +81,9 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         status = excluded.status,
         origin = excluded.origin,
         relative_folder = excluded.relative_folder,
+        scope = excluded.scope,
+        applies_to_folder = excluded.applies_to_folder,
+        research_json = excluded.research_json,
         tags_json = excluded.tags_json,
         original_chars = excluded.original_chars,
         stored_chars = excluded.stored_chars,
@@ -120,6 +131,9 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         status,
         origin,
         relative_folder AS "relativeFolder",
+        scope,
+        applies_to_folder AS "appliesToFolder",
+        research_json AS "research",
         tags_json AS "tags",
         original_chars AS "originalChars",
         stored_chars AS "storedChars",

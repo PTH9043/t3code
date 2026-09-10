@@ -722,15 +722,16 @@ describe("DesktopBackendConfiguration", () => {
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-desktop-backend-config-test-",
       });
-      const resourcesPath = `${baseDir}/resources`;
-      const dirname = `${resourcesPath}/app.asar/apps/desktop/dist-electron`;
-      const embeddedMonitorPath = `${resourcesPath}/app.asar/apps/desktop/prod-resources/resource-monitor/t3-resource-monitor`;
-      const monitorPath = `${resourcesPath}/resource-monitor/t3-resource-monitor`;
-      yield* fileSystem.makeDirectory(
-        `${resourcesPath}/app.asar/apps/desktop/prod-resources/resource-monitor`,
-        { recursive: true },
+      const path = yield* Path.Path;
+      const resourcesPath = path.join(baseDir, "resources");
+      const dirname = path.join(resourcesPath, "app.asar/apps/desktop/dist-electron");
+      const embeddedMonitorPath = path.join(
+        resourcesPath,
+        "app.asar/apps/desktop/prod-resources/resource-monitor/t3-resource-monitor",
       );
-      yield* fileSystem.makeDirectory(`${resourcesPath}/resource-monitor`, {
+      const monitorPath = path.join(resourcesPath, "resource-monitor/t3-resource-monitor");
+      yield* fileSystem.makeDirectory(path.dirname(embeddedMonitorPath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(monitorPath), {
         recursive: true,
       });
       yield* fileSystem.writeFileString(embeddedMonitorPath, "embedded");
@@ -751,7 +752,7 @@ describe("DesktopBackendConfiguration", () => {
             Layer.provideMerge(DesktopWslEnvironment.layerTest()),
             Layer.provideMerge(
               makeEnvironmentLayer(baseDir, {
-                appPath: `${resourcesPath}/app.asar`,
+                appPath: path.join(resourcesPath, "app.asar"),
                 dirname,
                 isPackaged: true,
                 resourcesPath,

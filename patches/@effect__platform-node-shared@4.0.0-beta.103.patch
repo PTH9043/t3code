@@ -1,5 +1,5 @@
 diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
-index 29b02311c2101b01e5ad991f2e9375e699f2340c..5e19b628af40e377e89ab96eb663b4e65019dcd0 100644
+index 29b0231..bad323f 100644
 --- a/dist/NodeChildProcessSpawner.js
 +++ b/dist/NodeChildProcessSpawner.js
 @@ -274,9 +274,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
@@ -17,7 +17,17 @@ index 29b02311c2101b01e5ad991f2e9375e699f2340c..5e19b628af40e377e89ab96eb663b4e6
        return;
      }
      try {
-@@ -349,7 +351,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+@@ -341,6 +343,9 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+             cwd,
+             env,
+             stdio,
++            // PATCHED (2026-08-24): git/console children flashed a conhost window on
++            // Windows because Electron has no console; hide it like windowsHide.
++            windowsHide: true,
+             detached: cmd.options.detached ?? process.platform !== "win32",
+             shell: cmd.options.shell
+           }), Effect.fnUntraced(function* ([childProcess, exitSignal]) {
+@@ -349,7 +354,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
              if (exited) {
                // Process already exited, check if children need cleanup
                const [code] = yield* Deferred.await(exitSignal);

@@ -1,5 +1,6 @@
 import {
   EventId,
+  MessageId,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -22,6 +23,10 @@ import {
   ProjectionThreadActivityRepository,
   type ProjectionThreadActivity,
 } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import {
+  ProjectionThreadMessageRepository,
+  type ProjectionThreadMessage,
+} from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import {
   OrchestrationEngineService,
@@ -104,10 +109,28 @@ function activity(input: {
   };
 }
 
+function recoveryMessage(input: {
+  readonly id: string;
+  readonly threadId: ThreadId;
+  readonly createdAt: string;
+}): ProjectionThreadMessage {
+  return {
+    messageId: MessageId.make(input.id),
+    threadId: input.threadId,
+    turnId: null,
+    role: "user",
+    text: "[자동 복구] 서버가 재시작되면서 직전 턴이 중단되었습니다.",
+    isStreaming: false,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+  };
+}
+
 function makeHarness(input: {
   readonly threads: ReadonlyArray<OrchestrationThreadShell>;
   readonly resumableRuns?: ReadonlyArray<WorkspaceCollaborationRun>;
   readonly activities?: ReadonlyArray<ProjectionThreadActivity>;
+  readonly messages?: ReadonlyArray<ProjectionThreadMessage>;
 }) {
   return Effect.gen(function* () {
     const dispatchedRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
@@ -135,7 +158,13 @@ function makeHarness(input: {
         Effect.succeed((input.activities ?? []).filter((row) => row.threadId === threadId)),
     } as unknown as ProjectionThreadActivityRepository["Service"];
 
+    const messageRepository = {
+      listByThreadId: ({ threadId }: { readonly threadId: ThreadId }) =>
+        Effect.succeed((input.messages ?? []).filter((row) => row.threadId === threadId)),
+    } as unknown as ProjectionThreadMessageRepository["Service"];
+
     const layer = SessionRecoveryReactorLive.pipe(
+      Layer.provideMerge(Layer.succeed(ProjectionThreadMessageRepository, messageRepository)),
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
       Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
       Layer.provideMerge(Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, repository)),
@@ -321,6 +350,41 @@ it.effect("does not inject a recovery turn into a resumable run's running attemp
   }),
 );
 
+it.effect(
+  "does not inject a recovery turn into an orchestra node's fixed thread while it runs",
+  () =>
+    Effect.gen(function* () {
+      const nodeThreadId = ThreadId.make("thread-orchestra-node");
+      const harness = yield* makeHarness({
+        threads: [
+          threadShell({
+            id: "thread-orchestra-node",
+            session: session({
+              threadId: nodeThreadId,
+              status: "running",
+              activeTurnId: TurnId.make("turn-n"),
+            }),
+          }),
+        ],
+        resumableRuns: [
+          {
+            id: WorkspaceCollaborationRunId.make("run-o"),
+            projectId,
+            meeting: null,
+            graph: {
+              nodes: [{ status: "running", threadId: nodeThreadId, attempts: [] }],
+            },
+            steps: [],
+          } as unknown as WorkspaceCollaborationRun,
+        ],
+      });
+      yield* runSweep(harness);
+
+      const dispatched = yield* Ref.get(harness.dispatchedRef);
+      expect(dispatched.map((command) => command.type)).toEqual(["thread.session.stop"]);
+    }),
+);
+
 it.effect("closes the questions the dead session left open and tells the seat to ask again", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread-asking");
@@ -494,5 +558,76 @@ it.effect("marks background monitors and a pending self-wakeup as lost, and tell
     if (turnStart?.type !== "thread.turn.start") throw new Error("expected a turn start");
     expect(turnStart.message.text).toContain("백그라운드 감시 2개");
     expect(turnStart.message.text).toContain("자동 깨어남");
+  }),
+);
+
+// The storm guard measures against the wall clock, which `it.effect`'s
+// TestClock would freeze at the epoch — hence `it.live` for these two.
+it.live("holds the recovery turn once restarts keep killing the same thread", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-storm");
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const harness = yield* makeHarness({
+      threads: [
+        threadShell({
+          id: "thread-storm",
+          session: session({ threadId, status: "running", activeTurnId: TurnId.make("turn-9") }),
+        }),
+      ],
+      messages: [1, 2, 3].map((index) =>
+        recoveryMessage({
+          id: `recovery-${index}`,
+          threadId,
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(now - index * 60_000)),
+        }),
+      ),
+    });
+    yield* runSweep(harness);
+
+    const dispatched = yield* Ref.get(harness.dispatchedRef);
+    expect(dispatched.map((command) => command.type)).toEqual([
+      "thread.session.stop",
+      "thread.activity.append",
+    ]);
+    const marker = dispatched[1];
+    if (marker?.type !== "thread.activity.append") throw new Error("expected a hold marker");
+    expect(marker.activity.kind).toBe("session.recovery-held");
+    expect(marker.activity.summary).toContain("자동 복구 보류");
+  }),
+);
+
+it.live("recovery turns outside the storm window do not hold the thread", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-old-storm");
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const harness = yield* makeHarness({
+      threads: [
+        threadShell({
+          id: "thread-old-storm",
+          session: session({ threadId, status: "running", activeTurnId: TurnId.make("turn-9") }),
+        }),
+      ],
+      messages: [
+        recoveryMessage({
+          id: "recovery-recent",
+          threadId,
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(now - 60_000)),
+        }),
+        ...[1, 2, 3].map((index) =>
+          recoveryMessage({
+            id: `recovery-old-${index}`,
+            threadId,
+            createdAt: DateTime.formatIso(DateTime.makeUnsafe(now - (20 + index) * 60_000)),
+          }),
+        ),
+      ],
+    });
+    yield* runSweep(harness);
+
+    const dispatched = yield* Ref.get(harness.dispatchedRef);
+    expect(dispatched.map((command) => command.type)).toEqual([
+      "thread.session.stop",
+      "thread.turn.start",
+    ]);
   }),
 );

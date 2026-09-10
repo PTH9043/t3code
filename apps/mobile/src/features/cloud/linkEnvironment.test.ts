@@ -1077,7 +1077,7 @@ describe("mobile cloud link environment client", () => {
       expect(error).toMatchObject({
         _tag: "CloudEnvironmentLinkError",
         message:
-          "https://relay.example.test/v1/environments/env-1/connect failed: Relay rejected the DPoP proof.",
+          "https://relay.example.test/v1/environments/env-1/connect failed: 릴레이가 DPoP 증명을 거부했습니다.",
         traceId: "trace-connect",
       });
     }),

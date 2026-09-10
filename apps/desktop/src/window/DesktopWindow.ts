@@ -11,6 +11,7 @@ import * as Electron from "electron";
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
@@ -51,6 +52,7 @@ type DesktopWindowRuntimeServices =
   | DesktopEnvironment.DesktopEnvironment
   | DesktopAssets.DesktopAssets
   | DesktopAppSettings.DesktopAppSettings
+  | ElectronDialog.ElectronDialog
   | ElectronMenu.ElectronMenu
   | ElectronShell.ElectronShell
   | ElectronTheme.ElectronTheme
@@ -255,6 +257,7 @@ function bindFirstRevealTrigger(
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const assets = yield* DesktopAssets.DesktopAssets;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
@@ -676,6 +679,14 @@ export const make = Effect.gen(function* () {
             recovering: shouldRecover,
           });
           if (!shouldRecover) {
+            // A destroyed window or a non-crash exit is an ordinary teardown,
+            // not an exhausted recovery.
+            if (recoverable && !window.isDestroyed()) {
+              yield* electronDialog.showErrorBox(
+                "창이 반복해서 다운되어 복구하지 못했습니다",
+                `마지막 종료 사유: ${details.reason} (exitCode ${details.exitCode})\n앱을 다시 시작해 주세요.`,
+              );
+            }
             return;
           }
           rendererRecoveryTimestamps.push(now);

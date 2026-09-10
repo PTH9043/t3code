@@ -1,9 +1,9 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
 import type * as Electron from "electron";
@@ -86,7 +86,9 @@ const makeEnvironmentLayer = (overrides: TestEnvironmentInput = {}) => {
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
-        NodeServices.layer,
+        // The simulated host is darwin, so pin POSIX path semantics instead
+        // of inheriting the real host's separator.
+        Path.layer,
         DesktopConfig.layerTest({
           ...env,
         }),

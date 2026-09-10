@@ -27,6 +27,7 @@ import {
   KEY_DOWN_COMMAND,
   KEY_ENTER_COMMAND,
   KEY_TAB_COMMAND,
+  COMPOSITION_END_COMMAND,
   COMMAND_PRIORITY_HIGH,
   COMMAND_PRIORITY_LOW,
   KEY_BACKSPACE_COMMAND,
@@ -1553,6 +1554,13 @@ function ComposerPromptEditorInner({
     expandedCursor: expandCollapsedComposerCursor(value, initialCursor),
     terminalContextIds: terminalContexts.map((context) => context.id),
   });
+  // Parent state must not rewrite the editor while an IME owns its composing text.
+  const pendingCompositionSnapshotRef = useRef<{
+    value: string;
+    cursor: number;
+    expandedCursor: number;
+    terminalContextIds: string[];
+  } | null>(null);
   const isApplyingControlledUpdateRef = useRef(false);
   const terminalContextActions = useMemo(
     () => ({ onRemoveTerminalContext }),
@@ -1572,6 +1580,16 @@ function ComposerPromptEditorInner({
   }, [disabled, editor]);
 
   useLayoutEffect(() => {
+    // While an IME composition is open the editor holds text the parent has not
+    // been told about yet — `handleEditorChange` withholds it until
+    // COMPOSITION_END so the parent cannot rewrite the composing run. That makes
+    // `value` deliberately stale here, so rewriting the editor from it would
+    // erase whatever is mid-composition. The composition-end handler publishes
+    // the real text, which re-runs this effect with a value that matches.
+    if (editor.isComposing()) {
+      return;
+    }
+
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
     const previousSnapshot = snapshotRef.current;
     const contextsChanged = terminalContextsSignatureRef.current !== terminalContextsSignature;
@@ -1696,54 +1714,92 @@ function ComposerPromptEditorInner({
     [focusAt, readSnapshot],
   );
 
-  const handleEditorChange = useCallback((editorState: EditorState) => {
-    editorState.read(() => {
-      const nextValue = $getRoot().getTextContent();
-      const fallbackCursor = clampCollapsedComposerCursor(nextValue, snapshotRef.current.cursor);
-      const nextCursor = clampCollapsedComposerCursor(
-        nextValue,
-        $readSelectionOffsetFromEditorState(fallbackCursor),
-      );
-      const fallbackExpandedCursor = clampExpandedCursor(
-        nextValue,
-        snapshotRef.current.expandedCursor,
-      );
-      const nextExpandedCursor = clampExpandedCursor(
-        nextValue,
-        $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
-      );
-      const terminalContextIds = collectTerminalContextIds($getRoot());
-      const previousSnapshot = snapshotRef.current;
-      if (
-        previousSnapshot.value === nextValue &&
-        previousSnapshot.cursor === nextCursor &&
-        previousSnapshot.expandedCursor === nextExpandedCursor &&
-        previousSnapshot.terminalContextIds.length === terminalContextIds.length &&
-        previousSnapshot.terminalContextIds.every((id, index) => id === terminalContextIds[index])
-      ) {
-        return;
-      }
-      if (isApplyingControlledUpdateRef.current) {
-        return;
-      }
-      snapshotRef.current = {
-        value: nextValue,
-        cursor: nextCursor,
-        expandedCursor: nextExpandedCursor,
-        terminalContextIds,
-      };
+  const publishEditorSnapshot = useCallback(
+    (nextSnapshot: {
+      value: string;
+      cursor: number;
+      expandedCursor: number;
+      terminalContextIds: string[];
+    }) => {
       const cursorAdjacentToMention =
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "right");
+        isCollapsedCursorAdjacentToInlineToken(nextSnapshot.value, nextSnapshot.cursor, "left") ||
+        isCollapsedCursorAdjacentToInlineToken(nextSnapshot.value, nextSnapshot.cursor, "right");
       onChangeRef.current(
-        nextValue,
-        nextCursor,
-        nextExpandedCursor,
+        nextSnapshot.value,
+        nextSnapshot.cursor,
+        nextSnapshot.expandedCursor,
         cursorAdjacentToMention,
-        terminalContextIds,
+        nextSnapshot.terminalContextIds,
       );
-    });
-  }, []);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    return editor.registerCommand(
+      COMPOSITION_END_COMMAND,
+      () => {
+        queueMicrotask(() => {
+          if (editor.isComposing() || !pendingCompositionSnapshotRef.current) {
+            return;
+          }
+          pendingCompositionSnapshotRef.current = null;
+          publishEditorSnapshot(readSnapshot());
+        });
+        return false;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
+  }, [editor, publishEditorSnapshot, readSnapshot]);
+
+  const handleEditorChange = useCallback(
+    (editorState: EditorState) => {
+      editorState.read(() => {
+        const nextValue = $getRoot().getTextContent();
+        const fallbackCursor = clampCollapsedComposerCursor(nextValue, snapshotRef.current.cursor);
+        const nextCursor = clampCollapsedComposerCursor(
+          nextValue,
+          $readSelectionOffsetFromEditorState(fallbackCursor),
+        );
+        const fallbackExpandedCursor = clampExpandedCursor(
+          nextValue,
+          snapshotRef.current.expandedCursor,
+        );
+        const nextExpandedCursor = clampExpandedCursor(
+          nextValue,
+          $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
+        );
+        const terminalContextIds = collectTerminalContextIds($getRoot());
+        const previousSnapshot = snapshotRef.current;
+        if (
+          previousSnapshot.value === nextValue &&
+          previousSnapshot.cursor === nextCursor &&
+          previousSnapshot.expandedCursor === nextExpandedCursor &&
+          previousSnapshot.terminalContextIds.length === terminalContextIds.length &&
+          previousSnapshot.terminalContextIds.every((id, index) => id === terminalContextIds[index])
+        ) {
+          return;
+        }
+        if (isApplyingControlledUpdateRef.current) {
+          return;
+        }
+        const nextSnapshot = {
+          value: nextValue,
+          cursor: nextCursor,
+          expandedCursor: nextExpandedCursor,
+          terminalContextIds,
+        };
+        snapshotRef.current = nextSnapshot;
+        if (editor.isComposing()) {
+          pendingCompositionSnapshotRef.current = nextSnapshot;
+          return;
+        }
+        pendingCompositionSnapshotRef.current = null;
+        publishEditorSnapshot(nextSnapshot);
+      });
+    },
+    [editor, publishEditorSnapshot],
+  );
 
   return (
     <ComposerTerminalContextActionsContext value={terminalContextActions}>

@@ -102,7 +102,7 @@ describe("formatMeetingProtocolText", () => {
     );
     expect(output).toContain("❓ 이전 기록을 붙여넣어 줄래요?");
     expect(output).toContain("선택지: 예 · 아니오");
-    expect(output).toContain("답장을 보내면 회의가 이어집니다");
+    expect(output).toContain("답장을 보내면 오케스트라가 이어집니다");
   });
 
   it("shows synthesis confidence, conflicts, and memory candidates", () => {

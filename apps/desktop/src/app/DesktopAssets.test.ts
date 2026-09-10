@@ -1,8 +1,8 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
 import * as DesktopAssets from "./DesktopAssets.ts";
@@ -19,7 +19,11 @@ const environmentLayer = DesktopEnvironment.layer({
   isPackaged: true,
   resourcesPath: "/Applications/T3 Code.app/Contents/Resources",
   runningUnderArm64Translation: false,
-}).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({}))));
+}).pipe(
+  // The simulated host is darwin, so pin POSIX path semantics instead of
+  // inheriting the real host's separator.
+  Layer.provide(Layer.mergeAll(Path.layer, DesktopConfig.layerTest({}))),
+);
 
 describe("DesktopAssets", () => {
   it.effect("preserves the failed asset candidate and filesystem cause", () =>

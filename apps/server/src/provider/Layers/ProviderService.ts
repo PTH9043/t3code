@@ -19,6 +19,7 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  ProviderExecutionContext,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -73,6 +74,7 @@ const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
 });
+const isExecutionContext = Schema.is(ProviderExecutionContext);
 
 function toValidationError(
   operation: string,
@@ -213,9 +215,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  const executions = new Map<ThreadId, ProviderExecutionContext>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
-    McpSessionRegistry.issueActiveMcpCredential({ threadId, providerInstanceId }).pipe(
+    McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId,
+      ...(executions.has(threadId)
+        ? { ownerThreadId: executions.get(threadId)!.ownerThreadId }
+        : {}),
+    }).pipe(
       Effect.tap((credential) =>
         credential
           ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))
@@ -228,7 +237,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Effect.succeed(event).pipe(
+    Effect.sync(() => {
+      const execution = executions.get(event.threadId);
+      return execution === undefined
+        ? event
+        : { ...event, threadId: execution.ownerThreadId, execution };
+    }).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
           ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
@@ -339,7 +353,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             },
             event,
           ),
-        ).pipe(Effect.forkScoped);
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
       }
     }
     yield* Ref.set(subscribedAdapters, next);
@@ -529,6 +543,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         schema: ProviderSessionStartInput,
         payload: rawInput,
       });
+      if (parsed.execution !== undefined) {
+        if (
+          String(threadId) !== String(parsed.execution.executionId) ||
+          threadId === parsed.execution.ownerThreadId
+        ) {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "An execution needs its own session key and an owning conversation.",
+          );
+        }
+        executions.set(threadId, parsed.execution);
+      }
 
       const resolvedInstanceId = yield* requireBindingInstanceId(
         "ProviderService.startSession",
@@ -622,6 +648,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
         });
+        if (parsed.execution !== undefined) {
+          yield* directory.upsert({
+            threadId,
+            provider: resolvedProvider,
+            providerInstanceId: resolvedInstanceId,
+            runtimePayload: { execution: parsed.execution },
+          });
+        }
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
           runtimeMode: input.runtimeMode,
@@ -949,6 +983,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const sessions: ProviderSession[] = [];
       for (const session of activeSessions) {
         const binding = bindingsByThreadId.get(session.threadId);
+        const payload = binding?.runtimePayload;
+        if (
+          executions.has(session.threadId) ||
+          (payload !== null &&
+            typeof payload === "object" &&
+            "execution" in payload &&
+            isExecutionContext(payload.execution))
+        )
+          continue;
         if (!binding) {
           sessions.push(session);
           continue;

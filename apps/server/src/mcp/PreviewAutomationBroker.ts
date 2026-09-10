@@ -397,20 +397,34 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   const respond: PreviewAutomationBroker["Service"]["respond"] = Effect.fn(
     "PreviewAutomationBroker.respond",
   )(function* (response) {
-    const pending = yield* SynchronizedRef.modify(state, (current) => {
+    const { pending, context } = yield* SynchronizedRef.modify(state, (current) => {
       const entry = current.pending.get(response.requestId);
-      if (
-        !entry ||
-        entry.context.clientId !== response.clientId ||
-        entry.context.connectionId !== response.connectionId
-      ) {
-        return [undefined, current] as const;
-      }
+      const matched =
+        entry !== undefined &&
+        entry.context.clientId === response.clientId &&
+        entry.context.connectionId === response.connectionId;
+      const resolved = { pending: matched ? entry : undefined, context: entry?.context };
+      if (!matched) return [resolved, current] as const;
       const next = new Map(current.pending);
       next.delete(response.requestId);
-      return [entry, { ...current, pending: next }] as const;
+      return [resolved, { ...current, pending: next }] as const;
     });
-    if (!pending) return;
+    if (!pending) {
+      yield* Effect.logWarning("dropped an unmatched preview automation response", {
+        requestId: response.requestId,
+        clientId: response.clientId,
+        connectionId: response.connectionId,
+        ok: response.ok,
+        reason: context ? "connection_mismatch" : "no_pending_request",
+        ...(context === undefined
+          ? {}
+          : {
+              operation: context.operation,
+              ...(context.tabId === undefined ? {} : { tabId: context.tabId }),
+            }),
+      });
+      return;
+    }
     if (response.ok) {
       yield* Deferred.succeed(pending.deferred, response.result);
     } else {

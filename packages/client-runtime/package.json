@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/conversation-handoff": {
+      "types": "./src/state/conversationHandoff.ts",
+      "default": "./src/state/conversationHandoff.ts"
+    },
+    "./state/token-usage": {
+      "types": "./src/state/tokenUsage.ts",
+      "default": "./src/state/tokenUsage.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "default": "./src/connection/index.ts"

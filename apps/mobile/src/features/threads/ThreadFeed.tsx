@@ -2,6 +2,10 @@ import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
+import {
+  orchestraKindLabels,
+  orchestraStatusLabels,
+} from "@t3tools/client-runtime/state/presentation";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
 import { SymbolView } from "../../components/AppSymbol";
@@ -949,9 +953,34 @@ function renderFeedEntry(
     const enterAnimated = isFreshTimestamp(message.createdAt);
     return (
       <Animated.View
-        className={cn(showAssistantMeta ? "mb-5 px-1" : "mb-2 px-1")}
+        className={cn(
+          entry.orchestraBlock
+            ? "mb-4 rounded-xl border border-neutral-300 p-3 dark:border-neutral-700"
+            : showAssistantMeta
+              ? "mb-5 px-1"
+              : "mb-2 px-1",
+        )}
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
+        {entry.orchestraBlock ? (
+          <View className="mb-3 gap-1 border-b border-neutral-200 pb-2 dark:border-neutral-700">
+            <Text className="font-t3-semibold text-sm text-neutral-900 dark:text-neutral-100">
+              {orchestraKindLabels[entry.orchestraBlock.kind]} · {entry.orchestraBlock.title}
+            </Text>
+            {entry.orchestraBlock.instruction ? (
+              <Text className="font-t3 text-xs text-neutral-600 dark:text-neutral-400">
+                {entry.orchestraBlock.instruction}
+              </Text>
+            ) : null}
+            <Text className="font-t3 text-xs text-neutral-600 dark:text-neutral-400">
+              {entry.orchestraBlock.displayName} · {entry.orchestraBlock.modelSelection.model} ·{" "}
+              {orchestraStatusLabels[entry.orchestraBlock.status]}
+              {entry.orchestraBlock.attempt > 1
+                ? ` · 재시도 ${entry.orchestraBlock.attempt - 1}`
+                : ""}
+            </Text>
+          </View>
+        ) : null}
         {message.text.trim().length > 0 ? (
           hasNativeSelectableMarkdownText() ? (
             <SelectableMarkdownText

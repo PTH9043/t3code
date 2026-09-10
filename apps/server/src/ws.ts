@@ -38,6 +38,7 @@ import {
   OrchestrationWorkspaceRuntimeError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
+  type ProviderInstanceId,
   type ProjectId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
@@ -88,6 +89,7 @@ import {
   observeRpcStream as instrumentRpcStream,
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import * as ProviderInstanceRegistry from "./provider/Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
@@ -122,6 +124,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
+import * as GeminiAuth from "./provider/GeminiAuth.ts";
 import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
 import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as GitHubCli from "./sourceControl/GitHubCli.ts";
@@ -379,6 +382,27 @@ function toAuthAccessStreamEvent(
   }
 }
 
+export const refreshGeminiProviderAfterAuth = Effect.fn("refreshGeminiProviderAfterAuth")(
+  function* (
+    instanceId: ProviderInstanceId,
+    instanceRegistry: Pick<ProviderInstanceRegistry.ProviderInstanceRegistryShape, "getInstance">,
+    providerRegistry: Pick<ProviderRegistry.ProviderRegistryShape, "refreshInstance">,
+  ) {
+    const instance = yield* instanceRegistry.getInstance(instanceId);
+    if (instance?.driverKind === "gemini") {
+      yield* instance.adapter.stopAll().pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to stop Gemini provider sessions after account change", {
+            instanceId,
+            cause,
+          }),
+        ),
+      );
+    }
+    yield* providerRegistry.refreshInstance(instanceId);
+  },
+);
+
 const makeWsRpcLayer = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
@@ -405,7 +429,11 @@ const makeWsRpcLayer = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
+      const providerInstanceRegistry = yield* Effect.serviceOption(
+        ProviderInstanceRegistry.ProviderInstanceRegistry,
+      );
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const geminiAuth = yield* GeminiAuth.GeminiAuth;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1283,6 +1311,26 @@ const makeWsRpcLayer = (
                 ),
             { "rpc.aggregate": "orchestration", "rpc.workspace_id": input.projectId },
           ),
+        [ORCHESTRATION_WS_METHODS.getThreadTokenUsage]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTokenUsage,
+            projectionSnapshotQuery.getThreadTokenUsage === undefined
+              ? Effect.fail(
+                  new OrchestrationSearchThreadsError({
+                    message: "사용량 조회를 사용할 수 없습니다",
+                  }),
+                )
+              : projectionSnapshotQuery.getThreadTokenUsage(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationSearchThreadsError({
+                        message: "사용량 조회에 실패했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration", "rpc.thread_id": input.threadId },
+          ),
         [ORCHESTRATION_WS_METHODS.searchWorkspaceRag]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.searchWorkspaceRag,
@@ -1824,6 +1872,34 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.geminiAuthBegin]: (input) =>
+          observeRpcEffect(WS_METHODS.geminiAuthBegin, geminiAuth.begin(input.instanceId), {
+            "rpc.aggregate": "providerAuth",
+          }),
+        [WS_METHODS.geminiAuthComplete]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.geminiAuthComplete,
+            geminiAuth.complete(input.sessionId, input.code).pipe(
+              Effect.tap((result) =>
+                Option.match(providerInstanceRegistry, {
+                  onNone: () => providerRegistry.refreshInstance(result.instanceId),
+                  onSome: (instanceRegistry) =>
+                    refreshGeminiProviderAfterAuth(
+                      result.instanceId,
+                      instanceRegistry,
+                      providerRegistry,
+                    ),
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "providerAuth" },
+          ),
+        [WS_METHODS.geminiAuthCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.geminiAuthCancel,
+            geminiAuth.cancel(input.sessionId).pipe(Effect.as({})),
+            { "rpc.aggregate": "providerAuth" },
           ),
         [WS_METHODS.serverUpdateServer]: (input) =>
           observeRpcEffect(WS_METHODS.serverUpdateServer, serverSelfUpdate.update(input), {
@@ -2593,6 +2669,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
+    const geminiAuth = yield* GeminiAuth.GeminiAuth;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2616,6 +2693,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
+              Layer.provide(Layer.succeed(GeminiAuth.GeminiAuth, geminiAuth)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

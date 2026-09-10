@@ -73,8 +73,11 @@ import Migration0057 from "./Migrations/057_TokenUsage.ts";
 import Migration0058 from "./Migrations/058_ConversationHandoffMode.ts";
 import Migration0059 from "./Migrations/059_WorkspaceCollaborationRunOrchestra.ts";
 import Migration0060 from "./Migrations/060_RepairPreOrchestraMigrations.ts";
+import Migration0061 from "./Migrations/061_ThreadOrchestraRunThread.ts";
+import Migration0062 from "./Migrations/062_ClaimOrchestraNodeThreads.ts";
 import Migration0063 from "./Migrations/063_ProjectionWorkspaceRagBigramIndex.ts";
 import Migration0064 from "./Migrations/064_SharedDesignLibrary.ts";
+import Migration0065 from "./Migrations/065_WorkspaceKnowledgeScope.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -147,8 +150,11 @@ export const migrationEntries = [
   [58, "ConversationHandoffMode", Migration0058],
   [59, "WorkspaceCollaborationRunOrchestra", Migration0059],
   [60, "RepairPreOrchestraMigrations", Migration0060],
+  [61, "ThreadOrchestraRunThread", Migration0061],
+  [62, "ClaimOrchestraNodeThreads", Migration0062],
   [63, "ProjectionWorkspaceRagBigramIndex", Migration0063],
   [64, "SharedDesignLibrary", Migration0064],
+  [65, "WorkspaceKnowledgeScope", Migration0065],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

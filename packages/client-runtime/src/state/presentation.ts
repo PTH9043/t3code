@@ -8,6 +8,12 @@ import {
   type EnvironmentPresentation,
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+export {
+  orchestraBlocksByMessage,
+  orchestraKindLabels,
+  orchestraStatusLabels,
+} from "./orchestra.ts";
+export { formatMeetingProtocolText } from "./meetingProtocolText.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {

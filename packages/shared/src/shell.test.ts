@@ -1,4 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
@@ -12,6 +15,7 @@ import {
   listLoginShellCandidates,
   mergePathEntries,
   mergePathValues,
+  npmNodeScriptFromShim,
   readEnvironmentFromLoginShell,
   readEnvironmentFromWindowsShell,
   readPathFromLaunchctl,
@@ -367,6 +371,40 @@ effectIt.layer(NodeServices.layer)("resolveCommandPath", (it) => {
 });
 
 effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
+  it.effect(
+    "bypasses cmd for stock npm shims with a long PATH and preserves literal arguments",
+    () =>
+      Effect.gen(function* () {
+        const shimPath = NodeURL.fileURLToPath(
+          new URL("./fixtures/npm-node-shim.cmd", import.meta.url),
+        );
+        const args = ["--message", "hello & goodbye", "%PATH%", 'quote"value'];
+        const command = yield* resolveSpawnCommand("example", args, {
+          env: { PATH: "C:\\tool;".repeat(2000) },
+        }).pipe(
+          Effect.provideService(HostProcessPlatform, "win32"),
+          Effect.provideService(SpawnExecutableResolution, (name) =>
+            name === "example" ? shimPath : "C:\\node\\node.exe",
+          ),
+        );
+        expect(command).toEqual({
+          command: "C:\\node\\node.exe",
+          args: [
+            NodePath.win32.resolve(
+              NodePath.win32.dirname(shimPath),
+              "node_modules/example/bin/cli.js",
+            ),
+            ...args,
+          ],
+          shell: false,
+        });
+        const original = NodeFS.readFileSync(shimPath, "utf8");
+        expect(
+          npmNodeScriptFromShim(`echo custom behavior\n${original}`, shimPath),
+        ).toBeUndefined();
+      }),
+  );
+
   it.effect("runs Windows executables directly without a shell", () =>
     Effect.gen(function* () {
       const command = yield* resolveSpawnCommand("node.exe", ["script.js", "hello & goodbye"], {

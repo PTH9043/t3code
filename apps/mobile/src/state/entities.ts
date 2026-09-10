@@ -33,6 +33,17 @@ export function useThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(environmentThreadShells.threadShellsAtom);
 }
 
+/**
+ * The conversations a person browses. Excludes the node conversations an
+ * orchestra run executes in — a run spawns one per parallel node, and they are
+ * opened from the run's own conversation. Machinery wants
+ * {@link useThreadShells} instead: a lookup that misses a conversation here is
+ * a conversation that exists.
+ */
+export function useListedThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
+  return useAtomValue(environmentThreadShells.listedThreadShellsAtom);
+}
+
 export function useProject(ref: ScopedProjectRef | null): EnvironmentProject | null {
   return useAtomValue(ref === null ? EMPTY_PROJECT_ATOM : environmentProjects.projectAtom(ref));
 }

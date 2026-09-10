@@ -351,7 +351,7 @@ export function useThreadListActions(): {
       // run. Servers that predate reordering get the bare pin (keyless).
       let orderKey: string | undefined;
       if (environmentSupportsPinReorder(thread.environmentId)) {
-        const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+        const shells = appAtomRegistry.get(environmentThreadShells.listedThreadShellsAtom);
         let firstKey: string | null = null;
         for (const shell of shells) {
           if (shell.pinnedAt == null || shell.pinOrderKey == null) continue;
@@ -428,7 +428,7 @@ export function useThreadListActions(): {
         );
         return false;
       }
-      const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+      const shells = appAtomRegistry.get(environmentThreadShells.listedThreadShellsAtom);
       const pinned = sortPinnedThreadsByOrderKey(
         shells.filter(
           (shell) =>

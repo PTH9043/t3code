@@ -35,7 +35,7 @@ describe("thread content presentation", () => {
       }),
     ).toEqual({
       kind: "unavailable",
-      title: "Messages not cached",
+      title: "메시지가 기기에 저장되지 않았습니다",
       detail: "Reconnect this environment to load the conversation.",
     });
   });
@@ -50,7 +50,7 @@ describe("thread content presentation", () => {
       }),
     ).toEqual({
       kind: "unavailable",
-      title: "Could not load conversation",
+      title: "대화를 불러오지 못했습니다",
       detail: "The thread stream failed.",
     });
   });

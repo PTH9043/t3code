@@ -3,6 +3,7 @@ import {
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   MessageId,
   ThreadId,
+  ProviderExecutionId,
   WorkspaceKnowledgeItemId,
   WorkspaceTaskNodeId,
   type OrchestrationEvent,
@@ -14,7 +15,6 @@ import {
   type WorkspaceCollaborationStep,
   type WorkspaceFailureClassification,
   type WorkspaceMeeting,
-  type WorkspaceMeetingParticipantId,
   type WorkspaceMeetingStatement,
   type WorkspaceTaskAttempt,
   type WorkspaceTaskGraph,
@@ -70,6 +70,8 @@ import {
   buildMeetingSeededTaskGraph,
   chainKeyByNodeId,
   computeWriteChains,
+  grantsFreeRetryAfterInterruption,
+  INTERRUPTED_TURN_ERROR_SUFFIX,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -88,6 +90,8 @@ import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts
 import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
+import { WorkspaceAgentExecutor } from "../Services/WorkspaceAgentExecutor.ts";
+import { orchestraWorkerCandidates, seatAssignedWorkers } from "../workspaceOrchestraRoster.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   WorkspaceCollaborationReactor,
@@ -107,6 +111,8 @@ class WorkspaceCollaborationExecutionError extends Data.TaggedError(
   "WorkspaceCollaborationExecutionError",
 )<{
   readonly message: string;
+  /** The seat's turn was cut off from outside rather than failing on its own. */
+  readonly interrupted?: boolean;
 }> {}
 
 const MAX_PARALLEL_GRAPH_NODES = 3;
@@ -127,17 +133,13 @@ function graphWaveWidth(run: WorkspaceCollaborationRun): number {
  * node per chain at selection time.
  */
 function soloWriteWaves(run: WorkspaceCollaborationRun): boolean {
-  return run.orchestra !== null && !run.orchestra.isolateWorktrees;
+  return !isolatesWorktrees(run);
 }
 
 function isolatesWorktrees(run: WorkspaceCollaborationRun): boolean {
   return run.orchestra?.isolateWorktrees === true;
 }
 
-/** On an orchestra run every node executes in its own fixed conversation. */
-function nodeOwnsThread(run: WorkspaceCollaborationRun): boolean {
-  return run.orchestra !== null;
-}
 const MAX_GRAPH_REVISIONS = 8;
 /** Mirrors the contract's ceiling on `WorkspaceTaskNode.maxAttempts`. */
 const MAX_NODE_ATTEMPTS = 10;
@@ -287,7 +289,15 @@ function graphCompatibilitySteps(
 
 type GraphNodeExecutionResult =
   | { readonly nodeId: string; readonly output: string; readonly error?: never }
-  | { readonly nodeId: string; readonly output?: never; readonly error: string };
+  | {
+      readonly nodeId: string;
+      readonly output?: never;
+      readonly error: string;
+      readonly interrupted?: boolean;
+    };
+
+/** Pins a wave callback's success type so its early returns unify with the run path. */
+const settledResult = (result: GraphNodeExecutionResult) => Effect.succeed(result);
 
 function updateLastAttempt(
   node: WorkspaceTaskNode,
@@ -350,6 +360,7 @@ function conciseCause(cause: Cause.Cause<unknown>): string {
 export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const turnWait = yield* OrchestrationTurnWait;
+  const agentExecutor = yield* Effect.serviceOption(WorkspaceAgentExecutor);
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
   const providerInstanceRegistry = yield* ProviderInstanceRegistry;
@@ -523,7 +534,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         if (attempt >= INTERRUPTED_TURN_CANCEL_GRACE_CHECKS) break;
         yield* Effect.sleep(INTERRUPTED_TURN_CANCEL_GRACE_INTERVAL);
       }
-      return yield* executionError(`Collaboration turn '${result.turn.turnId}' was interrupted.`);
+      return yield* new WorkspaceCollaborationExecutionError({
+        message: `Collaboration turn '${result.turn.turnId}' ${INTERRUPTED_TURN_ERROR_SUFFIX}`,
+        interrupted: true,
+      });
     }
     return yield* executionError(
       result.thread.session?.lastError ??
@@ -538,6 +552,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly prompt: string;
       readonly title: string;
       readonly expectedAgent?: "fable" | "codex" | "grok";
+      readonly node?: WorkspaceTaskNode;
       readonly usageContext?: import("@t3tools/contracts").TokenUsageContext;
       /**
        * The write-chain checkout this node works in. The thread is created
@@ -563,13 +578,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const instance = yield* providerInstanceRegistry.getInstance(
         input.step.modelSelection.instanceId,
       );
-      if (instance === undefined) {
+      if (instance === undefined || !instance.enabled) {
         return yield* executionError(
           `Provider instance '${input.step.modelSelection.instanceId}' assigned to role '${input.step.role}' is unavailable.`,
         );
       }
       const expectedDriver =
-        input.expectedAgent === "codex" ? "codex" : input.expectedAgent === "grok" ? "grok" : null;
+        input.node === undefined
+          ? input.expectedAgent === "codex"
+            ? "codex"
+            : input.expectedAgent === "grok"
+              ? "grok"
+              : null
+          : null;
       if (expectedDriver !== null && instance.driverKind !== expectedDriver) {
         return yield* executionError(
           `Agent '${input.expectedAgent}' requires the '${expectedDriver}' provider driver, but role '${input.step.role}' is bound to '${instance.driverKind}'.`,
@@ -582,15 +603,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         const taskTitle = input.title.replace(/\s+/g, " ").trim().slice(0, 80);
         yield* orchestrationEngine.dispatch({
           type: "thread.create",
-          commandId: CommandId.make(yield* randomUUID),
+          commandId:
+            input.node === undefined
+              ? CommandId.make(yield* randomUUID)
+              : CommandId.make(`orchestra-conversation:${input.run.id}`),
           threadId: input.step.threadId,
           projectId: input.run.projectId,
           title: `Collaboration ${input.step.role}: ${taskTitle}`,
           modelSelection: input.step.modelSelection,
           runtimeMode: input.step.runtimeMode,
           interactionMode: input.step.interactionMode,
-          branch: input.worktree?.branch ?? null,
-          worktreePath: input.worktree?.worktreePath ?? null,
+          branch: input.node === undefined ? (input.worktree?.branch ?? null) : null,
+          worktreePath: input.node === undefined ? (input.worktree?.worktreePath ?? null) : null,
+          orchestraRunThreadId: null,
           createdAt,
         });
         thread = yield* loadThread(runRef, input.step.threadId);
@@ -600,6 +625,61 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         return yield* executionError(
           `Collaboration thread '${input.step.threadId}' was not projected after creation.`,
         );
+      }
+      if (input.node !== undefined || input.run.orchestra !== null) {
+        if (Option.isNone(agentExecutor))
+          return yield* executionError("오케스트라 실행 서비스를 사용할 수 없습니다.");
+        const project = yield* projectionSnapshotQuery.getProjectShellById(input.run.projectId);
+        if (Option.isNone(project))
+          return yield* executionError("오케스트라 프로젝트를 찾을 수 없습니다.");
+        const nodeId =
+          input.node?.id ??
+          WorkspaceTaskNodeId.make(`legacy-step-${input.run.steps.indexOf(input.step)}`);
+        const attempt = input.node?.attempts.at(-1) ?? {
+          number: 1,
+          startedAt: input.step.startedAt ?? input.run.createdAt,
+        };
+        return yield* agentExecutor.value
+          .execute({
+            execution: {
+              executionId: ProviderExecutionId.make(
+                `orchestra:${input.run.id}:${nodeId}:${attempt.number}`,
+              ),
+              ownerThreadId: input.step.threadId,
+              runId: input.run.id,
+              nodeId,
+              attempt: attempt.number,
+            },
+            modelSelection: input.step.modelSelection,
+            runtimeMode: input.step.runtimeMode,
+            interactionMode: input.step.interactionMode,
+            prompt: input.prompt,
+            cwd: input.worktree?.worktreePath ?? project.value.workspaceRoot,
+            title: input.node?.title ?? input.title,
+            displayName: input.step.displayName,
+            instruction: (input.node === undefined
+              ? input.run.task
+              : `${input.node.handoff.task}\n\n완료 기준:\n${input.node.handoff.successCriteria.map((criterion) => `- ${criterion}`).join("\n")}`
+            ).slice(0, 20_000),
+            role: input.node?.role ?? input.step.role,
+            kind:
+              input.node?.kind ??
+              (input.step.phase === "kickoff"
+                ? "orchestration"
+                : input.step.phase === "finalization"
+                  ? "synthesis"
+                  : "implementation"),
+            startedAt: attempt.startedAt,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new WorkspaceCollaborationExecutionError({
+                  message: error.message,
+                  ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
+                }),
+            ),
+          );
       }
       if (
         input.worktree !== undefined &&
@@ -760,16 +840,28 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   const recordPromptUsage = (input: {
     readonly projectId: ProjectId;
     readonly sourceItemIds: ReadonlyArray<WorkspaceKnowledgeItemId>;
+    readonly sourceReferences?: ReadonlyArray<{
+      readonly projectId: ProjectId;
+      readonly itemId: WorkspaceKnowledgeItemId;
+    }>;
   }) =>
     Effect.gen(function* () {
-      if (input.sourceItemIds.length === 0) return;
-      yield* orchestrationEngine.dispatch({
-        type: "project.knowledge.usage.record",
-        commandId: CommandId.make(yield* randomUUID),
-        projectId: input.projectId,
-        itemIds: input.sourceItemIds,
-        usedAt: yield* nowIso,
-      });
+      const groups = new Map<ProjectId, WorkspaceKnowledgeItemId[]>();
+      for (const source of input.sourceReferences ??
+        input.sourceItemIds.map((itemId) => ({ itemId, projectId: input.projectId }))) {
+        const items = groups.get(source.projectId) ?? [];
+        if (!items.includes(source.itemId)) items.push(source.itemId);
+        groups.set(source.projectId, items);
+      }
+      for (const [projectId, itemIds] of groups) {
+        yield* orchestrationEngine.dispatch({
+          type: "project.knowledge.usage.record",
+          commandId: CommandId.make(yield* randomUUID),
+          projectId,
+          itemIds,
+          usedAt: yield* nowIso,
+        });
+      }
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to record Workspace knowledge prompt usage", {
@@ -916,51 +1008,43 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           worktreePath: null,
           createdAt,
         });
-      } else {
-        const session = existing.value.session;
-        if (
-          session !== null &&
-          session.status !== "stopped" &&
-          session.providerName !== null &&
-          session.providerName !== instance.driverKind
-        ) {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.stop",
-            commandId: CommandId.make(yield* randomUUID),
-            threadId,
-            createdAt,
-          });
-        }
       }
-      yield* orchestrationEngine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make(yield* randomUUID),
-        threadId,
-        message: {
-          messageId: MessageId.make(yield* randomUUID),
-          role: "user",
-          text: input.prompt,
-          attachments: [],
-        },
-        inputOrigin: "automation",
-        modelSelection: input.route.modelSelection,
-        usageContext: {
-          workId: input.run.id,
-          phase: input.usagePhase ?? "discussion",
-          nodeId: null,
-          attempt: 1,
-        },
-        runtimeMode: input.route.runtimeMode,
-        interactionMode: input.route.interactionMode,
-        createdAt,
-      });
-      // A wave that collapses — a cancel, a sibling seat failing the run — must
-      // not leave this seat's provider turn running unattended.
-      const output = yield* awaitStepOutput(runRef, threadId, createdAt).pipe(
-        Effect.onExit((exit) =>
-          exit._tag === "Failure" ? interruptThreadTurn(runRef, threadId) : Effect.void,
-        ),
-      );
+      if (Option.isNone(agentExecutor))
+        return yield* executionError("오케스트라 실행 서비스를 사용할 수 없습니다.");
+      const project = yield* projectionSnapshotQuery.getProjectShellById(input.run.projectId);
+      if (Option.isNone(project))
+        return yield* executionError("오케스트라 프로젝트를 찾을 수 없습니다.");
+      const nodeId = WorkspaceTaskNodeId.make(`meeting-${yield* randomUUID}`);
+      const output = yield* agentExecutor.value
+        .execute({
+          execution: {
+            executionId: ProviderExecutionId.make(`orchestra:${input.run.id}:${nodeId}:1`),
+            ownerThreadId: threadId,
+            runId: input.run.id,
+            nodeId,
+            attempt: 1,
+          },
+          modelSelection: input.route.modelSelection,
+          runtimeMode: input.route.runtimeMode,
+          interactionMode: input.route.interactionMode,
+          cwd: project.value.workspaceRoot,
+          prompt: input.prompt,
+          instruction: input.run.task,
+          title: input.usagePhase === "planning" ? "실행 계획" : "AI 토론",
+          displayName: input.route.displayName,
+          role: "coordinator",
+          kind: "orchestration",
+          startedAt: createdAt,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new WorkspaceCollaborationExecutionError({
+                message: error.message,
+                ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
+              }),
+          ),
+        );
       return { threadId, output } as const;
     },
   );
@@ -1289,6 +1373,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           }
 
           case "plan": {
+            const providers = yield* Effect.forEach(
+              yield* providerInstanceRegistry.listInstances,
+              (instance) =>
+                instance.enabled && instance.snapshot !== undefined
+                  ? instance.snapshot.getSnapshot.pipe(Effect.map(Option.some))
+                  : Effect.succeed(Option.none()),
+              { concurrency: 4 },
+            );
+            const availableWorkers = orchestraWorkerCandidates(
+              providers.flatMap((provider) => (Option.isSome(provider) ? [provider.value] : [])),
+              meeting,
+            );
             if (meeting.phase === "discussing") {
               // Entering planning is persisted on its own so a crash mid-plan
               // resumes as "plan again" rather than replaying the discussion.
@@ -1310,6 +1406,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 workspacePrompt: input.workspacePrompt,
                 task: run.task,
                 meeting,
+                availableWorkers,
               }),
               usagePhase: "planning",
             }).pipe(
@@ -1344,9 +1441,16 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             }
             const occurredAt = yield* nowIso;
             let graph: WorkspaceTaskGraph;
+            let assignedMeeting = meeting;
             try {
-              const planContext = meetingPlanContext(meeting);
+              const planContext = {
+                ...meetingPlanContext(meeting),
+                participantIds: [...meeting.participants, ...availableWorkers].map(
+                  (seat) => seat.id,
+                ),
+              };
               const proposal = parseWorkspaceTaskGraphProposal(turn.output, planContext);
+              assignedMeeting = seatAssignedWorkers(meeting, availableWorkers, proposal.nodes);
               const finalRound = meeting.rounds.at(-1);
               const agreement = [
                 "## 회의 합의",
@@ -1378,7 +1482,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               continue;
             }
             run = yield* persistGraphRun(
-              { ...run, meeting: { ...meeting, phase: "executing" } },
+              { ...run, meeting: { ...assignedMeeting, phase: "executing" } },
               graph,
               input.bindings,
               { status: "running", error: null, updatedAt: occurredAt },
@@ -1566,13 +1670,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly nodes: ReadonlyArray<WorkspaceTaskNode>;
     }) {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
-      const meeting = input.run.meeting;
-      // Without an orchestra a meeting is one shared conversation, and one
-      // conversation runs one turn at a time — its waves take a single node.
-      // Role-bound runs keep their parallel per-attempt threads. An orchestra
-      // run takes its own width; writes run alone unless the run isolates
-      // write chains into their own worktrees, in which case a wave admits at
-      // most one node per chain.
+      // Execution sessions share one durable conversation. Writes run alone
+      // unless each write chain owns a worktree.
       const isolated = isolatesWorktrees(input.run);
       const chains = isolated ? computeWriteChains(input.run.graph.nodes) : [];
       const chainIndex = chainKeyByNodeId(chains);
@@ -1593,7 +1692,37 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             assignments: new Map<string, { worktreePath: string; branch: string }>(),
             errors: new Map<string, string>(),
           };
-      const ownThread = nodeOwnsThread(input.run);
+      const ownerThreadId =
+        input.run.meeting?.threadId ??
+        input.run.steps.find((step) => step.threadId !== null)?.threadId ??
+        input.run.graph.nodes.find((node) => node.threadId !== null)?.threadId ??
+        ThreadId.make(yield* randomUUID);
+      const owner = yield* projectionSnapshotQuery.getThreadDetailById(ownerThreadId);
+      if (Option.isNone(owner)) {
+        const route =
+          input.run.meeting === null
+            ? input.bindings.find((binding) => binding.role === "coordinator" && binding.enabled)
+            : meetingAssignmentRoute(
+                input.run.meeting,
+                resolveChairParticipantId(input.run.meeting),
+              );
+        if (route === undefined)
+          return yield* executionError("오케스트라 지휘 AI 설정이 없습니다.");
+        yield* orchestrationEngine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`orchestra-conversation:${input.run.id}`),
+          threadId: ownerThreadId,
+          projectId: input.run.projectId,
+          title: `오케스트라: ${input.run.task.slice(0, 70)}`,
+          modelSelection: route.modelSelection,
+          runtimeMode: route.runtimeMode,
+          interactionMode: route.interactionMode,
+          branch: null,
+          worktreePath: null,
+          orchestraRunThreadId: null,
+          createdAt: yield* nowIso,
+        });
+      }
       const startedNodes = yield* Effect.forEach(
         waveNodes,
         (node) =>
@@ -1603,16 +1732,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const chainKey = chainIndex.get(String(node.id));
             const assignment =
               chainKey === undefined ? undefined : provisioning.assignments.get(chainKey);
-            const meetingThreadId =
-              !ownThread && meeting !== null && node.participantId !== null
-                ? meeting.threadId
-                : null;
-            // An orchestra node keeps one conversation for its whole life —
-            // retries and a resume after a question continue where the
-            // previous attempt left off instead of starting cold.
-            const nodeThreadId = ownThread
-              ? (node.threadId ?? ThreadId.make(yield* randomUUID))
-              : null;
+            const nodeThreadId = ownerThreadId;
             const attempt: WorkspaceTaskAttempt = {
               number: node.attempts.length + 1,
               agent: node.agent,
@@ -1621,7 +1741,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               runtimeMode: route.route.runtimeMode,
               interactionMode: route.route.interactionMode,
               strategy: route.strategy,
-              threadId: nodeThreadId ?? meetingThreadId ?? ThreadId.make(yield* randomUUID),
+              threadId: nodeThreadId,
               status: "running",
               output: null,
               error: null,
@@ -1635,7 +1755,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               ...(assignment !== undefined
                 ? { worktreePath: assignment.worktreePath, branch: assignment.branch }
                 : {}),
-              threadId: nodeThreadId ?? node.threadId,
+              threadId: nodeThreadId,
               status: "running" as const,
               attempts: [...node.attempts, attempt],
               output: null,
@@ -1663,8 +1783,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const chainKey = chainIndex.get(String(node.id));
           const assignment =
             chainKey === undefined ? undefined : provisioning.assignments.get(chainKey);
-          if (assignment === undefined || node.worktreePath !== null) return node;
-          return { ...node, worktreePath: assignment.worktreePath, branch: assignment.branch };
+          if (assignment === undefined || node.worktreePath !== null)
+            return { ...node, threadId: ownerThreadId };
+          return {
+            ...node,
+            threadId: ownerThreadId,
+            worktreePath: assignment.worktreePath,
+            branch: assignment.branch,
+          };
         }),
         nextAction: `실행 중: ${startedNodes.map((node) => node.title).join(", ")}`,
       };
@@ -1724,71 +1850,95 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         (node) => {
           const provisionError = input.provisionErrors?.get(String(node.id));
           if (provisionError !== undefined) {
-            return Effect.succeed({ nodeId: String(node.id), error: provisionError });
+            return settledResult({ nodeId: String(node.id), error: provisionError });
           }
           // A crash between marking the wave and persisting its provisioning
           // can resume a chain node without a worktree; running it would edit
           // the project root the isolation promised to protect.
           if (isolated && chainIndex?.has(String(node.id)) === true && node.worktreePath === null) {
-            return Effect.succeed({
+            return settledResult({
               nodeId: String(node.id),
               error: `Node '${node.id}' resumed without its chain worktree; it will be re-provisioned on retry.`,
             });
           }
           const attempt = node.attempts.at(-1);
           if (attempt === undefined) {
-            return Effect.succeed({
+            return settledResult({
               nodeId: String(node.id),
               error: `Running node '${node.id}' has no attempt.`,
             });
           }
           const step = compatibilitySteps[sortedNodeIds.indexOf(String(node.id))];
           if (step === undefined) {
-            return Effect.succeed({
+            return settledResult({
               nodeId: String(node.id),
               error: `Running node '${node.id}' has no compatibility step.`,
             });
           }
-          return ensureThreadAndTurn({
-            run: input.run,
-            step,
-            prompt: buildWorkspaceTaskNodePrompt({
-              workspacePrompt: input.workspacePrompt,
+          return Effect.gen(function* () {
+            const compose = projectionSnapshotQuery.composeWorkspacePrompt;
+            const nodeContext =
+              node.handoff.contextPaths?.length && compose !== undefined
+                ? yield* compose({
+                    projectId: input.run.projectId,
+                    task: node.handoff.task,
+                    contextPaths: node.handoff.contextPaths,
+                    includeShared: true,
+                    includeRag: true,
+                    includeWorkingMemory: true,
+                    includeLongTermMemory: true,
+                    maxContextChars: 40_000,
+                  })
+                : null;
+            const nodePrompt = nodeContext?.prompt ?? input.workspacePrompt;
+            if (nodeContext !== null)
+              yield* recordPromptUsage({ projectId: input.run.projectId, ...nodeContext });
+            return yield* ensureThreadAndTurn({
               run: input.run,
-              graph,
+              step,
               node,
-              availableAgents,
-              meeting: input.run.meeting,
-            }),
-            title:
-              node.participantId === null
-                ? `${node.agent.toUpperCase()}: ${node.title}`
-                : node.title,
-            // A seat's account is whatever the person picked; only role-bound
-            // nodes pin the provider driver to the agent.
-            ...(node.participantId === null ? { expectedAgent: node.agent } : {}),
-            ...(node.worktreePath !== null
-              ? { worktree: { worktreePath: node.worktreePath, branch: node.branch } }
-              : {}),
-            // Anchors this attempt's turn inside the seat's reused conversation.
-            turnAfter: attempt.startedAt,
-            usageContext: {
-              workId: input.run.id,
-              nodeId: node.id,
-              phase:
-                node.kind === "validation"
-                  ? "verification"
-                  : node.kind === "orchestration" || node.kind === "research"
-                    ? "planning"
-                    : node.kind === "synthesis"
-                      ? "finalization"
-                      : "implementation",
-              attempt: attempt.number,
-            },
+              prompt: buildWorkspaceTaskNodePrompt({
+                workspacePrompt: nodePrompt,
+                run: input.run,
+                graph,
+                node,
+                availableAgents,
+                meeting: input.run.meeting,
+              }),
+              title:
+                node.participantId === null
+                  ? `${node.agent.toUpperCase()}: ${node.title}`
+                  : node.title,
+              // A seat's account is whatever the person picked; only role-bound
+              // nodes pin the provider driver to the agent.
+              ...(node.participantId === null ? { expectedAgent: node.agent } : {}),
+              ...(node.worktreePath !== null
+                ? { worktree: { worktreePath: node.worktreePath, branch: node.branch } }
+                : {}),
+              // Anchors this attempt's turn inside the seat's reused conversation.
+              turnAfter: attempt.startedAt,
+              usageContext: {
+                workId: input.run.id,
+                nodeId: node.id,
+                phase:
+                  node.kind === "validation"
+                    ? "verification"
+                    : node.kind === "orchestration" || node.kind === "research"
+                      ? "planning"
+                      : node.kind === "synthesis"
+                        ? "finalization"
+                        : "implementation",
+                attempt: attempt.number,
+              },
+            });
           }).pipe(
             Effect.map((output) => ({ nodeId: String(node.id), output })),
             Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
-              Effect.succeed({ nodeId: String(node.id), error: error.message }),
+              settledResult({
+                nodeId: String(node.id),
+                error: error.message,
+                ...(error.interrupted === true ? { interrupted: true } : {}),
+              }),
             ),
           );
         },
@@ -2053,12 +2203,22 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         if (current === undefined || current.status !== "running") continue;
         const completedAt = yield* nowIso;
         if (result.error !== undefined) {
+          // A turn cut off from outside — the server restarted under it, or
+          // a person stopped the thread without stopping the run — is not
+          // the seat's failure: the retry gets the attempt back and no plan
+          // revision is charged. (Observed live: a dev-server restart spent a
+          // validation node's last attempt and parked the run on a question.)
+          const freeRetry =
+            result.interrupted === true &&
+            current.maxAttempts < MAX_NODE_ATTEMPTS &&
+            grantsFreeRetryAfterInterruption(current);
           graph = failOrParkNode({
             graph,
-            node: current,
+            node: freeRetry ? { ...current, maxAttempts: current.maxAttempts + 1 } : current,
             error: result.error,
             classification: "tool",
             completedAt,
+            consumesRevision: !freeRetry,
           });
           continue;
         }
@@ -2459,7 +2619,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     });
     yield* recordPromptUsage({
       projectId: run.projectId,
-      sourceItemIds: workspacePrompt.sourceItemIds,
+      ...workspacePrompt,
     });
 
     // A meeting is the run's leading phase: the seats discuss and the chair
@@ -2697,7 +2857,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     });
     yield* recordPromptUsage({
       projectId: run.projectId,
-      sourceItemIds: workspacePrompt.sourceItemIds,
+      ...workspacePrompt,
     });
 
     for (let index = 0; index < run.steps.length; index += 1) {
@@ -2714,7 +2874,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         const startedAt = yield* nowIso;
         step = {
           ...step,
-          threadId: ThreadId.make(yield* randomUUID),
+          threadId:
+            (run.orchestra === null
+              ? undefined
+              : run.steps.find((existing) => existing.threadId !== null)?.threadId) ??
+            ThreadId.make(yield* randomUUID),
           status: "running",
           startedAt,
           completedAt: null,

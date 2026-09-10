@@ -154,7 +154,7 @@ describe("AgentActivity widget layout", () => {
       environment as never,
     );
     expect(JSON.stringify(layout.compactLeading)).toContain("#a5b4fc"); // indigo-300
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Input");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("입력");
     expect(JSON.stringify(layout.minimal)).toContain("#a5b4fc");
   });
 
@@ -210,14 +210,14 @@ describe("AgentActivity widget layout", () => {
       environment as never,
     );
     const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work completed");
+    expect(banner).toContain("에이전트 작업 완료");
     expect(banner).not.toContain("0 active");
     expect(banner).toContain("#6ee7b7"); // emerald-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Done");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("완료");
     expect(JSON.stringify(layout.compactTrailing)).not.toContain("0 active");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Done");
+    expect(JSON.stringify(layout.expandedLeading)).toContain("완료");
     expect(JSON.stringify(layout.minimal)).toContain("checkmark.circle.fill");
-    expect(JSON.stringify(layout.bannerSmall)).toContain("Done");
+    expect(JSON.stringify(layout.bannerSmall)).toContain("완료");
   });
 
   it("reads Failed when the finished work ended in failure", () => {
@@ -231,10 +231,10 @@ describe("AgentActivity widget layout", () => {
       environment as never,
     );
     const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work failed");
+    expect(banner).toContain("에이전트 작업 실패");
     expect(banner).toContain("#fca5a5"); // red-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Failed");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Failed");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("실패");
+    expect(JSON.stringify(layout.expandedLeading)).toContain("실패");
     expect(JSON.stringify(layout.minimal)).toContain("xmark.octagon.fill");
   });
 
@@ -255,11 +255,11 @@ describe("AgentActivity widget layout", () => {
       environment as never,
     );
     const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work failed");
-    expect(banner).not.toContain("Agent work completed");
+    expect(banner).toContain("에이전트 작업 실패");
+    expect(banner).not.toContain("에이전트 작업 완료");
     expect(banner).toContain("#fca5a5"); // red-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Failed");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Failed");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("실패");
+    expect(JSON.stringify(layout.expandedLeading)).toContain("실패");
     expect(JSON.stringify(layout.minimal)).toContain("xmark.octagon.fill");
   });
 

@@ -11,17 +11,9 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       (() => {
-        try {
-          const rawScale = Number(window.localStorage.getItem("newautousage:ui-scale"));
-          const scale =
-            Number.isFinite(rawScale) && rawScale > 0
-              ? Math.min(150, Math.max(80, Math.round(rawScale / 10) * 10))
-              : 100;
-          document.documentElement.style.fontSize = `${scale}%`;
-          document.documentElement.dataset.uiScale = String(scale);
-        } catch {
-          // The default browser size remains usable when storage is unavailable.
-        }
+        // No font-size is written here on purpose. The interface size is a
+        // client setting, applied once from React (`appearanceFonts`); a second
+        // writer on this element silently discarded the saved size.
         const LIGHT_BACKGROUND = "#ffffff";
         const DARK_BACKGROUND = "#1b1f27";
         const CUSTOM_THEMES_STORAGE_KEY = "t3code:themes:v1";

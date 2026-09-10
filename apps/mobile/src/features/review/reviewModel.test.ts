@@ -241,7 +241,7 @@ describe("buildReviewParsedDiff", () => {
     expect(preview).toMatchObject({
       kind: "suppressed",
       reason: "non-text",
-      title: "Non-text file",
+      title: "텍스트가 아닌 파일",
       actionLabel: null,
     });
   });
@@ -267,8 +267,8 @@ describe("buildReviewParsedDiff", () => {
     expect(preview).toMatchObject({
       kind: "suppressed",
       reason: "large",
-      title: "Large diff",
-      actionLabel: "Load diff",
+      title: "큰 변경 내용",
+      actionLabel: "변경 내용 불러오기",
     });
   });
 
@@ -347,7 +347,7 @@ describe("buildReviewParsedDiff", () => {
       expect.objectContaining({
         kind: "file-suppressed",
         fileId: file.id,
-        actionLabel: "Load diff",
+        actionLabel: "변경 내용 불러오기",
       }),
     ]);
   });

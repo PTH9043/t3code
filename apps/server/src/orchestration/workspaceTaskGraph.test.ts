@@ -1,6 +1,7 @@
 import {
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   WorkspaceMeetingParticipantId,
   WorkspaceTaskNodeId,
   type WorkspaceTaskNode,
@@ -12,6 +13,8 @@ import {
   buildMeetingSeededTaskGraph,
   chainKeyByNodeId,
   computeWriteChains,
+  grantsFreeRetryAfterInterruption,
+  INTERRUPTED_TURN_ERROR_SUFFIX,
   materializeWorkspaceTaskGraphPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
@@ -148,6 +151,33 @@ describe("Workspace task graph", () => {
     expect(synthesis.confidence).toBe("high");
     expect(synthesis).toMatchObject({ conflictDetected: false, nextAction: "완료" });
   });
+
+  it("routes a salvaged follow-up by its kind and infers a missing kind from the failure", () => {
+    const decision = parseWorkspaceValidationDecision(
+      `<t3_validation>${JSON.stringify({
+        verdict: "fail",
+        confidence: "medium",
+        summary: "회귀",
+        evidence: [],
+        failureClassification: "implementation",
+        nextAction: "수정",
+        followUpNodes: [
+          // An alias kind and the wrong agent for it: the kind wins the route.
+          { title: "회귀 수정", agent: "grok", task: "실패 원인을 고친다.", kind: "fix" },
+          // No kind: the named agent says what it is.
+          { task: "원인 조사", agent: "grok" },
+          // Neither: an implementation failure wants a debug node.
+          { id: "Bad Id!", task: "다시 빌드" },
+        ],
+      })}</t3_validation>`,
+    );
+    expect(decision.followUpNodes.map((item) => [item.id, item.kind, item.agent])).toEqual([
+      ["follow-up-1", "debug", "codex"],
+      ["follow-up-2", "research", "grok"],
+      ["bad-id", "debug", "codex"],
+    ]);
+    expect(decision.followUpNodes[1]?.title).toBe("원인 조사");
+  });
 });
 
 describe("Workspace meeting task graph", () => {
@@ -180,6 +210,62 @@ describe("Workspace meeting task graph", () => {
         seats,
       ),
     ).toThrow(/participantId/);
+  });
+
+  it("salvages loosely shaped follow-up nodes and keeps the verdict", () => {
+    // The three shapes seats produced live, one per attempt, each of which
+    // used to reject the whole receipt.
+    const decision = parseWorkspaceValidationDecision(
+      `<t3_validation>${JSON.stringify({
+        verdict: "fail",
+        confidence: "high",
+        summary: "산출물 부재",
+        evidence: ["귀속표 없음"],
+        failureClassification: "validation",
+        nextAction: "감사 완성",
+        followUpNodes: [
+          {
+            id: "complete-audit",
+            participantId: "p2",
+            task: "미커밋 변경 전수 감사 산출물을 완성한다: (1) 귀속표, (2) 스위트 수치.",
+            goal: "커밋 계획",
+            context: "산출물이 저장소에 없음",
+            constraints: ["읽기 전용"],
+            successCriteria: ["전부 등장"],
+            expectedOutput: "영수증",
+          },
+          {
+            id: "recheck",
+            kind: "validation",
+            title: "재검증",
+            participantId: "p2",
+            description: "보완 증거를 다시 확인한다.",
+            dependencies: ["complete-audit"],
+            deliverable: "검증 영수증",
+          },
+          { id: "empty", participantId: "p2" },
+          { id: "ghost", participantId: "nobody", task: "좌석 없는 작업" },
+        ],
+      })}</t3_validation>`,
+      seats,
+    );
+    expect(decision.verdict).toBe("fail");
+    expect(decision.followUpNodes.map((item) => item.id)).toEqual(["complete-audit", "recheck"]);
+    expect(decision.followUpNodes[0]).toMatchObject({
+      kind: "research",
+      agent: "grok",
+      participantId: "p2",
+      title: "미커밋 변경 전수 감사 산출물을 완성한다",
+      goal: "커밋 계획",
+      constraints: ["읽기 전용"],
+    });
+    expect(decision.followUpNodes[1]).toMatchObject({
+      kind: "research",
+      task: "보완 증거를 다시 확인한다.",
+      goal: "보완 증거를 다시 확인한다.",
+      expectedOutput: "검증 영수증",
+      dependsOn: ["complete-audit"],
+    });
   });
 
   it("materializes a meeting plan without role bindings and seats the chair on the gates", () => {
@@ -449,5 +535,70 @@ describe("Workspace orchestra write chains", () => {
       chainByNodeId: chainKeyByNodeId(chains),
     });
     expect(wave.map((node) => node.id)).toEqual(["write-b", "read-d"]);
+  });
+});
+
+describe("Workspace node interruption budget", () => {
+  const interrupted = `Collaboration turn 'turn-1' ${INTERRUPTED_TURN_ERROR_SUFFIX}`;
+  /** Attempt history; the last entry is the attempt whose result is being applied. */
+  const nodeWithAttempts = (errors: ReadonlyArray<string | null>): WorkspaceTaskNode => ({
+    id: WorkspaceTaskNodeId.make("research"),
+    order: 0,
+    kind: "research",
+    agent: "grok",
+    role: "researcher",
+    participantId: null,
+    threadId: null,
+    parkedQuestion: null,
+    worktreePath: null,
+    branch: null,
+    title: "조사",
+    handoff: {
+      task: "조사",
+      goal: "조사",
+      context: "",
+      input: "",
+      constraints: [],
+      expectedOutput: "결과",
+      successCriteria: [],
+    },
+    dependsOn: [],
+    validationTargetId: null,
+    priority: 0,
+    status: "running",
+    maxAttempts: 2,
+    attempts: errors.map((error, index) => ({
+      number: index + 1,
+      agent: "grok",
+      role: "researcher",
+      modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "model" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      strategy: "",
+      threadId: ThreadId.make(`thread-${index}`),
+      status: index === errors.length - 1 ? "running" : error === null ? "completed" : "failed",
+      output: null,
+      error,
+      failureClassification: error === null ? null : "tool",
+      confidence: null,
+      startedAt: "2026-09-07T00:00:00.000Z",
+      completedAt: null,
+    })),
+    output: null,
+    error: null,
+    failureClassification: null,
+    confidence: null,
+    validation: null,
+    startedAt: "2026-09-07T00:00:00.000Z",
+    completedAt: null,
+  });
+
+  it("grants one free retry after an interruption, then charges the next in a row", () => {
+    expect(grantsFreeRetryAfterInterruption(nodeWithAttempts([null]))).toBe(true);
+    expect(grantsFreeRetryAfterInterruption(nodeWithAttempts(["형식 오류", null]))).toBe(true);
+    expect(grantsFreeRetryAfterInterruption(nodeWithAttempts([interrupted, null]))).toBe(false);
+    expect(
+      grantsFreeRetryAfterInterruption(nodeWithAttempts([interrupted, "형식 오류", null])),
+    ).toBe(true);
   });
 });

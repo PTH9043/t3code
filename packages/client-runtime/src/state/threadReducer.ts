@@ -54,6 +54,183 @@ function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity
 }
 
 /**
+ * Keep the full `payload` (tool `data.rawOutput`/`data.item` bodies, long
+ * `detail` command output) only for the most recent activities. On a
+ * long-lived thread that receives events indefinitely, these bodies grow the
+ * renderer heap without bound (~1GB/hr on a monitoring thread) because
+ * `thread.activities` is append-only and holds every payload verbatim.
+ */
+const PAYLOAD_RETENTION_ACTIVITIES = 300;
+
+/**
+ * Hard cap on retained activity rows. Payload compaction bounds the bytes per
+ * row; this bounds the row COUNT so an append-only thread cannot grow the heap
+ * without limit through sheer number of (even small) rows. The most recent
+ * resolvable `context-window.updated` row is preserved past the cap so the
+ * context-usage display keeps resolving after old rows are evicted.
+ */
+const ACTIVITY_ROW_CAP = 2000;
+
+/** Marker written onto a compacted payload so the pass is idempotent. */
+const COMPACTED_MARKER = "__payloadCompacted";
+
+/**
+ * Shared, frozen placeholder reused for every compacted payload that has no
+ * routing/marker fields to preserve (the common case: monitoring rows and tool
+ * outputs without agent/task markers). Interning one object instead of
+ * allocating a fresh `{ __payloadCompacted: true }` per row removes per-row
+ * allocation and GC churn. Safe to share because every payload reader is
+ * read-only (guarded reads via asString/asRecord/optional chaining).
+ */
+const EMPTY_COMPACTED_PAYLOAD: Readonly<Record<string, unknown>> = Object.freeze({
+  [COMPACTED_MARKER]: true,
+});
+
+/**
+ * True when this activity's payload was blanked by compaction. Readers that treat a
+ * missing field as a positive signal (a withdrawn plan, a cleared list) must check this
+ * first: compaction means "unknown", never "empty".
+ */
+export function isCompactedActivityPayload(activity: OrchestrationThreadActivity): boolean {
+  return isCompactedPayload(activity);
+}
+
+function isCompactedPayload(activity: OrchestrationThreadActivity): boolean {
+  const payload = activity.payload;
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as Record<string, unknown>)[COMPACTED_MARKER] === true
+  );
+}
+
+/**
+ * Blank only the byte-heavy parts of an old activity's payload while keeping
+ * every small scalar/marker field that downstream routing and the subagent
+ * roster read (see the payload readers in session-logic.ts and
+ * subagentRuntime.ts). `context-window.updated` rows are never compacted so
+ * context-window resolution keeps working. Returns a NEW activity object
+ * (fresh identity, same id/turnId/kind/createdAt/summary) so the identity-keyed
+ * work-log caches re-derive and the reducer's id-keyed logic still matches.
+ */
+function compactActivityPayload(
+  activity: OrchestrationThreadActivity,
+): OrchestrationThreadActivity {
+  if (
+    activity.kind === "context-window.updated" ||
+    activity.kind === "orchestra.block" ||
+    activity.kind === "conversation.handoff.prepared"
+  )
+    return activity;
+  const payload = activity.payload;
+  if (typeof payload !== "object" || payload === null) return activity;
+  const source = payload as Record<string, unknown>;
+  if (source[COMPACTED_MARKER] === true) return activity;
+  const preservedKeys = [
+    "taskId",
+    "agentId",
+    "agentKind",
+    "timelineBypass",
+    "taskType",
+    "workflowName",
+    "status",
+    "endedAt",
+    "requestId",
+    "requestKind",
+    "requestType",
+    "itemType",
+    "title",
+    "role",
+    "summary",
+    // A `user-input.requested` row IS the pending question: deriveOpenUserInputRequests
+    // drops the request outright when `questions` is missing, so compacting it away
+    // takes the answer UI with it and leaves the agent blocked on a prompt the user can
+    // no longer see. The array is small — a few options — so it stays.
+    "questions",
+  ] as const;
+  const next: Record<string, unknown> = { [COMPACTED_MARKER]: true };
+  let preservedAny = false;
+  for (const key of preservedKeys) {
+    if (source[key] !== undefined) {
+      next[key] = source[key];
+      preservedAny = true;
+    }
+  }
+  // Pool: rows with nothing to preserve all share one frozen placeholder.
+  return { ...activity, payload: preservedAny ? next : EMPTY_COMPACTED_PAYLOAD };
+}
+
+/**
+ * Bound the retained activity row count to the most recent ACTIVITY_ROW_CAP.
+ * Preserve the latest context window and at most MESSAGE_ROW_CAP older block
+ * headers, so retained messages keep their identity after noisy tool output.
+ */
+export function capActivityRows(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<OrchestrationThreadActivity> {
+  if (activities.length <= ACTIVITY_ROW_CAP) return activities;
+  const cut = activities.length - ACTIVITY_ROW_CAP;
+  const tail = activities.slice(cut);
+  let hasContextWindow = tail.some(isResolvableContextWindowActivity);
+  const preserved: OrchestrationThreadActivity[] = [];
+  let blockCount = 0;
+  for (let i = cut - 1; i >= 0; i--) {
+    const evicted = activities[i];
+    if (evicted === undefined) continue;
+    if (evicted.kind === "orchestra.block" && blockCount < MESSAGE_ROW_CAP) {
+      preserved.push(evicted);
+      blockCount++;
+    } else if (!hasContextWindow && isResolvableContextWindowActivity(evicted)) {
+      preserved.push(evicted);
+      hasContextWindow = true;
+    }
+  }
+  return preserved.length === 0 ? tail : [...preserved.toReversed(), ...tail];
+}
+
+/**
+ * Hard cap on retained message rows. `thread.messages` is append-only on the
+ * live event path and, unlike activities, keeps every row's full text, so a
+ * long-lived thread (e.g. a monitoring thread streaming reports for days)
+ * grows the renderer heap — and the transcript's React/DOM tree — without
+ * bound. The tail is kept, so the currently streaming message always survives.
+ */
+const MESSAGE_ROW_CAP = 1000;
+
+/** Bound the retained message row count to the most recent MESSAGE_ROW_CAP. */
+export function capMessageRows(
+  messages: ReadonlyArray<OrchestrationMessage>,
+): ReadonlyArray<OrchestrationMessage> {
+  if (messages.length <= MESSAGE_ROW_CAP) return messages;
+  return messages.slice(messages.length - MESSAGE_ROW_CAP);
+}
+
+/**
+ * Compact payloads of activities older than the retention window. Amortized
+ * O(1) on the common in-order append: only the row that just fell out of the
+ * window needs compacting, and the backward walk stops at the first
+ * already-compacted row (everything before it was compacted on earlier
+ * events). `context-window.updated` rows are skipped, not treated as a stop.
+ */
+export function compactOldActivityPayloads(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<OrchestrationThreadActivity> {
+  const boundary = activities.length - PAYLOAD_RETENTION_ACTIVITIES - 1;
+  if (boundary < 0) return activities;
+  let out: OrchestrationThreadActivity[] | null = null;
+  for (let i = boundary; i >= 0; i--) {
+    const current = activities[i];
+    if (current === undefined) continue;
+    if (isCompactedPayload(current)) break;
+    const compacted = compactActivityPayload(current);
+    if (compacted === current) continue; // context-window / non-object: skip, keep walking
+    if (out === null) out = activities.slice();
+    out[i] = compacted;
+  }
+  return out ?? activities;
+}
+
+/**
  * Apply a single orchestration event to an `OrchestrationThread`, returning
  * the updated thread, a deletion signal, or an "unchanged" marker when the
  * event doesn't affect this thread.
@@ -65,7 +242,14 @@ function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity
 export function applyThreadDetailEvent(
   thread: OrchestrationThread,
   event: OrchestrationEvent,
+  // The row caps bound live growth on a thread the user never paged. Once older
+  // pages are merged in, the loaded window IS history the user asked for, and
+  // capping from the head silently deletes exactly that page — so the caller
+  // passes `capRows: false` while a widened window is in play. Payloads are
+  // still compacted regardless; only row eviction is suspended.
+  options?: { readonly capRows?: boolean },
 ): ThreadDetailReducerResult {
+  const capRows = options?.capRows ?? true;
   switch (event.type) {
     // ── Project events (irrelevant to thread detail) ────────────────
     case "project.created":
@@ -208,6 +392,9 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+          ...(event.payload.handoffMode !== undefined
+            ? { handoffMode: event.payload.handoffMode }
+            : {}),
           ...(event.payload.titleRegeneration !== undefined
             ? { titleRegeneration: event.payload.titleRegeneration }
             : {}),
@@ -370,7 +557,7 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
-          messages,
+          messages: capRows ? capMessageRows(messages) : messages,
           checkpoints,
           latestTurn,
           updatedAt: event.occurredAt,
@@ -587,10 +774,11 @@ export function applyThreadDetailEvent(
         ? thread.activities.filter((entry) => !dropped(entry))
         : thread.activities;
       const last = base[base.length - 1];
-      const activities =
+      const appended =
         last === undefined || activityOrder(last, activity) <= 0
           ? [...base, activity]
           : Arr.sort([...base, activity], activityOrder);
+      const activities = compactOldActivityPayloads(capRows ? capActivityRows(appended) : appended);
 
       return {
         kind: "updated",

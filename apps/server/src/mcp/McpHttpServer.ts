@@ -96,6 +96,47 @@ const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;
 }>()(makeMcpAuthMiddleware).layer;
 
+// The preview host drives arbitrary third-party pages, and the wire schema types
+// `message`/`detail` as unbounded strings and Unknown. Both reach the model's
+// context, so this server bounds them rather than trusting the host to: only
+// these structural keys cross, and the message is clipped.
+const PREVIEW_ERROR_DETAIL_KEYS = [
+  "requestId",
+  "operation",
+  "tabId",
+  "timeoutMs",
+  "bridgeAvailable",
+  "selectorKind",
+  "selectorLength",
+] as const;
+const PREVIEW_ERROR_MESSAGE_MAX = 2_000;
+
+const previewSnapshotRemoteError = (
+  error: unknown,
+): { readonly message?: string; readonly detail?: Record<string, unknown> } => {
+  const remote =
+    typeof error === "object" && error !== null && "cause" in error ? error.cause : undefined;
+  if (typeof remote !== "object" || remote === null) return {};
+  const rawMessage =
+    "message" in remote && typeof remote.message === "string" ? remote.message : undefined;
+  const message =
+    rawMessage === undefined ? undefined : rawMessage.slice(0, PREVIEW_ERROR_MESSAGE_MAX);
+  const rawDetail = "detail" in remote ? remote.detail : undefined;
+  const detail =
+    typeof rawDetail === "object" && rawDetail !== null
+      ? Object.fromEntries(
+          PREVIEW_ERROR_DETAIL_KEYS.filter((key) => key in rawDetail).map((key) => [
+            key,
+            (rawDetail as Record<string, unknown>)[key],
+          ]),
+        )
+      : undefined;
+  return {
+    ...(message === undefined ? {} : { message }),
+    ...(detail === undefined || Object.keys(detail).length === 0 ? {} : { detail }),
+  };
+};
+
 const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
   if (Cause.hasInterrupts(cause) || cause.reasons.some(Cause.isDieReason)) {
     return Effect.failCause(cause).pipe(Effect.orDie);
@@ -109,6 +150,7 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
     typeof firstFailure._tag === "string"
       ? firstFailure._tag
       : "PreviewSnapshotError";
+  const remote = previewSnapshotRemoteError(firstFailure);
   const result = new McpSchema.CallToolResult({
     isError: true,
     structuredContent: {
@@ -116,9 +158,10 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
         _tag: errorTag,
         operation: "snapshot",
         failureCount: failures.length,
+        ...(remote.detail === undefined ? {} : { detail: remote.detail }),
       },
     },
-    content: [{ type: "text", text: "Preview snapshot failed." }],
+    content: [{ type: "text", text: remote.message ?? "Preview snapshot failed." }],
   });
   return Effect.logWarning("preview snapshot failed", {
     operation: "snapshot",
@@ -165,7 +208,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
             onFailure: previewSnapshotFailure,
             onSuccess: ({ encodedResult }) => {
               const snapshot = encodedResult as {
-                readonly screenshot: {
+                readonly screenshot?: {
                   readonly mimeType: "image/png";
                   readonly data: string;
                   readonly width: number;
@@ -176,11 +219,15 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               const { screenshot, ...page } = snapshot;
               const metadata = {
                 ...page,
-                screenshot: {
-                  mimeType: screenshot.mimeType,
-                  width: screenshot.width,
-                  height: screenshot.height,
-                },
+                ...(screenshot === undefined
+                  ? {}
+                  : {
+                      screenshot: {
+                        mimeType: screenshot.mimeType,
+                        width: screenshot.width,
+                        height: screenshot.height,
+                      },
+                    }),
               };
               return Effect.succeed(
                 new McpSchema.CallToolResult({
@@ -188,11 +235,15 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                   structuredContent: metadata,
                   content: [
                     { type: "text", text: JSON.stringify(metadata) },
-                    {
-                      type: "image",
-                      data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
-                      mimeType: screenshot.mimeType,
-                    },
+                    ...(screenshot === undefined
+                      ? []
+                      : [
+                          {
+                            type: "image" as const,
+                            data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
+                            mimeType: screenshot.mimeType,
+                          },
+                        ]),
                   ],
                 }),
               );

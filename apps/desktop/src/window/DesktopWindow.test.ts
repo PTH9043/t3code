@@ -37,6 +37,7 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
@@ -186,6 +187,7 @@ function makeTestLayer(input: {
     bounds: DesktopAppSettings.DesktopWindowBounds,
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
+  readonly shownErrorBoxes?: Array<{ readonly title: string; readonly content: string }>;
 }) {
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
@@ -250,6 +252,12 @@ function makeTestLayer(input: {
         desktopAppSettingsLayer,
         desktopServerExposureLayer,
         DesktopState.layer,
+        Layer.mock(ElectronDialog.ElectronDialog)({
+          showErrorBox: (title, content) =>
+            Effect.sync(() => {
+              input.shownErrorBoxes?.push({ title, content });
+            }),
+        }),
         electronMenuLayer,
         Layer.succeed(ElectronShell.ElectronShell, {
           openExternal: (url) =>
@@ -348,6 +356,9 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
           desktopEnvironmentLayer,
           DesktopAppSettings.layerTest(),
           desktopServerExposureLayer,
+          Layer.mock(ElectronDialog.ElectronDialog)({
+            showErrorBox: () => Effect.void,
+          }),
           electronMenuLayer,
           Layer.succeed(ElectronShell.ElectronShell, {
             openExternal: () => Effect.succeed(true),
@@ -973,6 +984,46 @@ describe("DesktopWindow", () => {
         yield* TestClock.adjust(250);
         assert.equal(fakeWindow.loadURL.mock.calls.length, 2);
         assert.equal(fakeWindow.reload.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("tells the user when a repeatedly crashing renderer cannot be recovered", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const shownErrorBoxes: Array<{ readonly title: string; readonly content: string }> = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        shownErrorBoxes,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const renderProcessGone = fakeWindow.webContentsListeners.get("render-process-gone");
+        if (!renderProcessGone) {
+          return yield* Effect.die("render-process-gone listener was not registered");
+        }
+        const crash = () => renderProcessGone({}, { reason: "oom", exitCode: -536870904 });
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          crash();
+          yield* TestClock.adjust(500);
+        }
+        assert.equal(fakeWindow.loadURL.mock.calls.length, 4);
+        assert.deepEqual(shownErrorBoxes, []);
+
+        crash();
+        yield* TestClock.adjust(500);
+        assert.equal(fakeWindow.loadURL.mock.calls.length, 4);
+        assert.lengthOf(shownErrorBoxes, 1);
+        assert.include(shownErrorBoxes[0]?.content ?? "", "oom");
+        assert.include(shownErrorBoxes[0]?.content ?? "", "-536870904");
       }).pipe(Effect.provide(layer));
     }),
   );

@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
@@ -18,10 +19,19 @@ import {
   makeCloudflaredRelayClient,
 } from "./relayClient.ts";
 
+// The client resolves executables against the real filesystem, so the stubbed
+// platform must match the host: a POSIX platform stub on Windows would demand
+// executable mode bits that NTFS never reports.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Chooses the fixture shape for the real filesystem, outside any Effect runtime; the resolved value is then provided explicitly below.
+const hostPlatform = process.platform;
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Same as above.
+const hostArch = process.arch;
+const executableName = hostPlatform === "win32" ? "cloudflared.exe" : "cloudflared";
+
 const hostRuntimeLayer = (env: Record<string, string> = {}) =>
   Layer.mergeAll(
-    Layer.succeed(HostProcessPlatform, "linux"),
-    Layer.succeed(HostProcessArchitecture, "x64"),
+    Layer.succeed(HostProcessPlatform, hostPlatform),
+    Layer.succeed(HostProcessArchitecture, hostArch),
     ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
   );
 
@@ -128,7 +138,15 @@ describe("RelayClient", () => {
           }
         }),
       );
-      const managedPath = `${baseDir}/tools/cloudflared/${CLOUDFLARED_VERSION}/linux-x64/cloudflared`;
+      const path = yield* Path.Path;
+      const managedPath = path.join(
+        baseDir,
+        "tools",
+        "cloudflared",
+        CLOUDFLARED_VERSION,
+        `${hostPlatform}-${hostArch}`,
+        executableName,
+      );
       expect(installed).toEqual({
         status: "available",
         executablePath: managedPath,
@@ -234,8 +252,9 @@ describe("RelayClient", () => {
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-cloudflared-test-",
       });
-      const binDir = `${baseDir}/bin`;
-      const executablePath = `${binDir}/cloudflared`;
+      const path = yield* Path.Path;
+      const binDir = path.join(baseDir, "bin");
+      const executablePath = path.join(binDir, executableName);
       const manager = yield* makeCloudflaredRelayClient({
         baseDir,
       });

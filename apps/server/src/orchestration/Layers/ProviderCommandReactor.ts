@@ -1,11 +1,16 @@
+import { buildConversationHandoff, prepareCompactHandoff } from "../conversationHandoff.ts";
+import { ServerConfig } from "../../config.ts";
 import {
   type ChatAttachment,
   CommandId,
   EventId,
   type ModelSelection,
+  type MessageId,
   type OrchestrationEvent,
-  type OrchestrationThread,
   ProviderDriverKind,
+  WorkspaceExecutionRequestRoute,
+  WorkspaceOrchestraBlock,
+  type OrchestrationThread,
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
@@ -17,6 +22,7 @@ import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shar
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -49,6 +55,17 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
+const isExecutionRequestRoute = Schema.is(WorkspaceExecutionRequestRoute);
+const isOrchestraBlock = Schema.is(WorkspaceOrchestraBlock);
+function resolveExecutionRequest(thread: OrchestrationThread, requestId: string) {
+  for (const activity of thread.activities.toReversed()) {
+    if (isExecutionRequestRoute(activity.payload) && activity.payload.requestId === requestId) {
+      return activity.payload;
+    }
+  }
+  return undefined;
+}
+
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
   {
@@ -68,42 +85,7 @@ function toNonEmptyProviderInput(value: string | undefined): string | undefined 
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
-const HANDOFF_MESSAGE_LIMIT = 30;
-const HANDOFF_MESSAGE_CHARS = 2_000;
-const HANDOFF_TOTAL_CHARS = 16_000;
-
-/**
- * A provider switched mid-conversation starts from a blank provider thread;
- * this block, prepended to the switching turn's provider input (never to the
- * persisted message), carries the recent conversation across so the incoming
- * model answers in context instead of greeting a stranger.
- */
-export function buildConversationHandoff(
-  messages: OrchestrationThread["messages"],
-): string | undefined {
-  const spoken = messages.filter((message) => !message.streaming && message.text.trim().length > 0);
-  if (spoken.length === 0) {
-    return undefined;
-  }
-  const lines: string[] = [];
-  let total = 0;
-  for (const message of spoken.slice(-HANDOFF_MESSAGE_LIMIT).toReversed()) {
-    const text =
-      message.text.length > HANDOFF_MESSAGE_CHARS
-        ? `${message.text.slice(0, HANDOFF_MESSAGE_CHARS)}…`
-        : message.text;
-    const line = `[${message.role}] ${text}`;
-    if (total + line.length > HANDOFF_TOTAL_CHARS && lines.length > 0) break;
-    lines.push(line);
-    total += line.length;
-  }
-  return [
-    "<t3_conversation_handoff>",
-    "이 대화는 방금 다른 AI 모델로부터 이어받았다. 아래는 지금까지의 대화 기록(오래된 순)이다. 이 맥락을 이어서, 이 블록은 언급하지 말고 사용자의 새 메시지에만 답하라.",
-    ...lines.toReversed(),
-    "</t3_conversation_handoff>",
-  ].join("\n");
-}
+export { buildConversationHandoff } from "../conversationHandoff.ts";
 
 function mapProviderSessionStatusToOrchestrationStatus(
   status: "connecting" | "ready" | "running" | "error" | "closed",
@@ -350,6 +332,7 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const serverConfig = yield* ServerConfig;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
@@ -763,6 +746,8 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly messageId: MessageId;
+    readonly beforeSequence: number;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
@@ -787,10 +772,50 @@ const make = Effect.gen(function* () {
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
-    const handoff =
+    let handoff =
       ensured.contextHandoff && input.userInitiated !== false
-        ? buildConversationHandoff(thread.messages)
+        ? buildConversationHandoff(thread.messages, input.messageId)
         : undefined;
+    if (handoff !== undefined && thread.handoffMode === "compact") {
+      const prepared = yield* prepareCompactHandoff({
+        thread,
+        currentMessageId: input.messageId,
+        stateDir: serverConfig.stateDir,
+        standardHandoff: handoff,
+        decisions:
+          projectionSnapshotQuery.getThreadHandoffDecisions === undefined
+            ? null
+            : yield* projectionSnapshotQuery
+                .getThreadHandoffDecisions({
+                  threadId: thread.id,
+                  beforeSequence: input.beforeSequence,
+                })
+                .pipe(Effect.catch(() => Effect.succeed(null))),
+      });
+      handoff = prepared.text;
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: yield* serverCommandId("conversation-handoff"),
+          threadId: thread.id,
+          activity: {
+            id: yield* serverEventId(),
+            kind: "conversation.handoff.prepared",
+            tone: "info",
+            summary:
+              prepared.report.status === "compact" ? "인계 문맥 축소 준비" : "기존 인계 유지",
+            payload: prepared.report,
+            turnId: null,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        })
+        .pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("Could not record conversation handoff metrics"),
+          ),
+        );
+    }
     const normalizedInput = toNonEmptyProviderInput(
       handoff === undefined ? input.messageText : `${handoff}\n\n${input.messageText}`,
     );
@@ -1204,6 +1229,8 @@ const make = Effect.gen(function* () {
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
+      messageId: event.payload.messageId,
+      beforeSequence: event.sequence,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }
@@ -1232,8 +1259,27 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
-    if (!hasSession) {
+    const activeRuns = new Set(
+      thread.activities.flatMap((activity) => {
+        if (activity.kind !== "orchestra.block" || !isOrchestraBlock(activity.payload)) return [];
+        return activity.payload.status === "running" || activity.payload.status === "awaiting-user"
+          ? [activity.payload.runId]
+          : [];
+      }),
+    );
+    if (activeRuns.size > 0) {
+      for (const runId of activeRuns)
+        yield* orchestrationEngine.dispatch({
+          type: "project.collaboration.run.cancel",
+          commandId: CommandId.make(`orchestra-stop:${event.eventId}:${runId}`),
+          projectId: thread.projectId,
+          runId,
+          createdAt: event.payload.createdAt,
+        });
+      return;
+    }
+    const session = thread.session;
+    if (!session || session.status === "stopped") {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.interrupt.failed",
@@ -1243,14 +1289,89 @@ const make = Effect.gen(function* () {
         createdAt: event.payload.createdAt,
       });
     }
+    // An idle session has no turn to interrupt. Rapid repeated Stop clicks
+    // queue one event each behind the first; once that one settles the turn,
+    // the rest would only burn a provider round-trip apiece — skip them.
+    // Only "ready" counts as idle: a "starting" session can hold a pending
+    // turn the provider has not acknowledged yet (activeTurnId is still null
+    // in that window), and dropping the interrupt there leaves the provider
+    // running a turn the projection already recorded as interrupted.
+    if (session.activeTurnId === null && session.status === "ready") {
+      return;
+    }
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({
-      threadId: event.payload.threadId,
-      ...(event.payload.stopBackground !== undefined
-        ? { stopBackground: event.payload.stopBackground }
-        : {}),
-    });
+    // Orchestration turn ids are not provider turn ids, so interrupt by
+    // session. Bounded + caught: a provider that never acknowledges must not
+    // wedge this reactor's serial worker (a hung claudeAgent stop once jammed
+    // it, silently swallowing every queued Stop click), and the user must see
+    // the failure as an activity instead of a button that does nothing.
+    const failureDetail = yield* providerService
+      .interruptTurn({
+        threadId: event.payload.threadId,
+        ...(event.payload.stopBackground !== undefined
+          ? { stopBackground: event.payload.stopBackground }
+          : {}),
+      })
+      .pipe(
+        Effect.as(null),
+        Effect.timeoutOption("15 seconds"),
+        Effect.map(
+          Option.getOrElse<string | null>(
+            () => "Provider did not acknowledge the interrupt within 15 seconds.",
+          ),
+        ),
+        Effect.catchCause((cause) => Effect.succeed(Cause.pretty(cause))),
+      );
+    if (failureDetail !== null) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.interrupt.failed",
+        summary: "Provider turn interrupt failed",
+        detail: failureDetail,
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+
+    // The provider acknowledged the interrupt, but codex (observed 2026-08-29)
+    // can drop the turn-ended notification afterwards, leaving the session
+    // "running" a turn the projection already settled as interrupted — a
+    // zombie that lives until the next restart, where session recovery
+    // resurrects the very turn the user stopped. Give the provider a grace
+    // period to report the end itself, then settle the session.
+    const interruptedTurnId = session.activeTurnId;
+    yield* Effect.gen(function* () {
+      yield* Effect.sleep("20 seconds");
+      const current = yield* resolveThread(event.payload.threadId);
+      const currentSession = current?.session;
+      if (
+        !currentSession ||
+        currentSession.status !== "running" ||
+        currentSession.activeTurnId !== interruptedTurnId
+      ) {
+        return;
+      }
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* setThreadSession({
+        threadId: event.payload.threadId,
+        session: {
+          ...currentSession,
+          status: "ready",
+          activeTurnId: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* Effect.logWarning(
+        "provider never reported turn end after an acknowledged interrupt; settled the session",
+        { threadId: event.payload.threadId, turnId: interruptedTurnId },
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("interrupt grace settle failed", { cause: Cause.pretty(cause) }),
+      ),
+      Effect.forkScoped,
+    );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1260,7 +1381,9 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
+    const executionRequest = resolveExecutionRequest(thread, event.payload.requestId);
+    const hasSession =
+      executionRequest !== undefined || (thread.session && thread.session.status !== "stopped");
     if (!hasSession) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
@@ -1275,8 +1398,11 @@ const make = Effect.gen(function* () {
 
     yield* providerService
       .respondToRequest({
-        threadId: event.payload.threadId,
-        requestId: event.payload.requestId,
+        threadId:
+          executionRequest === undefined
+            ? event.payload.threadId
+            : ThreadId.make(executionRequest.executionId),
+        requestId: executionRequest?.providerRequestId ?? event.payload.requestId,
         decision: event.payload.decision,
       })
       .pipe(
@@ -1304,7 +1430,9 @@ const make = Effect.gen(function* () {
       if (!thread) {
         return;
       }
-      const hasSession = thread.session && thread.session.status !== "stopped";
+      const executionRequest = resolveExecutionRequest(thread, event.payload.requestId);
+      const hasSession =
+        executionRequest !== undefined || (thread.session && thread.session.status !== "stopped");
       if (!hasSession) {
         return yield* appendProviderFailureActivity({
           threadId: event.payload.threadId,
@@ -1319,8 +1447,11 @@ const make = Effect.gen(function* () {
 
       yield* providerService
         .respondToUserInput({
-          threadId: event.payload.threadId,
-          requestId: event.payload.requestId,
+          threadId:
+            executionRequest === undefined
+              ? event.payload.threadId
+              : ThreadId.make(executionRequest.executionId),
+          requestId: executionRequest?.providerRequestId ?? event.payload.requestId,
           answers: event.payload.answers,
         })
         .pipe(
@@ -1351,7 +1482,26 @@ const make = Effect.gen(function* () {
 
     const now = event.payload.createdAt;
     if (thread.session && thread.session.status !== "stopped") {
-      yield* providerService.stopSession({ threadId: thread.id });
+      // Bounded + caught: the projection below must mark the session stopped
+      // even when provider teardown hangs or fails — an unbounded await here
+      // once wedged the serial worker behind a claudeAgent stop, which also
+      // swallowed every turn interrupt queued after it.
+      const failureDetail = yield* providerService.stopSession({ threadId: thread.id }).pipe(
+        Effect.as(null),
+        Effect.timeoutOption("15 seconds"),
+        Effect.map(
+          Option.getOrElse<string | null>(
+            () => "Provider did not acknowledge the stop within 15 seconds.",
+          ),
+        ),
+        Effect.catchCause((cause) => Effect.succeed(Cause.pretty(cause))),
+      );
+      if (failureDetail !== null) {
+        yield* Effect.logWarning(
+          "provider session stop failed; marking the session stopped anyway",
+          { threadId: thread.id, detail: failureDetail },
+        );
+      }
     }
 
     yield* setThreadSession({
@@ -1420,6 +1570,12 @@ const make = Effect.gen(function* () {
 
   const processDomainEventSafely = (event: ProviderIntentEvent) =>
     processDomainEvent(event).pipe(
+      // NO blanket timeout here: a timeout races the handler onto a temporary
+      // fiber, and adapters historically forked session-lifetime fibers as
+      // children of the handler's fiber — a 60s envelope added 2026-08-29
+      // silently killed every codex session's event pump the moment its
+      // handler settled. Hang protection lives in the per-call bounds inside
+      // the handlers (stop/interrupt 15s, adapter-level request timeouts).
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.interrupt;

@@ -790,6 +790,7 @@ export function buildMeetingPlanPrompt(input: {
   readonly workspacePrompt: string;
   readonly task: string;
   readonly meeting: WorkspaceMeeting;
+  readonly availableWorkers?: ReadonlyArray<WorkspaceMeeting["participants"][number]>;
 }): string {
   const chair = findParticipant(input.meeting, resolveChairParticipantId(input.meeting));
   return [
@@ -808,6 +809,17 @@ export function buildMeetingPlanPrompt(input: {
     "",
     "## Roster",
     renderMeetingRoster(input.meeting),
+    ...(input.availableWorkers?.length
+      ? [
+          "",
+          "## 추가 가능한 작업 AI",
+          ...input.availableWorkers.map(
+            (seat) =>
+              `- ${seat.id}: ${seat.displayName} (${seat.modelSelection.instanceId} / ${seat.modelSelection.model})`,
+          ),
+          "You may assign nodes to these connected workers when their account or model better fits the work. Keep the user's conductor fixed. Add at most enough workers to reach eight total seats. Explain additions and reassignments in summary. Do not assign unnecessary duplicate work.",
+        ]
+      : []),
     "",
     "## Transcript",
     transcriptSection(input.meeting),
@@ -815,7 +827,7 @@ export function buildMeetingPlanPrompt(input: {
     "## Deliverable",
     "Return one strict machine-readable proposal between <t3_task_graph> and </t3_task_graph> tags.",
     'The JSON shape is: {"summary":string,"nextAction":string,"nodes":[{"id":slug,"kind":"research"|"implementation"|"debug","participantId":seatId,"title":string,"task":string,"goal":string,"context":string,"input":string,"constraints":string[],"expectedOutput":string,"successCriteria":string[],"dependsOn":slug[],"priority":nonNegativeInteger}]}.',
-    "participantId must be a seat id from the roster; assign each node to the seat whose argued position fits it best. Encode real dependencies only; independent nodes must not depend on each other. Do not use the id 'plan'.",
+    "participantId must be a seat id from the roster or the listed available workers. Choose the most suitable worker. Encode real dependencies only; independent nodes must not depend on each other. Do not use the id 'plan'. Each node may include contextPaths: project-relative folders/files whose scoped memory should be loaded.",
     "Do not add validation or synthesis nodes. The server inserts those gates, runs them on the chair's seat, and rejects duplicate ids, missing dependencies, cycles, and unseated assignments.",
     // A node worded as offensive security gets refused by the provider before
     // it runs, which stalls the whole graph on work that was only ever

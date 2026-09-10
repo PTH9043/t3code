@@ -170,3 +170,43 @@ export function derivePendingUserInputProgress(
     canAdvance: Boolean(resolvedAnswer),
   };
 }
+
+/**
+ * What an "advance" (the primary button, or Enter in the composer) should do.
+ *
+ * The button is gated by `canAdvance`/`isComplete`, but Enter reaches the same
+ * handler ungated — so Enter used to step past an unanswered question and then
+ * do nothing at all on the last one, with no explanation. Both paths resolve
+ * through here now.
+ */
+export type PendingUserInputAdvance =
+  | { kind: "submit" }
+  | { kind: "next"; questionIndex: number }
+  | { kind: "blocked"; questionIndex: number };
+
+export function resolvePendingUserInputAdvance(
+  questions: ReadonlyArray<UserInputQuestion>,
+  draftAnswers: Record<string, PendingUserInputDraftAnswer>,
+  questionIndex: number,
+): PendingUserInputAdvance {
+  const progress = derivePendingUserInputProgress(questions, draftAnswers, questionIndex);
+
+  if (!progress.activeQuestion || !progress.canAdvance) {
+    return { kind: "blocked", questionIndex: progress.questionIndex };
+  }
+
+  if (!progress.isLastQuestion) {
+    return { kind: "next", questionIndex: progress.questionIndex + 1 };
+  }
+
+  if (progress.isComplete) {
+    return { kind: "submit" };
+  }
+
+  // The last question is answered but an earlier one was skipped: send the
+  // person back to what is actually missing instead of dropping the keystroke.
+  return {
+    kind: "blocked",
+    questionIndex: findFirstUnansweredPendingUserInputQuestionIndex(questions, draftAnswers),
+  };
+}

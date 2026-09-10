@@ -19,8 +19,10 @@ export default defineConfig({
         cache: false,
       },
       dev: {
+        // Watches the server bundle alongside the desktop bundle so server
+        // edits restart the running app too (see scripts/dev-desktop-bundles.mjs).
         command:
-          "node scripts/build-preview-annotation-css.mjs && cross-env T3CODE_DESKTOP_DEV=1 vp pack --watch",
+          "node scripts/build-preview-annotation-css.mjs && node scripts/dev-desktop-bundles.mjs",
         dependsOn: ["t3#build"],
         cache: false,
       },

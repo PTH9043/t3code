@@ -27,7 +27,7 @@ export interface MeetingComposerSeat {
   readonly options?: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>;
 }
 
-/** 회의 debates first; 협업 skips discussion and goes straight to the plan. */
+/** "토론 먼저" debates first; "바로 실행" skips discussion and plans straight away. */
 export type MeetingComposerStyle = "meeting" | "collaboration";
 
 export interface MeetingComposerConfig {
@@ -35,14 +35,15 @@ export interface MeetingComposerConfig {
   readonly style: MeetingComposerStyle;
   readonly mode: WorkspaceMeetingMode;
   readonly maxRounds: number;
-  /** 협업의 횟수 제한: 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
+  /** "바로 실행"의 횟수 제한: 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
   readonly maxRevisions: number;
   /**
-   * 오케스트라: 실행 단계의 노드들을 각자의 대화에서 병렬로 돌린다. 꺼져
-   * 있으면 서버는 기존대로 회의 대화 하나에서 한 노드씩 실행한다.
+   * 오케스트라는 이제 상시 모드다: armed면 실행 단계 노드들을 각자의 대화에서
+   * 병렬로 돌린다. 이 플래그는 예전 설정 호환용으로만 남아 있고 send 경로는
+   * 이를 보지 않는다 — 순차 실행은 병렬 폭 1로 표현한다.
    */
   readonly orchestraEnabled: boolean;
-  /** 오케스트라 병렬 폭 (1–6). */
+  /** 오케스트라 병렬 폭 (1–6, 1이면 순차). */
   readonly maxParallel: number;
   /**
    * 쓰기 연쇄(worktree) 격리: 수정 작업 묶음마다 전용 git worktree를 만들어
@@ -61,7 +62,7 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   mode: "fixed-rounds",
   maxRounds: 2,
   maxRevisions: 8,
-  orchestraEnabled: false,
+  orchestraEnabled: true,
   maxParallel: 3,
   isolateWorktrees: false,
   userInLoop: false,
@@ -70,10 +71,10 @@ export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
 };
 
 /**
- * The style is its own field so 회의 and 협업 never overwrite each other's
- * settings: switching styles must not touch the meeting's round count. The
- * short-lived first cut encoded 협업 as maxRounds 0 — fold those entries
- * forward and give the meeting side its rounds back.
+ * The style is its own field so "토론 먼저" and "바로 실행" never overwrite each
+ * other's settings: switching styles must not touch the discussion round count.
+ * The short-lived first cut encoded "바로 실행" as maxRounds 0 — fold those
+ * entries forward and give the discussion side its rounds back.
  */
 function normalizeMeetingComposerConfig(
   config:

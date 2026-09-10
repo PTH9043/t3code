@@ -21,6 +21,7 @@ import {
   type ModelUsage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
+import { claudeTokenConsumption } from "../tokenConsumption.ts";
 import {
   ApprovalRequestId,
   type CanonicalItemType,
@@ -37,6 +38,7 @@ import {
   type ProviderSendTurnInput,
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
+  type TokenUsageObservation,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
   RuntimeItemId,
@@ -2026,15 +2028,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     options?: {
       readonly rawMethod?: string;
       readonly rawPayload?: unknown;
+      readonly consumption?: ReadonlyArray<TokenUsageObservation>;
     },
   ) {
-    if (!usage) {
+    if (!usage && !options?.consumption?.length) {
       return;
     }
 
-    context.lastKnownTokenUsage = usage;
+    context.lastKnownTokenUsage = usage ?? context.lastKnownTokenUsage;
     context.lastKnownTotalProcessedTokens =
-      usage.totalProcessedTokens ?? context.lastKnownTotalProcessedTokens;
+      usage?.totalProcessedTokens ?? context.lastKnownTotalProcessedTokens;
 
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
@@ -2046,7 +2049,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId: context.session.threadId,
       ...(turnState ? { turnId: turnState.turnId } : {}),
       payload: {
-        usage,
+        usage: usage ?? { usedTokens: 0 },
+        ...(options?.consumption?.length ? { consumption: options.consumption } : {}),
       },
       providerRefs: nativeProviderRefs(context),
       ...(options?.rawMethod || options?.rawPayload
@@ -2069,13 +2073,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return undefined;
     }
 
+    // Bounded: getContextUsage is a control request to the child process, and
+    // a busy or wedged child may never answer it (Effect.promise itself has no
+    // timeout). This runs inside completeTurn on the session-stop path, where
+    // an unbounded await wedged the provider command reactor's serial worker —
+    // every later Stop click queued behind it forever.
     const usage = yield* Effect.promise(async () => {
       try {
         return await context.query.getContextUsage?.();
       } catch {
         return undefined;
       }
-    });
+    }).pipe(Effect.timeoutOption("3 seconds"), Effect.map(Option.getOrUndefined));
     if (!usage) {
       return undefined;
     }
@@ -2248,6 +2257,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* emitThreadTokenUsage(context, usageSnapshot, {
         rawMethod: "claude/result",
         rawPayload: result ?? { status },
+        consumption: claudeTokenConsumption(result),
       });
 
       const stamp = yield* makeEventStamp();
@@ -2322,6 +2332,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* emitThreadTokenUsage(context, usageSnapshot, {
       rawMethod: "claude/result",
       rawPayload: result ?? { status },
+      consumption: claudeTokenConsumption(result),
     });
 
     const stamp = yield* makeEventStamp();
@@ -3056,15 +3067,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Undeclared-but-real subtypes (absent from the SDK's union, so they can't
     // be switch cases): consumed intentionally without emitting, otherwise
     // they fall through to the unknown-subtype warning and surface as spurious
-    // error rows in client work logs. `background_tasks_changed` is a roster
-    // snapshot ({tasks: [...]}) — the task_* lifecycle events carry the
-    // authoritative per-agent data and the typed background_tasks control
-    // request is the reconciliation source. `vcs_state_changed`
+    // error rows in client work logs. `vcs_state_changed`
     // ({kind: commit|push|rebase}) and `code_change_published`
     // ({provider, url, repo}) are informational CLI notices; the work log
     // already shows the underlying git/gh tool calls.
     switch (message.subtype as string) {
-      case "background_tasks_changed":
       case "vcs_state_changed":
       case "code_change_published":
         return;
@@ -3361,14 +3368,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* emitRuntimeWarning(context, message.text, message);
         }
         return;
+      case "informational":
+        // Transcript-style CLI notice. Same bar as `notification`: only the
+        // prominent level earns a work-log row.
+        if (message.level === "warning") {
+          yield* emitRuntimeWarning(context, message.content, message);
+        }
+        return;
       // Inner protocol/UX details with no T3 surface today — consumed
       // deliberately so they don't masquerade as unknown-subtype warnings.
+      // `background_tasks_changed` is a roster snapshot ({tasks: [...]}) —
+      // the task_* lifecycle events carry the authoritative per-agent data.
+      // `model_refusal_no_fallback` is already reported by the turn's
+      // result/error path; `control_request_progress` is a transport retry
+      // heartbeat (see api_retry); `worker_shutting_down` is followed by the
+      // stream ending, which the session teardown path reports.
       case "model_refusal_fallback":
+      case "model_refusal_no_fallback":
       case "local_command_output":
       case "plugin_install":
       case "commands_changed":
       case "memory_recall":
       case "elicitation_complete":
+      case "background_tasks_changed":
+      case "control_request_progress":
+      case "worker_shutting_down":
         return;
       case "permission_denied":
         yield* offerRuntimeEvent({
@@ -3492,6 +3516,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
 
+    // Undeclared-but-real top-level types (absent from the SDK's SDKMessage
+    // union, so they can't be typed switch cases — same story as the
+    // unknown-subtype pre-switch in handleSystemMessage):
+    // `command_lifecycle` ({command_uuid, state: started|completed}) brackets
+    // each slash-command run; the command's own output rows already show in
+    // the transcript, so it earns no work-log row.
+    switch (message.type as string) {
+      case "command_lifecycle":
+        return;
+    }
+
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);
@@ -3516,6 +3551,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       // Composer prompt suggestions have no T3 surface; consumed deliberately.
       case "prompt_suggestion":
+        return;
+      // /clear inside the CLI session. T3 never drives it, and the CLI keeps
+      // the same session_id, so there is nothing to re-key; consumed.
+      case "conversation_reset":
         return;
       default: {
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
@@ -3631,7 +3670,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const streamFiber = context.streamFiber;
     context.streamFiber = undefined;
     if (streamFiber && streamFiber.pollUnsafe() === undefined) {
-      yield* Fiber.interrupt(streamFiber);
+      // The stream fiber can be parked in SDK iterator internals that ignore
+      // interruption; waiting for its exit must not block session teardown.
+      yield* Fiber.interrupt(streamFiber).pipe(Effect.timeoutOption("5 seconds"), Effect.asVoid);
     }
 
     yield* Effect.try({
@@ -3888,12 +3929,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         // Return the answers to the SDK in the expected format:
-        // { questions: [...], answers: { questionText: selectedLabel } }
+        // { questions: [...], answers: { questionText: selectedLabel } }.
+        // The SDK contract types every answer as a STRING and documents
+        // multi-select answers as comma-separated — the UI's string[] for a
+        // multiSelect question must be joined here or the model never sees
+        // the selections (multi-select looked broken end-to-end).
+        const sdkAnswers = Object.fromEntries(
+          Object.entries(answers).map(([questionText, answer]) => [
+            questionText,
+            Array.isArray(answer) ? answer.join(", ") : answer,
+          ]),
+        );
         return {
           behavior: "allow",
           updatedInput: {
             questions: toolInput.questions,
-            answers,
+            answers: sdkAnswers,
           },
         } satisfies PermissionResult;
       });
@@ -4474,10 +4525,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           { concurrency: 8, discard: true },
         ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
       }
-      yield* Effect.tryPromise({
+      // Bounded like the stopTask fan-out above: a wedged child never answers
+      // the control request, and an unbounded await here turns one stuck
+      // session into a permanently jammed interrupt path.
+      const acknowledged = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
-      });
+      }).pipe(Effect.timeoutOption("10 seconds"));
+      if (Option.isNone(acknowledged)) {
+        return yield* toRequestError(
+          threadId,
+          "turn/interrupt",
+          new Error("Claude runtime did not acknowledge the interrupt within 10 seconds."),
+        );
+      }
     },
   );
 

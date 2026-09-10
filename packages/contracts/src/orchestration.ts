@@ -1,5 +1,10 @@
+import { ConversationHandoffMode } from "./conversationHandoff.ts";
 import * as Effect from "effect/Effect";
-import { TokenUsageContext } from "./tokenUsage.ts";
+import {
+  GetThreadTokenUsageInput,
+  ThreadTokenUsageReport,
+  TokenUsageContext,
+} from "./tokenUsage.ts";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -33,6 +38,7 @@ import {
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
+  getThreadTokenUsage: "orchestration.getThreadTokenUsage",
   dispatchCommand: "orchestration.dispatchCommand",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnDiff: "orchestration.getTurnDiff",
@@ -517,6 +523,23 @@ export const WorkspaceKnowledgeRelativeFolder = TrimmedNonEmptyString.check(
 );
 export type WorkspaceKnowledgeRelativeFolder = typeof WorkspaceKnowledgeRelativeFolder.Type;
 
+export const WorkspaceKnowledgeScope = Schema.Literals(["environment", "project", "folder"]);
+export type WorkspaceKnowledgeScope = typeof WorkspaceKnowledgeScope.Type;
+
+/** Storage folders organize files; these fields determine where a memory applies. */
+const WorkspaceKnowledgeLocationFields = {
+  scope: Schema.optionalKey(WorkspaceKnowledgeScope),
+  appliesToFolder: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeRelativeFolder)),
+};
+
+export const WorkspaceResearchRecord = Schema.Struct({
+  query: Schema.String,
+  sources: Schema.Array(Schema.String),
+  capturedAt: IsoDateTime,
+  verification: Schema.Literals(["unverified", "verified", "contradicted"]),
+});
+export type WorkspaceResearchRecord = typeof WorkspaceResearchRecord.Type;
+
 export const WorkspaceKnowledgeItem = Schema.Struct({
   id: WorkspaceKnowledgeItemId,
   projectId: ProjectId,
@@ -526,6 +549,8 @@ export const WorkspaceKnowledgeItem = Schema.Struct({
   status: WorkspaceKnowledgeStatus,
   origin: WorkspaceKnowledgeOrigin,
   relativeFolder: Schema.NullOr(WorkspaceKnowledgeRelativeFolder),
+  ...WorkspaceKnowledgeLocationFields,
+  research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
   tags: Schema.Array(TrimmedNonEmptyString),
   /**
    * How many agent prompts this item was actually composed into, and when it
@@ -552,6 +577,7 @@ export type WorkspaceKnowledgeItem = typeof WorkspaceKnowledgeItem.Type;
 
 export const WorkspaceKnowledgeListInput = Schema.Struct({
   projectId: ProjectId,
+  includeShared: Schema.optionalKey(Schema.Boolean),
   kinds: Schema.optional(Schema.Array(WorkspaceKnowledgeKind)),
   statuses: Schema.optional(Schema.Array(WorkspaceKnowledgeStatus)),
 });
@@ -564,6 +590,8 @@ export type WorkspaceKnowledgeListResult = typeof WorkspaceKnowledgeListResult.T
 
 export const WorkspaceRagSearchInput = Schema.Struct({
   projectId: ProjectId,
+  includeShared: Schema.optionalKey(Schema.Boolean),
+  contextPaths: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeRelativeFolder)),
   query: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
   includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
@@ -572,6 +600,7 @@ export type WorkspaceRagSearchInput = typeof WorkspaceRagSearchInput.Type;
 
 export const WorkspaceRagMatch = Schema.Struct({
   projectId: ProjectId,
+  ...WorkspaceKnowledgeLocationFields,
   itemId: WorkspaceKnowledgeItemId,
   kind: Schema.Literals(["rag-source", "long-term-memory"]),
   title: TrimmedNonEmptyString,
@@ -612,6 +641,8 @@ export type SharedLibraryMatch = typeof SharedLibraryMatch.Type;
 
 export const WorkspacePromptComposeInput = Schema.Struct({
   projectId: ProjectId,
+  includeShared: Schema.optionalKey(Schema.Boolean),
+  contextPaths: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeRelativeFolder)),
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
   includeRag: Schema.optionalKey(Schema.Boolean),
   includeWorkingMemory: Schema.optionalKey(Schema.Boolean),
@@ -628,6 +659,14 @@ export type WorkspacePromptComposeInput = typeof WorkspacePromptComposeInput.Typ
 export const WorkspacePromptComposeResult = Schema.Struct({
   prompt: Schema.String,
   sourceItemIds: Schema.Array(WorkspaceKnowledgeItemId),
+  sourceReferences: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        projectId: ProjectId,
+        itemId: WorkspaceKnowledgeItemId,
+      }),
+    ),
+  ),
   ragMatches: Schema.Array(WorkspaceRagMatch),
   /** Shared library references the prompt actually carries. */
   libraryMatches: Schema.optionalKey(Schema.Array(SharedLibraryMatch)),
@@ -762,6 +801,7 @@ const WorkspaceTaskContextText = Schema.String.check(Schema.isMaxLength(20_000))
 
 /** Minimal sufficient context handed to one graph node. */
 export const WorkspaceTaskHandoff = Schema.Struct({
+  contextPaths: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeRelativeFolder)),
   task: WorkspaceTaskShortText,
   goal: WorkspaceTaskShortText,
   context: WorkspaceTaskContextText,
@@ -1144,11 +1184,9 @@ export const WorkspaceMeetingSetup = Schema.Struct({
 export type WorkspaceMeetingSetup = typeof WorkspaceMeetingSetup.Type;
 
 /**
- * Orchestra: the run's execution nodes run in parallel, each in its own fixed
- * conversation. A run-level, opt-in setting — null keeps the pre-orchestra
- * behaviour (one node at a time in the meeting's conversation on meeting runs,
- * the server's fixed width on role-bound runs). Fixed when the run starts so a
- * later settings change never re-shapes a run under way.
+ * Orchestra nodes use independent provider sessions and append blocks in one
+ * durable conversation. These run-level settings control parallel width and
+ * checkout isolation, independently of conversation ownership.
  */
 export const WorkspaceOrchestraSettings = Schema.Struct({
   /** Nodes executed at once. */
@@ -1755,7 +1793,20 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+/**
+ * The orchestra conversation a node conversation belongs to, or null for an
+ * ordinary conversation. An orchestra run executes its graph nodes in parallel,
+ * which needs one provider session — and therefore one conversation — per node.
+ * Those node conversations are the run's internals: clients keep them out of
+ * their conversation lists and reach them from this conversation instead.
+ * Optional so conversations, commands and payloads written before the
+ * orchestra still decode, and so every unrelated `thread.create` call site
+ * stays untouched. Read it as `?? null`.
+ */
+export const OrchestraRunThreadId = Schema.optional(Schema.NullOr(ThreadId));
+
 export const OrchestrationThread = Schema.Struct({
+  handoffMode: Schema.optional(ConversationHandoffMode),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -1766,6 +1817,7 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  orchestraRunThreadId: OrchestraRunThreadId,
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -1825,6 +1877,7 @@ export const OrchestrationProjectShell = Schema.Struct({
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
 export const OrchestrationThreadShell = Schema.Struct({
+  handoffMode: Schema.optional(ConversationHandoffMode),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -1835,6 +1888,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  orchestraRunThreadId: OrchestraRunThreadId,
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -2087,6 +2141,8 @@ const ProjectRuntimeViewCommand = Schema.Struct({
 
 const ProjectKnowledgeItemUpsertCommand = Schema.Struct({
   type: Schema.Literal("project.knowledge.item.upsert"),
+  ...WorkspaceKnowledgeLocationFields,
+  research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
   commandId: CommandId,
   projectId: ProjectId,
   itemId: WorkspaceKnowledgeItemId,
@@ -2335,6 +2391,7 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  orchestraRunThreadId: OrchestraRunThreadId,
   createdAt: IsoDateTime,
 });
 
@@ -2421,6 +2478,7 @@ const ThreadPinReorderCommand = Schema.Struct({
 });
 
 const ThreadMetaUpdateCommand = Schema.Struct({
+  handoffMode: Schema.optional(ConversationHandoffMode),
   type: Schema.Literal("thread.meta.update"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -2952,6 +3010,8 @@ export const ProjectRuntimeViewedPayload = Schema.Struct({
 });
 
 export const ProjectKnowledgeItemUpsertedPayload = Schema.Struct({
+  ...WorkspaceKnowledgeLocationFields,
+  research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
   projectId: ProjectId,
   itemId: WorkspaceKnowledgeItemId,
   kind: WorkspaceKnowledgeKind,
@@ -3123,6 +3183,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  orchestraRunThreadId: OrchestraRunThreadId,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -3193,6 +3254,7 @@ export const ThreadPinReorderedPayload = Schema.Struct({
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
+  handoffMode: Schema.optional(ConversationHandoffMode),
   threadId: ThreadId,
   title: Schema.optional(TrimmedNonEmptyString),
   /** Intent marker consumed by the title-generation reactor. Keeping this on
@@ -3863,6 +3925,10 @@ export class OrchestrationSharedLibraryError extends Schema.TaggedErrorClass<Orc
 ) {}
 
 export const OrchestrationRpcSchemas = {
+  getThreadTokenUsage: {
+    input: GetThreadTokenUsageInput,
+    output: ThreadTokenUsageReport,
+  },
   dispatchCommand: {
     input: ClientOrchestrationCommand,
     output: DispatchResult,

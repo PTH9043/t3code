@@ -2,12 +2,13 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  GeminiSettings,
   GrokSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type * as Schema from "effect/Schema";
-import { ClaudeAI, CursorIcon, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import { ClaudeAI, CursorIcon, Gemini, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
 
 type ProviderSettingsSchema = {
   readonly fields: Readonly<Record<string, Schema.Top>>;
@@ -60,6 +61,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: GrokIcon,
     badgeLabel: "얼리 액세스",
     settingsSchema: GrokSettings,
+  },
+  {
+    value: ProviderDriverKind.make("gemini"),
+    label: "Gemini",
+    icon: Gemini,
+    settingsSchema: GeminiSettings,
   },
   {
     value: ProviderDriverKind.make("opencode"),

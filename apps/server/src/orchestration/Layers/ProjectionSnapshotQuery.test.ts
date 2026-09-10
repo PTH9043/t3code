@@ -246,6 +246,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       `;
 
       let sequence = 5;
+      const sequenceByProjector = new Map<string, number>();
       for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
         yield* sql`
           INSERT INTO projection_state (
@@ -259,12 +260,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '2026-02-24T00:00:09.000Z'
           )
         `;
+        sequenceByProjector.set(projector, sequence);
         sequence += 1;
       }
 
       const snapshot = yield* snapshotQuery.getSnapshot();
 
-      assert.equal(snapshot.snapshotSequence, 5);
+      // The watermark is the slowest projector the snapshot actually reads from.
+      // Projectors the read model does not contain (token usage is served by its own
+      // query) must not drag it back, so derive the expectation instead of pinning a
+      // literal that silently re-points whenever a projector is added to the record.
+      const snapshotProjectors = [
+        ORCHESTRATION_PROJECTOR_NAMES.projects,
+        ORCHESTRATION_PROJECTOR_NAMES.threads,
+        ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
+        ORCHESTRATION_PROJECTOR_NAMES.threadProposedPlans,
+        ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
+        ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
+        ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
+      ];
+      assert.equal(
+        snapshot.snapshotSequence,
+        Math.min(...snapshotProjectors.map((projector) => sequenceByProjector.get(projector)!)),
+      );
       assert.equal(snapshot.updatedAt, "2026-02-24T00:00:09.000Z");
       assert.deepEqual(snapshot.projects, [
         {
@@ -301,10 +319,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          handoffMode: "standard",
           interactionMode: "default",
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          orchestraRunThreadId: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -385,7 +405,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       ]);
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
-      assert.equal(shellSnapshot.snapshotSequence, 5);
+      assert.equal(
+        shellSnapshot.snapshotSequence,
+        Math.min(...snapshotProjectors.map((projector) => sequenceByProjector.get(projector)!)),
+      );
       assert.deepEqual(shellSnapshot.projects, [
         {
           id: asProjectId("project-1"),
@@ -420,10 +443,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          handoffMode: "standard",
           interactionMode: "default",
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          orchestraRunThreadId: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",

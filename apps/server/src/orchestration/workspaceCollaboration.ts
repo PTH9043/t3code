@@ -211,9 +211,11 @@ function graphStructuredDeliverable(
       "Independently verify the target output against its success criteria and evidence. Do not merely restate it.",
       "Return one strict receipt between <t3_validation> and </t3_validation> tags.",
       'The JSON shape is: {"verdict":"pass"|"fail"|"inconclusive","confidence":"high"|"medium"|"low","summary":string,"evidence":string[],"failureClassification":null|"information"|"implementation"|"tool"|"assumption"|"validation","nextAction":string,"followUpNodes":TaskNode[]}.',
+      // The validator never sees the planner's prompt, so "same fields as a
+      // plan node" left it guessing field names; spell the shape out.
       meeting !== null
-        ? "TaskNode uses the same fields as a t3_task_graph node, with participantId set to a meeting seat id. Use an empty array on pass; on failure or low confidence, add only the narrowly scoped follow-up work that is already clear from the evidence."
-        : "TaskNode uses the same fields and routing rules as a t3_task_graph node. Use an empty array on pass; on failure or low confidence, add only the narrowly scoped research, debugging, redesign, or cross-validation work that is already clear from the evidence.",
+        ? 'Each followUpNodes TaskNode is exactly {"id":slug,"kind":"orchestration"|"research"|"implementation"|"debug","participantId":seatId,"title":string,"task":string,"goal":string,"context":string,"input":string,"constraints":string[],"expectedOutput":string,"successCriteria":string[],"dependsOn":slug[],"priority":nonNegativeInteger}; participantId must be one of the meeting seat ids listed under AVAILABLE AGENTS. Use an empty array on pass; on failure or low confidence, add only the narrowly scoped follow-up work that is already clear from the evidence.'
+        : 'Each followUpNodes TaskNode is exactly {"id":slug,"kind":"orchestration"|"research"|"implementation"|"debug","agent":"fable"|"codex"|"grok","title":string,"task":string,"goal":string,"context":string,"input":string,"constraints":string[],"expectedOutput":string,"successCriteria":string[],"dependsOn":slug[],"priority":nonNegativeInteger}; route research to grok, implementation and debug to codex, orchestration to fable. Use an empty array on pass; on failure or low confidence, add only the narrowly scoped research, debugging, redesign, or cross-validation work that is already clear from the evidence.',
     ];
   }
   if (node.kind === "synthesis") {

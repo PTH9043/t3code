@@ -66,10 +66,52 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
 };
 
 const DEFAULT_SERVICE_TIER_ID = "default";
-const CURRENT_CODEX_MODELS = new Set(["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]);
+/** How many of the newest `gpt-<major>.<minor>` lines count as current. */
+const CURRENT_CODEX_MODEL_LINES = 2;
 
-export function isLegacyCodexModel(model: string): boolean {
-  return !CURRENT_CODEX_MODELS.has(model);
+type CodexCatalogModel = Pick<CodexSchema.V2ModelListResponse__Model, "model" | "upgrade">;
+
+function codexModelLine(slug: string): { key: string; rank: readonly [number, number] } | null {
+  const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(slug);
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? 0 : Number(match[2]);
+  return { key: `${major}.${minor}`, rank: [major, minor] };
+}
+
+/**
+ * Legacy status is derived from the live `model/list` catalog rather than a
+ * hand-maintained allowlist, so a new generation shows up as current the
+ * moment Codex starts serving it:
+ *  - a model Codex itself points at a successor (`upgrade`) is legacy,
+ *  - otherwise the newest `CURRENT_CODEX_MODEL_LINES` version lines stay
+ *    current and every older line is legacy,
+ *  - slugs without a parseable version are left current.
+ */
+export function legacyCodexModelSlugs(
+  models: ReadonlyArray<CodexCatalogModel>,
+): ReadonlySet<string> {
+  const lines = new Map<string, readonly [number, number]>();
+  for (const model of models) {
+    if (model.upgrade) continue;
+    const line = codexModelLine(model.model);
+    if (line) lines.set(line.key, line.rank);
+  }
+  const currentLines = new Set(
+    [...lines.entries()]
+      .sort(([, a], [, b]) => b[0] - a[0] || b[1] - a[1])
+      .slice(0, CURRENT_CODEX_MODEL_LINES)
+      .map(([key]) => key),
+  );
+
+  const legacy = new Set<string>();
+  for (const model of models) {
+    const line = codexModelLine(model.model);
+    if (model.upgrade || (line && !currentLines.has(line.key))) {
+      legacy.add(model.model);
+    }
+  }
+  return legacy;
 }
 
 function reasoningEffortLabel(reasoningEffort: string): string {
@@ -191,26 +233,32 @@ const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string =>
     .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
 };
 
-function parseCodexModelListResponse(
-  response: CodexSchema.V2ModelListResponse,
+export function parseCodexCatalogModels(
+  models: ReadonlyArray<CodexSchema.V2ModelListResponse__Model>,
 ): ReadonlyArray<ServerProviderModel> {
-  return response.data.map((model) => ({
+  const legacySlugs = legacyCodexModelSlugs(models);
+  return models.map((model) => ({
     slug: model.model,
     name: toDisplayName(model),
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
-    ...(isLegacyCodexModel(model.model) ? { isLegacy: true } : {}),
+    ...(legacySlugs.has(model.model) ? { isLegacy: true } : {}),
     capabilities: mapCodexModelCapabilities(model),
   }));
 }
 
 /**
- * Prefer our own default-model ranking when one of the preferred slugs is in
- * the live catalog; otherwise keep whatever Codex itself flagged as default.
+ * Codex's own default wins as long as it is a current (non-legacy) catalog
+ * model — that is how a newly shipped generation becomes the default the
+ * moment Codex promotes it. Our preference ranking only steps in when Codex
+ * flags nothing, or flags a legacy model.
  */
 export function applyPreferredCodexDefaultModel(
   models: ReadonlyArray<ServerProviderModel>,
 ): ReadonlyArray<ServerProviderModel> {
+  if (models.some((model) => model.isDefault && !model.isCustom && !model.isLegacy)) {
+    return models;
+  }
   const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.find((slug) =>
     models.some((model) => model.slug === slug && !model.isCustom),
   );
@@ -295,7 +343,7 @@ function parseCodexSkillsListResponse(
 const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
 ) {
-  const models: ServerProviderModel[] = [];
+  const models: CodexSchema.V2ModelListResponse__Model[] = [];
   let cursor: string | null | undefined = undefined;
 
   do {
@@ -303,11 +351,13 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
       "model/list",
       cursor ? { cursor } : {},
     );
-    models.push(...parseCodexModelListResponse(response));
+    models.push(...response.data);
     cursor = response.nextCursor;
   } while (cursor);
 
-  return models;
+  // Legacy detection compares version lines across the whole catalog, so it
+  // has to run after every page is in.
+  return parseCodexCatalogModels(models);
 });
 
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
@@ -598,6 +648,13 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     Effect.result,
   );
 
+  // A probe that could not finish says nothing about whether Codex works: this
+  // check spawns its own app-server and makes two network calls inside
+  // AUTH_PROBE_TIMEOUT_MS, so it can lose that race while live sessions keep
+  // running. Only a failed spawn proves the CLI is unusable; the other two
+  // outcomes report "could not verify" so a blip cannot claim the provider is
+  // unavailable. Messages are Korean because the UI drops non-Korean text in
+  // favour of a generic fallback.
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
@@ -610,11 +667,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       probe: {
         installed,
         version: null,
-        status: "error",
+        status: installed ? "warning" : "error",
         auth: { status: "unknown" },
         message: installed
-          ? `Codex app-server provider probe failed: ${error.message}.`
-          : "Codex CLI (`codex`) is not installed or not on PATH.",
+          ? `Codex 상태 확인에 실패했습니다: ${error.message} 진행 중인 대화는 영향을 받지 않을 수 있습니다.`
+          : "Codex CLI(`codex`)를 찾을 수 없습니다. 설치되어 있고 PATH에 등록되어 있는지 확인하세요.",
       },
     });
   }
@@ -629,9 +686,9 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       probe: {
         installed: true,
         version: null,
-        status: "error",
+        status: "warning",
         auth: { status: "unknown" },
-        message: "Timed out while checking Codex app-server provider status.",
+        message: `Codex 상태 확인이 ${Math.round(AUTH_PROBE_TIMEOUT_MS / 1000)}초 안에 끝나지 않았습니다. CLI는 설치되어 있으며 진행 중인 대화는 영향을 받지 않을 수 있습니다.`,
       },
     });
   }

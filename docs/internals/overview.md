@@ -101,7 +101,7 @@ reactor(후속 작업을 처리하는 워커)만 만들어 냅니다(`thread.mes
 
 ## 제공자 드라이버
 
-Codex, Claude, Cursor, Grok, OpenCode 드라이버 다섯 개가 기본 내장되어 [`builtInDrivers.ts`][drivers]에
+Codex, Claude, Cursor, Gemini, Grok, OpenCode 드라이버 여섯 개가 기본 내장되어 [`builtInDrivers.ts`][drivers]에
 `BUILT_IN_DRIVERS`로 등록되어 있습니다. 드라이버는 자신의 종류와 설정 스키마를 선언하고 스코프가 지정된
 어댑터를 만들며, `ProviderInstanceRegistry`가 실행 중인 인스턴스를 소유하고 `ProviderAdapterRegistry`가
 인스턴스를 해당 어댑터로 해석하므로, `ProviderService`는 뒤에 어떤 에이전트가 있는지 알지 못한 채 세션·턴

@@ -43,6 +43,19 @@ export function scopeThread(
   return { ...thread, environmentId };
 }
 
+/**
+ * Whether a conversation is one an orchestra run executes a node in. A run
+ * needs a provider session per parallel node, and a session needs a
+ * conversation — so these exist for the run's machinery, not because the person
+ * started them. Every conversation list leaves them out; the run's own
+ * conversation is where they are listed and opened.
+ */
+export function isOrchestraNodeThread(thread: {
+  readonly orchestraRunThreadId?: ThreadId | null | undefined;
+}): boolean {
+  return (thread.orchestraRunThreadId ?? null) !== null;
+}
+
 export function selectEnvironmentThreadShell(
   snapshot: OrchestrationShellSnapshot | null,
   environmentId: EnvironmentId,

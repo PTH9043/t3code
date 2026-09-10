@@ -70,6 +70,7 @@ import {
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import { GeminiLoginDialog } from "./GeminiLoginDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
@@ -396,6 +397,10 @@ export function EnvironmentProviderSettings({
   });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [geminiLoginTarget, setGeminiLoginTarget] = useState<{
+    readonly instanceId: ProviderInstanceId;
+    readonly displayName: string;
+  } | null>(null);
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
@@ -476,7 +481,6 @@ export function EnvironmentProviderSettings({
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -839,6 +843,21 @@ export function EnvironmentProviderSettings({
                   onClick={() => resetDefaultInstance(row.driver)}
                 />
               ) : null;
+            const displayName =
+              row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
+            const authAction =
+              row.driver === ProviderDriverKind.make("gemini") ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant={liveProvider?.auth.status === "authenticated" ? "ghost" : "outline"}
+                  onClick={() => setGeminiLoginTarget({ instanceId: row.instanceId, displayName })}
+                >
+                  {liveProvider?.auth.status === "authenticated"
+                    ? "Google 계정 변경"
+                    : "Google로 로그인"}
+                </Button>
+              ) : null;
             return (
               <ProviderInstanceCard
                 key={row.instanceId}
@@ -868,6 +887,7 @@ export function EnvironmentProviderSettings({
                 }}
                 onDelete={row.isDefault ? undefined : () => deleteProviderInstance(row.instanceId)}
                 headerAction={headerAction}
+                authAction={authAction}
                 hiddenModels={modelPreferences.hiddenModels}
                 favoriteModels={favoriteModels}
                 modelOrder={modelPreferences.modelOrder}
@@ -909,6 +929,25 @@ export function EnvironmentProviderSettings({
           environmentId={environmentId}
           environmentLabel={environmentLabel}
           onOpenChange={setIsAddInstanceDialogOpen}
+        />
+      ) : null}
+      {geminiLoginTarget ? (
+        <GeminiLoginDialog
+          open
+          environmentId={environmentId}
+          instanceId={geminiLoginTarget.instanceId}
+          displayName={geminiLoginTarget.displayName}
+          onAuthenticated={() => {
+            const row = rows.find(
+              (candidate) => candidate.instanceId === geminiLoginTarget.instanceId,
+            );
+            if (row && !(row.instance.enabled ?? true)) {
+              updateProviderInstance(row, { ...row.instance, enabled: true });
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) setGeminiLoginTarget(null);
+          }}
         />
       ) : null}
     </>

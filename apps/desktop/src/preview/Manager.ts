@@ -43,6 +43,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
@@ -2687,8 +2688,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         })()`,
         true,
       );
-      const [accessibility, sourceImage, diagnostics, timelines] = yield* Effect.all([
+      const [accessibility, capture, diagnostics, timelines] = yield* Effect.all([
         send("Accessibility.getFullAXTree"),
+        // A parked-offscreen guest never produces a compositor frame, so
+        // capturePage fails permanently while the page evaluate still succeeds.
         attemptPromise(
           {
             operation: "automationSnapshot.capturePage",
@@ -2696,16 +2699,31 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             webContentsId: wc.id,
           },
           () => wc.capturePage(),
-        ),
+        ).pipe(Effect.result),
         Ref.get(diagnosticsRef),
         Ref.get(actionTimelineRef),
       ]);
-      const sourceSize = sourceImage.getSize();
-      const image =
-        sourceSize.width > MAX_SCREENSHOT_WIDTH
-          ? sourceImage.resize({ width: MAX_SCREENSHOT_WIDTH })
-          : sourceImage;
-      const size = image.getSize();
+      const screenshot = Result.match(capture, {
+        onSuccess: (sourceImage) => {
+          const sourceSize = sourceImage.getSize();
+          const image =
+            sourceSize.width > MAX_SCREENSHOT_WIDTH
+              ? sourceImage.resize({ width: MAX_SCREENSHOT_WIDTH })
+              : sourceImage;
+          const size = image.getSize();
+          return {
+            screenshot: {
+              mimeType: "image/png" as const,
+              data: image.toPNG().toString("base64"),
+              width: size.width,
+              height: size.height,
+            },
+          };
+        },
+        onFailure: (error) => ({
+          screenshotError: PreviewOperationError.toTimelineMessage(error),
+        }),
+      });
       const browserDiagnostics = diagnostics.get(wc.id);
       return {
         ...page,
@@ -2713,12 +2731,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         consoleEntries: [...(browserDiagnostics?.consoleEntries ?? [])],
         networkEntries: [...(browserDiagnostics?.networkEntries ?? [])],
         actionTimeline: [...(timelines.get(tabId) ?? [])],
-        screenshot: {
-          mimeType: "image/png" as const,
-          data: image.toPNG().toString("base64"),
-          width: size.width,
-          height: size.height,
-        },
+        ...screenshot,
       };
     },
   );

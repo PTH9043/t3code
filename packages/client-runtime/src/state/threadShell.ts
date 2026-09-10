@@ -10,7 +10,7 @@ import type {
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
-import { scopeThreadShell } from "./models.ts";
+import { isOrchestraNodeThread, scopeThreadShell } from "./models.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import {
   arrayElementsEqual,
@@ -160,6 +160,9 @@ export function createEnvironmentThreadShellAtoms(input: {
   }).pipe(Atom.withLabel("environment-thread-refs"));
 
   let previousThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
+  // Every conversation this client knows of. Machinery reads this one — an
+  // outbox drain that cannot find a conversation drops the message queued for
+  // it, so nothing may be missing here.
   const threadShellsAtom = Atom.make((get) => {
     const next = get(threadRefsAtom).flatMap((ref) => {
       const thread = get(threadShellAtomFamily(threadKey(ref)));
@@ -172,6 +175,19 @@ export function createEnvironmentThreadShellAtoms(input: {
     return previousThreadShells;
   }).pipe(Atom.withLabel("environment-thread-shell-list"));
 
+  let previousListedThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
+  // What a person browses: the same conversations minus an orchestra run's
+  // node conversations, which a run spawns one of per parallel node and which
+  // are opened from the run's own conversation instead.
+  const listedThreadShellsAtom = Atom.make((get) => {
+    const next = get(threadShellsAtom).filter((thread) => !isOrchestraNodeThread(thread));
+    if (arrayElementsEqual(previousListedThreadShells, next)) {
+      return previousListedThreadShells;
+    }
+    previousListedThreadShells = next;
+    return previousListedThreadShells;
+  }).pipe(Atom.withLabel("environment-listed-thread-shell-list"));
+
   return {
     environmentThreadsAtom,
     environmentThreadIndexAtom,
@@ -179,6 +195,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     environmentThreadRefsByProjectAtom,
     threadRefsAtom,
     threadShellsAtom,
+    listedThreadShellsAtom,
     threadShellsForProjectRefsAtom: (refs: ReadonlyArray<ScopedProjectRef>) =>
       threadShellsForProjectRefsAtomFamily(projectRefCollectionKey(refs)),
     threadShellAtom: (ref: ScopedThreadRef) => threadShellAtomFamily(threadKey(ref)),

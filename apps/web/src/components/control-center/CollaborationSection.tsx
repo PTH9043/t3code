@@ -52,15 +52,15 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
   );
   useOperationsRevisionRefresh(runtime.data, runs.refresh);
   const requestRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
-    label: "프로젝트 협업 요청",
+    label: "오케스트라 실행 요청",
     reportFailure: false,
   });
   const cancelRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
-    label: "프로젝트 협업 취소",
+    label: "오케스트라 실행 취소",
     reportFailure: false,
   });
   const answerRun = useAtomCommand(projectEnvironment.answerWorkspaceCollaborationRun, {
-    label: "회의 질문 답변",
+    label: "오케스트라 질문 답변",
     reportFailure: false,
   });
   const cleanupWorktree = useAtomCommand(orchestrationEnvironment.cleanupWorkspaceWorktree, {
@@ -123,7 +123,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
       });
       if (!notifyCommandFailure(result, "답변 전송 실패")) {
         runs.refresh();
-        notifySuccess("답변을 전달했습니다.", "회의가 이어서 진행됩니다.");
+        notifySuccess("답변을 전달했습니다.", "오케스트라가 이어서 진행됩니다.");
       }
     } finally {
       setAnsweringRunId(null);
@@ -142,7 +142,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
           task: task.trim(),
         },
       });
-      if (!notifyCommandFailure(result, "협업 실행 요청 실패")) {
+      if (!notifyCommandFailure(result, "오케스트라 실행 요청 실패")) {
         setTask("");
         runs.refresh();
         notifySuccess(
@@ -160,7 +160,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
       environmentId: project.environmentId,
       input: { projectId: project.id, runId },
     });
-    if (!notifyCommandFailure(result, "협업 실행 취소 실패")) {
+    if (!notifyCommandFailure(result, "오케스트라 실행 취소 실패")) {
       runs.refresh();
       notifySuccess("취소 요청을 전달했습니다.");
     }
@@ -374,7 +374,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
           ))}
           {runs.data && runs.data.runs.length === 0 ? (
             <p className="rounded-xl border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
-              아직 협업 실행 이력이 없습니다.
+              아직 오케스트라 실행 이력이 없습니다.
             </p>
           ) : null}
         </div>

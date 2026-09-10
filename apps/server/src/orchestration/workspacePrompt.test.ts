@@ -11,6 +11,37 @@ import { composeWorkspacePrompt } from "./workspacePrompt.ts";
 
 const projectId = ProjectId.make("workspace-a");
 
+it("composes applicable shared and folder memory without collapsing source identities", () => {
+  const shared = {
+    ...item({
+      id: "same",
+      kind: "long-term-memory",
+      content: "Shared evidence",
+      workspace: "workspace-b",
+    }),
+    scope: "environment" as const,
+  };
+  const local = {
+    ...item({ id: "same", kind: "long-term-memory", content: "Web evidence" }),
+    scope: "folder" as const,
+    appliesToFolder: "apps/web",
+  };
+  const result = composeWorkspacePrompt({
+    request: { projectId, task: "Review", contextPaths: ["apps/web/src"] },
+    items: [shared, local],
+    ragMatches: [],
+  });
+  expect(result.prompt).toContain("Shared evidence");
+  expect(result.prompt).toContain("Web evidence");
+  expect(result.sourceReferences).toHaveLength(2);
+  const sibling = composeWorkspacePrompt({
+    request: { projectId, task: "Review", contextPaths: ["apps/web-extra"], includeShared: false },
+    items: [shared, local],
+    ragMatches: [],
+  });
+  expect(sibling.sourceReferences).toEqual([]);
+});
+
 function item(input: {
   readonly id: string;
   readonly kind: WorkspaceKnowledgeItem["kind"];

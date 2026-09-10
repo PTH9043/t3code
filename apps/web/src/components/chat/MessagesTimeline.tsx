@@ -4,7 +4,12 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type TurnId,
+  type WorkspaceOrchestraBlock,
 } from "@t3tools/contracts";
+import {
+  orchestraKindLabels,
+  orchestraStatusLabels,
+} from "@t3tools/client-runtime/state/presentation";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
@@ -130,6 +135,7 @@ import {
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  orchestraBlocks: ReadonlyMap<MessageId, WorkspaceOrchestraBlock>;
   timestampFormat: TimestampFormat;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
@@ -189,6 +195,7 @@ function TimelineLoadEarlierHeader({
 }
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_ORCHESTRA_BLOCKS = new Map<MessageId, WorkspaceOrchestraBlock>();
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -203,6 +210,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  orchestraBlocks?: ReadonlyMap<MessageId, WorkspaceOrchestraBlock>;
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
   isWorking: boolean;
@@ -249,6 +257,7 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  orchestraBlocks = EMPTY_ORCHESTRA_BLOCKS,
   isWorking,
   workingStepLabel = null,
   activeTurnInProgress,
@@ -503,6 +512,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
+      orchestraBlocks,
       timestampFormat,
       routeThreadKey,
       threadRef: parseScopedThreadKey(routeThreadKey),
@@ -520,6 +530,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenAgents,
     }),
     [
+      orchestraBlocks,
       timestampFormat,
       routeThreadKey,
       markdownCwd,
@@ -1121,41 +1132,94 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(빈 응답)");
+  const block = ctx.orchestraBlocks.get(row.message.id);
+  const messageText =
+    row.message.text || (row.message.streaming ? "출력을 기다리는 중…" : "(빈 응답)");
+  const [collapsed, setCollapsed] = useState(false);
 
   return (
     <>
-      <div className="relative min-w-0 px-1 py-0.5">
-        <ChatMarkdown
-          text={messageText}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          isStreaming={Boolean(row.message.streaming)}
-          skills={ctx.skills}
-        />
-        <AssistantChangedFilesSection
-          turnSummary={row.assistantTurnDiffSummary}
-          routeThreadKey={ctx.routeThreadKey}
-          resolvedTheme={ctx.resolvedTheme}
-          onOpenTurnDiff={ctx.onOpenTurnDiff}
-        />
-        {row.showAssistantMeta ? (
-          <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
-            <AssistantCopyButton row={row} />
-            {!row.message.streaming && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={<p className="text-muted-foreground text-xs tabular-nums" />}
-                >
-                  {formatShortTimestamp(row.message.updatedAt, ctx.timestampFormat)}
-                </TooltipTrigger>
-                <TooltipPopup>
-                  {formatChatTimestampTooltip(row.message.updatedAt, ctx.timestampFormat)}
-                </TooltipPopup>
-              </Tooltip>
+      <div
+        className={
+          block
+            ? "relative my-2 min-w-0 overflow-hidden rounded-xl border border-border bg-card"
+            : "relative min-w-0 px-1 py-0.5"
+        }
+        data-orchestra-block={block?.nodeId}
+      >
+        {block ? (
+          <button
+            type="button"
+            className="flex w-full items-start gap-2 border-b border-border/60 bg-muted/40 px-4 py-3 text-left"
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? (
+              <ChevronRightIcon className="mt-0.5 size-4 shrink-0" />
+            ) : (
+              <ChevronDownIcon className="mt-0.5 size-4 shrink-0" />
             )}
-          </div>
+            <span className="min-w-0 flex-1">
+              <span className="block break-words text-sm font-medium">
+                {orchestraKindLabels[block.kind]} · {block.title}
+              </span>
+              <span className="mt-1 block break-all text-xs text-muted-foreground">
+                {block.displayName} · {block.modelSelection.model}
+                {block.attempt > 1 ? ` · 재시도 ${block.attempt - 1}` : ""}
+              </span>
+            </span>
+            <span
+              className={
+                block.status === "failed"
+                  ? "shrink-0 text-xs text-destructive"
+                  : "shrink-0 text-xs text-muted-foreground"
+              }
+            >
+              {orchestraStatusLabels[block.status]}
+            </span>
+          </button>
         ) : null}
+        <div
+          hidden={collapsed && block !== undefined}
+          className={block ? "min-w-0 px-4 py-3" : undefined}
+        >
+          {block?.instruction ? (
+            <details className="mb-3 rounded-lg bg-muted/40 p-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">작업 지시</summary>
+              <p className="mt-2 whitespace-pre-wrap">{block.instruction}</p>
+            </details>
+          ) : null}
+          <ChatMarkdown
+            text={messageText}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            isStreaming={Boolean(row.message.streaming)}
+            skills={ctx.skills}
+          />
+          <AssistantChangedFilesSection
+            turnSummary={row.assistantTurnDiffSummary}
+            routeThreadKey={ctx.routeThreadKey}
+            resolvedTheme={ctx.resolvedTheme}
+            onOpenTurnDiff={ctx.onOpenTurnDiff}
+          />
+          {row.showAssistantMeta ? (
+            <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+              <AssistantCopyButton row={row} />
+              {!row.message.streaming && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<p className="text-muted-foreground text-xs tabular-nums" />}
+                  >
+                    {formatShortTimestamp(row.message.updatedAt, ctx.timestampFormat)}
+                  </TooltipTrigger>
+                  <TooltipPopup>
+                    {formatChatTimestampTooltip(row.message.updatedAt, ctx.timestampFormat)}
+                  </TooltipPopup>
+                </Tooltip>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
     </>
   );

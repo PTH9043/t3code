@@ -445,6 +445,17 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     -webkit-app-region: no-drag;
   }
 
+  .workspace-window-titlebar {
+    display: none;
+  }
+
+  /* Native window controls occupy the viewport's top edge, not the active tab pane. */
+  .electron .workspace-window-titlebar {
+    display: block;
+    height: var(--workspace-topbar-height);
+    flex: 0 0 var(--workspace-topbar-height);
+  }
+
   .surface-subheader {
     @apply flex h-10 min-h-10 shrink-0 items-center border-b border-border/60 bg-background;
   }

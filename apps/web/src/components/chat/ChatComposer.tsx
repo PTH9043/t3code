@@ -91,6 +91,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
+import { ComposerOrchestraQuestionPanel } from "./ComposerOrchestraQuestionPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { setAskFirstEnabled, useAskFirstEnabled } from "../../askFirstStore";
@@ -104,6 +105,7 @@ import {
   renderProviderTraitsPicker,
 } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import { TokenUsageButton } from "./TokenUsageButton";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
@@ -480,8 +482,8 @@ const AskFirstToggle = memo(function AskFirstToggle() {
       </TooltipTrigger>
       <TooltipPopup side="top">
         {enabled
-          ? "켜짐: 회의든 작업이든 시작 전에 계획과 질문을 먼저 물어봅니다."
-          : "켜면 회의·작업을 시작하기 전에 반드시 나에게 먼저 물어봅니다."}
+          ? "켜짐: 오케스트라든 작업이든 시작 전에 계획과 질문을 먼저 물어봅니다."
+          : "켜면 오케스트라·작업을 시작하기 전에 반드시 나에게 먼저 물어봅니다."}
       </TooltipPopup>
     </Tooltip>
   );
@@ -578,6 +580,11 @@ export interface ChatComposerProps {
   activePendingQuestionIndex: number;
   respondingRequestIds: ApprovalRequestId[];
 
+  // 오케스트라 run pending question (parked run waiting on the person)
+  orchestraQuestion: { question: string; options: readonly string[] } | null;
+  orchestraQuestionAnswering: boolean;
+  onAnswerOrchestraQuestion: (answer: string) => void;
+
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
@@ -673,6 +680,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePendingDraftAnswers,
     activePendingQuestionIndex,
     respondingRequestIds,
+    orchestraQuestion,
+    orchestraQuestionAnswering,
+    onAnswerOrchestraQuestion,
     showPlanFollowUpPrompt,
     activeProposedPlan,
     runtimeMode,
@@ -2744,7 +2754,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }}
         >
           {!isComposerCollapsedMobile &&
-            (activePendingApproval ? (
+            (orchestraQuestion ? (
+              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+                <ComposerOrchestraQuestionPanel
+                  question={orchestraQuestion.question}
+                  options={orchestraQuestion.options}
+                  isAnswering={orchestraQuestionAnswering}
+                  onAnswer={onAnswerOrchestraQuestion}
+                />
+              </div>
+            ) : activePendingApproval ? (
               <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
                 <ComposerPendingApprovalPanel
                   approval={activePendingApproval}
@@ -3260,6 +3279,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
               >
+                {activeThreadId ? (
+                  <TokenUsageButton
+                    key={`${environmentId}:${activeThreadId}`}
+                    environmentId={environmentId}
+                    threadId={activeThreadId}
+                    busy={phase === "running"}
+                  />
+                ) : null}
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}

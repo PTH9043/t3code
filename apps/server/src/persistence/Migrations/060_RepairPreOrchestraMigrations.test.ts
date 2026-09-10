@@ -6,6 +6,8 @@ import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import orchestra from "./059_WorkspaceCollaborationRunOrchestra.ts";
 
+// Bounded to the window this repair owns, so a later migration joining the
+// ledger does not read as a regression in 057-060.
 const appliedIds = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ readonly id: number }>`
@@ -30,10 +32,7 @@ it.effect("repairs 059-only databases while retaining the original migration num
     yield* orchestra;
     yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
       VALUES (59, 'WorkspaceCollaborationRunOrchestra')`;
-    // Later migrations run too; this repair only concerns the 57–60 window.
-    expect((yield* runMigrations()).filter(([id]) => id <= 60)).toEqual([
-      [60, "RepairPreOrchestraMigrations"],
-    ]);
+    expect(yield* runMigrations()).toContainEqual([60, "RepairPreOrchestraMigrations"]);
     expect(yield* appliedIds).toEqual([57, 58, 59, 60]);
     const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
     expect(columns.some((column) => column.name === "handoff_mode")).toBe(true);

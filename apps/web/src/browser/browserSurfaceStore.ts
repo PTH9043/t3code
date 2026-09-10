@@ -155,6 +155,11 @@ export const useBrowserSurfaceStore = create<BrowserSurfaceStoreState>()((set) =
     set((state) => {
       const current = state.byTabId[tabId];
       if (current?.owner !== owner) return state;
+      // Keep the record's last-known rect/content: an offscreen guest webview
+      // (HostedBrowserWebview) is mounted at the app root, independent of the
+      // surface slot, and reads these to hold its real size. Deleting the record
+      // when the last slot unmounts collapsed a fill-mode guest to the 1280x800
+      // fallback mid-automation. Only ownership and presentation flags reset.
       return {
         byTabId: {
           ...state.byTabId,

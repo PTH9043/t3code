@@ -1,3 +1,4 @@
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -98,21 +99,27 @@ function neverFinishingMockHandle() {
   });
 }
 
+// The spawner is fully mocked, so no real executable is resolved; pinning the
+// platform keeps the asserted command name ("tailscale", not "tailscale.exe")
+// identical on every development host.
 function mockSpawnerLayer(
   handler: (
     command: string,
     args: ReadonlyArray<string>,
   ) => { stdout?: string; stderr?: string; code?: number },
 ) {
-  return Layer.succeed(
-    ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make((command) => {
-      const childProcess = command as unknown as {
-        readonly command: string;
-        readonly args: ReadonlyArray<string>;
-      };
-      return Effect.succeed(mockHandle(handler(childProcess.command, childProcess.args)));
-    }),
+  return Layer.mergeAll(
+    Layer.succeed(HostProcessPlatform, "linux"),
+    Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        const childProcess = command as unknown as {
+          readonly command: string;
+          readonly args: ReadonlyArray<string>;
+        };
+        return Effect.succeed(mockHandle(handler(childProcess.command, childProcess.args)));
+      }),
+    ),
   );
 }
 
@@ -194,9 +201,12 @@ describe("tailscale", () => {
       method: "spawn",
       cause: systemCause,
     });
-    const layer = Layer.succeed(
-      ChildProcessSpawner.ChildProcessSpawner,
-      ChildProcessSpawner.make(() => Effect.fail(cause)),
+    const layer = Layer.mergeAll(
+      Layer.succeed(HostProcessPlatform, "linux"),
+      Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => Effect.fail(cause)),
+      ),
     );
 
     return Effect.gen(function* () {
@@ -256,8 +266,9 @@ describe("tailscale", () => {
   });
 
   it.effect("times out tailscale status through TestClock", () => {
-    const layer = Layer.merge(
+    const layer = Layer.mergeAll(
       TestClock.layer(),
+      Layer.succeed(HostProcessPlatform, "linux"),
       Layer.succeed(
         ChildProcessSpawner.ChildProcessSpawner,
         ChildProcessSpawner.make(() => Effect.succeed(neverFinishingMockHandle())),

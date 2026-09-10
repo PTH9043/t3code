@@ -1,12 +1,38 @@
+import {
+  DEFAULT_INTERFACE_FONT_SIZE,
+  MAX_INTERFACE_FONT_SIZE,
+  MIN_INTERFACE_FONT_SIZE,
+} from "@t3tools/contracts";
 import { Maximize2Icon, MinusIcon, MoonIcon, PlusIcon, RotateCcwIcon, SunIcon } from "lucide-react";
 
+import { clampInterfaceFontSize } from "~/appearanceFonts";
 import { Button } from "~/components/ui/button";
+import {
+  useClientSettings,
+  useClientSettingsHydrated,
+  useUpdateClientSettings,
+} from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
-import { useUiScale } from "~/hooks/useUiScale";
+
+/** One press of the header's font buttons, in px of interface font size. */
+const INTERFACE_FONT_SIZE_STEP = 1;
 
 export function ControlCenterDisplayControls() {
   const { resolvedTheme, setAppearanceMode } = useTheme();
-  const { scale, decrease, increase, reset, canDecrease, canIncrease } = useUiScale();
+  // These buttons step the same preference Settings → 모양 edits. The header
+  // must not keep a scale of its own: both would own
+  // `documentElement.style.fontSize`, and whichever ran last silently threw the
+  // other away — mounting the control center used to reset a saved size.
+  const fontSize = useClientSettings((settings) => settings.fontSizeInterface);
+  const settingsHydrated = useClientSettingsHydrated();
+  const updateClientSettings = useUpdateClientSettings();
+  const setFontSize = (next: number) => {
+    // Writing before hydration would persist the defaults over the stored size.
+    if (!settingsHydrated) return;
+    updateClientSettings({ fontSizeInterface: clampInterfaceFontSize(next) });
+  };
+  const canDecrease = settingsHydrated && fontSize > MIN_INTERFACE_FONT_SIZE;
+  const canIncrease = settingsHydrated && fontSize < MAX_INTERFACE_FONT_SIZE;
   const toggleWindowMaximized =
     typeof window === "undefined" ? undefined : window.desktopBridge?.toggleWindowMaximized;
   const darkModeEnabled = resolvedTheme === "dark";
@@ -21,7 +47,7 @@ export function ControlCenterDisplayControls() {
       <Button
         aria-label="글자 작게"
         disabled={!canDecrease}
-        onClick={decrease}
+        onClick={() => setFontSize(fontSize - INTERFACE_FONT_SIZE_STEP)}
         size="icon-xs"
         title="글자 작게"
         variant="ghost"
@@ -29,19 +55,20 @@ export function ControlCenterDisplayControls() {
         <MinusIcon />
       </Button>
       <Button
-        aria-label={`글자 크기 ${scale}%, 기본 크기로 초기화`}
+        aria-label={`글자 크기 ${fontSize}px, 기본 크기로 초기화`}
         className="min-w-11 px-1 font-mono text-[11px]"
-        onClick={reset}
+        onClick={() => setFontSize(DEFAULT_INTERFACE_FONT_SIZE)}
         size="xs"
         title="글자 크기 초기화"
         variant="ghost"
       >
-        {scale}%{scale !== 100 ? <RotateCcwIcon className="size-3" /> : null}
+        {fontSize}px
+        {fontSize === DEFAULT_INTERFACE_FONT_SIZE ? null : <RotateCcwIcon className="size-3" />}
       </Button>
       <Button
         aria-label="글자 크게"
         disabled={!canIncrease}
-        onClick={increase}
+        onClick={() => setFontSize(fontSize + INTERFACE_FONT_SIZE_STEP)}
         size="icon-xs"
         title="글자 크게"
         variant="ghost"

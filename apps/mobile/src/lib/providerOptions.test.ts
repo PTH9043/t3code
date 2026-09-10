@@ -88,13 +88,13 @@ describe("mobile provider options", () => {
     expect(buildProviderOptionMenuActions(descriptors)).toMatchObject([
       {
         title: "Fast Mode",
-        subtitle: "Off",
+        subtitle: "꺼짐",
         subactions: [
-          { title: "Off", state: "on" },
-          { title: "On", state: undefined },
+          { title: "꺼짐", state: "on" },
+          { title: "켜짐", state: undefined },
         ],
       },
     ]);
-    expect(providerOptionsConfigurationLabel(descriptors)).toBe("Configuration");
+    expect(providerOptionsConfigurationLabel(descriptors)).toBe("구성");
   });
 });

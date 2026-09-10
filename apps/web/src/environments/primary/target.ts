@@ -57,12 +57,26 @@ export class DesktopEnvironmentBootstrapIncompleteError extends Schema.TaggedErr
   }
 }
 
+export class DesktopEnvironmentBootstrapPendingError extends Schema.TaggedErrorClass<DesktopEnvironmentBootstrapPendingError>()(
+  "DesktopEnvironmentBootstrapPendingError",
+  {
+    protocol: Schema.String,
+  },
+) {
+  override get message(): string {
+    return "The desktop backend has not published its local environment bootstrap yet.";
+  }
+}
+
 export const isPrimaryEnvironmentUrlInvalidError = Schema.is(PrimaryEnvironmentUrlInvalidError);
 export const isPrimaryEnvironmentProtocolUnsupportedError = Schema.is(
   PrimaryEnvironmentProtocolUnsupportedError,
 );
 export const isDesktopEnvironmentBootstrapIncompleteError = Schema.is(
   DesktopEnvironmentBootstrapIncompleteError,
+);
+export const isDesktopEnvironmentBootstrapPendingError = Schema.is(
+  DesktopEnvironmentBootstrapPendingError,
 );
 
 export interface PrimaryEnvironmentTarget {
@@ -286,9 +300,22 @@ export function resolvePrimaryEnvironmentHttpUrl(
 }
 
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget {
-  return (
-    resolveDesktopPrimaryTarget() ??
-    resolveConfiguredPrimaryTarget() ??
-    resolveWindowOriginPrimaryTarget()
-  );
+  const resolvedTarget = resolveDesktopPrimaryTarget() ?? resolveConfiguredPrimaryTarget();
+  if (resolvedTarget) {
+    return resolvedTarget;
+  }
+
+  try {
+    return resolveWindowOriginPrimaryTarget();
+  } catch (error) {
+    // Inside the desktop shell the renderer is served from a custom protocol,
+    // so the window origin can never address the backend. Reaching here means
+    // the backend pool has not published its bootstrap list yet (it is still
+    // starting), which is a wait-and-retry condition rather than the permanent
+    // misconfiguration an unsupported-protocol error otherwise reports.
+    if (window.desktopBridge && isPrimaryEnvironmentProtocolUnsupportedError(error)) {
+      throw new DesktopEnvironmentBootstrapPendingError({ protocol: error.protocol });
+    }
+    throw error;
+  }
 }

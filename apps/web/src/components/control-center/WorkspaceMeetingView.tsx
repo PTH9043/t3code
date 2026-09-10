@@ -90,7 +90,7 @@ export function WorkspaceMeetingView(props: {
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
         <Badge variant="outline">
-          <UsersIcon className="size-3" /> 회의 · {MODE_LABELS[meeting.mode]}
+          <UsersIcon className="size-3" /> 오케스트라 · {MODE_LABELS[meeting.mode]}
         </Badge>
         <Badge variant={meeting.phase === "done" ? "success" : "secondary"}>
           {PHASE_LABELS[meeting.phase]}

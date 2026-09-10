@@ -2355,6 +2355,7 @@ describe("ClaudeAdapterLive", () => {
         result: "done",
         stop_reason: "end_turn",
         session_id: "sdk-session-result-usage",
+        uuid: "result-usage-id",
         usage: {
           input_tokens: 4,
           cache_creation_input_tokens: 2715,
@@ -2382,6 +2383,23 @@ describe("ClaudeAdapterLive", () => {
             outputTokens: 679,
             maxTokens: 200000,
           },
+          consumption: [
+            {
+              sourceId: "claude:sdk-session-result-usage:result-usage-id",
+              mode: "execution-total",
+              provider: "claude",
+              model: null,
+              isFinal: true,
+              counts: {
+                total: 24542,
+                input: 23863,
+                output: 679,
+                cacheRead: 21144,
+                cacheWrite: 2715,
+                reasoning: null,
+              },
+            },
+          ],
         });
       }
     }).pipe(
@@ -3221,6 +3239,7 @@ describe("ClaudeAdapterLive", () => {
             },
           ],
           toolUseID: "tool-use-1",
+          requestId: "req-use-1",
         },
       );
 
@@ -3297,6 +3316,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-agent-1",
+          requestId: "req-agent-1",
         },
       );
 
@@ -3321,6 +3341,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-grep-approval-1",
+          requestId: "req-grep-approval-1",
         },
       );
 
@@ -3858,6 +3879,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-exit-1",
+          requestId: "req-exit-1",
         },
       );
 
@@ -4024,6 +4046,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-1",
+        requestId: "req-ask-1",
       });
 
       // The adapter should emit a user-input.requested event.
@@ -4150,6 +4173,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-2",
+        requestId: "req-ask-2",
       });
 
       // Should still get user-input.requested even in full-access mode.
@@ -4173,6 +4197,77 @@ describe("ClaudeAdapterLive", () => {
       const updatedInput = (permissionResult as { updatedInput: Record<string, unknown> })
         .updatedInput;
       assert.deepEqual(updatedInput.answers, { "Deploy to which env?": "Staging" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("joins multi-select answers into the comma-separated string the SDK expects", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+      const createInput = harness.getLastCreateQueryInput();
+      const canUseTool = createInput?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      if (!canUseTool) {
+        return;
+      }
+
+      const permissionPromise = canUseTool(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Which features?",
+              header: "Features",
+              options: [
+                { label: "Auth", description: "Authentication" },
+                { label: "Search", description: "Search" },
+                { label: "Billing", description: "Billing" },
+              ],
+              multiSelect: true,
+            },
+          ],
+        },
+        {
+          signal: new AbortController().signal,
+          toolUseID: "tool-ask-multi",
+          requestId: "req-ask-multi",
+        },
+      );
+
+      const requestedEvent = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requestedEvent._tag, "Some");
+      if (requestedEvent._tag !== "Some" || requestedEvent.value.type !== "user-input.requested") {
+        assert.fail("Expected user-input.requested event");
+        return;
+      }
+      const requestId = requestedEvent.value.requestId;
+
+      // The web UI submits multi-select answers as a string array.
+      yield* adapter.respondToUserInput(session.threadId, ApprovalRequestId.make(requestId!), {
+        "Which features?": ["Auth", "Billing"],
+      });
+
+      yield* Stream.runHead(adapter.streamEvents);
+
+      const permissionResult = yield* Effect.promise(() => permissionPromise);
+      assert.equal((permissionResult as PermissionResult).behavior, "allow");
+      const updatedInput = (permissionResult as { updatedInput: Record<string, unknown> })
+        .updatedInput;
+      // SDK answers are typed string-per-question; multi-select must arrive
+      // comma-separated, not as an array the SDK cannot render.
+      assert.deepEqual(updatedInput.answers, { "Which features?": "Auth, Billing" });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4215,6 +4310,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: controller.signal,
           toolUseID: "tool-ask-abort",
+          requestId: "req-ask-abort",
         },
       );
 

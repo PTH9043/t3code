@@ -730,6 +730,22 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    beginGeminiAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:gemini-auth-begin",
+      tag: WS_METHODS.geminiAuthBegin,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
+      },
+    }),
+    completeGeminiAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:gemini-auth-complete",
+      tag: WS_METHODS.geminiAuthComplete,
+    }),
+    cancelGeminiAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:gemini-auth-cancel",
+      tag: WS_METHODS.geminiAuthCancel,
+    }),
     updateServer,
     upsertKeybinding: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:upsert-keybinding",

@@ -58,6 +58,7 @@ import { SessionRecoveryReactorLive } from "./orchestration/Layers/SessionRecove
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
+import { WorkspaceAgentExecutorLive } from "./orchestration/Layers/WorkspaceAgentExecutor.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
 import { SharedLibrarySyncLive } from "./library/SharedLibrarySync.ts";
 import { SharedLibraryRepositoryLive } from "./persistence/Layers/SharedLibrary.ts";
@@ -124,6 +125,7 @@ import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import { forkParked, ServerActivation } from "./serverActivation.ts";
+import * as GeminiAuth from "./provider/GeminiAuth.ts";
 
 // Effect's default preemptive shutdown waits 20s before finalizing request scopes.
 // T3's primary transport is long-lived WebSocket RPC, whose Effect scope finalizer
@@ -148,6 +150,11 @@ const PtyAdapterLive = Layer.unwrap(
 );
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer));
+
+const GeminiAuthLayerLive = GeminiAuth.layer.pipe(
+  Layer.provide(PtyAdapterLive),
+  Layer.provide(ServerSettingsLayerLive),
+);
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
   Layer.provide(ResourceMonitorBinary.layer),
@@ -276,6 +283,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(WorkspaceKnowledgeReactorLive),
   Layer.provideMerge(WorkspaceCollaborationReactorLive),
+  Layer.provideMerge(WorkspaceAgentExecutorLive),
   Layer.provideMerge(WorkspaceSchedulerReactorLive),
   Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
   Layer.provideMerge(WorkspaceWorktreeCleanup.layer),
@@ -494,6 +502,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(
+  Layer.provide(GeminiAuthLayerLive),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer),
   Layer.provide(commandReadinessLayer),

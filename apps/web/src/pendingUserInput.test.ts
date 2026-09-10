@@ -5,6 +5,7 @@ import {
   countAnsweredPendingUserInputQuestions,
   derivePendingUserInputProgress,
   findFirstUnansweredPendingUserInputQuestionIndex,
+  resolvePendingUserInputAdvance,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
@@ -246,5 +247,83 @@ describe("pending user input question progress", () => {
       canAdvance: true,
       isComplete: true,
     });
+  });
+});
+
+describe("resolvePendingUserInputAdvance", () => {
+  const questions = [
+    singleSelectQuestion,
+    {
+      id: "compat",
+      header: "Compat",
+      question: "How strict should compatibility be?",
+      options: [
+        {
+          label: "Keep current envelope",
+          description: "Preserve current wire format",
+        },
+      ],
+      multiSelect: false,
+    },
+  ] as const;
+
+  it("blocks instead of stepping past an unanswered question", () => {
+    expect(resolvePendingUserInputAdvance(questions, {}, 0)).toEqual({
+      kind: "blocked",
+      questionIndex: 0,
+    });
+  });
+
+  it("moves to the next question once the current one is answered", () => {
+    expect(
+      resolvePendingUserInputAdvance(
+        questions,
+        { scope: { selectedOptionLabels: ["Orchestration-first"] } },
+        0,
+      ),
+    ).toEqual({ kind: "next", questionIndex: 1 });
+  });
+
+  it("submits from the last question when every answer is present", () => {
+    expect(
+      resolvePendingUserInputAdvance(
+        questions,
+        {
+          scope: { selectedOptionLabels: ["Orchestration-first"] },
+          compat: { customAnswer: "Keep the current envelope" },
+        },
+        1,
+      ),
+    ).toEqual({ kind: "submit" });
+  });
+
+  it("sends the person back to a skipped question instead of dying on the last one", () => {
+    expect(
+      resolvePendingUserInputAdvance(
+        questions,
+        { compat: { customAnswer: "Keep the current envelope" } },
+        1,
+      ),
+    ).toEqual({ kind: "blocked", questionIndex: 0 });
+  });
+
+  it("blocks on an unanswered last question", () => {
+    expect(
+      resolvePendingUserInputAdvance(
+        questions,
+        { scope: { selectedOptionLabels: ["Orchestration-first"] } },
+        1,
+      ),
+    ).toEqual({ kind: "blocked", questionIndex: 1 });
+  });
+
+  it("submits a single answered question", () => {
+    expect(
+      resolvePendingUserInputAdvance(
+        [singleSelectQuestion],
+        { scope: { selectedOptionLabels: ["Orchestration-first"] } },
+        0,
+      ),
+    ).toEqual({ kind: "submit" });
   });
 });

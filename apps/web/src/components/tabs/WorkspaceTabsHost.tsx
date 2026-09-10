@@ -76,7 +76,6 @@ export function useSyncWorkspaceTabRoute(view: WorkspaceTabView | null): void {
       syncRouteView(view, { projectKey });
     }
     // The key captures the view's identity; the object is rebuilt per render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewKey, projectKey, syncRouteView]);
 }
 
@@ -96,6 +95,9 @@ export function WorkspaceTabsHost({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-svh min-h-0 min-w-0 flex-1 flex-col md:h-dvh">
+      {tabs.length > 0 ? (
+        <div className="workspace-window-titlebar drag-region" aria-hidden="true" />
+      ) : null}
       <WorkspaceTabBar />
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {tabs.map((tab) => (

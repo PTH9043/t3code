@@ -14,6 +14,8 @@ import {
   type WorkspaceAgentRole,
   type WorkspaceAgentRoleBinding,
   type WorkspaceKnowledgeKind,
+  type WorkspaceKnowledgeItem,
+  type WorkspaceKnowledgeScope,
   type WorkspaceRuntimeEvidence,
   type WorkspaceRuntimeAttention,
   type WorkspaceRuntimeLifecycleStatus,
@@ -94,13 +96,6 @@ function providerStatusLabel(status: string): string {
   if (status === "error") return "오류";
   if (status === "disabled") return "사용 안 함";
   return status;
-}
-
-function numericKnowledgeTag(tags: ReadonlyArray<string>, prefix: string): number | null {
-  const value = tags.find((tag) => tag.startsWith(prefix))?.slice(prefix.length);
-  if (value === undefined) return null;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function runtimeStatusLabel(status: WorkspaceRuntimeStatus): string {
@@ -555,7 +550,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
       id="project-memory"
       icon={ShieldCheckIcon}
       title="격리 경계와 물리 장기기억 위치"
-      description="이 폴더의 프로젝트 ID가 지식·RAG·실행·스케줄의 보안 경계입니다. 같은 계정이나 같은 모델을 사용해도 다른 프로젝트의 기억은 조회하거나 결합하지 않습니다."
+      description="프로젝트와 폴더 기억은 지정된 범위에서 사용합니다. 공용으로 지정한 기억은 같은 환경의 다른 프로젝트에서도 사용할 수 있습니다."
       action={<Badge variant="success">엄격 격리</Badge>}
     >
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(17rem,0.42fr)]">
@@ -626,7 +621,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
               <div>
                 <p className="text-sm font-medium">에이전트 결과 자동 압축 등록</p>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  협업 실행이 끝나면 각 작업의 결과를 빠짐없이 압축해 검색 자료로 등록합니다.
+                  오케스트라 실행이 끝나면 각 작업의 결과를 빠짐없이 압축해 검색 자료로 등록합니다.
                 </p>
               </div>
               <Switch
@@ -668,8 +663,8 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
               <div>
                 <p className="text-sm font-medium">무인 실행 오케스트라 기본값</p>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  스케줄·장애 복구처럼 사람이 보내지 않는 실행에 적용됩니다. 회의에서 직접 보낸
-                  실행은 전송 시 설정이 우선합니다.
+                  스케줄·장애 복구처럼 사람이 보내지 않는 실행에 적용됩니다. 오케스트라에서 직접
+                  보낸 실행은 전송 시 설정이 우선합니다.
                 </p>
               </div>
               <Switch
@@ -718,9 +713,9 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
             </div>
             <div>
               <dt className="text-muted-foreground">격리 정책</dt>
-              <dd className="mt-1 font-medium text-success-foreground">폴더 외부 지식 조회 금지</dd>
+              <dd className="mt-1 font-medium text-success-foreground">프로젝트·폴더 범위 적용</dd>
               <dd className="mt-1 text-muted-foreground">
-                예외: 공용 디자인 라이브러리 (외부 공개 레퍼런스 · 읽기 전용)
+                공용 기억과 공개 디자인 레퍼런스는 프로젝트 간 공유
               </dd>
             </div>
           </dl>
@@ -734,7 +729,7 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
   const knowledge = useEnvironmentQuery(
     orchestrationEnvironment.workspaceKnowledge({
       environmentId: project.environmentId,
-      input: { projectId: project.id },
+      input: { projectId: project.id, includeShared: true },
     }),
   );
   const upsertKnowledge = useAtomCommand(projectEnvironment.upsertWorkspaceKnowledgeItem, {
@@ -749,10 +744,22 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [relativeFolder, setRelativeFolder] = useState("");
+  const [scope, setScope] = useState<WorkspaceKnowledgeScope>("project");
+  const [appliesToFolder, setAppliesToFolder] = useState("");
+  const [editingItem, setEditingItem] = useState<WorkspaceKnowledgeItem | null>(null);
   const [tags, setTags] = useState("");
   const [saving, setSaving] = useState(false);
   const [ragText, setRagText] = useState("");
   const [ragRequest, setRagRequest] = useState("");
+  const [contextPathText, setContextPathText] = useState("");
+  const contextPaths = useMemo(
+    () =>
+      contextPathText
+        .split(",")
+        .map((path) => path.trim().replaceAll("\\", "/"))
+        .filter(Boolean),
+    [contextPathText],
+  );
   const [composeTask, setComposeTask] = useState("");
   const [composeRequest, setComposeRequest] = useState("");
   const rag = useEnvironmentQuery(
@@ -762,6 +769,8 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           input: {
             projectId: project.id,
             query: ragRequest,
+            includeShared: true,
+            contextPaths,
             limit: 8,
             includeLongTermMemory: true,
           },
@@ -775,6 +784,8 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           input: {
             projectId: project.id,
             task: composeRequest,
+            includeShared: true,
+            contextPaths,
             includeRag: true,
             includeWorkingMemory: true,
             includeLongTermMemory: true,
@@ -788,6 +799,12 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
     knowledge.data?.items.filter(
       (item) => item.kind === "rag-source" && item.tags.includes("auto-conversation"),
     ).length ?? 0;
+  const searchRag = () => {
+    const query = ragText.trim();
+    if (!query) return;
+    if (query === ragRequest) rag.refresh();
+    else setRagRequest(query);
+  };
   const libraryStatus = useEnvironmentQuery(
     orchestrationEnvironment.sharedLibraryStatus({
       environmentId: project.environmentId,
@@ -839,18 +856,28 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
       toastManager.add({ type: "warning", title: "제목과 내용을 입력하세요." });
       return;
     }
+    if (scope === "folder" && !appliesToFolder.trim()) {
+      toastManager.add({
+        type: "warning",
+        title: "기억이 적용될 프로젝트 내부 폴더를 입력하세요.",
+      });
+      return;
+    }
     setSaving(true);
     try {
       const result = await upsertKnowledge({
         environmentId: project.environmentId,
         input: {
-          projectId: project.id,
-          itemId: WorkspaceKnowledgeItemId.make(`knowledge-${randomUUID()}`),
+          projectId: editingItem?.projectId ?? project.id,
+          itemId: editingItem?.id ?? WorkspaceKnowledgeItemId.make(`knowledge-${randomUUID()}`),
           kind,
           title: title.trim(),
           content: content.trim(),
           status: "active",
-          origin: "user",
+          origin: editingItem?.origin ?? "user",
+          scope,
+          appliesToFolder: scope === "folder" ? appliesToFolder.trim().replaceAll("\\", "/") : null,
+          research: editingItem?.research ?? null,
           relativeFolder:
             kind === "long-term-memory" && relativeFolder.trim()
               ? relativeFolder.trim().replaceAll("\\", "/")
@@ -865,8 +892,12 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
         setTitle("");
         setContent("");
         setRelativeFolder("");
+        setAppliesToFolder("");
+        setEditingItem(null);
         setTags("");
         knowledge.refresh();
+        rag.refresh();
+        composedPrompt.refresh();
         notifySuccess(`${KNOWLEDGE_KIND_LABELS[kind]}을 저장했습니다.`);
       }
     } finally {
@@ -874,14 +905,53 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
     }
   };
 
-  const archive = async (itemId: WorkspaceKnowledgeItemId) => {
+  const archive = async (item: WorkspaceKnowledgeItem) => {
     const result = await archiveKnowledge({
       environmentId: project.environmentId,
-      input: { projectId: project.id, itemId },
+      input: { projectId: item.projectId, itemId: item.id },
     });
     if (!notifyCommandFailure(result, "지식 항목 보관 실패")) {
       knowledge.refresh();
+      rag.refresh();
+      composedPrompt.refresh();
       notifySuccess("항목을 보관 처리했습니다.");
+    }
+  };
+
+  const edit = (item: WorkspaceKnowledgeItem) => {
+    setEditingItem(item);
+    setKind(item.kind);
+    setTitle(item.title);
+    setContent(item.content);
+    setTags(item.tags.join(", "));
+    setRelativeFolder(item.relativeFolder ?? "");
+    setScope(item.scope ?? "project");
+    setAppliesToFolder(item.appliesToFolder ?? "");
+    document.getElementById("knowledge-title")?.focus();
+  };
+
+  const restore = async (item: WorkspaceKnowledgeItem) => {
+    const result = await upsertKnowledge({
+      environmentId: project.environmentId,
+      input: {
+        projectId: item.projectId,
+        itemId: item.id,
+        kind: item.kind,
+        title: item.title,
+        content: item.content,
+        status: "active",
+        origin: item.origin,
+        relativeFolder: item.relativeFolder,
+        tags: item.tags,
+        scope: item.scope ?? "project",
+        appliesToFolder: item.appliesToFolder ?? null,
+        research: item.research ?? null,
+      },
+    });
+    if (!notifyCommandFailure(result, "지식 항목 복원 실패")) {
+      knowledge.refresh();
+      rag.refresh();
+      composedPrompt.refresh();
     }
   };
 
@@ -890,7 +960,8 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
       id="project-knowledge"
       icon={DatabaseIcon}
       title="RAG · 메모리 · 장기기억 · 프롬프트"
-      description="모든 자료는 이 프로젝트에만 귀속됩니다(공용 디자인 라이브러리만 모든 프로젝트가 함께 읽는 외부 레퍼런스입니다). 사용자 지침은 결합 프롬프트의 최상위 권한으로 유지되고, 검색 자료와 에이전트 기억은 비권위 참고 문맥으로만 들어갑니다."
+      scopeLabel="공용 · 프로젝트 · 폴더 기억"
+      description="공용 기억은 이 환경의 모든 프로젝트에서, 프로젝트 기억은 이 프로젝트에서, 폴더 기억은 지정한 폴더의 작업에서 사용됩니다. 조사 기록에는 출처와 검증 상태가 함께 남습니다."
       action={
         <div className="flex flex-wrap gap-1">
           <Badge variant="info">항목 {knowledge.data?.items.length ?? 0}개</Badge>
@@ -921,7 +992,11 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
             </label>
             <label className="grid gap-1.5 text-sm font-medium">
               제목
-              <Input value={title} onChange={(event) => setTitle(event.currentTarget.value)} />
+              <Input
+                id="knowledge-title"
+                value={title}
+                onChange={(event) => setTitle(event.currentTarget.value)}
+              />
             </label>
           </div>
           <label className="grid gap-1.5 text-sm font-medium">
@@ -932,6 +1007,30 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
               placeholder="사용자 지침, 장기 목표, 검색 자료, 기억 또는 재사용할 프롬프트를 입력하세요."
             />
           </label>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1.5 text-sm font-medium">
+              기억 적용 범위
+              <select
+                className={SELECT_CLASS}
+                value={scope}
+                onChange={(event) => setScope(event.currentTarget.value as WorkspaceKnowledgeScope)}
+              >
+                <option value="environment">공용 · 이 환경의 모든 프로젝트</option>
+                <option value="project">이 프로젝트</option>
+                <option value="folder">이 프로젝트의 특정 폴더</option>
+              </select>
+            </label>
+            {scope === "folder" ? (
+              <label className="grid gap-1.5 text-sm font-medium">
+                적용 폴더
+                <Input
+                  value={appliesToFolder}
+                  onChange={(event) => setAppliesToFolder(event.currentTarget.value)}
+                  placeholder="예: apps/web"
+                />
+              </label>
+            ) : null}
+          </div>
           <div className="grid gap-3 md:grid-cols-2">
             <label className="grid gap-1.5 text-sm font-medium">
               태그 (쉼표 구분)
@@ -956,8 +1055,24 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           <div className="flex justify-end">
             <Button onClick={() => void save()} disabled={saving}>
               {saving ? <RefreshCcwIcon /> : <DatabaseIcon />}
-              프로젝트에 저장
+              {editingItem ? "변경 저장" : "기억 저장"}
             </Button>
+            {editingItem ? (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setEditingItem(null);
+                  setTitle("");
+                  setContent("");
+                  setRelativeFolder("");
+                  setAppliesToFolder("");
+                  setTags("");
+                  setScope("project");
+                }}
+              >
+                편집 취소
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -1009,6 +1124,14 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           ) : null}
         </div>
 
+        <label className="grid gap-1.5 text-sm font-medium">
+          검색·프롬프트의 작업 경로
+          <Input
+            value={contextPathText}
+            onChange={(event) => setContextPathText(event.currentTarget.value)}
+            placeholder="예: apps/web, apps/server (비우면 공용·프로젝트 기억만 사용)"
+          />
+        </label>
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="grid content-start gap-3 rounded-xl border border-border/70 p-4">
             <div className="flex items-center gap-2">
@@ -1020,22 +1143,21 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                 value={ragText}
                 onChange={(event) => setRagText(event.currentTarget.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && ragText.trim()) setRagRequest(ragText.trim());
+                  if (event.key === "Enter") searchRag();
                 }}
-                placeholder="이 프로젝트 안에서만 검색"
+                placeholder="프로젝트·공용·해당 폴더의 기억 검색"
               />
-              <Button
-                variant="outline"
-                onClick={() => ragText.trim() && setRagRequest(ragText.trim())}
-                disabled={!ragText.trim()}
-              >
+              <Button variant="outline" onClick={searchRag} disabled={!ragText.trim()}>
                 <SearchIcon />
                 검색
               </Button>
             </div>
             {rag.error ? <p className="text-xs text-destructive">{rag.error}</p> : null}
             {rag.data?.matches.map((match) => (
-              <div key={match.itemId} className="rounded-lg bg-muted/35 p-3">
+              <div
+                key={`${match.projectId}:${match.itemId}`}
+                className="rounded-lg bg-muted/35 p-3"
+              >
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-xs font-semibold">{match.title}</span>
                   <Badge variant="outline">{KNOWLEDGE_KIND_LABELS[match.kind]}</Badge>
@@ -1061,7 +1183,12 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
             <Button
               variant="outline"
               className="justify-self-end"
-              onClick={() => composeTask.trim() && setComposeRequest(composeTask.trim())}
+              onClick={() => {
+                const task = composeTask.trim();
+                if (!task) return;
+                if (task === composeRequest) composedPrompt.refresh();
+                else setComposeRequest(task);
+              }}
               disabled={!composeTask.trim()}
             >
               <SparklesIcon />
@@ -1073,7 +1200,11 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
             {composedPrompt.data ? (
               <div className="grid gap-2">
                 <div className="flex flex-wrap gap-1">
-                  <Badge variant="info">자료 {composedPrompt.data.sourceItemIds.length}</Badge>
+                  <Badge variant="info">
+                    자료{" "}
+                    {composedPrompt.data.sourceReferences?.length ??
+                      composedPrompt.data.sourceItemIds.length}
+                  </Badge>
                   <Badge variant="info">RAG {composedPrompt.data.ragMatches.length}</Badge>
                   {(composedPrompt.data.libraryMatches?.length ?? 0) > 0 ? (
                     <Badge variant="success">
@@ -1103,12 +1234,35 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           {knowledge.error ? <p className="text-xs text-destructive">{knowledge.error}</p> : null}
           <div className="grid gap-2 lg:grid-cols-2">
             {knowledge.data?.items.map((item) => (
-              <article key={item.id} className="rounded-xl border border-border/60 p-3">
+              <article
+                key={`${item.projectId}:${item.id}`}
+                className="rounded-xl border border-border/60 p-3"
+              >
                 <div className="flex items-start gap-2">
                   <FileStackIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h4 className="truncate text-sm font-medium">{item.title}</h4>
+                      <Badge variant="outline">
+                        {item.scope === "environment"
+                          ? "공용"
+                          : item.scope === "folder"
+                            ? `폴더 · ${item.appliesToFolder}`
+                            : "프로젝트"}
+                      </Badge>
+                      {item.research ? (
+                        <Badge
+                          variant={
+                            item.research.verification === "verified" ? "success" : "warning"
+                          }
+                        >
+                          {item.research.verification === "verified"
+                            ? "검증됨"
+                            : item.research.verification === "contradicted"
+                              ? "반대 근거 확인"
+                              : "검증 전 조사"}
+                        </Badge>
+                      ) : null}
                       <Badge variant={item.status === "active" ? "success" : "outline"}>
                         {KNOWLEDGE_KIND_LABELS[item.kind]}
                       </Badge>
@@ -1146,16 +1300,23 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                       </p>
                     ) : null}
                   </div>
+                  <Button size="xs" variant="ghost" onClick={() => edit(item)}>
+                    수정
+                  </Button>
                   {item.status !== "archived" ? (
                     <Button
                       size="icon-xs"
                       variant="ghost"
                       aria-label="항목 보관"
-                      onClick={() => void archive(item.id)}
+                      onClick={() => void archive(item)}
                     >
                       <ArchiveIcon />
                     </Button>
-                  ) : null}
+                  ) : (
+                    <Button size="xs" variant="ghost" onClick={() => void restore(item)}>
+                      복원
+                    </Button>
+                  )}
                 </div>
               </article>
             ))}
@@ -1455,7 +1616,7 @@ function RoleSection({ project }: { project: EnvironmentProject }) {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <label className="flex items-center gap-2 text-sm font-medium">
               <Switch checked={enabled} onCheckedChange={setEnabled} />
-              협업 실행에 포함
+              오케스트라 실행에 포함
             </label>
             <div className="flex gap-2">
               {roles.data?.roles.some((binding) => binding.role === role) ? (
@@ -1636,7 +1797,7 @@ function ScheduleSection({ project }: { project: EnvironmentProject }) {
               size="sm"
               value={task}
               onChange={(event) => setTask(event.currentTarget.value)}
-              placeholder="역할별 AI가 무인으로 협업할 작업"
+              placeholder="역할별 AI가 무인으로 분담할 작업"
             />
           </label>
           <label className="grid gap-1.5 text-sm font-medium">

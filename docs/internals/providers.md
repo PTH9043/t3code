@@ -7,13 +7,14 @@
 
 ## 내장 드라이버
 
-[`builtInDrivers.ts`][drivers]는 항목 다섯 개를 담은 `BUILT_IN_DRIVERS`를 내보냅니다.
+[`builtInDrivers.ts`][drivers]는 항목 여섯 개를 담은 `BUILT_IN_DRIVERS`를 내보냅니다.
 
 | 드라이버 종류 | 드라이버 소스                           |
 | ------------- | --------------------------------------- |
 | `codex`       | [`Drivers/CodexDriver.ts`][codex]       |
 | `claudeAgent` | [`Drivers/ClaudeDriver.ts`][claude]     |
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
+| `gemini`      | [`Drivers/GeminiDriver.ts`][gemini]     |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
@@ -22,6 +23,10 @@
 `apps/server/src/provider/Layers/`(`CodexAdapter.ts`, `ClaudeAdapter.ts` 등)에 있으며
 [`ProviderAdapter.ts`][adapter]를 따릅니다. 특정 에이전트의 전송 방식, 설정, 이벤트 형태가 어떻게
 대응되는지 보려면 드라이버와 그 어댑터를 함께 읽으세요.
+
+Gemini의 Google OAuth는 [`GeminiAuth.ts`][geminiauth]가 원격에서도 사용할 수 있는 URL/코드 흐름으로
+처리합니다. 각 인스턴스는 별도 `GEMINI_CLI_HOME`을 사용하고, Gemini CLI의 OS 전역 키체인 대신 그
+홈 안의 암호화 파일 저장소를 강제하므로 여러 Google 계정이 서로 덮어쓰지 않습니다.
 
 ### 사용자에게 묻는 질문
 
@@ -92,6 +97,8 @@ Codex의 `request_user_input` 도구는 Plan 모드에서만 열려 있어서, D
 [codexargs]: ../../apps/server/src/provider/Layers/codexLaunchArgs.ts
 [claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
+[gemini]: ../../apps/server/src/provider/Drivers/GeminiDriver.ts
+[geminiauth]: ../../apps/server/src/provider/GeminiAuth.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts

@@ -44,6 +44,68 @@ function item(input: {
 }
 
 layer("ProjectionWorkspaceRagRepository", (it) => {
+  it.effect("shares only environment memory and preserves same-id sources", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionWorkspaceRagRepository;
+      for (const projectId of ["scope-a", "scope-b"]) {
+        yield* repository.replaceItem({
+          ...item({ projectId, content: "공용 오케스트라 검증 기준" }),
+          scope: "environment",
+        });
+      }
+      const projectId = ProjectId.make("scope-consumer");
+      const result = yield* repository.search({ projectId, query: "오케스트라" });
+      expect(result.matches.map((match) => match.projectId).sort()).toEqual(["scope-a", "scope-b"]);
+      expect(
+        (yield* repository.search({ projectId, query: "오케스트라", includeShared: false }))
+          .matches,
+      ).toEqual([]);
+      yield* repository.replaceItem({
+        ...item({ projectId: "scope-a", content: "공용 오케스트라 검증 기준" }),
+        scope: "project",
+      });
+      expect(
+        (yield* repository.search({ projectId, query: "오케스트라" })).matches.map(
+          (match) => match.projectId,
+        ),
+      ).toEqual(["scope-b"]);
+      for (const source of ["scope-a", "scope-b"]) {
+        yield* repository.removeItem({
+          projectId: ProjectId.make(source),
+          itemId: WorkspaceKnowledgeItemId.make("shared-item"),
+        });
+      }
+    }),
+  );
+
+  it.effect("matches folder descendants without exposing siblings or other projects", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("folder-scope");
+      yield* repository.replaceItem({
+        ...item({ projectId, content: "블록 렌더링 성능 검증" }),
+        scope: "folder",
+        appliesToFolder: "apps/web",
+      });
+      for (const contextPaths of [[], ["apps/web-extra"], ["apps/server"]]) {
+        expect(
+          (yield* repository.search({ projectId, query: "렌더링", contextPaths })).matches,
+        ).toEqual([]);
+      }
+      for (const contextPaths of [["apps/web"], ["apps/web/src/Chat.tsx"], ["apps\\web\\src"]]) {
+        expect(
+          (yield* repository.search({ projectId, query: "렌더링", contextPaths })).matches,
+        ).toHaveLength(1);
+      }
+      expect(
+        (yield* repository.search({
+          projectId: ProjectId.make("other"),
+          query: "렌더링",
+          contextPaths: ["apps/web"],
+        })).matches,
+      ).toEqual([]);
+    }),
+  );
   it.effect("never returns another Workspace's matching chunks", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionWorkspaceRagRepository;

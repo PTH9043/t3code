@@ -1481,6 +1481,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (isNonRepositoryGitStderr(branchResult.stderr)) {
         return NON_REPOSITORY_REMOTE_STATUS_DETAILS;
       }
+      if (isUnbornHeadStderr(branchResult.stderr)) {
+        const unbornHeadStdout = yield* runGitStdout(
+          "GitVcsDriver.statusDetailsRemote.branch.unborn",
+          cwd,
+          ["symbolic-ref", "--quiet", "--short", "HEAD"],
+          true,
+        );
+        const unbornBranchValue = unbornHeadStdout.trim();
+        const unbornBranch = unbornBranchValue.length > 0 ? unbornBranchValue : null;
+        const unbornDefaultBranch = yield* resolveDefaultBranchName(cwd, "origin");
+        return {
+          ...NON_REPOSITORY_REMOTE_STATUS_DETAILS,
+          isRepo: true,
+          isDefaultBranch:
+            unbornBranch !== null &&
+            (unbornBranch === unbornDefaultBranch ||
+              (unbornDefaultBranch === null &&
+                (unbornBranch === "main" || unbornBranch === "master"))),
+          branch: unbornBranch,
+        };
+      }
       return yield* new GitCommandError({
         ...gitCommandContext({
           operation: "GitVcsDriver.statusDetailsRemote.branch",

@@ -42,6 +42,7 @@ import {
   ThreadComposer,
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
+import { TokenUsageButton } from "./TokenUsageButton";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 
 export interface ThreadDetailScreenProps {
@@ -434,6 +435,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               ) : null}
             </View>
 
+            <TokenUsageButton
+              key={selectedThreadKey}
+              environmentId={props.environmentId}
+              threadId={props.selectedThread.id}
+              busy={props.activeThreadBusy}
+            />
             <ThreadComposer
               editorRef={composerEditorRef}
               draftMessage={props.draftMessage}

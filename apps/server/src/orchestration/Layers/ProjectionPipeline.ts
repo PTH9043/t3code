@@ -17,6 +17,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeTokenUsageProjection } from "./TokenUsageProjection.ts";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
@@ -79,6 +80,7 @@ import {
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
+  tokenUsage: "projection.token-usage-v1",
   projects: "projection.projects",
   workspaceKnowledge: "projection.workspace-knowledge-v2",
   workspaceRag: "projection.workspace-rag-v2",
@@ -506,6 +508,7 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
 const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjectionPipeline")(
   function* () {
     const sql = yield* SqlClient.SqlClient;
+    const tokenUsage = yield* makeTokenUsageProjection;
     const eventStore = yield* OrchestrationEventStore;
     const projectionStateRepository = yield* ProjectionStateRepository;
     const projectionProjectRepository = yield* ProjectionProjectRepository;
@@ -796,6 +799,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             status: event.payload.status,
             origin: event.payload.origin,
             relativeFolder: event.payload.relativeFolder,
+            scope: event.payload.scope ?? "project",
+            appliesToFolder: event.payload.appliesToFolder ?? null,
+            research: event.payload.research ?? null,
             tags: event.payload.tags,
             originalChars: event.payload.originalChars,
             storedChars: event.payload.storedChars,
@@ -903,6 +909,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             promptUses: 0,
             lastUsedAt: null,
             relativeFolder: event.payload.relativeFolder,
+            scope: event.payload.scope ?? "project",
+            appliesToFolder: event.payload.appliesToFolder ?? null,
+            research: event.payload.research ?? null,
             tags: event.payload.tags,
             createdAt: event.payload.updatedAt,
             updatedAt: event.payload.updatedAt,
@@ -1148,6 +1157,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
+            orchestraRunThreadId: event.payload.orchestraRunThreadId ?? null,
             latestTurnId: null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
@@ -1323,6 +1333,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+            ...(event.payload.handoffMode !== undefined
+              ? { handoffMode: event.payload.handoffMode }
+              : {}),
             ...(event.payload.titleRegeneration !== undefined
               ? {
                   titleRegenerationRequestId: event.payload.titleRegeneration?.requestId ?? null,
@@ -2156,6 +2169,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     });
 
     const projectors: ReadonlyArray<ProjectorDefinition> = [
+      { name: ORCHESTRATION_PROJECTOR_NAMES.tokenUsage, apply: tokenUsage.apply },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
         apply: applyProjectsProjection,

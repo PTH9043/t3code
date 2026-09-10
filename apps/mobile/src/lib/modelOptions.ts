@@ -36,6 +36,7 @@ function providerDisplayLabel(provider: {
   if (provider.displayName) return provider.displayName;
   if (provider.driver === "codex") return "코덱스";
   if (provider.driver === "claudeAgent") return "클로드";
+  if (provider.driver === "gemini") return "Gemini";
   return provider.instanceId;
 }
 

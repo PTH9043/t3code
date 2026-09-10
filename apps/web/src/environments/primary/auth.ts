@@ -20,6 +20,7 @@ import {
 } from "../../pairingUrl";
 
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
+import { isDesktopEnvironmentBootstrapPendingError } from "./target";
 import { runPrimaryHttp } from "../../lib/runtime";
 
 const PrimaryEnvironmentRequestOperation = Schema.Literals([
@@ -306,15 +307,38 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
 }
 
 function isTransientBootstrapError(error: unknown): boolean {
+  // Every caller wraps its failure into a PrimaryEnvironmentRequestError
+  // *inside* the retried operation, so the loop only ever sees the wrapper and
+  // the transient signal has to be read back off its cause. Without that, a
+  // request the backend never answered (still binding its port, or its event
+  // loop blocked by startup recovery) becomes status 500, is classified as
+  // permanent, and turns a boot-time hiccup into the root route's error screen.
   if (isPrimaryEnvironmentRequestError(error)) {
-    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+    return (
+      TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status) || isTransientRequestCause(error.cause)
+    );
   }
 
+  return isTransientRequestCause(error);
+}
+
+function isTransientRequestCause(error: unknown): boolean {
   if (error instanceof TypeError) {
     return true;
   }
 
-  return error instanceof DOMException && error.name === "AbortError";
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+
+  if (isDesktopEnvironmentBootstrapPendingError(error)) {
+    return true;
+  }
+
+  // A transport failure carries no response: the request never reached the
+  // backend, so retrying it is worthwhile. Encode/InvalidUrl failures and every
+  // response-bearing error stay permanent.
+  return HttpClientError.isHttpClientError(error) && error.reason._tag === "TransportError";
 }
 
 async function bootstrapServerAuth(): Promise<ServerAuthGateState> {

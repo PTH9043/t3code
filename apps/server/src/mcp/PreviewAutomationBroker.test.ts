@@ -17,6 +17,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 
@@ -1042,3 +1043,61 @@ it.effect("accepts responses only from the host that received the request", () =
     }),
   ),
 );
+
+it.effect("reports a response that arrives after its request is gone", () => {
+  const logged: unknown[] = [];
+  const logger = Logger.make(({ message }) => {
+    logged.push(...(Array.isArray(message) ? message : [message]));
+  });
+
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const routedRequests: RoutedRequest[] = [];
+      const requests = requestsFrom(yield* broker.connect(makeHost()));
+      yield* Stream.runForEach(requests, (request) => {
+        routedRequests.push(request);
+        return broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+          result: "answered",
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      yield* broker.invoke<string>({
+        scope,
+        operation: "snapshot",
+        input: {},
+        tabId: PreviewTabId.make("tab-1"),
+      });
+      yield* Effect.forEach(
+        routedRequests,
+        (request) =>
+          broker.respond({
+            clientId: "client-1",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "late",
+          }),
+        { discard: true },
+      );
+
+      expect(logged).toContain("dropped an unmatched preview automation response");
+      expect(
+        logged.find(
+          (entry): entry is Record<string, unknown> =>
+            typeof entry === "object" && entry !== null && "requestId" in entry,
+        ),
+      ).toMatchObject({
+        requestId: "preview-0",
+        clientId: "client-1",
+        ok: true,
+        reason: "no_pending_request",
+      });
+    }),
+  ).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+});

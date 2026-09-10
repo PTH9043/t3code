@@ -14,36 +14,10 @@ import {
   useWorkspaceTabStore,
   useWorkspaceTabs,
   type WorkspaceTab,
-  type WorkspaceTabView,
 } from "../../workspaceTabStore";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { navigateToTabView } from "./navigateToTabView";
 import { cn } from "~/lib/utils";
-
-/**
- * The router's navigate is route-literal typed, so the view union has to be
- * unfolded case by case rather than through a generic location object.
- */
-function navigateToTabView(navigate: ReturnType<typeof useNavigate>, view: WorkspaceTabView): void {
-  switch (view.kind) {
-    case "thread":
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: {
-          environmentId: view.environmentId as EnvironmentId,
-          threadId: view.threadId as ThreadId,
-        },
-      });
-      return;
-    case "draft":
-      void navigate({ to: "/draft/$draftId", params: { draftId: view.draftId } });
-      return;
-    case "control-center":
-      void navigate({
-        to: "/control-center/$environmentId/$projectId",
-        params: { environmentId: view.environmentId, projectId: view.projectId },
-      });
-  }
-}
 
 /**
  * One dot, most urgent first: the person's attention is a queue, not a

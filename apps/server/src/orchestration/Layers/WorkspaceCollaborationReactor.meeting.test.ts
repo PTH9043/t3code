@@ -40,6 +40,10 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
+import {
+  WorkspaceAgentExecutor,
+  type WorkspaceAgentExecutionInput,
+} from "../Services/WorkspaceAgentExecutor.ts";
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReactor.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -214,6 +218,7 @@ function makeHarness(input: {
     const runRef = yield* Ref.make(input.run);
     const threadsRef = yield* Ref.make(new Map<string, OrchestrationThread>());
     const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+    const executionsRef = yield* Ref.make<ReadonlyArray<WorkspaceAgentExecutionInput>>([]);
     const sessionStopsRef = yield* Ref.make(0);
     const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
     let sequence = 0;
@@ -250,6 +255,7 @@ function makeHarness(input: {
                 interactionMode: command.interactionMode,
                 branch: command.branch,
                 worktreePath: command.worktreePath,
+                orchestraRunThreadId: command.orchestraRunThreadId ?? null,
                 latestTurn: null,
                 createdAt: command.createdAt,
                 updatedAt: command.createdAt,
@@ -409,6 +415,18 @@ function makeHarness(input: {
       listInstances: Effect.succeed(providerInstances),
     } as unknown as ProviderInstanceRegistry["Service"];
     const layer = WorkspaceCollaborationReactorLive.pipe(
+      Layer.provideMerge(
+        Layer.succeed(WorkspaceAgentExecutor, {
+          execute: (execution) =>
+            Effect.gen(function* () {
+              yield* Ref.update(executionsRef, (current) => [...current, execution]);
+              if (input.onTurnStart !== undefined)
+                yield* input.onTurnStart({ prompt: execution.prompt, run: yield* Ref.get(runRef) });
+              yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
+              return input.respond(execution.prompt);
+            }),
+        }),
+      ),
       Layer.provideMerge(OrchestrationTurnWaitLive),
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
       Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
@@ -422,7 +440,7 @@ function makeHarness(input: {
       Layer.provideMerge(orchestraWorktreeStubs),
       Layer.provideMerge(NodeServices.layer),
     );
-    return { runRef, promptsRef, threadsRef, sessionStopsRef, pubsub, layer };
+    return { runRef, promptsRef, executionsRef, threadsRef, sessionStopsRef, pubsub, layer };
   });
 }
 
@@ -485,10 +503,14 @@ it.effect("runs the meeting, plans onto the roster, and executes with the same s
       expect(round?.statements.every((statement) => statement.threadId === meetingThread)).toBe(
         true,
       );
-      expect((yield* Ref.get(harness.threadsRef)).size).toBe(1);
+      const meetingThreads = yield* Ref.get(harness.threadsRef);
+      expect(meetingThreads.size).toBe(1);
+      // Without an orchestra the one conversation is the person's own, so
+      // nothing marks it as a run internal and nothing hides it.
+      expect([...meetingThreads.values()].every((t) => t.orchestraRunThreadId === null)).toBe(true);
       // Handing the conversation between providers released the live session
       // each time the speaker's driver changed.
-      expect(yield* Ref.get(harness.sessionStopsRef)).toBeGreaterThanOrEqual(3);
+      expect(yield* Ref.get(harness.sessionStopsRef)).toBe(0);
 
       const nodes = new Map(run.graph?.nodes.map((node) => [String(node.id), node]));
       expect(run.graph?.status).toBe("completed");
@@ -558,11 +580,19 @@ it.effect(
         expect(build?.branch).toContain("t3code/orch-runm-");
         expect(validate?.worktreePath).toBe(build?.worktreePath);
         expect(nodes.get("plan")?.worktreePath ?? null).toBeNull();
-        // The node's pinned conversation was created inside the chain worktree.
+        // Worktree ownership belongs to executions; the shared conversation stays at the root.
         const threads = yield* Ref.get(harness.threadsRef);
         const buildThread = build?.threadId != null ? threads.get(build.threadId) : undefined;
-        expect(buildThread?.worktreePath).toBe(build?.worktreePath);
-        expect(buildThread?.branch).toBe(build?.branch);
+        expect(threads.size).toBe(1);
+        expect(buildThread?.worktreePath).toBeNull();
+        expect(buildThread?.branch).toBeNull();
+        const executions = yield* Ref.get(harness.executionsRef);
+        expect(executions.find((entry) => entry.execution.nodeId === "build")?.cwd).toBe(
+          build?.worktreePath,
+        );
+        expect(executions.find((entry) => entry.execution.nodeId === "validate-build")?.cwd).toBe(
+          build?.worktreePath,
+        );
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
 );
@@ -1057,7 +1087,7 @@ const orchestraRun = (meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollabo
 const seatQuestion = (question: string) =>
   `<t3_question>${JSON.stringify({ question, options: ["A", "B"], context: "선택이 남았다." })}</t3_question>`;
 
-it.effect("orchestra: runs nodes side by side, each in its own fixed conversation", () =>
+it.effect("orchestra: runs independent executions side by side inside one conversation", () =>
   Effect.gen(function* () {
     const firstStarted = yield* Deferred.make<void>();
     const secondStarted = yield* Deferred.make<void>();
@@ -1086,13 +1116,21 @@ it.effect("orchestra: runs nodes side by side, each in its own fixed conversatio
       const nodes = done.graph?.nodes.filter((node) => node.kind === "research") ?? [];
       expect(nodes).toHaveLength(2);
       const meetingThread = done.meeting?.threadId;
+      const threads = yield* Ref.get(harness.threadsRef);
       for (const node of nodes) {
-        // The node's conversation is its own, not the meeting's.
         expect(node.threadId).not.toBeNull();
-        expect(node.threadId).not.toBe(meetingThread);
+        expect(node.threadId).toBe(meetingThread);
         expect(node.attempts.every((attempt) => attempt.threadId === node.threadId)).toBe(true);
+        expect(threads.get(String(node.threadId))?.orchestraRunThreadId).toBeNull();
       }
-      expect(new Set(nodes.map((node) => node.threadId)).size).toBe(2);
+      expect(threads.size).toBe(1);
+      const executions = (yield* Ref.get(harness.executionsRef)).filter(
+        (entry) => entry.kind === "research",
+      );
+      expect(new Set(executions.map((entry) => entry.execution.executionId)).size).toBe(2);
+      expect(executions.every((entry) => entry.execution.ownerThreadId === meetingThread)).toBe(
+        true,
+      );
       // Both research prompts were issued in the same wave: the second one
       // went out before either result could have been applied.
       const prompts = yield* Ref.get(harness.promptsRef);

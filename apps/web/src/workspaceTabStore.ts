@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
+import { isElectron } from "./env";
+
 /**
  * One workspace tab = the screen it is showing. "자유 단위": a tab can hold
  * any thread, draft composer, or a project's control center — whatever the
@@ -11,6 +13,12 @@ export type WorkspaceTabView =
   | { readonly kind: "thread"; readonly environmentId: string; readonly threadId: string }
   | { readonly kind: "draft"; readonly draftId: string }
   | { readonly kind: "control-center"; readonly environmentId: string; readonly projectId: string };
+
+/** The conversation-shaped views — everything a "대화로 돌아가기" can return to. */
+export type ChatWorkspaceTabView = Extract<
+  WorkspaceTabView,
+  { kind: "thread" } | { kind: "draft" }
+>;
 
 export interface WorkspaceTab {
   readonly id: string;
@@ -51,6 +59,13 @@ interface WorkspaceTabState {
   readonly tabs: ReadonlyArray<WorkspaceTab>;
   readonly activeTabId: string | null;
   /**
+   * The conversation the person was last on, wherever it was showing. The
+   * control center takes over the tab it was opened from (same-folder
+   * navigation retargets), so its "대화로 돌아가기" has nothing left in the
+   * tab to return to — this is what it goes back to.
+   */
+  readonly lastChatView: ChatWorkspaceTabView | null;
+  /**
    * Route → tabs sync. Called by the (thin) route components: shows `view`
    * in the right tab. Same-folder navigation retargets the current tab; a
    * view already open elsewhere activates that tab; and navigation into a
@@ -87,11 +102,19 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
     (set, get) => ({
       tabs: [],
       activeTabId: null,
+      lastChatView: null,
 
       syncRouteView: (view, options) => {
         const key = workspaceTabViewKey(view);
         const projectKey = options?.projectKey ?? null;
-        const { tabs, activeTabId } = get();
+        const { tabs, activeTabId, lastChatView } = get();
+        if (view.kind !== "control-center") {
+          // Recorded before the tab bookkeeping below, which has early
+          // returns for navigation that leaves the tabs untouched.
+          if (lastChatView === null || workspaceTabViewKey(lastChatView) !== key) {
+            set({ lastChatView: view });
+          }
+        }
         const retarget = (tabId: string, activate: boolean) =>
           set({
             ...(activate ? { activeTabId: tabId } : {}),
@@ -208,13 +231,18 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       },
 
       closeTabsForView: (viewKey) => {
-        const { tabs, activeTabId } = get();
+        const { tabs, activeTabId, lastChatView } = get();
         const nextTabs = tabs.filter((tab) => workspaceTabViewKey(tab.view) !== viewKey);
         if (nextTabs.length === tabs.length) return;
         const activeSurvives = nextTabs.some((tab) => tab.id === activeTabId);
         set({
           tabs: nextTabs,
           activeTabId: activeSurvives ? activeTabId : (nextTabs.at(-1)?.id ?? null),
+          // This runs when the screen itself is gone (deleted thread, dropped
+          // draft), so it must stop being the conversation to go back to.
+          ...(lastChatView !== null && workspaceTabViewKey(lastChatView) === viewKey
+            ? { lastChatView: null }
+            : {}),
         });
       },
 
@@ -237,12 +265,19 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       },
 
       retargetTabView: (fromViewKey, view) => {
-        const { tabs } = get();
+        const { tabs, lastChatView } = get();
         if (!tabs.some((tab) => workspaceTabViewKey(tab.view) === fromViewKey)) return;
         set({
           tabs: tabs.map((tab) =>
             workspaceTabViewKey(tab.view) === fromViewKey ? { ...tab, view } : tab,
           ),
+          // A promoted draft keeps its tab; it keeps its place as the
+          // conversation to go back to under the new identity too.
+          ...(view.kind !== "control-center" &&
+          lastChatView !== null &&
+          workspaceTabViewKey(lastChatView) === fromViewKey
+            ? { lastChatView: view }
+            : {}),
         });
       },
 
@@ -255,12 +290,20 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
     }),
     {
       name: "t3.workspace-tabs.v1",
-      partialize: (state) => ({ tabs: state.tabs, activeTabId: state.activeTabId }),
+      partialize: (state) => ({
+        tabs: state.tabs,
+        activeTabId: state.activeTabId,
+        lastChatView: state.lastChatView,
+      }),
       // Tabs persisted before projectKey existed rehydrate with it undefined;
       // normalize to null so folder-boundary checks stay two-valued.
       merge: (persisted, current) => {
         const stored = persisted as
-          | { tabs?: ReadonlyArray<WorkspaceTab>; activeTabId?: string | null }
+          | {
+              tabs?: ReadonlyArray<WorkspaceTab>;
+              activeTabId?: string | null;
+              lastChatView?: ChatWorkspaceTabView | null;
+            }
           | undefined;
         return {
           ...current,
@@ -269,6 +312,7 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
             projectKey: tab.projectKey ?? null,
           })),
           activeTabId: stored?.activeTabId ?? null,
+          lastChatView: stored?.lastChatView ?? null,
         };
       },
     },
@@ -281,4 +325,47 @@ export function useWorkspaceTabs(): ReadonlyArray<WorkspaceTab> {
 
 export function useActiveWorkspaceTabId(): string | null {
   return useWorkspaceTabStore((state) => state.activeTabId);
+}
+
+/** The conversation to return to from a screen that is not one, if any. */
+export function useLastChatView(): ChatWorkspaceTabView | null {
+  return useWorkspaceTabStore((state) => state.lastChatView);
+}
+
+/**
+ * Whether this page load started on the index route. Read at module load,
+ * before any navigation, so a later trip to the index (closing the last tab,
+ * a deleted screen) is not mistaken for a cold start. Electron routes off the
+ * hash; the browser off the path.
+ */
+const bootedAtIndex =
+  typeof window === "undefined"
+    ? false
+    : (isElectron ? window.location.hash.replace(/^#/, "") || "/" : window.location.pathname) ===
+      "/";
+
+let startupRestoreTaken = false;
+
+/**
+ * The screen this window was on when it last closed, taken once per page
+ * load. Electron opens the app at a bare origin and the router boots at the
+ * index, which is a "start something new" landing, not a resume — without
+ * this every launch and every reload drops the person into a fresh draft.
+ * Consumed on first read so a screen that no longer exists falls through to
+ * that landing instead of bouncing against it.
+ */
+export function takeStartupRestoreView(): WorkspaceTabView | null {
+  if (startupRestoreTaken || !bootedAtIndex) return null;
+  startupRestoreTaken = true;
+  return selectStartupRestoreView(useWorkspaceTabStore.getState());
+}
+
+/** The tab the window was left on, or the conversation behind it. */
+export function selectStartupRestoreView(state: {
+  readonly tabs: ReadonlyArray<WorkspaceTab>;
+  readonly activeTabId: string | null;
+  readonly lastChatView: ChatWorkspaceTabView | null;
+}): WorkspaceTabView | null {
+  const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null;
+  return activeTab?.view ?? state.lastChatView;
 }

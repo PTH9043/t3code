@@ -48,6 +48,8 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   });
 });
 
+const BROKER_TIMEOUT_GRACE_MS = 5_000;
+
 const invokeTargeted = <A>(
   operation: PreviewAutomationOperation,
   input: {
@@ -57,7 +59,12 @@ const invokeTargeted = <A>(
   timeoutMs?: number,
 ) => {
   const { tabId, ...operationInput } = input;
-  return invoke<A>(operation, operationInput, timeoutMs, tabId);
+  return invoke<A>(
+    operation,
+    timeoutMs === undefined ? operationInput : { ...operationInput, timeoutMs },
+    timeoutMs === undefined ? undefined : timeoutMs + BROKER_TIMEOUT_GRACE_MS,
+    tabId,
+  );
 };
 
 const handlers = {

@@ -26,9 +26,13 @@ const RagSearchRequest = Schema.Struct({
   projectId: Schema.String,
   match: Schema.String,
   includeLongTermMemory: Schema.Boolean,
+  includeShared: Schema.Boolean,
+  contextPathsJson: Schema.String,
   limit: Schema.Int,
 });
 const RagCandidateRow = Schema.Struct({
+  scope: WorkspaceRagMatch.fields.scope,
+  appliesToFolder: WorkspaceRagMatch.fields.appliesToFolder,
   projectId: WorkspaceRagMatch.fields.projectId,
   itemId: WorkspaceRagMatch.fields.itemId,
   kind: WorkspaceRagMatch.fields.kind,
@@ -50,10 +54,19 @@ const make = Effect.gen(function* () {
   const searchRows = SqlSchema.findAll({
     Request: RagSearchRequest,
     Result: RagCandidateRow,
-    execute: ({ projectId, match, includeLongTermMemory, limit }) =>
+    execute: ({
+      projectId,
+      match,
+      includeLongTermMemory,
+      includeShared,
+      contextPathsJson,
+      limit,
+    }) =>
       sql`
         SELECT
           project_id AS "projectId",
+          scope,
+          applies_to_folder AS "appliesToFolder",
           item_id AS "itemId",
           kind,
           title,
@@ -66,7 +79,15 @@ const make = Effect.gen(function* () {
           updated_at AS "updatedAt"
         FROM projection_workspace_rag_chunks
         WHERE projection_workspace_rag_chunks MATCH ${match}
-          AND project_id = ${projectId}
+          AND (
+            (scope = 'environment' AND (${includeShared ? 1 : 0} = 1 OR project_id = ${projectId}))
+            OR (project_id = ${projectId} AND scope = 'project')
+            OR (project_id = ${projectId} AND scope = 'folder' AND EXISTS (
+              SELECT 1 FROM json_each(${contextPathsJson}) AS context
+              WHERE context.value = applies_to_folder
+                OR substr(context.value, 1, length(applies_to_folder) + 1) = applies_to_folder || '/'
+            ))
+          )
           AND (${includeLongTermMemory ? 1 : 0} = 1 OR kind = 'rag-source')
         ORDER BY bm25(
             projection_workspace_rag_chunks,
@@ -123,10 +144,12 @@ const make = Effect.gen(function* () {
             INSERT INTO projection_workspace_rag_chunks (
               project_id, item_id, kind, chunk_index, title, content, updated_at,
               tags_text, search_title, search_tags, search_body
+              , scope, applies_to_folder
             ) VALUES (
               ${item.projectId}, ${item.id}, ${item.kind}, ${chunk.chunkIndex}, ${item.title},
               ${chunk.content}, ${item.updatedAt}, ${chunk.tagsText}, ${chunk.searchTitle},
               ${chunk.searchTags}, ${chunk.searchBody}
+              , ${item.scope ?? "project"}, ${item.appliesToFolder ?? null}
             )
           `,
         { concurrency: 1, discard: true },
@@ -141,6 +164,10 @@ const make = Effect.gen(function* () {
       projectId: input.projectId,
       match: query.match,
       includeLongTermMemory: input.includeLongTermMemory !== false,
+      includeShared: input.includeShared !== false,
+      contextPathsJson: JSON.stringify(
+        (input.contextPaths ?? []).map((path) => path.replaceAll("\\", "/")),
+      ),
       limit: Math.min(limit * CANDIDATE_FACTOR, MAX_CANDIDATES),
     }).pipe(
       Effect.map((rows) => {
@@ -153,8 +180,9 @@ const make = Effect.gen(function* () {
         for (const row of rows) {
           const coverage = termCoverage(query.terms, `${row.title} ${row.tagsText} ${row.content}`);
           const rank = row.score * (1 + coverage);
-          const current = best.get(row.itemId);
-          if (current === undefined || rank > current.rank) best.set(row.itemId, { row, rank });
+          const key = `${row.projectId}:${row.itemId}`;
+          const current = best.get(key);
+          if (current === undefined || rank > current.rank) best.set(key, { row, rank });
         }
         return {
           matches: [...best.values()]
@@ -165,6 +193,8 @@ const make = Effect.gen(function* () {
             .slice(0, limit)
             .map(({ row, rank }) => ({
               projectId: row.projectId,
+              scope: row.scope ?? "project",
+              appliesToFolder: row.appliesToFolder ?? null,
               itemId: row.itemId,
               kind: row.kind,
               title: row.title,

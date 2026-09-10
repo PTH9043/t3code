@@ -54,6 +54,30 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
+it.effect("gives workers their owner's scope while revoking each execution independently", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const ownerThreadId = ThreadId.make("orchestra-owner");
+    const first = yield* registry.issue({
+      threadId: ThreadId.make("worker-a"),
+      ownerThreadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const second = yield* registry.issue({
+      threadId: ThreadId.make("worker-b"),
+      ownerThreadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const firstToken = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const secondToken = second.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect((yield* registry.resolve(firstToken))?.threadId).toBe(ownerThreadId);
+    expect(first.config.threadId).toBe("worker-a");
+    yield* registry.revokeThread(ThreadId.make("worker-a"));
+    expect(yield* registry.resolve(firstToken)).toBeUndefined();
+    expect((yield* registry.resolve(secondToken))?.threadId).toBe(ownerThreadId);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [

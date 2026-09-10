@@ -31,6 +31,10 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
+import {
+  WorkspaceAgentExecutor,
+  WorkspaceAgentExecutionError,
+} from "../Services/WorkspaceAgentExecutor.ts";
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
 import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReactor.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -459,6 +463,10 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
         Ref.get(threadsRef).pipe(
           Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
         ),
+      getProjectShellById: () =>
+        Effect.succeed(
+          Option.some({ id: projectId, workspaceRoot: "D:/repo", scripts: [] } as never),
+        ),
     } as unknown as ProjectionSnapshotQueryShape;
     const providerInstances = [
       {
@@ -488,6 +496,23 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
       listInstances: Effect.succeed(providerInstances),
     } as unknown as ProviderInstanceRegistry["Service"];
     const layer = WorkspaceCollaborationReactorLive.pipe(
+      Layer.provideMerge(
+        Layer.succeed(WorkspaceAgentExecutor, {
+          execute: (execution) =>
+            Effect.gen(function* () {
+              yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
+              if (
+                execution.modelSelection.instanceId === "codex-work" &&
+                execution.prompt.includes("Node: build\n")
+              ) {
+                return yield* new WorkspaceAgentExecutionError({
+                  message: "Primary Codex tool failed.",
+                });
+              }
+              return responseForGraphPrompt(execution.prompt);
+            }),
+        }),
+      ),
       Layer.provideMerge(OrchestrationTurnWaitLive),
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
       Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
@@ -508,7 +533,7 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
       yield* reactor.drain;
 
       const run = yield* Ref.get(runRef);
-      expect(run.status).toBe("completed");
+      expect(run.status, run.error ?? undefined).toBe("completed");
       expect(run.graph?.status).toBe("completed");
       expect(run.graph?.overallConfidence).toBe("high");
       expect(run.graph?.nodes.filter((node) => node.kind === "validation")).toHaveLength(4);
@@ -553,7 +578,9 @@ it.effect("preempts work, reroutes tools, revises failures and conflicts, and co
       expect(prompts).toHaveLength(13);
       expect(prompts[0]).toContain("current user goal is the absolute priority");
       expect(prompts[1]).toContain("TASK:\n현재 자료를 조사한다.");
-      expect(prompts[2]).toContain("TASK:\n제어 센터를 구현한다.");
+      expect(prompts.find((prompt) => prompt.includes("Node: build\n"))).toContain(
+        "TASK:\n제어 센터를 구현한다.",
+      );
       expect(prompts.some((prompt) => prompt.includes("Node: replan-"))).toBe(true);
       expect(prompts.every((prompt) => prompt.includes("SUCCESS CRITERIA:"))).toBe(true);
     }).pipe(Effect.provide(layer), Effect.scoped);

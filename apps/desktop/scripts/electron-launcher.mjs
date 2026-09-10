@@ -281,12 +281,14 @@ function readJson(path) {
 }
 
 export function resolveMacLauncherPaths(appBundlePath, displayName = APP_DISPLAY_NAME) {
-  const executableDir = NodePath.join(appBundlePath, "Contents", "MacOS");
+  // These describe the macOS .app bundle layout, so join with POSIX
+  // separators no matter which host computes them.
+  const executableDir = NodePath.posix.join(appBundlePath, "Contents", "MacOS");
   const launcherExecutableName = `${displayName} Launcher`;
   return {
     launcherExecutableName,
-    launcherBinaryPath: NodePath.join(executableDir, launcherExecutableName),
-    runtimeElectronBinaryPath: NodePath.join(executableDir, "Electron"),
+    launcherBinaryPath: NodePath.posix.join(executableDir, launcherExecutableName),
+    runtimeElectronBinaryPath: NodePath.posix.join(executableDir, "Electron"),
   };
 }
 

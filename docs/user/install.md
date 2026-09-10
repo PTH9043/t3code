@@ -45,13 +45,14 @@ yay -S t3code-bin
 T3 Code는 제공자 CLI를 구동할 뿐 함께 배포하지는 않습니다. 사용할 제공자마다 CLI를 설치한 다음
 인증하세요.
 
-| 제공자     | CLI                                                   | 기본 바이너리  | 로그인 명령           |
-| ---------- | ----------------------------------------------------- | -------------- | --------------------- |
-| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)  | `codex`        | `codex login`         |
-| Claude     | [Claude Code](https://claude.com/product/claude-code) | `claude`       | `claude auth login`   |
-| Cursor     | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
-| Grok Build | [Grok Build CLI](https://x.ai/cli)                    | `grok`         | `grok login`          |
-| OpenCode   | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
+| 제공자     | CLI                                                                | 기본 바이너리  | 로그인 명령                    |
+| ---------- | ------------------------------------------------------------------ | -------------- | ------------------------------ |
+| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)               | `codex`        | `codex login`                  |
+| Claude     | [Claude Code](https://claude.com/product/claude-code)              | `claude`       | `claude auth login`            |
+| Cursor     | [Cursor CLI](https://cursor.com/cli)                               | `cursor-agent` | `agent login`                  |
+| Grok Build | [Grok Build CLI](https://x.ai/cli)                                 | `grok`         | `grok login`                   |
+| Gemini     | [Gemini CLI](https://geminicli.com/docs/get-started/installation/) | `gemini`       | T3 Code 설정에서 Google 로그인 |
+| OpenCode   | [OpenCode](https://opencode.ai)                                    | `opencode`     | `opencode auth login`          |
 
 Cursor는 특히 주의해야 하는데, T3 Code가 찾는 `cursor-agent` 바이너리를 제공하는 Cursor CLI를
 설치하되 인증은 `cursor-agent login`이 아니라 `agent login`으로 해야 합니다.
@@ -70,8 +71,8 @@ Cursor는 특히 주의해야 하는데, T3 Code가 찾는 `cursor-agent` 바이
 T3 Code를 설치하고 실행한 다음 제공자를 추가해도 됩니다. 인증되지 않은 제공자는 **설정**에
 상태가 표시되며, 실행할 로그인 명령과 함께 세션 시작 단계에서 실패합니다.
 
-여러 계정을 사용하는 설정은 [Codex](./providers-codex.md)와 [Claude](./providers-claude.md)를
-참고하세요.
+여러 계정을 사용하는 설정은 [Codex](./providers-codex.md), [Claude](./providers-claude.md),
+[Gemini](./providers-gemini.md)를 참고하세요.
 
 ## 다음 단계
 

@@ -26,7 +26,12 @@ import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import { subscribeDynamic } from "../rpc/client.ts";
 import { ThreadSnapshotLoader, type ThreadSnapshotWindow } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
-import { applyThreadDetailEvent } from "./threadReducer.ts";
+import {
+  applyThreadDetailEvent,
+  capActivityRows,
+  capMessageRows,
+  compactOldActivityPayloads,
+} from "./threadReducer.ts";
 import { THREAD_STATE_IDLE_TTL_MS } from "./threadRetention.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import {
@@ -185,6 +190,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     readonly snapshot: OrchestrationThreadDetailSnapshot;
     readonly epoch: number;
   } | null>(null);
+  // Once an older page is merged the loaded window holds history the user asked
+  // for, so the row caps must stop trimming it (they would delete exactly that
+  // page while its cursor has already advanced past it, leaving an unreachable
+  // gap). A fresh snapshot replaces the window and clears this.
+  const expandedHistory = yield* Ref.make(false);
   const persistence = yield* Queue.sliding<OrchestrationThreadDetailSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
@@ -259,8 +269,30 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     page: Option.Option<EnvironmentThreadPageState> | "keep",
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
+    // A fresh snapshot (page provided) replaces the window, so it re-establishes
+    // the bounded baseline; a live "keep" event on a widened window must not
+    // re-cap, or every unrelated activity/session event would silently delete
+    // the older page the user just loaded.
+    if (page !== "keep") {
+      yield* Ref.set(expandedHistory, false);
+    }
+    const capRows = !(yield* Ref.get(expandedHistory));
+    // A loaded/streamed snapshot arrives with every activity's payload verbatim
+    // (tool rawOutput/item bodies). Compact payloads older than the retention
+    // window on entry so a fresh load or reload stays bounded — the live append
+    // path (threadReducer) already does this per event, but bulk snapshots
+    // bypass it, which let a reloaded long thread re-grow the renderer heap.
+    // Payloads are always compacted; row eviction is suspended while history is
+    // expanded so a merged older page survives the next live event.
+    const bounded: OrchestrationThread = {
+      ...thread,
+      activities: compactOldActivityPayloads(
+        capRows ? capActivityRows(thread.activities) : thread.activities,
+      ),
+      messages: capRows ? capMessageRows(thread.messages) : thread.messages,
+    };
     yield* SubscriptionRef.update(state, (current) => ({
-      data: Option.some(thread),
+      data: Option.some(bounded),
       status: waiting ? ("synchronizing" as const) : ("live" as const),
       error: Option.none(),
       page: page === "keep" ? current.page : page,
@@ -273,7 +305,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       const currentPage = yield* SubscriptionRef.get(state).pipe(Effect.map((value) => value.page));
       yield* Queue.offer(persistence, {
         snapshotSequence,
-        thread,
+        // Persist the bounded snapshot, not the raw one: the queue (and the
+        // debounced encoder behind it) would otherwise retain every verbatim
+        // activity payload the compaction above just dropped.
+        thread: bounded,
         // Persist the window boundary with the window's content so a cache
         // restore can keep paging from where the loaded history ends.
         ...Option.match(currentPage, {
@@ -360,7 +395,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       // revert reducer's turn filtering fully handles loaded history.
       yield* Ref.update(historyEpoch, (epoch) => epoch + 1);
     }
-    const result = applyThreadDetailEvent(current.data.value, item.event);
+    const result = applyThreadDetailEvent(current.data.value, item.event, {
+      capRows: !(yield* Ref.get(expandedHistory)),
+    });
     if (result.kind === "updated") {
       yield* setThread(result.thread, "keep");
     } else if (result.kind === "deleted") {
@@ -435,7 +472,14 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         // windowed collections gain rows from the older page.
         ...loaded,
         messages: mergeById(older.messages, loaded.messages),
-        activities: mergeById(older.activities, loaded.activities),
+        // Both messages AND activities stay uncapped here on purpose: the older
+        // page IS the transcript history the user just asked to load. Capping
+        // activities from the head dropped exactly that page (the whole page
+        // once the live window already sat at the cap), while its cursor had
+        // advanced past it — leaving work-log/tool rows unreachable. Payloads
+        // are still compacted; `expandedHistory` keeps later live events from
+        // re-trimming the widened window.
+        activities: compactOldActivityPayloads(mergeById(older.activities, loaded.activities)),
         proposedPlans: mergeById(older.proposedPlans, loaded.proposedPlans),
         checkpoints: [
           ...older.checkpoints.filter((row) => !seenCheckpoints.has(row.turnId)),
@@ -448,6 +492,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         page: pageStateFromSnapshot(snapshot.page),
       };
     });
+    if (merged !== null) {
+      // The window now holds paged-in history; suspend row-eviction so the next
+      // live event doesn't re-trim it back to the cap.
+      yield* Ref.set(expandedHistory, true);
+    }
     // Persist the widened window under the *loaded* watermark: the merged
     // content is only known consistent with the state it merged into, not
     // with the page's own (possibly newer) sequence.

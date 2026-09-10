@@ -656,12 +656,62 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
     return { command: resolvedCommand, args: [...args], shell: false };
   }
 
+  // npm's stock Node shims needlessly pass through cmd.exe, which drops PATH
+  // when it exceeds 8191 characters. Launch the same script with the same Node
+  // executable directly; custom batch scripts retain their shell behavior.
+  if (extension === ".cmd") {
+    let nodeScript: string | undefined;
+    try {
+      nodeScript = npmNodeScriptFromShim(
+        NodeFS.readFileSync(resolvedCommand, "utf8"),
+        resolvedCommand,
+      );
+    } catch {
+      // A missing or unreadable shim follows the ordinary spawn error path.
+    }
+    if (nodeScript !== undefined) {
+      const siblingNode = NodePath.win32.join(NodePath.win32.dirname(resolvedCommand), "node.exe");
+      const nodeExecutable = NodeFS.existsSync(siblingNode)
+        ? siblingNode
+        : resolveExecutable("node.exe", platform, env);
+      if (nodeExecutable !== undefined)
+        return { command: nodeExecutable, args: [nodeScript, ...args], shell: false };
+    }
+  }
+
   return {
     command: escapeWindowsShellArg(resolvedCommand),
     args: sanitizeShellModeArgsForPlatform(args, platform),
     shell: true,
   };
 });
+
+/** Recognize only npm's stock shim; never discard commands in a customized wrapper. */
+export function npmNodeScriptFromShim(content: string, shimPath: string): string | undefined {
+  const normalized = content.replaceAll("\r\n", "\n").trim();
+  const target = /"%_prog%"\s+"%dp0%\\([^"%\r\n]+)" %\*$/.exec(normalized)?.[1];
+  if (target === undefined) return undefined;
+  const expected = `@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\\node.exe" (
+  SET "_prog=%dp0%\\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${target}" %*`;
+  return normalized === expected
+    ? NodePath.win32.resolve(NodePath.win32.dirname(shimPath), target)
+    : undefined;
+}
 
 export const isCommandAvailable = Effect.fn("shell.isCommandAvailable")(function* (
   command: string,

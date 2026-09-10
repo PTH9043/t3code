@@ -42,7 +42,9 @@ export { PrimaryEnvironmentHttpClient } from "./httpClient";
 
 export {
   DesktopEnvironmentBootstrapIncompleteError,
+  DesktopEnvironmentBootstrapPendingError,
   isDesktopEnvironmentBootstrapIncompleteError,
+  isDesktopEnvironmentBootstrapPendingError,
   isPrimaryEnvironmentProtocolUnsupportedError,
   isPrimaryEnvironmentUrlInvalidError,
   PrimaryEnvironmentProtocolUnsupportedError,

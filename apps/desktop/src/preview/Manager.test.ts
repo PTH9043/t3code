@@ -1269,6 +1269,87 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("keeps the automation snapshot when an offscreen capture fails", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate"
+            ? {
+                result: {
+                  value: {
+                    url: "https://example.com/",
+                    title: "Example",
+                    loading: false,
+                    visibleText: "Hello from an offscreen tab",
+                    interactiveElements: [
+                      {
+                        tag: "button",
+                        role: null,
+                        name: "Send",
+                        selector: "#send",
+                        x: 1,
+                        y: 2,
+                        width: 3,
+                        height: 4,
+                      },
+                    ],
+                  },
+                },
+              }
+            : undefined,
+        );
+        fromId.mockReturnValue({
+          id: 42,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "https://example.com",
+          getTitle: () => "Example",
+          isLoading: () => false,
+          isDevToolsOpened: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler: vi.fn(),
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand,
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+          capturePage: vi.fn(async () => {
+            throw new Error("UnknownVizError");
+          }),
+        } as never);
+
+        yield* manager.createTab("tab_offscreen");
+        yield* manager.registerWebview("tab_offscreen", 42);
+
+        const snapshot = yield* manager.automationSnapshot("tab_offscreen");
+
+        expect(snapshot.visibleText).toBe("Hello from an offscreen tab");
+        expect(snapshot.interactiveElements).toEqual([
+          {
+            tag: "button",
+            role: null,
+            name: "Send",
+            selector: "#send",
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+          },
+        ]);
+        expect(snapshot.screenshot).toBeUndefined();
+        expect(snapshot.screenshotError).toBe("UnknownVizError");
+      }),
+    ),
+  );
+
   effectIt.effect("drops empty frames before picture-in-picture delivery", () =>
     withManager((manager) =>
       Effect.gen(function* () {

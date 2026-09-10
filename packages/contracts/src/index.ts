@@ -1,4 +1,6 @@
 export * from "./baseSchemas.ts";
+export * from "./providerExecution.ts";
+export * from "./workspaceOrchestra.ts";
 export * from "./background.ts";
 export * from "./auth.ts";
 export * from "./environment.ts";
@@ -16,6 +18,7 @@ export * from "./keybindings.ts";
 export * from "./server.ts";
 export * from "./settings.ts";
 export * from "./git.ts";
+export * from "./geminiAuth.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./orchestration.ts";
@@ -30,3 +33,5 @@ export * from "./previewAutomation.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";
 export * from "./tokenUsage.ts";
+
+export * from "./conversationHandoff.ts";
