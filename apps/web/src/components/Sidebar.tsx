@@ -1,4 +1,3 @@
-import { autoAnimate } from "@formkit/auto-animate";
 import { useAtomValue } from "@effect/atom-react";
 import {
   DndContext,
@@ -3225,11 +3224,6 @@ export default function Sidebar() {
     setShowJumpHints(shouldShowJumpHintsNow);
   }, [shouldShowJumpHintsNow]);
 
-  const attachListAutoAnimateRef = useCallback((node: HTMLUListElement | null) => {
-    if (!node) return;
-    autoAnimate(node, { duration: 150, easing: "ease-out" });
-  }, []);
-
   // The project selector is the parent context, so creating a conversation
   // never opens a second project picker or accidentally targets another project.
   const handleNewThreadClick = useCallback(() => {
@@ -3533,7 +3527,7 @@ export default function Sidebar() {
               closeDelay={0}
               timeout={400}
             >
-              <ul ref={attachListAutoAnimateRef} role="list" className="flex flex-col gap-px">
+              <ul role="list" className="flex flex-col gap-px">
                 {(() => {
                   const renderThreadRow = (
                     thread: EnvironmentThreadShell,

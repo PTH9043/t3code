@@ -88,6 +88,7 @@ function killChildTreeByPid(pid, signal) {
     // running. taskkill /T takes the whole tree down.
     NodeChildProcess.spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
       stdio: "ignore",
+      windowsHide: true,
     });
     return;
   }
@@ -206,16 +207,18 @@ async function stopApp() {
     };
 
     app.once("exit", finish);
-    app.kill("SIGTERM");
     killChildTreeByPid(app.pid, "TERM");
+    // Keep the parent alive until Windows has found and terminated its tree.
+    // Killing it first can orphan its renderer and backend processes.
+    if (hostPlatform !== "win32") app.kill("SIGTERM");
 
     setTimeout(() => {
       if (settled) {
         return;
       }
 
-      app.kill("SIGKILL");
       killChildTreeByPid(app.pid, "KILL");
+      if (hostPlatform !== "win32") app.kill("SIGKILL");
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });

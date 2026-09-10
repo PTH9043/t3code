@@ -1,13 +1,13 @@
-// Runs the two bundle watchers desktop development needs, side by side:
+// Runs the two bundle watchers and one Electron launcher, side by side:
 //
 //   - apps/server  `vp pack --watch --no-clean`  → apps/server/dist/bin.mjs
-//   - apps/desktop `vp pack --watch`             → dist-electron/*.cjs, which
-//     also (re)launches Electron through the pack config's onSuccess hook.
+//   - apps/desktop `vp pack --watch`             → dist-electron/*.cjs
+//   - apps/desktop `node scripts/dev-electron.mjs`
 //
-// dev-electron.mjs watches both outputs and restarts the app when either
-// changes, so a server-side edit now reaches the running desktop app without a
-// manual `build:bundle`. `--no-clean` keeps service-launcher.mjs, which the
-// one-shot `t3#build` produced and the watcher never rebuilds.
+// The launcher waits for its resources, then watches both outputs itself.
+// Spawning it from pack's onSuccess leaks launchers across rebuilds on Windows.
+// `--no-clean` keeps service-launcher.mjs, which the one-shot `t3#build`
+// produced and the server watcher never rebuilds.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
@@ -32,27 +32,33 @@ const children = [
   {
     name: "server-bundle",
     cwd: serverDir,
-    args: ["pack", "--watch", "--no-clean"],
-    env: {},
+    args: [vpBin, "pack", "--watch", "--no-clean"],
   },
   {
     name: "desktop-bundle",
     cwd: desktopDir,
-    args: ["pack", "--watch"],
-    env: { T3CODE_DESKTOP_DEV: "1" },
+    args: [vpBin, "pack", "--watch"],
+  },
+  {
+    name: "electron-launcher",
+    cwd: desktopDir,
+    args: [NodePath.join(scriptsDir, "dev-electron.mjs")],
   },
 ].map((spec) => {
-  const child = NodeChildProcess.spawn(process.execPath, [vpBin, ...spec.args], {
+  const child = NodeChildProcess.spawn(process.execPath, spec.args, {
     cwd: spec.cwd,
-    env: { ...process.env, ...spec.env },
+    env: process.env,
     stdio: "inherit",
+    windowsHide: true,
+  });
+  child.once("error", (error) => {
+    console.error(`[dev-desktop-bundles] ${spec.name} failed to start: ${error.message}`);
+    void shutdown(1);
   });
   child.once("exit", (code, signal) => {
     if (shuttingDown) return;
-    console.error(
-      `[dev-desktop-bundles] ${spec.name} watcher exited (${signal ?? code}); shutting down`,
-    );
-    void shutdown(typeof code === "number" && code !== 0 ? code : 1);
+    console.error(`[dev-desktop-bundles] ${spec.name} exited (${signal ?? code}); shutting down`);
+    void shutdown(spec.name === "electron-launcher" ? (code ?? 1) : code || 1);
   });
   return { ...spec, child };
 });
@@ -60,10 +66,11 @@ const children = [
 let shuttingDown = false;
 
 function killTree(child) {
-  if (typeof child.pid !== "number" || child.exitCode !== null) return;
+  if (typeof child.pid !== "number" || child.exitCode !== null || child.signalCode !== null) return;
   if (hostPlatform === "win32") {
     NodeChildProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
+      windowsHide: true,
     });
     return;
   }
