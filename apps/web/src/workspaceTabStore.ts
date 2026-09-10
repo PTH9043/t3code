@@ -58,13 +58,10 @@ function makeTabId(): string {
 interface WorkspaceTabState {
   readonly tabs: ReadonlyArray<WorkspaceTab>;
   readonly activeTabId: string | null;
-  /**
-   * The conversation the person was last on, wherever it was showing. The
-   * control center takes over the tab it was opened from (same-folder
-   * navigation retargets), so its "대화로 돌아가기" has nothing left in the
-   * tab to return to — this is what it goes back to.
-   */
+  /** Most recent conversation for global screens such as settings and the overview. */
   readonly lastChatView: ChatWorkspaceTabView | null;
+  /** Project control centers return within their own environment and folder. */
+  readonly lastChatViewByProjectKey: Readonly<Record<string, ChatWorkspaceTabView>>;
   /**
    * Route → tabs sync. Called by the (thin) route components: shows `view`
    * in the right tab. Same-folder navigation retargets the current tab; a
@@ -103,16 +100,30 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       tabs: [],
       activeTabId: null,
       lastChatView: null,
+      lastChatViewByProjectKey: {},
 
       syncRouteView: (view, options) => {
         const key = workspaceTabViewKey(view);
         const projectKey = options?.projectKey ?? null;
-        const { tabs, activeTabId, lastChatView } = get();
+        const { tabs, activeTabId, lastChatView, lastChatViewByProjectKey } = get();
         if (view.kind !== "control-center") {
           // Recorded before the tab bookkeeping below, which has early
           // returns for navigation that leaves the tabs untouched.
-          if (lastChatView === null || workspaceTabViewKey(lastChatView) !== key) {
-            set({ lastChatView: view });
+          const rememberGlobal = lastChatView === null || workspaceTabViewKey(lastChatView) !== key;
+          // Project identity can arrive after the route, even when the view
+          // has not changed. Never infer it from the previously active tab.
+          const projectView =
+            projectKey === null ? undefined : lastChatViewByProjectKey[projectKey];
+          const rememberProject =
+            projectKey !== null &&
+            (projectView === undefined || workspaceTabViewKey(projectView) !== key);
+          if (rememberGlobal || rememberProject) {
+            set({
+              ...(rememberGlobal ? { lastChatView: view } : {}),
+              ...(rememberProject
+                ? { lastChatViewByProjectKey: { ...lastChatViewByProjectKey, [projectKey]: view } }
+                : {}),
+            });
           }
         }
         const retarget = (tabId: string, activate: boolean) =>
@@ -231,18 +242,33 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       },
 
       closeTabsForView: (viewKey) => {
-        const { tabs, activeTabId, lastChatView } = get();
+        const { tabs, activeTabId, lastChatView, lastChatViewByProjectKey } = get();
         const nextTabs = tabs.filter((tab) => workspaceTabViewKey(tab.view) !== viewKey);
-        if (nextTabs.length === tabs.length) return;
+        const nextProjectViews = Object.fromEntries(
+          Object.entries(lastChatViewByProjectKey).filter(
+            ([, view]) => workspaceTabViewKey(view) !== viewKey,
+          ),
+        );
+        const forgetLastChat =
+          lastChatView !== null && workspaceTabViewKey(lastChatView) === viewKey;
+        if (
+          nextTabs.length === tabs.length &&
+          !forgetLastChat &&
+          Object.keys(nextProjectViews).length === Object.keys(lastChatViewByProjectKey).length
+        ) {
+          return;
+        }
         const activeSurvives = nextTabs.some((tab) => tab.id === activeTabId);
         set({
           tabs: nextTabs,
-          activeTabId: activeSurvives ? activeTabId : (nextTabs.at(-1)?.id ?? null),
+          activeTabId:
+            nextTabs.length === tabs.length || activeSurvives
+              ? activeTabId
+              : (nextTabs.at(-1)?.id ?? null),
           // This runs when the screen itself is gone (deleted thread, dropped
           // draft), so it must stop being the conversation to go back to.
-          ...(lastChatView !== null && workspaceTabViewKey(lastChatView) === viewKey
-            ? { lastChatView: null }
-            : {}),
+          ...(forgetLastChat ? { lastChatView: null } : {}),
+          lastChatViewByProjectKey: nextProjectViews,
         });
       },
 
@@ -265,8 +291,16 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       },
 
       retargetTabView: (fromViewKey, view) => {
-        const { tabs, lastChatView } = get();
-        if (!tabs.some((tab) => workspaceTabViewKey(tab.view) === fromViewKey)) return;
+        const { tabs, lastChatView, lastChatViewByProjectKey } = get();
+        const matches = (candidate: WorkspaceTabView) =>
+          workspaceTabViewKey(candidate) === fromViewKey;
+        if (
+          !tabs.some((tab) => matches(tab.view)) &&
+          !(lastChatView !== null && matches(lastChatView)) &&
+          !Object.values(lastChatViewByProjectKey).some(matches)
+        ) {
+          return;
+        }
         set({
           tabs: tabs.map((tab) =>
             workspaceTabViewKey(tab.view) === fromViewKey ? { ...tab, view } : tab,
@@ -277,6 +311,16 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
           lastChatView !== null &&
           workspaceTabViewKey(lastChatView) === fromViewKey
             ? { lastChatView: view }
+            : {}),
+          ...(view.kind !== "control-center"
+            ? {
+                lastChatViewByProjectKey: Object.fromEntries(
+                  Object.entries(lastChatViewByProjectKey).map(([projectKey, previous]) => [
+                    projectKey,
+                    matches(previous) ? view : previous,
+                  ]),
+                ),
+              }
             : {}),
         });
       },
@@ -294,6 +338,7 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
         tabs: state.tabs,
         activeTabId: state.activeTabId,
         lastChatView: state.lastChatView,
+        lastChatViewByProjectKey: state.lastChatViewByProjectKey,
       }),
       // Tabs persisted before projectKey existed rehydrate with it undefined;
       // normalize to null so folder-boundary checks stay two-valued.
@@ -303,6 +348,7 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
               tabs?: ReadonlyArray<WorkspaceTab>;
               activeTabId?: string | null;
               lastChatView?: ChatWorkspaceTabView | null;
+              lastChatViewByProjectKey?: Readonly<Record<string, ChatWorkspaceTabView>>;
             }
           | undefined;
         return {
@@ -313,6 +359,7 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
           })),
           activeTabId: stored?.activeTabId ?? null,
           lastChatView: stored?.lastChatView ?? null,
+          lastChatViewByProjectKey: stored?.lastChatViewByProjectKey ?? {},
         };
       },
     },
@@ -325,11 +372,6 @@ export function useWorkspaceTabs(): ReadonlyArray<WorkspaceTab> {
 
 export function useActiveWorkspaceTabId(): string | null {
   return useWorkspaceTabStore((state) => state.activeTabId);
-}
-
-/** The conversation to return to from a screen that is not one, if any. */
-export function useLastChatView(): ChatWorkspaceTabView | null {
-  return useWorkspaceTabStore((state) => state.lastChatView);
 }
 
 /**

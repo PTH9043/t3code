@@ -1,12 +1,17 @@
-import { useMemo } from "react";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { ArrowLeftIcon, BrainCircuitIcon, SettingsIcon } from "lucide-react";
+import { scopeProjectRef, scopedProjectKey } from "@t3tools/client-runtime/environment";
 
 import { useEnvironments } from "~/state/environments";
-import { useProjects } from "~/state/entities";
-import { useLastChatView } from "~/workspaceTabStore";
+import { readThreadShells, useProjects } from "~/state/entities";
+import { useWorkspaceTabStore } from "~/workspaceTabStore";
+import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
+import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { navigateToTabView } from "../tabs/navigateToTabView";
+import { toastManager } from "../ui/toast";
+import { resolveControlCenterChatView } from "./controlCenterNavigation";
 import {
   SidebarContent,
   SidebarFooter,
@@ -22,9 +27,16 @@ export function ControlCenterSidebarNav() {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (location) => location.pathname });
   const projects = useProjects();
+  const params = useParams({ strict: false });
+  const project = projects.find(
+    (candidate) =>
+      candidate.environmentId === params.environmentId && candidate.id === params.projectId,
+  );
+  const isProjectCenter = params.projectId !== undefined;
+  const handleNewThread = useNewThreadHandler();
+  const [isReturning, setIsReturning] = useState(false);
   const { environments } = useEnvironments();
   const { isMobile, setOpenMobile } = useSidebar();
-  const lastChatView = useLastChatView();
   const environmentLabels = useMemo(
     () =>
       new Map(environments.map((environment) => [environment.environmentId, environment.label])),
@@ -50,18 +62,37 @@ export function ControlCenterSidebarNav() {
     void navigate({ to });
   };
 
-  /**
-   * "돌아가기" means the conversation the person came from. The index route
-   * is not that — it starts a fresh draft in whichever folder was touched
-   * last — so it is only the fallback for having no conversation to return to.
-   */
-  const goBackToChat = () => {
+  const goBackToChat = async () => {
+    if (isReturning || (isProjectCenter && !project)) return;
     if (isMobile) setOpenMobile(false);
-    if (lastChatView === null) {
-      void navigate({ to: "/" });
+    const { lastChatView, lastChatViewByProjectKey } = useWorkspaceTabStore.getState();
+    if (!project) {
+      if (lastChatView) navigateToTabView(navigate, lastChatView);
+      else void navigate({ to: "/" });
       return;
     }
-    navigateToTabView(navigate, lastChatView);
+    const projectRef = scopeProjectRef(project.environmentId, project.id);
+    const view = resolveControlCenterChatView({
+      projectRef,
+      preferredViews: [lastChatViewByProjectKey[scopedProjectKey(projectRef)], lastChatView],
+      threads: readThreadShells(),
+      getDraftProject: (draftId) => {
+        const draft = useComposerDraftStore.getState().getDraftSession(DraftId.make(draftId));
+        return draft ? scopeProjectRef(draft.environmentId, draft.projectId) : null;
+      },
+    });
+    if (view) {
+      navigateToTabView(navigate, view);
+      return;
+    }
+    setIsReturning(true);
+    try {
+      await handleNewThread(projectRef);
+    } catch {
+      toastManager.add({ type: "error", title: "이 프로젝트의 대화를 열지 못했습니다." });
+    } finally {
+      setIsReturning(false);
+    }
   };
 
   return (
@@ -125,7 +156,10 @@ export function ControlCenterSidebarNav() {
       <SidebarFooter className="p-[var(--sidebar-content-inset)]">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton onClick={goBackToChat}>
+            <SidebarMenuButton
+              onClick={() => void goBackToChat()}
+              disabled={isReturning || (isProjectCenter && !project)}
+            >
               <ArrowLeftIcon />
               <span>대화로 돌아가기</span>
             </SidebarMenuButton>

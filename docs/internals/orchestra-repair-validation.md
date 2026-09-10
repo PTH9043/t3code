@@ -38,6 +38,14 @@ Focused regression tests cover execution isolation, request routing, retries, se
 
 Machine-local screenshots, browser sessions and test databases remain in the ignored validation home. Browser credentials, pairing tokens and copied conversation contents are not committed. The accompanying [memory records](./knowledge/orchestra-repair-notes.json) contain only reusable findings and source paths for storage through the application's knowledge API.
 
+## Project control-center return navigation
+
+An additional report reproduced OnChainBot's control center returning to a different project. `lastChatView` stored only one app-wide conversation, and the index-route fallback also selected a project globally. Return history now persists under an environment/project key. Before navigating, the control center validates remembered thread and draft ownership against current state. Missing history falls back to a recent, unarchived conversation in the same project, then an explicitly scoped new draft. Deleted conversations and promoted drafts update remembered targets even when their former tab now displays the control center.
+
+An isolated browser reproduced the wrong return before the fix. Afterward it passed cross-project return, refresh persistence, direct-link fallback, empty-project draft creation, and project switching through the control-center sidebar. Focused tests cover independent environments with overlapping IDs, late project identity, deleted history, draft promotion, archived/legacy worker exclusion, and invalid draft ownership. The same sidebar handles direct links, restored tabs and navigation from the project list on web and Electron; native mobile uses separate React Navigation screens. No provider or wire contracts changed.
+
+An isolated native Electron instance also passed the actual menu sequence: open OnChainBot's conversation, use the project filter to visit another project's conversation, open OnChainBot's control center, and click “대화로 돌아가기”. The selected tab returned to OnChainBot's original conversation with no uncaught page errors. All 24 focused tests, the web typecheck, targeted lint, and the production web build passed.
+
 ## Live memory persistence
 
 After the developer explicitly authorized the required live-state write, the existing `t3 pair` command issued a temporary credential for the running application. All nine prepared records were stored through its authenticated orchestration API: one environment record, one project record and seven folder records. No validation server was started against the live home.

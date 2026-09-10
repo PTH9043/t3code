@@ -8,7 +8,7 @@ import {
   type WorkspaceTabView,
 } from "./workspaceTabStore";
 
-const threadView = (threadId: string): WorkspaceTabView => ({
+const threadView = (threadId: string): Extract<WorkspaceTabView, { kind: "thread" }> => ({
   kind: "thread",
   environmentId: "env-1",
   threadId,
@@ -26,6 +26,7 @@ function resetStore() {
     activeTabId: null,
     seenTurnByTabId: {},
     lastChatView: null,
+    lastChatViewByProjectKey: {},
   });
 }
 
@@ -190,6 +191,66 @@ describe("workspaceTabStore", () => {
     useWorkspaceTabStore.getState().syncRouteView(threadView("thread-a"));
     useWorkspaceTabStore.getState().closeTabsForView(workspaceTabViewKey(threadView("thread-a")));
     expect(useWorkspaceTabStore.getState().lastChatView).toBeNull();
+  });
+
+  it("keeps separate return conversations when switching project control centers", () => {
+    const store = useWorkspaceTabStore.getState();
+    store.syncRouteView(threadView("onchain-work"), { projectKey: "env-1:onchain" });
+    store.syncRouteView(controlCenterView("onchain"), { projectKey: "env-1:onchain" });
+    store.syncRouteView(threadView("other-work"), { projectKey: "env-1:other" });
+    store.syncRouteView(controlCenterView("onchain"), { projectKey: "env-1:onchain" });
+
+    const state = useWorkspaceTabStore.getState();
+    expect(state.lastChatView).toEqual(threadView("other-work"));
+    expect(state.lastChatViewByProjectKey).toEqual({
+      "env-1:onchain": threadView("onchain-work"),
+      "env-1:other": threadView("other-work"),
+    });
+  });
+
+  it("separates identically named projects in different environments", () => {
+    const store = useWorkspaceTabStore.getState();
+    const remote: WorkspaceTabView = { ...threadView("work"), environmentId: "env-2" };
+    store.syncRouteView(threadView("work"), { projectKey: "env-1:onchain" });
+    store.syncRouteView(remote, { projectKey: "env-2:onchain" });
+    expect(useWorkspaceTabStore.getState().lastChatViewByProjectKey).toEqual({
+      "env-1:onchain": threadView("work"),
+      "env-2:onchain": remote,
+    });
+  });
+
+  it("records the return target when project identity arrives after its route", () => {
+    const store = useWorkspaceTabStore.getState();
+    store.syncRouteView(threadView("other"), { projectKey: "env-1:other" });
+    store.syncRouteView(threadView("onchain"));
+    expect(useWorkspaceTabStore.getState().lastChatViewByProjectKey["env-1:other"]).toEqual(
+      threadView("other"),
+    );
+    store.syncRouteView(threadView("onchain"), { projectKey: "env-1:onchain" });
+    expect(useWorkspaceTabStore.getState().lastChatViewByProjectKey["env-1:onchain"]).toEqual(
+      threadView("onchain"),
+    );
+  });
+
+  it("forgets a deleted return target while its tab shows the control center", () => {
+    const store = useWorkspaceTabStore.getState();
+    store.syncRouteView(threadView("onchain"), { projectKey: "env-1:onchain" });
+    store.syncRouteView(controlCenterView("onchain"), { projectKey: "env-1:onchain" });
+    store.closeTabsForView(workspaceTabViewKey(threadView("onchain")));
+    expect(useWorkspaceTabStore.getState().lastChatViewByProjectKey).toEqual({});
+    expect(useWorkspaceTabStore.getState().lastChatView).toBeNull();
+    expect(useWorkspaceTabStore.getState().tabs[0]?.view).toEqual(controlCenterView("onchain"));
+  });
+
+  it("follows a promoted draft even after its tab switched to the control center", () => {
+    const store = useWorkspaceTabStore.getState();
+    const draft: WorkspaceTabView = { kind: "draft", draftId: "onchain-draft" };
+    store.syncRouteView(draft, { projectKey: "env-1:onchain" });
+    store.syncRouteView(controlCenterView("onchain"), { projectKey: "env-1:onchain" });
+    store.retargetTabView(workspaceTabViewKey(draft), threadView("onchain"));
+    expect(useWorkspaceTabStore.getState().lastChatViewByProjectKey["env-1:onchain"]).toEqual(
+      threadView("onchain"),
+    );
   });
 
   it("follows a promoted draft to its thread", () => {
