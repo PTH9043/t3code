@@ -95,5 +95,14 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-command:orchestration:cleanup-workspace-worktree",
       tag: ORCHESTRATION_WS_METHODS.cleanupWorkspaceWorktree,
     }),
+    sharedLibraryStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:shared-library-status",
+      tag: ORCHESTRATION_WS_METHODS.getSharedLibraryStatus,
+      staleTimeMs: 2_000,
+    }),
+    syncSharedLibrary: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:orchestration:sync-shared-library",
+      tag: ORCHESTRATION_WS_METHODS.syncSharedLibrary,
+    }),
   };
 }

@@ -9,7 +9,8 @@ import orchestra from "./059_WorkspaceCollaborationRunOrchestra.ts";
 const appliedIds = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ readonly id: number }>`
-    SELECT migration_id AS id FROM effect_sql_migrations WHERE migration_id >= 57 ORDER BY migration_id
+    SELECT migration_id AS id FROM effect_sql_migrations
+    WHERE migration_id BETWEEN 57 AND 60 ORDER BY migration_id
   `;
   return rows.map((row) => row.id);
 });
@@ -29,7 +30,10 @@ it.effect("repairs 059-only databases while retaining the original migration num
     yield* orchestra;
     yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
       VALUES (59, 'WorkspaceCollaborationRunOrchestra')`;
-    expect(yield* runMigrations()).toEqual([[60, "RepairPreOrchestraMigrations"]]);
+    // Later migrations run too; this repair only concerns the 57–60 window.
+    expect((yield* runMigrations()).filter(([id]) => id <= 60)).toEqual([
+      [60, "RepairPreOrchestraMigrations"],
+    ]);
     expect(yield* appliedIds).toEqual([57, 58, 59, 60]);
     const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
     expect(columns.some((column) => column.name === "handoff_mode")).toBe(true);

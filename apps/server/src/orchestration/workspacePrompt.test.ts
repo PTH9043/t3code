@@ -1,6 +1,7 @@
 import {
   ProjectId,
   WorkspaceKnowledgeItemId,
+  type SharedLibraryMatch,
   type WorkspaceKnowledgeItem,
   type WorkspaceRagMatch,
 } from "@t3tools/contracts";
@@ -124,6 +125,73 @@ it("deduplicates retrieved memory and honors memory inclusion flags", () => {
   });
   expect(excluded.prompt).not.toContain("Durable Workspace fact");
   expect(excluded.sourceItemIds).toEqual([]);
+});
+
+const designReference = (itemId: string, content: string): SharedLibraryMatch => ({
+  libraryId: "design-references",
+  itemId,
+  title: `채용 관리 대시보드 ${itemId}`,
+  snippet: "",
+  content,
+  sourceUrl: `https://ref.theseeker.io/r/${itemId}`,
+  author: "@vektorastudio",
+  category: "dashboard",
+  tags: ["dashboard"],
+  score: 3,
+});
+
+it("injects the matched chunk, then the shared library after the project's own context", () => {
+  const rag: WorkspaceRagMatch = {
+    projectId,
+    itemId: WorkspaceKnowledgeItemId.make("guide"),
+    kind: "rag-source",
+    title: "화면 가이드",
+    snippet: "…[대시]보드…",
+    content: "대시보드는 4열 카드 그리드로 배치한다.",
+    score: 2,
+    updatedAt: "2026-08-08T01:00:00.000Z",
+  };
+  const library = designReference(
+    "5494",
+    "밝은 배경에 파란 강조색.\n레퍼런스: https://ref.theseeker.io/r/5494",
+  );
+  const result = composeWorkspacePrompt({
+    request: { projectId, task: "대시보드 개선" },
+    items: [],
+    ragMatches: [rag],
+    libraryMatches: [library],
+  });
+  expect(result.prompt).toContain("대시보드는 4열 카드 그리드로 배치한다.");
+  expect(result.prompt).not.toContain("…[대시]보드…");
+  expect(result.prompt).toContain("## 공용 디자인 라이브러리");
+  expect(result.prompt).toContain("레퍼런스: https://ref.theseeker.io/r/5494");
+  expect(result.prompt.indexOf("## 프로젝트 전용 문맥")).toBeLessThan(
+    result.prompt.indexOf("## 공용 디자인 라이브러리"),
+  );
+  expect(result.libraryMatches?.map((match) => match.itemId)).toEqual(["5494"]);
+
+  const withoutLibrary = composeWorkspacePrompt({
+    request: { projectId, task: "대시보드 개선", includeSharedLibrary: false },
+    items: [],
+    ragMatches: [rag],
+    libraryMatches: [library],
+  });
+  expect(withoutLibrary.prompt).not.toContain("공용 디자인 라이브러리");
+  expect(withoutLibrary.libraryMatches).toEqual([]);
+});
+
+it("keeps the shared library within its share of the budget", () => {
+  const result = composeWorkspacePrompt({
+    request: { projectId, task: "대시보드", maxContextChars: 8_000 },
+    items: [],
+    ragMatches: [],
+    libraryMatches: Array.from({ length: 4 }, (_, index) =>
+      designReference(String(index), "x".repeat(1_500)),
+    ),
+  });
+  // A quarter of 8,000 characters holds one 1,500-character reference.
+  expect(result.libraryMatches).toHaveLength(1);
+  expect(result.truncated).toBe(true);
 });
 
 it("preserves the user task while bounding optional context", () => {

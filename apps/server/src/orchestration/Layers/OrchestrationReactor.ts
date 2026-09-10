@@ -16,6 +16,7 @@ import { WorkspaceMonitoringReactor } from "../Services/WorkspaceMonitoringReact
 import { WorkspaceProgramSupervisor } from "../Services/WorkspaceProgramSupervisor.ts";
 import { SessionRecoveryReactor } from "../Services/SessionRecoveryReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import { SharedLibrarySync } from "../../library/SharedLibrarySync.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -29,6 +30,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const workspaceMonitoringReactor = yield* Effect.serviceOption(WorkspaceMonitoringReactor);
   const sessionRecoveryReactor = yield* Effect.serviceOption(SessionRecoveryReactor);
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+  const sharedLibrarySync = yield* Effect.serviceOption(SharedLibrarySync);
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* providerRuntimeIngestion.start();
@@ -51,6 +53,10 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
       yield* sessionRecoveryReactor.value.start();
     }
     yield* agentAwarenessRelay.start();
+    // Last: its first check waits out startup, then runs at most once a day.
+    if (sharedLibrarySync._tag === "Some") {
+      yield* sharedLibrarySync.value.start();
+    }
   });
 
   return {

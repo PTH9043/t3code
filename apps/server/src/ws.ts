@@ -30,6 +30,7 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadsError,
   OrchestrationWorkspaceKnowledgeError,
+  OrchestrationSharedLibraryError,
   OrchestrationWorkspaceAgentRolesError,
   OrchestrationWorkspaceCollaborationError,
   OrchestrationWorkspaceScheduleError,
@@ -107,6 +108,7 @@ import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as WorktreeProvisionService from "./git/WorktreeProvisionService.ts";
 import { WorkspaceWorktreeCleanup } from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
+import { SharedLibrarySync } from "./library/SharedLibrarySync.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
@@ -396,6 +398,7 @@ const makeWsRpcLayer = (
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
       const worktreeProvision = yield* WorktreeProvisionService.WorktreeProvisionService;
       const worktreeCleanup = yield* WorkspaceWorktreeCleanup;
+      const sharedLibrarySync = yield* Effect.serviceOption(SharedLibrarySync);
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -1160,6 +1163,50 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getWorkflowScript,
             readWorkflowScript({ scriptPath: input.scriptPath }),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getSharedLibraryStatus]: (_input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getSharedLibraryStatus,
+            sharedLibrarySync._tag === "None"
+              ? Effect.fail(
+                  new OrchestrationSharedLibraryError({
+                    message: "공용 라이브러리를 사용할 수 없습니다",
+                  }),
+                )
+              : sharedLibrarySync.value.status().pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationSharedLibraryError({
+                        message: "공용 라이브러리 상태를 읽지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.syncSharedLibrary]: (_input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.syncSharedLibrary,
+            sharedLibrarySync._tag === "None"
+              ? Effect.fail(
+                  new OrchestrationSharedLibraryError({
+                    message: "공용 라이브러리를 사용할 수 없습니다",
+                  }),
+                )
+              : Effect.gen(function* () {
+                  const started = yield* sharedLibrarySync.value.syncNow();
+                  const status = yield* sharedLibrarySync.value.status();
+                  return { started, status };
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationSharedLibraryError({
+                        message: "공용 라이브러리 동기화를 시작하지 못했습니다",
+                        cause,
+                      }),
+                  ),
+                ),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.cleanupWorkspaceWorktree]: (input) =>

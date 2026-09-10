@@ -24,6 +24,7 @@ import {
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type SharedLibraryMatch,
   ModelSelection,
   ProjectId,
   ThreadId,
@@ -60,6 +61,8 @@ import { ProjectionThreadSession } from "../../persistence/Services/ProjectionTh
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionWorkspaceRagRepository } from "../../persistence/Services/ProjectionWorkspaceRag.ts";
 import { ProjectionWorkspaceRagRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceRag.ts";
+import { SharedLibraryRepository } from "../../persistence/Services/SharedLibrary.ts";
+import { SharedLibraryRepositoryLive } from "../../persistence/Layers/SharedLibrary.ts";
 import { ProjectionWorkspaceAgentRoleRepository } from "../../persistence/Services/ProjectionWorkspaceAgentRoles.ts";
 import { ProjectionWorkspaceAgentRoleRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceAgentRoles.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
@@ -375,6 +378,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const projectionWorkspaceRagRepository = yield* ProjectionWorkspaceRagRepository;
+  const sharedLibraryRepository = yield* SharedLibraryRepository;
   const projectionWorkspaceAgentRoleRepository = yield* ProjectionWorkspaceAgentRoleRepository;
   const projectionWorkspaceCollaborationRunRepository =
     yield* ProjectionWorkspaceCollaborationRunRepository;
@@ -2368,6 +2372,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     input,
   ) => projectionWorkspaceRagRepository.search(input);
 
+  // Design references a prompt may carry; the strong-match filter already
+  // keeps unrelated tasks at zero.
+  const SHARED_LIBRARY_PROMPT_LIMIT = 4;
+
   const composeWorkspacePrompt: NonNullable<
     ProjectionSnapshotQueryShape["composeWorkspacePrompt"]
   > = (input) =>
@@ -2387,10 +2395,29 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ? { includeLongTermMemory: input.includeLongTermMemory }
                 : {}),
             });
+      const libraryMatches: ReadonlyArray<SharedLibraryMatch> =
+        input.includeRag === false || input.includeSharedLibrary === false
+          ? []
+          : yield* sharedLibraryRepository
+              .search({
+                query: input.task,
+                limit: SHARED_LIBRARY_PROMPT_LIMIT,
+                requireStrongMatch: true,
+              })
+              .pipe(
+                // The library only ever adds outside references; a failed
+                // lookup must not cost the run its own project context.
+                Effect.catch((cause) =>
+                  Effect.logWarning("shared library lookup failed", { cause }).pipe(
+                    Effect.as([] as ReadonlyArray<SharedLibraryMatch>),
+                  ),
+                ),
+              );
       return composeWorkspacePromptContext({
         request: input,
         items: knowledge.items,
         ragMatches: rag.matches,
+        libraryMatches,
       });
     });
 
@@ -3028,6 +3055,7 @@ export const OrchestrationProjectionSnapshotQueryLive = Layer.effect(
   makeProjectionSnapshotQuery,
 ).pipe(
   Layer.provideMerge(ProjectionWorkspaceRagRepositoryLive),
+  Layer.provideMerge(SharedLibraryRepositoryLive),
   Layer.provideMerge(ProjectionWorkspaceAgentRoleRepositoryLive),
   Layer.provideMerge(ProjectionWorkspaceCollaborationRunRepositoryLive),
   Layer.provideMerge(ProjectionWorkspaceScheduleRepositoryLive),

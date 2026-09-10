@@ -125,6 +125,53 @@ layer("ProjectionWorkspaceRagRepository", (it) => {
     }),
   );
 
+  it.effect("finds Korean words through attached particles and endings", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("workspace-korean");
+      yield* repository.replaceItem({
+        ...item({
+          projectId,
+          content: "이번 분기 수익률을 개선했고 지갑별 매수 내역을 검증했다.",
+        }),
+        id: WorkspaceKnowledgeItemId.make("korean-note"),
+        title: "분기 운영 기록",
+      });
+      // Every one of these missed under the 041 index: "수익률을" was a
+      // single token that neither "수익" nor "수익률" could reach.
+      for (const query of ["수익", "수익률", "지갑", "매수한 내역", "검증을 다시"]) {
+        const result = yield* repository.search({ projectId, query });
+        expect(
+          result.matches.map((match) => match.itemId),
+          query,
+        ).toEqual(["korean-note"]);
+      }
+      const [match] = (yield* repository.search({ projectId, query: "수익" })).matches;
+      expect(match?.content).toContain("지갑별 매수 내역");
+      expect(match?.snippet).toContain("[수익]률을");
+    }),
+  );
+
+  it.effect("ranks the chunk covering more of the question first, one match per item", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("workspace-rank");
+      yield* repository.replaceItem({
+        ...item({ projectId, content: "대시보드 대시보드 대시보드 색상만 다룬다." }),
+        id: WorkspaceKnowledgeItemId.make("repeats-one"),
+        title: "색상 메모",
+      });
+      yield* repository.replaceItem({
+        ...item({ projectId, content: "로그인 화면 대시보드의 차트 배치 가이드." }),
+        id: WorkspaceKnowledgeItemId.make("covers-all"),
+        title: "화면 가이드",
+      });
+      const result = yield* repository.search({ projectId, query: "로그인 대시보드 차트" });
+      expect(result.matches[0]?.itemId).toBe("covers-all");
+      expect(new Set(result.matches.map((match) => match.itemId)).size).toBe(result.matches.length);
+    }),
+  );
+
   it("chunks large sources deterministically with bounded pieces", () => {
     const chunks = chunkWorkspaceKnowledgeContent("paragraph ".repeat(500));
     expect(chunks.length).toBeGreaterThan(1);

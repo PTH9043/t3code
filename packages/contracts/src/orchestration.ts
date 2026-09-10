@@ -54,6 +54,8 @@ export const ORCHESTRATION_WS_METHODS = {
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
   cleanupWorkspaceWorktree: "orchestration.cleanupWorkspaceWorktree",
+  getSharedLibraryStatus: "orchestration.getSharedLibraryStatus",
+  syncSharedLibrary: "orchestration.syncSharedLibrary",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -574,6 +576,11 @@ export const WorkspaceRagMatch = Schema.Struct({
   kind: Schema.Literals(["rag-source", "long-term-memory"]),
   title: TrimmedNonEmptyString,
   snippet: Schema.String,
+  /**
+   * The whole matched chunk, which prompt composition injects — the snippet
+   * is a highlighted excerpt for display. Absent from servers predating it.
+   */
+  content: Schema.optionalKey(Schema.String),
   score: Schema.Number,
   updatedAt: IsoDateTime,
 });
@@ -584,12 +591,33 @@ export const WorkspaceRagSearchResult = Schema.Struct({
 });
 export type WorkspaceRagSearchResult = typeof WorkspaceRagSearchResult.Type;
 
+/**
+ * A reference from the shared library — external public material every
+ * project may read, the one deliberate exception to per-project knowledge
+ * isolation. Never written by a project; only a source sync fills it.
+ */
+export const SharedLibraryMatch = Schema.Struct({
+  libraryId: TrimmedNonEmptyString,
+  itemId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  snippet: Schema.String,
+  content: Schema.String,
+  sourceUrl: TrimmedNonEmptyString,
+  author: Schema.NullOr(Schema.String),
+  category: Schema.NullOr(Schema.String),
+  tags: Schema.Array(Schema.String),
+  score: Schema.Number,
+});
+export type SharedLibraryMatch = typeof SharedLibraryMatch.Type;
+
 export const WorkspacePromptComposeInput = Schema.Struct({
   projectId: ProjectId,
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
   includeRag: Schema.optionalKey(Schema.Boolean),
   includeWorkingMemory: Schema.optionalKey(Schema.Boolean),
   includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
+  /** Omitted or true lets design-relevant shared library references in. */
+  includeSharedLibrary: Schema.optionalKey(Schema.Boolean),
   ragLimit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
   maxContextChars: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 2_000, maximum: 120_000 })),
@@ -601,6 +629,8 @@ export const WorkspacePromptComposeResult = Schema.Struct({
   prompt: Schema.String,
   sourceItemIds: Schema.Array(WorkspaceKnowledgeItemId),
   ragMatches: Schema.Array(WorkspaceRagMatch),
+  /** Shared library references the prompt actually carries. */
+  libraryMatches: Schema.optionalKey(Schema.Array(SharedLibraryMatch)),
   truncated: Schema.Boolean,
 });
 export type WorkspacePromptComposeResult = typeof WorkspacePromptComposeResult.Type;
@@ -3790,6 +3820,48 @@ export class OrchestrationWorktreeCleanupError extends Schema.TaggedErrorClass<O
   },
 ) {}
 
+export const SharedLibrarySourceStatus = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  origin: TrimmedNonEmptyString,
+  libraryId: TrimmedNonEmptyString,
+  /** Highest source reference stored. */
+  maxRef: NonNegativeInt,
+  /** Where an unfinished first scan resumes. */
+  scanCursor: NonNegativeInt,
+  fullScanCompletedAt: Schema.NullOr(IsoDateTime),
+  lastSyncAt: Schema.NullOr(IsoDateTime),
+  lastError: Schema.NullOr(Schema.String),
+  running: Schema.Boolean,
+});
+export type SharedLibrarySourceStatus = typeof SharedLibrarySourceStatus.Type;
+
+export const SharedLibraryStatus = Schema.Struct({
+  libraries: Schema.Array(
+    Schema.Struct({
+      libraryId: TrimmedNonEmptyString,
+      title: TrimmedNonEmptyString,
+      itemCount: NonNegativeInt,
+    }),
+  ),
+  sources: Schema.Array(SharedLibrarySourceStatus),
+});
+export type SharedLibraryStatus = typeof SharedLibraryStatus.Type;
+
+export const SharedLibrarySyncResult = Schema.Struct({
+  /** False when a sync was already running — the status shows its progress. */
+  started: Schema.Boolean,
+  status: SharedLibraryStatus,
+});
+export type SharedLibrarySyncResult = typeof SharedLibrarySyncResult.Type;
+
+export class OrchestrationSharedLibraryError extends Schema.TaggedErrorClass<OrchestrationSharedLibraryError>()(
+  "OrchestrationSharedLibraryError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -3874,6 +3946,14 @@ export const OrchestrationRpcSchemas = {
   cleanupWorkspaceWorktree: {
     input: WorkspaceWorktreeCleanupInput,
     output: WorkspaceWorktreeCleanupResult,
+  },
+  getSharedLibraryStatus: {
+    input: Schema.Struct({}),
+    output: SharedLibraryStatus,
+  },
+  syncSharedLibrary: {
+    input: Schema.Struct({}),
+    output: SharedLibrarySyncResult,
   },
 } as const;
 

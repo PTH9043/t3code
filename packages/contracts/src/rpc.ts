@@ -72,6 +72,7 @@ import {
   OrchestrationRpcSchemas,
   OrchestrationGetWorkflowScriptError,
   OrchestrationWorktreeCleanupError,
+  OrchestrationSharedLibraryError,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
@@ -887,6 +888,24 @@ export const WsOrchestrationCleanupWorkspaceWorktreeRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetSharedLibraryStatusRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getSharedLibraryStatus,
+  {
+    payload: OrchestrationRpcSchemas.getSharedLibraryStatus.input,
+    success: OrchestrationRpcSchemas.getSharedLibraryStatus.output,
+    error: Schema.Union([OrchestrationSharedLibraryError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationSyncSharedLibraryRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.syncSharedLibrary,
+  {
+    payload: OrchestrationRpcSchemas.syncSharedLibrary.input,
+    success: OrchestrationRpcSchemas.syncSharedLibrary.output,
+    error: Schema.Union([OrchestrationSharedLibraryError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -1032,4 +1051,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationCleanupWorkspaceWorktreeRpc,
+  WsOrchestrationGetSharedLibraryStatusRpc,
+  WsOrchestrationSyncSharedLibraryRpc,
 );

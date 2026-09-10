@@ -59,6 +59,8 @@ import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletion
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
+import { SharedLibrarySyncLive } from "./library/SharedLibrarySync.ts";
+import { SharedLibraryRepositoryLive } from "./persistence/Layers/SharedLibrary.ts";
 import * as ServerSelfSignals from "./diagnostics/ServerSelfSignals.ts";
 import { WorkspaceMonitoringReactorLive } from "./orchestration/Layers/WorkspaceMonitoringReactor.ts";
 import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceSchedulerReactor.ts";
@@ -254,6 +256,12 @@ const WorkspaceMonitoringReactorLayerLive = WorkspaceMonitoringReactorLive.pipe(
   Layer.provide(ProcessRunner.layer),
   Layer.provide(FetchHttpClient.layer),
 );
+// The shared library sync fetches a public site on a schedule; its store lives
+// in the same database but outside the event-sourced projections.
+const SharedLibrarySyncLayerLive = SharedLibrarySyncLive.pipe(
+  Layer.provide(SharedLibraryRepositoryLive),
+  Layer.provide(FetchHttpClient.layer),
+);
 const OrchestrationReactorWithProgramsLive = OrchestrationReactorLive.pipe(
   Layer.provideMerge(WorkspaceMonitoringReactorLayerLive),
   Layer.provideMerge(WorkspaceProgramSupervisorLayerLive),
@@ -271,6 +279,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(WorkspaceSchedulerReactorLive),
   Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
   Layer.provideMerge(WorkspaceWorktreeCleanup.layer),
+  Layer.provideMerge(SharedLibrarySyncLayerLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );

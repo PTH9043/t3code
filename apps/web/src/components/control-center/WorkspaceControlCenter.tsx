@@ -719,6 +719,9 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
             <div>
               <dt className="text-muted-foreground">격리 정책</dt>
               <dd className="mt-1 font-medium text-success-foreground">폴더 외부 지식 조회 금지</dd>
+              <dd className="mt-1 text-muted-foreground">
+                예외: 공용 디자인 라이브러리 (외부 공개 레퍼런스 · 읽기 전용)
+              </dd>
             </div>
           </dl>
         </div>
@@ -785,6 +788,51 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
     knowledge.data?.items.filter(
       (item) => item.kind === "rag-source" && item.tags.includes("auto-conversation"),
     ).length ?? 0;
+  const libraryStatus = useEnvironmentQuery(
+    orchestrationEnvironment.sharedLibraryStatus({
+      environmentId: project.environmentId,
+      input: {},
+    }),
+  );
+  const syncSharedLibrary = useAtomCommand(orchestrationEnvironment.syncSharedLibrary, {
+    label: "공용 라이브러리 동기화",
+    reportFailure: false,
+  });
+  const [librarySyncing, setLibrarySyncing] = useState(false);
+  const librarySource = libraryStatus.data?.sources[0] ?? null;
+  const libraryItemCount = libraryStatus.data?.libraries[0]?.itemCount ?? 0;
+  const libraryRunning = librarySource?.running === true;
+  const refreshLibraryStatus = libraryStatus.refresh;
+  // Poll only while a sync runs, so the count climbs on screen without a
+  // standing fixed-interval poller.
+  useEffect(() => {
+    if (!libraryRunning) return;
+    const timer = window.setInterval(refreshLibraryStatus, 5_000);
+    return () => window.clearInterval(timer);
+  }, [libraryRunning, refreshLibraryStatus]);
+  const formatLibraryTime = (iso: string) =>
+    new Date(iso).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" });
+
+  const syncLibrary = async () => {
+    setLibrarySyncing(true);
+    try {
+      const result = await syncSharedLibrary({
+        environmentId: project.environmentId,
+        input: {},
+      });
+      if (!notifyCommandFailure(result, "공용 라이브러리 동기화 실패")) {
+        refreshLibraryStatus();
+        notifySuccess(
+          result._tag === "Success" && !result.value.started
+            ? "이미 동기화하는 중입니다."
+            : "공용 라이브러리 동기화를 시작했습니다.",
+          "새 레퍼런스를 가져오는 동안 항목 수가 늘어납니다.",
+        );
+      }
+    } finally {
+      setLibrarySyncing(false);
+    }
+  };
 
   const save = async () => {
     if (!title.trim() || !content.trim()) {
@@ -842,7 +890,7 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
       id="project-knowledge"
       icon={DatabaseIcon}
       title="RAG · 메모리 · 장기기억 · 프롬프트"
-      description="모든 자료는 이 프로젝트에만 귀속됩니다. 사용자 지침은 결합 프롬프트의 최상위 권한으로 유지되고, 검색 자료와 에이전트 기억은 비권위 참고 문맥으로만 들어갑니다."
+      description="모든 자료는 이 프로젝트에만 귀속됩니다(공용 디자인 라이브러리만 모든 프로젝트가 함께 읽는 외부 레퍼런스입니다). 사용자 지침은 결합 프롬프트의 최상위 권한으로 유지되고, 검색 자료와 에이전트 기억은 비권위 참고 문맥으로만 들어갑니다."
       action={
         <div className="flex flex-wrap gap-1">
           <Badge variant="info">항목 {knowledge.data?.items.length ?? 0}개</Badge>
@@ -913,6 +961,54 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           </div>
         </div>
 
+        <div className="grid gap-2 rounded-xl border border-border/70 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <DatabaseIcon className="size-4 text-primary" />
+              <h3 className="text-sm font-semibold">공용 디자인 라이브러리</h3>
+              <Badge variant="info">{libraryItemCount.toLocaleString("ko-KR")}건</Badge>
+              {libraryRunning ? <Badge variant="warning">동기화 중</Badge> : null}
+            </div>
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void syncLibrary()}
+              disabled={librarySyncing || libraryRunning}
+            >
+              <RefreshCcwIcon />
+              지금 동기화
+            </Button>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            <a
+              href={librarySource?.origin ?? "https://ref.theseeker.io"}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            >
+              더씨커 레퍼런스
+            </a>
+            의 디자인 레퍼런스를 모든 프로젝트가 함께 검색합니다. 매일 새 레퍼런스를 가져오며,
+            화면·디자인과 관련된 작업의 프롬프트에만 출처와 작가 표기와 함께 들어갑니다.
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            {librarySource?.lastSyncAt
+              ? `마지막 동기화 ${formatLibraryTime(librarySource.lastSyncAt)}`
+              : "아직 동기화 전입니다."}
+            {librarySource !== null &&
+            librarySource.fullScanCompletedAt === null &&
+            librarySource.scanCursor > 0
+              ? ` · 최초 수집 ${librarySource.scanCursor.toLocaleString("ko-KR")}번까지 확인`
+              : ""}
+          </p>
+          {librarySource?.lastError ? (
+            <p className="text-xs text-destructive">{librarySource.lastError}</p>
+          ) : null}
+          {libraryStatus.error ? (
+            <p className="text-xs text-destructive">{libraryStatus.error}</p>
+          ) : null}
+        </div>
+
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="grid content-start gap-3 rounded-xl border border-border/70 p-4">
             <div className="flex items-center gap-2">
@@ -979,6 +1075,11 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                 <div className="flex flex-wrap gap-1">
                   <Badge variant="info">자료 {composedPrompt.data.sourceItemIds.length}</Badge>
                   <Badge variant="info">RAG {composedPrompt.data.ragMatches.length}</Badge>
+                  {(composedPrompt.data.libraryMatches?.length ?? 0) > 0 ? (
+                    <Badge variant="success">
+                      디자인 레퍼런스 {composedPrompt.data.libraryMatches?.length}
+                    </Badge>
+                  ) : null}
                   {composedPrompt.data.truncated ? (
                     <Badge variant="warning">일부 생략</Badge>
                   ) : null}

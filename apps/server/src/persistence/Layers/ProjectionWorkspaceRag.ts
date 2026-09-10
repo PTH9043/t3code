@@ -7,80 +7,71 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
+  analyzeChunks,
+  buildSearchQuery,
+  chunkSearchableContent,
+  makeSnippet,
+  termCoverage,
+} from "../searchText.ts";
+import {
   ProjectionWorkspaceRagRepository,
   type ProjectionWorkspaceRagRepositoryShape,
 } from "../Services/ProjectionWorkspaceRag.ts";
 
-const CHUNK_SIZE = 1_200;
-const CHUNK_OVERLAP = 200;
+/** Candidates read per requested match, so coverage re-ranking has room to work. */
+const CANDIDATE_FACTOR = 5;
+const MAX_CANDIDATES = 100;
 
 const RagSearchRequest = Schema.Struct({
   projectId: Schema.String,
-  ftsQuery: Schema.String,
+  match: Schema.String,
   includeLongTermMemory: Schema.Boolean,
   limit: Schema.Int,
 });
-const RagSearchRow = WorkspaceRagMatch;
+const RagCandidateRow = Schema.Struct({
+  projectId: WorkspaceRagMatch.fields.projectId,
+  itemId: WorkspaceRagMatch.fields.itemId,
+  kind: WorkspaceRagMatch.fields.kind,
+  title: WorkspaceRagMatch.fields.title,
+  content: Schema.String,
+  tagsText: Schema.String,
+  score: Schema.Number,
+  updatedAt: WorkspaceRagMatch.fields.updatedAt,
+});
 
-export function chunkWorkspaceKnowledgeContent(content: string): ReadonlyArray<string> {
-  const normalized = content.replaceAll("\r\n", "\n").trim();
-  if (normalized.length === 0) return [];
-  if (normalized.length <= CHUNK_SIZE) return [normalized];
-
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < normalized.length) {
-    const hardEnd = Math.min(normalized.length, start + CHUNK_SIZE);
-    let end = hardEnd;
-    if (hardEnd < normalized.length) {
-      const candidate = normalized.slice(start + Math.floor(CHUNK_SIZE / 2), hardEnd);
-      const newline = candidate.lastIndexOf("\n");
-      const space = candidate.lastIndexOf(" ");
-      const boundary = Math.max(newline, space);
-      if (boundary >= 0) end = start + Math.floor(CHUNK_SIZE / 2) + boundary + 1;
-    }
-    const chunk = normalized.slice(start, end).trim();
-    if (chunk.length > 0) chunks.push(chunk);
-    if (end >= normalized.length) break;
-    start = Math.max(start + 1, end - CHUNK_OVERLAP);
-  }
-  return chunks;
-}
-
-export function toWorkspaceFtsQuery(query: string): string | null {
-  const tokens = query
-    .normalize("NFKC")
-    .match(/[\p{L}\p{N}_-]+/gu)
-    ?.map((token) => token.trim())
-    .filter((token) => token.length > 0);
-  if (!tokens || tokens.length === 0) return null;
-  return [...new Set(tokens)]
-    .slice(0, 12)
-    .map((token) => `"${token.replaceAll('"', '""')}"`)
-    .join(" OR ");
-}
+/** Kept for existing callers; the chunker now lives beside the analyzer. */
+export const chunkWorkspaceKnowledgeContent = chunkSearchableContent;
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  // Only the analyzed search_* columns are indexed (see searchText.ts); the
+  // weights favour a hit in the title over the tags over the body.
   const searchRows = SqlSchema.findAll({
     Request: RagSearchRequest,
-    Result: RagSearchRow,
-    execute: ({ projectId, ftsQuery, includeLongTermMemory, limit }) =>
+    Result: RagCandidateRow,
+    execute: ({ projectId, match, includeLongTermMemory, limit }) =>
       sql`
         SELECT
           project_id AS "projectId",
           item_id AS "itemId",
           kind,
           title,
-          snippet(projection_workspace_rag_chunks, 5, '[', ']', '…', 32) AS snippet,
-          -bm25(projection_workspace_rag_chunks, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.0) AS score,
+          content,
+          tags_text AS "tagsText",
+          -bm25(
+            projection_workspace_rag_chunks,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 2.0, 1.0
+          ) AS score,
           updated_at AS "updatedAt"
         FROM projection_workspace_rag_chunks
-        WHERE projection_workspace_rag_chunks MATCH ${ftsQuery}
+        WHERE projection_workspace_rag_chunks MATCH ${match}
           AND project_id = ${projectId}
           AND (${includeLongTermMemory ? 1 : 0} = 1 OR kind = 'rag-source')
-        ORDER BY bm25(projection_workspace_rag_chunks, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.0) ASC,
+        ORDER BY bm25(
+            projection_workspace_rag_chunks,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 2.0, 1.0
+          ) ASC,
           updated_at DESC,
           item_id ASC,
           CAST(chunk_index AS INTEGER) ASC
@@ -124,16 +115,18 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      const chunks = chunkWorkspaceKnowledgeContent(item.content);
+      const chunks = analyzeChunks({ title: item.title, content: item.content, tags: item.tags });
       yield* Effect.forEach(
         chunks,
-        (content, chunkIndex) =>
+        (chunk) =>
           sql`
             INSERT INTO projection_workspace_rag_chunks (
-              project_id, item_id, kind, chunk_index, title, content, updated_at
+              project_id, item_id, kind, chunk_index, title, content, updated_at,
+              tags_text, search_title, search_tags, search_body
             ) VALUES (
-              ${item.projectId}, ${item.id}, ${item.kind}, ${chunkIndex},
-              ${item.title}, ${content}, ${item.updatedAt}
+              ${item.projectId}, ${item.id}, ${item.kind}, ${chunk.chunkIndex}, ${item.title},
+              ${chunk.content}, ${item.updatedAt}, ${chunk.tagsText}, ${chunk.searchTitle},
+              ${chunk.searchTags}, ${chunk.searchBody}
             )
           `,
         { concurrency: 1, discard: true },
@@ -141,15 +134,47 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceRag.replaceItem")));
 
   const search: ProjectionWorkspaceRagRepositoryShape["search"] = (input) => {
-    const ftsQuery = toWorkspaceFtsQuery(input.query);
-    if (ftsQuery === null) return Effect.succeed({ matches: [] });
+    const query = buildSearchQuery(input.query);
+    if (query === null) return Effect.succeed({ matches: [] });
+    const limit = input.limit ?? 8;
     return searchRows({
       projectId: input.projectId,
-      ftsQuery,
+      match: query.match,
       includeLongTermMemory: input.includeLongTermMemory !== false,
-      limit: input.limit ?? 8,
+      limit: Math.min(limit * CANDIDATE_FACTOR, MAX_CANDIDATES),
     }).pipe(
-      Effect.map((matches) => ({ matches })),
+      Effect.map((rows) => {
+        // One match per item — its best chunk — ranked by BM25 scaled by how
+        // many distinct query terms the chunk covers.
+        const best = new Map<
+          string,
+          { readonly row: (typeof rows)[number]; readonly rank: number }
+        >();
+        for (const row of rows) {
+          const coverage = termCoverage(query.terms, `${row.title} ${row.tagsText} ${row.content}`);
+          const rank = row.score * (1 + coverage);
+          const current = best.get(row.itemId);
+          if (current === undefined || rank > current.rank) best.set(row.itemId, { row, rank });
+        }
+        return {
+          matches: [...best.values()]
+            .toSorted(
+              (left, right) =>
+                right.rank - left.rank || right.row.updatedAt.localeCompare(left.row.updatedAt),
+            )
+            .slice(0, limit)
+            .map(({ row, rank }) => ({
+              projectId: row.projectId,
+              itemId: row.itemId,
+              kind: row.kind,
+              title: row.title,
+              snippet: makeSnippet(row.content, query.terms),
+              content: row.content,
+              score: rank,
+              updatedAt: row.updatedAt,
+            })),
+        };
+      }),
       Effect.mapError((cause) =>
         cause._tag === "SqlError"
           ? toPersistenceSqlError("ProjectionWorkspaceRag.search:query")(cause)
