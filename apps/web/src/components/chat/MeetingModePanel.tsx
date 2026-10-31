@@ -153,14 +153,22 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           }}
         >
           <option value="">자동 (첫 참가자)</option>
-          {config.seats.map((seat) => (
-            <option key={seat.id} value={seat.id}>
-              {seat.displayName} ·{" "}
-              {props.modelOptionsByInstance
-                .get(seat.instanceId)
-                ?.find((model) => model.slug === seat.model)?.name ?? seat.model}
-            </option>
-          ))}
+          {config.seats.map((seat) => {
+            const seatEntry = visibleEntries.find((entry) => entry.instanceId === seat.instanceId);
+            const seatLabel = seatEntry?.driverKind
+              ? (groupProviderInstanceEntriesByDriver(
+                  visibleEntries.filter((e) => e.driverKind === seatEntry.driverKind),
+                )[0]?.label ?? seat.displayName)
+              : seat.displayName;
+            return (
+              <option key={seat.id} value={seat.id}>
+                {seatLabel} ·{" "}
+                {props.modelOptionsByInstance
+                  .get(seat.instanceId)
+                  ?.find((model) => model.slug === seat.model)?.name ?? seat.model}
+              </option>
+            );
+          })}
         </select>
         <span className="font-normal text-muted-foreground">
           선택한 AI가 계획·배정·검증·최종 정리를 맡습니다.
