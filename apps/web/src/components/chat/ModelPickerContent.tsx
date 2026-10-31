@@ -38,7 +38,6 @@ import { TooltipProvider } from "../ui/tooltip";
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
-  groupProviderInstanceEntriesByDriver,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -217,6 +216,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   // another lookup.
   const flatModels = useMemo(() => {
     const out: ModelPickerItem[] = [];
+    const seenDriverModels = new Set<string>();
     for (const [instanceId, models] of modelOptionsByInstance) {
       const entry = entryByInstanceId.get(instanceId);
       if (!entry) {
@@ -228,6 +228,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         continue;
       }
       for (const model of models) {
+        const driverModelKey = `${entry.driverKind}:${model.slug}`;
+        if (seenDriverModels.has(driverModelKey)) continue;
+        seenDriverModels.add(driverModelKey);
         out.push({
           slug: model.slug,
           name: model.name,
@@ -427,56 +430,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       return next;
     });
   }, []);
-
-  const selectedAccountGroup = useMemo(() => {
-    if (selectedInstanceId === "favorites") return null;
-    const entry = entryByInstanceId.get(selectedInstanceId);
-    if (!entry) return null;
-    return (
-      groupProviderInstanceEntriesByDriver(
-        sidebarInstanceEntries.filter((candidate) => candidate.driverKind === entry.driverKind),
-      )[0] ?? null
-    );
-  }, [entryByInstanceId, selectedInstanceId, sidebarInstanceEntries]);
-
-  const accountStrip =
-    !isSearching && selectedAccountGroup !== null && selectedAccountGroup.entries.length > 1 ? (
-      <div className="border-b border-border/70 bg-muted/20 px-2 py-2">
-        <div className="flex items-center gap-1 overflow-x-auto">
-          {selectedAccountGroup.entries.map((entry) => {
-            const disabled =
-              !isProviderInstancePickerReady(entry) ||
-              (lockedDisabledInstanceIds?.has(entry.instanceId) ?? false);
-            return (
-              <button
-                key={entry.instanceId}
-                type="button"
-                className={cn(
-                  "flex min-w-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors",
-                  selectedInstanceId === entry.instanceId
-                    ? "border-primary/60 bg-primary/10 text-foreground"
-                    : "border-border/70 bg-background/60 text-muted-foreground hover:text-foreground",
-                  disabled && "cursor-not-allowed opacity-50 hover:text-muted-foreground",
-                )}
-                disabled={disabled}
-                onClick={() => handleSelectInstance(entry.instanceId)}
-                title={entry.displayName}
-              >
-                <ProviderInstanceIcon
-                  driverKind={entry.driverKind}
-                  displayName={entry.displayName}
-                  accentColor={entry.accentColor}
-                  className="size-3.5"
-                  iconClassName="size-3.5"
-                  showBadge={false}
-                />
-                <span className="truncate">{entry.displayName}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    ) : null;
 
   const handleModelSelect = useCallback(
     (modelSlug: string, instanceId: ProviderInstanceId) => {
@@ -736,7 +689,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 showSidebar && "border-l border-border/70",
               )}
             >
-              {accountStrip}
               {/* Search bar */}
               <div className="px-2 pt-2">
                 <div className="border-b border-border/70 pb-2.5 transition-colors focus-within:border-ring">
