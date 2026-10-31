@@ -187,6 +187,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                 (option) => !seats.some((seat) => seat.model === option.slug),
               );
               const nextModel = defaultSeatModel(available);
+              const showDisplayName = group.entries.length === 1;
               return (
                 <div
                   key={entry.instanceId}
@@ -201,12 +202,20 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                       className="size-4 shrink-0"
                       iconClassName="size-4"
                     />
-                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                      {entry.displayName}
-                      {!ready ? (
-                        <span className="ml-1 font-normal text-muted-foreground">(사용 불가)</span>
-                      ) : null}
-                    </span>
+                    {showDisplayName ? (
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                        {entry.displayName}
+                        {!ready ? (
+                          <span className="ml-1 font-normal text-muted-foreground">
+                            (사용 불가)
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                        {!ready ? <span className="text-muted-foreground">(사용 불가)</span> : null}
+                      </span>
+                    )}
                     <button
                       type="button"
                       className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted disabled:opacity-40"
