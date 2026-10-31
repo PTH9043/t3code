@@ -181,7 +181,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             const showNewBadge = group.entries.some(
               (candidate) => props.newBadgeInstanceIds?.has(candidate.instanceId) ?? false,
             );
-            const showInstanceBadge = group.entries.length > 1 || Boolean(entry.accentColor);
+            const showInstanceBadge = Boolean(entry.accentColor);
             const statusLines = group.entries.map((candidate) => {
               const contextDisabled = props.disabledInstanceIds?.has(candidate.instanceId) ?? false;
               const label = contextDisabled
@@ -193,7 +193,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             const tooltip =
               group.entries.length === 1
                 ? statusLines[0]
-                : `${entry.displayName} 외 ${group.entries.length - 1}개 계정\n${statusLines.join("\n")}`;
+                : `${entry.displayName}\n${statusLines.join("\n")}`;
 
             const button = (
               <button
@@ -213,13 +213,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 }
                 disabled={isDisabled}
                 type="button"
-                aria-label={
-                  isDisabled
-                    ? tooltip
-                    : group.entries.length === 1
-                      ? entry.displayName
-                      : `${group.driverKind}, ${group.entries.length}개 계정`
-                }
+                aria-label={isDisabled ? tooltip : entry.displayName}
               >
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
@@ -242,11 +236,6 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 {showNewBadge ? (
                   <span className={NEW_BADGE_CLASS} aria-hidden>
                     <SparklesIcon className="size-2" />
-                  </span>
-                ) : null}
-                {group.entries.length > 1 ? (
-                  <span className="absolute -bottom-0.5 -right-0.5 z-10 flex h-4 min-w-4 items-center justify-center rounded-full bg-background px-1 text-[9px] font-semibold shadow-sm ring-1 ring-border/60">
-                    {group.entries.length}
                   </span>
                 ) : null}
               </button>
@@ -273,14 +262,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     className={PICKER_TOOLTIP_CLASS}
                   >
                     <div className="grid gap-1">
-                      <div className="font-medium">
-                        {group.entries.length === 1
-                          ? entry.displayName
-                          : `${group.driverKind} 계정 ${group.entries.length}개`}
-                      </div>
-                      {group.entries.length > 1 ? (
-                        <div className="whitespace-pre-line">{tooltip}</div>
-                      ) : null}
+                      <div className="font-medium">{entry.displayName}</div>
                     </div>
                   </TooltipPopup>
                 </Tooltip>
