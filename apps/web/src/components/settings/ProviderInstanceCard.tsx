@@ -579,7 +579,9 @@ export function ProviderInstanceCard({
               />
             </div>
 
-            {instance.driver === "opencode" ? (
+            {instance.driver === "opencode" &&
+            (instance.config as Record<string, unknown> | undefined)?.apiConnection !==
+              undefined ? (
               <OpenCodeApiSettings
                 key={JSON.stringify(
                   (instance.config as Record<string, unknown> | undefined)?.apiConnection ?? null,

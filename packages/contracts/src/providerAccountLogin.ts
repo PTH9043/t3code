@@ -9,7 +9,7 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
  * to confirm the account landed before reporting success.
  */
 export const ProviderAccountLoginInput = Schema.Struct({
-  driver: Schema.Literals(["codex", "claudeAgent", "cursor", "grok", "gemini", "opencode"]),
+  driver: Schema.Literals(["codex", "claudeAgent", "cursor", "grok", "gemini"]),
 });
 export type ProviderAccountLoginInput = typeof ProviderAccountLoginInput.Type;
 

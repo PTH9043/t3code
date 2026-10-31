@@ -216,7 +216,7 @@ describe("EnvironmentProviderSettings routing", () => {
       (element) => element.props["aria-label"] === "Claude 자동 전환",
     );
     expect(codex?.props.checked).toBe(false);
-    expect(claude?.props.checked).toBe(false);
+    expect(claude?.props.checked).toBe(true);
     (codex!.props.onCheckedChange as (checked: boolean) => void)(true);
     expect(settingsState.updateSettings).toHaveBeenLastCalledWith({
       providerAutoSwitch: { codex: true },

@@ -38,7 +38,6 @@ import {
 } from "./AddProviderInstanceDialog.logic";
 import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps";
 import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
-import { OpenCodeApiSettings } from "./OpenCodeApiSettings";
 import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
 import { GlmConnectionDialog } from "./GlmConnectionDialog";
 import { AntseedConnectionDialog } from "./AntseedConnectionDialog";
@@ -138,7 +137,7 @@ export function AddProviderInstanceDialog({
   const [isGlmSelected, setIsGlmSelected] = useState(false);
   const [isAntseedSelected, setIsAntseedSelected] = useState(false);
   const [loginDriver, setLoginDriver] = useState<
-    "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode" | null
+    "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | null
   >(null);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
@@ -202,8 +201,7 @@ export function AddProviderInstanceDialog({
     value === "claudeAgent" ||
     value === "cursor" ||
     value === "grok" ||
-    value === "gemini" ||
-    value === "opencode";
+    value === "gemini";
 
   const navigateToStep = (requestedStep: number) => {
     applyWizardNavigation(
@@ -473,15 +471,6 @@ export function AddProviderInstanceDialog({
               </div>
 
               <div className={cn("grid gap-5", wizardStep !== 2 && "hidden")}>
-                {driver === "opencode" ? (
-                  <OpenCodeApiSettings
-                    instance={{ driver, config: configDraft, environment }}
-                    onUpdate={(next) => {
-                      setConfigDraft(next.config as Record<string, unknown>);
-                      setEnvironment(next.environment ?? []);
-                    }}
-                  />
-                ) : null}
                 {driverSettingsFields.length > 0 ? (
                   <ProviderSettingsForm
                     definition={driverOption}
@@ -522,7 +511,7 @@ export function AddProviderInstanceDialog({
                 onClick={() => {
                   if (wizardStep === 0 && isBrowserLoginUiDriver(driver)) {
                     setLoginDriver(
-                      driver as "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode",
+                      driver as "codex" | "claudeAgent" | "cursor" | "grok" | "gemini",
                     );
                     return;
                   }

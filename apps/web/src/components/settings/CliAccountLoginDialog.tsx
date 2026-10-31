@@ -24,7 +24,6 @@ const DRIVER_LABEL: Record<string, string> = {
   cursor: "Cursor",
   grok: "Grok",
   gemini: "Gemini",
-  opencode: "OpenCode",
 };
 
 export function CliAccountLoginDialog({
@@ -36,7 +35,7 @@ export function CliAccountLoginDialog({
 }: {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;
-  readonly driver: "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode";
+  readonly driver: "codex" | "claudeAgent" | "cursor" | "grok" | "gemini";
   readonly onOpenChange: (open: boolean) => void;
   readonly onBack?: () => void;
 }) {

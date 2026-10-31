@@ -5,7 +5,6 @@ import {
   CursorSettings,
   GeminiSettings,
   GrokSettings,
-  OpenCodeSettings,
   ProviderAccountLoginError,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -30,7 +29,6 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeGeminiSettings = Schema.decodeSync(GeminiSettings);
-const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
 function loginError(detail: string): ProviderAccountLoginError {
   return new ProviderAccountLoginError({ detail });
@@ -46,7 +44,7 @@ const AuthStatusResponseShape = Schema.Struct({
 });
 const decodeAuthStatus = Schema.decodeUnknownOption(Schema.fromJsonString(AuthStatusResponseShape));
 
-type BrowserLoginDriver = "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode";
+type BrowserLoginDriver = "codex" | "claudeAgent" | "cursor" | "grok" | "gemini";
 
 interface BrowserLoginSpec {
   readonly instancePrefix: string;
@@ -103,15 +101,11 @@ const BROWSER_LOGIN_SPECS: Record<BrowserLoginDriver, BrowserLoginSpec> = {
     loginArgs: ["auth", "login"],
     statusArgs: ["auth", "status"],
   },
-  opencode: {
-    instancePrefix: "opencode",
-    displayName: "OpenCode",
-    homeFolder: "opencode-home",
-    homeEnvVar: "XDG_DATA_HOME",
-    binary: "opencode",
-    loginArgs: ["auth", "login"],
-    statusArgs: ["auth", "status"],
-  },
+  // NOTE: opencode is intentionally absent. `opencode auth login` is an
+  // interactive TUI — there is no non-interactive browser OAuth path. Google
+  // in opencode accepts an API key only (no OAuth), so routing users through
+  // a "browser login" flow here always fails. Users who want a Google
+  // account should pick the Gemini driver instead.
 };
 
 export function isBrowserLoginDriver(driver: string): driver is BrowserLoginDriver {
@@ -195,11 +189,8 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
     } else if (driver === "grok") {
       const config = decodeGrokSettings({});
       binaryPath = config.binaryPath || spec.binary;
-    } else if (driver === "gemini") {
-      const config = decodeGeminiSettings({});
-      binaryPath = config.binaryPath || spec.binary;
     } else {
-      const config = decodeOpenCodeSettings({});
+      const config = decodeGeminiSettings({});
       binaryPath = config.binaryPath || spec.binary;
     }
     environment = {
@@ -276,8 +267,7 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
 
   // homePath is a real setting only for drivers that support it; other
   // drivers isolate auth through the spawned environment at runtime.
-  const supportsHomePath =
-    driver === "codex" || driver === "claudeAgent" || driver === "gemini" || driver === "opencode";
+  const supportsHomePath = driver === "codex" || driver === "claudeAgent" || driver === "gemini";
   yield* settings
     .updateSettings({
       providerInstancesToUpsert: {
