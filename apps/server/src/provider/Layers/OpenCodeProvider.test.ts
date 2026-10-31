@@ -229,6 +229,65 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       );
     }),
   );
+
+  it.effect("keeps verified API connection models selectable when discovery fails", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventoryError = new Error("opencode models failed");
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({
+          apiConnection: {
+            providerId: "t3_deepseek",
+            baseUrl: "https://api.deepseek.com",
+            protocol: "chat-completions",
+            models: ["deepseek-flash", "deepseek-v4-pro"],
+          },
+        }),
+        process.cwd(),
+      );
+
+      NodeAssert.equal(snapshot.status, "ready");
+      NodeAssert.deepEqual(
+        snapshot.models.map((model) => model.slug),
+        ["t3_deepseek/deepseek-flash", "t3_deepseek/deepseek-v4-pro"],
+      );
+    }),
+  );
+
+  it.effect("merges API connection models with the discovered inventory", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: {
+          connected: ["t3_antseed"],
+          all: [
+            {
+              id: "t3_antseed",
+              name: "t3_antseed",
+              models: { flash: { id: "flash", name: "flash", variants: {} } },
+            },
+          ],
+          default: {},
+        },
+        agents: [],
+      };
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({
+          apiConnection: {
+            providerId: "t3_antseed",
+            baseUrl: "http://127.0.0.1:8787",
+            protocol: "chat-completions",
+            models: ["flash"],
+          },
+        }),
+        process.cwd(),
+      );
+
+      NodeAssert.equal(snapshot.status, "ready");
+      NodeAssert.deepEqual(
+        snapshot.models.map((model) => model.slug),
+        ["t3_antseed/flash"],
+      );
+    }),
+  );
 });
 
 it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (it) => {

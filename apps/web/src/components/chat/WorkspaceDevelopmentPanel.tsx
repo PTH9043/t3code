@@ -133,7 +133,7 @@ export function WorkspaceDevelopmentPanel(props: WorkspaceDevelopmentPanelProps)
     .filter(
       (entry) =>
         isProviderInstancePickerReady(entry) &&
-        ["codex", "claudeAgent", "opencode"].includes(entry.driverKind),
+        ["codex", "claudeAgent", "opencode", "deepseek", "antseed"].includes(entry.driverKind),
     )
     .flatMap((entry) =>
       (props.modelOptionsByInstance?.get(entry.instanceId) ?? entry.models).map((model) => ({

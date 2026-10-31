@@ -137,7 +137,9 @@ export function AddProviderInstanceDialog({
   const [isDeepSeekSelected, setIsDeepSeekSelected] = useState(false);
   const [isGlmSelected, setIsGlmSelected] = useState(false);
   const [isAntseedSelected, setIsAntseedSelected] = useState(false);
-  const [loginDriver, setLoginDriver] = useState<"codex" | "claudeAgent" | null>(null);
+  const [loginDriver, setLoginDriver] = useState<
+    "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode" | null
+  >(null);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
   const [accentColor, setAccentColor] = useState<string>("");
@@ -191,6 +193,17 @@ export function AddProviderInstanceDialog({
     }
     setWizardStep(navigation.step);
   };
+
+  // Subscription-style CLI providers authenticate in the provider's own
+  // browser login after the provider is selected, instead of separate
+  // Codex/Claude shortcut buttons on the selection step.
+  const isBrowserLoginUiDriver = (value: ProviderDriverKind): boolean =>
+    value === "codex" ||
+    value === "claudeAgent" ||
+    value === "cursor" ||
+    value === "grok" ||
+    value === "gemini" ||
+    value === "opencode";
 
   const navigateToStep = (requestedStep: number) => {
     applyWizardNavigation(
@@ -376,14 +389,6 @@ export function AddProviderInstanceDialog({
                 <Button variant="outline" onClick={() => setIsAntseedSelected(true)}>
                   Antseed 게이트웨이 연결
                 </Button>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" onClick={() => setLoginDriver("codex")}>
-                    Codex 계정 브라우저 로그인
-                  </Button>
-                  <Button variant="outline" onClick={() => setLoginDriver("claudeAgent")}>
-                    Claude 계정 브라우저 로그인
-                  </Button>
-                </div>
               </div>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
@@ -512,7 +517,18 @@ export function AddProviderInstanceDialog({
               {wizardStep === 0 ? "취소" : "이전"}
             </Button>
             {wizardStep < ADD_PROVIDER_WIZARD_STEPS.length - 1 ? (
-              <Button size="sm" onClick={() => navigateToStep(wizardStep + 1)}>
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (wizardStep === 0 && isBrowserLoginUiDriver(driver)) {
+                    setLoginDriver(
+                      driver as "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode",
+                    );
+                    return;
+                  }
+                  navigateToStep(wizardStep + 1);
+                }}
+              >
                 다음
               </Button>
             ) : (

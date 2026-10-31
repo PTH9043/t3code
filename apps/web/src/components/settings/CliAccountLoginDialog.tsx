@@ -21,6 +21,10 @@ import { toastManager } from "../ui/toast";
 const DRIVER_LABEL: Record<string, string> = {
   codex: "Codex",
   claudeAgent: "Claude",
+  cursor: "Cursor",
+  grok: "Grok",
+  gemini: "Gemini",
+  opencode: "OpenCode",
 };
 
 export function CliAccountLoginDialog({
@@ -32,7 +36,7 @@ export function CliAccountLoginDialog({
 }: {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;
-  readonly driver: "codex" | "claudeAgent";
+  readonly driver: "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode";
   readonly onOpenChange: (open: boolean) => void;
   readonly onBack?: () => void;
 }) {

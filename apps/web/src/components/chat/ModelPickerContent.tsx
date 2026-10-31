@@ -2,6 +2,7 @@ import {
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
+  PROVIDER_DISPLAY_NAMES,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
@@ -216,7 +217,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   // another lookup.
   const flatModels = useMemo(() => {
     const out: ModelPickerItem[] = [];
-    const seenDriverModels = new Set<string>();
+    const seenDriverModels = new Map<string, number>();
+    const preferredInstanceId = selectedInstanceId === "favorites" ? null : selectedInstanceId;
     for (const [instanceId, models] of modelOptionsByInstance) {
       const entry = entryByInstanceId.get(instanceId);
       if (!entry) {
@@ -227,11 +229,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (!readyInstanceSet.has(instanceId)) {
         continue;
       }
+      const accountGroupKey =
+        entry.driverKind === "opencode"
+          ? `${entry.driverKind}:${PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName}`
+          : entry.driverKind;
       for (const model of models) {
-        const driverModelKey = `${entry.driverKind}:${model.slug}`;
-        if (seenDriverModels.has(driverModelKey)) continue;
-        seenDriverModels.add(driverModelKey);
-        out.push({
+        const driverModelKey = `${accountGroupKey}:${model.slug}`;
+        const item = {
           slug: model.slug,
           name: model.name,
           ...(model.shortName ? { shortName: model.shortName } : {}),
@@ -239,16 +243,27 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           ...(model.isLegacy ? { isLegacy: true } : {}),
           instanceId,
           driverKind: entry.driverKind,
-          instanceDisplayName: entry.displayName,
+          instanceDisplayName: PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName,
           ...(entry.accentColor ? { instanceAccentColor: entry.accentColor } : {}),
           ...(entry.continuationGroupKey
             ? { continuationGroupKey: entry.continuationGroupKey }
             : {}),
-        });
+        } satisfies ModelPickerItem;
+        const existingIndex = seenDriverModels.get(driverModelKey);
+        if (existingIndex === undefined) {
+          seenDriverModels.set(driverModelKey, out.length);
+          out.push(item);
+          continue;
+        }
+        // The visible row stays one per account/model, but an actively selected
+        // same-driver account must win its routing key over the first account.
+        if (instanceId === preferredInstanceId && out[existingIndex]?.instanceId !== instanceId) {
+          out[existingIndex] = item;
+        }
       }
     }
     return out;
-  }, [modelOptionsByInstance, entryByInstanceId, readyInstanceSet]);
+  }, [modelOptionsByInstance, entryByInstanceId, readyInstanceSet, selectedInstanceId]);
 
   const isLocked = props.lockedProvider !== null;
   const isSearching = searchQuery.trim().length > 0;

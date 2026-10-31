@@ -902,7 +902,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         data-thread-item
         className="list-none [content-visibility:auto] [contain-intrinsic-size:auto_34px]"
       >
-        <Tooltip>
+        <Tooltip disabled={!props.isActive}>
           <TooltipTrigger
             render={
               <div
@@ -1049,7 +1049,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         sortable?.isDragging && "z-20 opacity-80",
       )}
     >
-      <Tooltip>
+      <Tooltip disabled={!props.isActive}>
         <TooltipTrigger
           render={
             <div
@@ -1321,7 +1321,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   return (
     <li role="presentation" className="list-none">
-      <Tooltip>
+      <Tooltip disabled={!props.isRouteActive}>
         <TooltipTrigger
           render={
             <button

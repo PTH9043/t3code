@@ -145,6 +145,10 @@ describe("account auto switch policy", () => {
       "status code: 429",
       "429 Too Many Requests",
       "Too Many Requests",
+      "You've reached your usage limit",
+      "usage limit exceeded",
+      "사용량 한도에 도달했습니다",
+      "5시간 사용 한도에 도달했습니다",
     ])
       expect(isActualRateLimitFailure(message)).toBe(true);
     for (const message of ["credits 429", "weekly quota 100%", "429 tokens processed", null])

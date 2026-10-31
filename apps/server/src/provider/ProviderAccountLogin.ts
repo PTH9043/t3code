@@ -2,6 +2,10 @@ import * as NodeCrypto from "node:crypto";
 import {
   ClaudeSettings,
   CodexSettings,
+  CursorSettings,
+  GeminiSettings,
+  GrokSettings,
+  OpenCodeSettings,
   ProviderAccountLoginError,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -23,6 +27,10 @@ import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.
 
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeCursorSettings = Schema.decodeSync(CursorSettings);
+const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+const decodeGeminiSettings = Schema.decodeSync(GeminiSettings);
+const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
 function loginError(detail: string): ProviderAccountLoginError {
   return new ProviderAccountLoginError({ detail });
@@ -38,8 +46,76 @@ const AuthStatusResponseShape = Schema.Struct({
 });
 const decodeAuthStatus = Schema.decodeUnknownOption(Schema.fromJsonString(AuthStatusResponseShape));
 
-export function isBrowserLoginDriver(driver: string): driver is "codex" | "claudeAgent" {
-  return driver === "codex" || driver === "claudeAgent";
+type BrowserLoginDriver = "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | "opencode";
+
+interface BrowserLoginSpec {
+  readonly instancePrefix: string;
+  readonly displayName: string;
+  readonly homeFolder: string;
+  readonly homeEnvVar?: string;
+  readonly binary: string;
+  readonly loginArgs: ReadonlyArray<string>;
+  readonly statusArgs: ReadonlyArray<string>;
+}
+
+const BROWSER_LOGIN_SPECS: Record<BrowserLoginDriver, BrowserLoginSpec> = {
+  codex: {
+    instancePrefix: "codex",
+    displayName: "Codex",
+    homeFolder: "codex-home",
+    homeEnvVar: "CODEX_HOME",
+    binary: "codex",
+    loginArgs: ["login"],
+    statusArgs: ["login", "status"],
+  },
+  claudeAgent: {
+    instancePrefix: "claude",
+    displayName: "Claude",
+    homeFolder: "claude-home",
+    binary: "claude",
+    loginArgs: ["auth", "login"],
+    statusArgs: ["auth", "status"],
+  },
+  cursor: {
+    instancePrefix: "cursor",
+    displayName: "Cursor",
+    homeFolder: "cursor-home",
+    homeEnvVar: "CURSOR_HOME",
+    binary: "cursor-agent",
+    loginArgs: ["login"],
+    statusArgs: ["status"],
+  },
+  grok: {
+    instancePrefix: "grok",
+    displayName: "Grok",
+    homeFolder: "grok-home",
+    homeEnvVar: "GROK_HOME",
+    binary: "grok",
+    loginArgs: ["login"],
+    statusArgs: ["status"],
+  },
+  gemini: {
+    instancePrefix: "gemini",
+    displayName: "Gemini",
+    homeFolder: "gemini-home",
+    homeEnvVar: "GEMINI_CLI_HOME",
+    binary: "gemini",
+    loginArgs: ["auth", "login"],
+    statusArgs: ["auth", "status"],
+  },
+  opencode: {
+    instancePrefix: "opencode",
+    displayName: "OpenCode",
+    homeFolder: "opencode-home",
+    homeEnvVar: "XDG_DATA_HOME",
+    binary: "opencode",
+    loginArgs: ["auth", "login"],
+    statusArgs: ["auth", "status"],
+  },
+};
+
+export function isBrowserLoginDriver(driver: string): driver is BrowserLoginDriver {
+  return Object.hasOwn(BROWSER_LOGIN_SPECS, driver);
 }
 
 /**
@@ -55,6 +131,7 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
   if (!isBrowserLoginDriver(driver)) {
     return yield* loginError(`'${driver}' 드라이버는 브라우저 로그인을 지원하지 않습니다.`);
   }
+  const spec = BROWSER_LOGIN_SPECS[driver];
 
   const settings = yield* ServerSettingsService;
   const serverConfig = yield* ServerConfig;
@@ -62,13 +139,13 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
   const path = yield* Path.Path;
 
   const instanceId = ProviderInstanceId.make(
-    `${driver === "codex" ? "codex" : "claude"}_${NodeCrypto.randomUUID().slice(0, 8)}`,
+    `${spec.instancePrefix}_${NodeCrypto.randomUUID().slice(0, 8)}`,
   );
   const dedicatedHomePath = path.join(
     serverConfig.stateDir,
     "provider-instances",
     instanceId,
-    driver === "codex" ? "codex-home" : "claude-home",
+    spec.homeFolder,
   );
 
   const allSettings = yield* settings.getSettings.pipe(
@@ -81,16 +158,14 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
   const processEnv = mergeProviderInstanceEnvironment([]);
 
   let binaryPath: string;
-  let loginArgs: ReadonlyArray<string>;
-  let statusArgs: ReadonlyArray<string>;
   let environment: NodeJS.ProcessEnv;
+  const loginArgs = spec.loginArgs;
+  const statusArgs = spec.statusArgs;
 
   if (driver === "codex") {
     const config = decodeCodexSettings({ homePath: dedicatedHomePath });
     const homeLayout = yield* resolveCodexHomeLayout(config);
-    binaryPath = config.binaryPath || "codex";
-    loginArgs = ["login"];
-    statusArgs = ["login", "status"];
+    binaryPath = config.binaryPath || spec.binary;
     environment = {
       ...processEnv,
       CODEX_HOME: homeLayout.effectiveHomePath ?? dedicatedHomePath,
@@ -102,17 +177,40 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
           loginError(`Codex 홈 디렉터리를 만들지 못했습니다: ${dedicatedHomePath}`),
         ),
       );
-  } else {
+  } else if (driver === "claudeAgent") {
     const config = decodeClaudeSettings({ homePath: dedicatedHomePath });
-    binaryPath = config.binaryPath || "claude";
-    loginArgs = ["auth", "login"];
-    statusArgs = ["auth", "status"];
+    binaryPath = config.binaryPath || spec.binary;
     environment = yield* makeClaudeEnvironment(config, processEnv);
     yield* fs
       .makeDirectory(dedicatedHomePath, { recursive: true })
       .pipe(
         Effect.mapError(() =>
           loginError(`Claude 홈 디렉터리를 만들지 못했습니다: ${dedicatedHomePath}`),
+        ),
+      );
+  } else {
+    if (driver === "cursor") {
+      const config = decodeCursorSettings({});
+      binaryPath = config.binaryPath || spec.binary;
+    } else if (driver === "grok") {
+      const config = decodeGrokSettings({});
+      binaryPath = config.binaryPath || spec.binary;
+    } else if (driver === "gemini") {
+      const config = decodeGeminiSettings({});
+      binaryPath = config.binaryPath || spec.binary;
+    } else {
+      const config = decodeOpenCodeSettings({});
+      binaryPath = config.binaryPath || spec.binary;
+    }
+    environment = {
+      ...processEnv,
+      ...(spec.homeEnvVar ? { [spec.homeEnvVar]: dedicatedHomePath } : {}),
+    };
+    yield* fs
+      .makeDirectory(dedicatedHomePath, { recursive: true })
+      .pipe(
+        Effect.mapError(() =>
+          loginError(`${spec.displayName} 홈 디렉터리를 만들지 못했습니다: ${dedicatedHomePath}`),
         ),
       );
   }
@@ -174,10 +272,12 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
   }
 
   const email = parsed.value.account?.email;
-  const displayName = email
-    ? `${driver === "codex" ? "Codex" : "Claude"} ${email}`
-    : `${driver === "codex" ? "Codex" : "Claude"} 계정`;
+  const displayName = email ? `${spec.displayName} ${email}` : `${spec.displayName} 계정`;
 
+  // homePath is a real setting only for drivers that support it; other
+  // drivers isolate auth through the spawned environment at runtime.
+  const supportsHomePath =
+    driver === "codex" || driver === "claudeAgent" || driver === "gemini" || driver === "opencode";
   yield* settings
     .updateSettings({
       providerInstancesToUpsert: {
@@ -185,7 +285,7 @@ export const loginProviderAccount = Effect.fn("loginProviderAccount")(function* 
           driver: ProviderDriverKind.make(driver),
           enabled: true,
           displayName,
-          config: { homePath: dedicatedHomePath },
+          ...(supportsHomePath ? { config: { homePath: dedicatedHomePath } } : {}),
         },
       },
     })

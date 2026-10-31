@@ -18,10 +18,12 @@ export function hasSpendableCredits(credits: ServerProviderUsageCredits | undefi
 }
 
 export function isActualRateLimitFailure(message: string | null | undefined): boolean {
+  if (message === null || message === undefined) return false;
   return (
-    message !== null &&
-    message !== undefined &&
     /\b(?:HTTP|status(?:\s+code)?)\s*[:=]?\s*429\b|\b429\s+Too Many Requests\b|\bToo Many Requests\b|^\s*429\s*$/iu.test(
+      message,
+    ) ||
+    /(?:usage|rate|message) limit (?:reached|exceeded)|you(?:'|’)ve (?:hit|reached) your (?:usage )?limit|사용량 한도.*(?:도달|초과)|한도.*(?:도달|초과)|(?:5|다섯)\s*시간.*(?:한도|제한)/iu.test(
       message,
     )
   );

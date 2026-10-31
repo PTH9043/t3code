@@ -1,4 +1,4 @@
-import { type ProviderInstanceId } from "@t3tools/contracts";
+import { type ProviderInstanceId, PROVIDER_DISPLAY_NAMES } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -67,22 +67,33 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
-  const selectedDriverKind = useMemo(() => {
+  const selectedGroupKey = useMemo(() => {
     if (props.selectedInstanceId === "favorites") return null;
-    return (
-      props.instanceEntries.find((entry) => entry.instanceId === props.selectedInstanceId)
-        ?.driverKind ?? null
+    const selectedEntry = props.instanceEntries.find(
+      (entry) => entry.instanceId === props.selectedInstanceId,
     );
+    if (!selectedEntry) return null;
+    return selectedEntry.driverKind === "opencode"
+      ? `${selectedEntry.driverKind}:${PROVIDER_DISPLAY_NAMES[selectedEntry.driverKind] ?? selectedEntry.displayName}`
+      : selectedEntry.driverKind;
   }, [props.instanceEntries, props.selectedInstanceId]);
   const driverGroups = useMemo(() => {
     const groups = new Map<string, ProviderInstanceEntry[]>();
     for (const entry of props.instanceEntries) {
-      const list = groups.get(entry.driverKind) ?? [];
+      // OpenCode API/gateway accounts are distinct selectable connections even
+      // though they share the opencode runtime driver; keep each labeled
+      // account in its own rail group.
+      const groupKey =
+        entry.driverKind === "opencode"
+          ? `${entry.driverKind}:${PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName}`
+          : entry.driverKind;
+      const list = groups.get(groupKey) ?? [];
       list.push(entry);
-      groups.set(entry.driverKind, list);
+      groups.set(groupKey, list);
     }
-    return [...groups.entries()].map(([driverKind, entries]) => {
+    return [...groups.entries()].map(([groupKey, entries]) => {
       const visibleEntries = entries;
+      const driverKind = entries[0]?.driverKind ?? groupKey;
       const selectedEntry = entries.find((entry) => entry.instanceId === props.selectedInstanceId);
       const representative =
         selectedEntry ??
@@ -95,6 +106,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       );
       const readyCount = entries.filter(isProviderInstancePickerReady).length;
       return {
+        groupKey,
         driverKind,
         entries: visibleEntries,
         representative,
@@ -114,14 +126,14 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     ).find(
       (item) =>
         item.dataset.modelPickerProvider ===
-        (props.selectedInstanceId === "favorites" ? "favorites" : selectedDriverKind),
+        (props.selectedInstanceId === "favorites" ? "favorites" : selectedGroupKey),
     );
     if (!selectedItem) {
       setSelectedIndicatorTop(null);
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, selectedDriverKind, showFavorites]);
+  }, [props.instanceEntries, props.selectedInstanceId, selectedGroupKey, showFavorites]);
 
   return (
     <div className="w-11 shrink-0 overflow-hidden bg-muted/30" data-model-picker-sidebar="true">
@@ -174,9 +186,10 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
           {driverGroups.map((group) => {
             const entry = group.representative;
             if (!entry) return null;
+            const groupLabel = PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName;
             const groupUnavailable = group.readyCount === 0;
             const isDisabled = groupUnavailable || group.allContextDisabled;
-            const isSelected = selectedDriverKind === group.driverKind;
+            const isSelected = selectedGroupKey === group.groupKey;
             const isHovered = hoveredInstanceId === entry.instanceId;
             const showNewBadge = group.entries.some(
               (candidate) => props.newBadgeInstanceIds?.has(candidate.instanceId) ?? false,
@@ -193,7 +206,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             const tooltip =
               group.entries.length === 1
                 ? statusLines[0]
-                : `${entry.displayName}\n${statusLines.join("\n")}`;
+                : `${groupLabel}\n${statusLines.join("\n")}`;
 
             const button = (
               <button
@@ -213,11 +226,11 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 }
                 disabled={isDisabled}
                 type="button"
-                aria-label={isDisabled ? tooltip : entry.displayName}
+                aria-label={isDisabled ? tooltip : groupLabel}
               >
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
-                  displayName={entry.displayName}
+                  displayName={groupLabel}
                   accentColor={entry.accentColor}
                   showBadge={showInstanceBadge}
                   className="size-6"
@@ -249,9 +262,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
 
             return (
               <div
-                key={group.driverKind}
+                key={group.groupKey}
                 className="relative w-full"
-                data-model-picker-provider={group.driverKind}
+                data-model-picker-provider={group.groupKey}
               >
                 <Tooltip>
                   <TooltipTrigger render={trigger} />
@@ -262,7 +275,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     className={PICKER_TOOLTIP_CLASS}
                   >
                     <div className="grid gap-1">
-                      <div className="font-medium">{entry.displayName}</div>
+                      <div className="font-medium">{groupLabel}</div>
                     </div>
                   </TooltipPopup>
                 </Tooltip>
