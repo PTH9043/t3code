@@ -2,6 +2,7 @@ import {
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
+  PROVIDER_DISPLAY_NAMES,
 } from "@t3tools/contracts";
 import { memo, useEffect, useMemo, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
@@ -74,10 +75,14 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     selectedInstanceOptions[0];
   const triggerTitle = selectedModel ? getTriggerDisplayModelName(selectedModel) : props.model;
   const triggerLabel = selectedModel ? getTriggerDisplayModelLabel(selectedModel) : props.model;
-  const duplicateDriverCount = props.instanceEntries.filter(
-    (entry) => activeEntry !== null && entry.driverKind === activeEntry.driverKind,
-  ).length;
-  const showInstanceBadge = Boolean(activeEntry?.accentColor) || duplicateDriverCount > 1;
+
+  // Always hide instance badge and use driver label instead of displayName.
+  // Multiple instances of the same driver (e.g. "claude" + "claude_personal")
+  // are unified under one label (e.g. "Claude") with auto-switch handling failover.
+  const showInstanceBadge = false;
+  const driverLabel = activeEntry?.driverKind
+    ? (PROVIDER_DISPLAY_NAMES[activeEntry.driverKind] ?? activeEntry.driverKind)
+    : (activeEntry?.displayName ?? "");
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -170,7 +175,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           {activeEntry ? (
             <ProviderInstanceIcon
               driverKind={activeEntry.driverKind}
-              displayName={activeEntry.displayName}
+              displayName={driverLabel}
               accentColor={activeEntry.accentColor}
               showBadge={showInstanceBadge}
               className="size-4"
