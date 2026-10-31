@@ -28,6 +28,7 @@ import {
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BookOpenIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
   FolderIcon,
@@ -123,6 +124,7 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
+import { openAiHelp } from "./help/aiHelpStore";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import { resolveDefaultProviderModelSelection } from "../providerInstances";
@@ -1500,6 +1502,29 @@ function OpenCommandPaletteDialog(props: {
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/settings" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:ai-help",
+    searchTerms: [
+      "help",
+      "guide",
+      "skills",
+      "codex",
+      "claude",
+      "grok",
+      "도움말",
+      "사용법",
+      "스킬",
+      "명령어",
+      "유틸리티",
+    ],
+    title: "AI 사용 도움말 열기",
+    icon: <BookOpenIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      openAiHelp();
     },
   });
 

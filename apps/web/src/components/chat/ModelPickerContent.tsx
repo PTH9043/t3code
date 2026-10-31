@@ -6,8 +6,8 @@ import {
 import { resolveSelectableModel } from "@t3tools/shared/model";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { ChevronRightIcon, SearchIcon, UsersIcon } from "lucide-react";
-import { MeetingModePanel } from "./MeetingModePanel";
+import { ChevronRightIcon, SearchIcon } from "lucide-react";
+import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import {
@@ -34,18 +34,15 @@ import {
 } from "../../keybindings";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
-import { Switch } from "../ui/switch";
 import { TooltipProvider } from "../ui/tooltip";
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  groupProviderInstanceEntriesByDriver,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
-import {
-  updateMeetingComposerConfig,
-  useMeetingComposerConfig,
-  type MeetingComposerTarget,
-} from "../../meetingComposerStore";
+import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import type { MeetingComposerTarget } from "../../meetingComposerStore";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
 type ModelPickerItem = {
@@ -96,12 +93,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
   terminalOpen: boolean;
   /**
-   * Present only in the chat composer, where the picker can also convene an
-   * 오케스트라 run: a toggle row appears and, once on, the model list gives way
-   * to the roster and rules panel scoped to this composer target.
+   * Present only in the chat composer, where the picker chooses between a
+   * a model and can open the shared AI work controls.
    */
   meetingTarget?: MeetingComposerTarget | null;
+  development?: WorkspaceDevelopmentPanelProps | null;
+  developmentUnavailableReason?: string;
   onRequestClose?: () => void;
+  onOpenAiTask?: () => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
@@ -112,6 +111,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     getModelDisabledReason,
     onInstanceModelChange,
   } = props;
+  const meetingSurface = (props.meetingTarget ?? null) !== null;
   const [searchQuery, setSearchQuery] = useState("");
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
@@ -428,6 +428,56 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     });
   }, []);
 
+  const selectedAccountGroup = useMemo(() => {
+    if (selectedInstanceId === "favorites") return null;
+    const entry = entryByInstanceId.get(selectedInstanceId);
+    if (!entry) return null;
+    return (
+      groupProviderInstanceEntriesByDriver(
+        sidebarInstanceEntries.filter((candidate) => candidate.driverKind === entry.driverKind),
+      )[0] ?? null
+    );
+  }, [entryByInstanceId, selectedInstanceId, sidebarInstanceEntries]);
+
+  const accountStrip =
+    !isSearching && selectedAccountGroup !== null && selectedAccountGroup.entries.length > 1 ? (
+      <div className="border-b border-border/70 bg-muted/20 px-2 py-2">
+        <div className="flex items-center gap-1 overflow-x-auto">
+          {selectedAccountGroup.entries.map((entry) => {
+            const disabled =
+              !isProviderInstancePickerReady(entry) ||
+              (lockedDisabledInstanceIds?.has(entry.instanceId) ?? false);
+            return (
+              <button
+                key={entry.instanceId}
+                type="button"
+                className={cn(
+                  "flex min-w-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors",
+                  selectedInstanceId === entry.instanceId
+                    ? "border-primary/60 bg-primary/10 text-foreground"
+                    : "border-border/70 bg-background/60 text-muted-foreground hover:text-foreground",
+                  disabled && "cursor-not-allowed opacity-50 hover:text-muted-foreground",
+                )}
+                disabled={disabled}
+                onClick={() => handleSelectInstance(entry.instanceId)}
+                title={entry.displayName}
+              >
+                <ProviderInstanceIcon
+                  driverKind={entry.driverKind}
+                  displayName={entry.displayName}
+                  accentColor={entry.accentColor}
+                  className="size-3.5"
+                  iconClassName="size-3.5"
+                  showBadge={false}
+                />
+                <span className="truncate">{entry.displayName}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    ) : null;
+
   const handleModelSelect = useCallback(
     (modelSlug: string, instanceId: ProviderInstanceId) => {
       if (getModelDisabledReason?.(instanceId, modelSlug)) {
@@ -608,27 +658,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     };
   }, [filteredItemKeys, updateModelListScrollFades]);
 
-  // The prop only marks this picker as a composer surface; the config itself
-  // is app-wide, so the armed roster follows the person everywhere.
-  const meetingSurface = (props.meetingTarget ?? null) !== null;
-  const meetingConfig = useMeetingComposerConfig();
-  const meetingEnabled = meetingSurface && meetingConfig.enabled;
-  const meetingToggleRow = !meetingSurface ? null : (
-    <div className="flex items-center gap-2 border-b border-border/70 bg-muted/30 px-3 py-2">
-      <UsersIcon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium">오케스트라</span>
-      {meetingConfig.seats.length > 0 ? (
-        <span className="text-[11px] text-muted-foreground">{meetingConfig.seats.length}명</span>
-      ) : null}
-      <Switch
-        checked={meetingEnabled}
-        aria-label="오케스트라"
-        onCheckedChange={(enabled) =>
-          updateMeetingComposerConfig((current) => ({ ...current, enabled }))
-        }
-      />
-    </div>
-  );
+  const aiTaskLink =
+    meetingSurface && props.onOpenAiTask ? (
+      <div className="border-b border-border/70 bg-muted/30 p-2">
+        <button
+          type="button"
+          className="w-full rounded-md px-2 py-2 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={props.onOpenAiTask}
+        >
+          AI 작업 설정 열기
+        </button>
+      </div>
+    ) : null;
 
   return (
     <TooltipProvider delay={0}>
@@ -636,208 +677,202 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         className="dropdown-glass model-picker-surface relative flex h-screen max-h-86.5 w-screen max-w-90 flex-col overflow-hidden rounded-lg text-popover-foreground [clip-path:inset(0_round_var(--radius-lg))]"
         data-model-picker-content="true"
       >
-        {meetingToggleRow}
-        {meetingEnabled ? (
-          <MeetingModePanel
-            instanceEntries={instanceEntries}
-            modelOptionsByInstance={modelOptionsByInstance}
-          />
-        ) : (
-          <div className="flex min-h-0 flex-1 flex-row">
-            {/* Sidebar */}
-            {showSidebar && (
-              <ModelPickerSidebar
-                selectedInstanceId={selectedInstanceId}
-                onSelectInstance={handleSelectInstance}
-                instanceEntries={sidebarInstanceEntries}
-                showFavorites
-                {...(lockedDisabledInstanceIds
-                  ? {
-                      disabledInstanceIds: lockedDisabledInstanceIds,
-                      getDisabledInstanceTooltip: (entry: ProviderInstanceEntry) =>
-                        `${entry.displayName}은(는) 이 대화에서 사용할 수 없습니다. 제공자를 바꾸려면 새 대화를 시작하세요.`,
-                    }
-                  : {})}
-              />
-            )}
+        {aiTaskLink}
+        <div className="flex min-h-0 flex-1 flex-row">
+          {/* Sidebar */}
+          {showSidebar && (
+            <ModelPickerSidebar
+              selectedInstanceId={selectedInstanceId}
+              onSelectInstance={handleSelectInstance}
+              instanceEntries={sidebarInstanceEntries}
+              showFavorites
+              {...(lockedDisabledInstanceIds
+                ? {
+                    disabledInstanceIds: lockedDisabledInstanceIds,
+                    getDisabledInstanceTooltip: (entry: ProviderInstanceEntry) =>
+                      `${entry.displayName}은(는) 이 대화에서 사용할 수 없습니다. 제공자를 바꾸려면 새 대화를 시작하세요.`,
+                  }
+                : {})}
+            />
+          )}
 
-            {/* Main content area */}
-            <Combobox
-              inline
-              items={allItemKeys}
-              filteredItems={filteredItemKeys}
-              filter={null}
-              autoHighlight
-              open
-              virtualized
-              value={modelPickerModelKey(props.activeInstanceId, props.model)}
-              onItemHighlighted={(modelKey, eventDetails) => {
-                highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
-                if (eventDetails.reason === "keyboard" && eventDetails.index >= 0) {
-                  void modelListRef.current?.scrollIndexIntoView?.({
-                    index: eventDetails.index,
-                    animated: false,
-                  });
-                }
-              }}
-              onValueChange={(modelKey) => {
-                if (typeof modelKey !== "string") {
-                  return;
-                }
-                const legacyInstanceId = parseModelPickerLegacySectionKey(modelKey);
-                if (legacyInstanceId) {
-                  toggleLegacySection(legacyInstanceId);
-                  return;
-                }
-                const model = parseModelPickerModelKey(modelKey);
-                if (model) {
-                  handleModelSelect(model.slug, model.instanceId);
-                }
-              }}
+          {/* Main content area */}
+          <Combobox
+            inline
+            items={allItemKeys}
+            filteredItems={filteredItemKeys}
+            filter={null}
+            autoHighlight
+            open
+            virtualized
+            value={modelPickerModelKey(props.activeInstanceId, props.model)}
+            onItemHighlighted={(modelKey, eventDetails) => {
+              highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
+              if (eventDetails.reason === "keyboard" && eventDetails.index >= 0) {
+                void modelListRef.current?.scrollIndexIntoView?.({
+                  index: eventDetails.index,
+                  animated: false,
+                });
+              }
+            }}
+            onValueChange={(modelKey) => {
+              if (typeof modelKey !== "string") {
+                return;
+              }
+              const legacyInstanceId = parseModelPickerLegacySectionKey(modelKey);
+              if (legacyInstanceId) {
+                toggleLegacySection(legacyInstanceId);
+                return;
+              }
+              const model = parseModelPickerModelKey(modelKey);
+              if (model) {
+                handleModelSelect(model.slug, model.instanceId);
+              }
+            }}
+          >
+            <div
+              className={cn(
+                "flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/40",
+                showSidebar && "border-l border-border/70",
+              )}
             >
-              <div
-                className={cn(
-                  "flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/40",
-                  showSidebar && "border-l border-border/70",
-                )}
-              >
-                {/* Search bar */}
-                <div className="px-2 pt-2">
-                  <div className="border-b border-border/70 pb-2.5 transition-colors focus-within:border-ring">
-                    <ComboboxInput
-                      ref={searchInputRef}
-                      className="[&_input]:h-6.5 [&_input]:font-sans [&_input]:leading-6.5"
-                      inputClassName="rounded-none bg-transparent text-sm"
-                      placeholder="모델 검색..."
-                      showTrigger={false}
-                      startAddon={
-                        <SearchIcon className="-translate-x-0.5 size-4 shrink-0 text-muted-foreground opacity-70" />
-                      }
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          props.onRequestClose?.();
-                          return;
-                        }
-                        if (e.key === "Enter" && highlightedModelKeyRef.current) {
-                          (
-                            e as typeof e & { preventBaseUIHandler?: () => void }
-                          ).preventBaseUIHandler?.();
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const legacyInstanceId = parseModelPickerLegacySectionKey(
-                            highlightedModelKeyRef.current,
-                          );
-                          if (legacyInstanceId) {
-                            toggleLegacySection(legacyInstanceId);
-                            return;
-                          }
-                          const model = parseModelPickerModelKey(highlightedModelKeyRef.current);
-                          if (model) {
-                            handleModelSelect(model.slug, model.instanceId);
-                          }
-                          return;
-                        }
+              {accountStrip}
+              {/* Search bar */}
+              <div className="px-2 pt-2">
+                <div className="border-b border-border/70 pb-2.5 transition-colors focus-within:border-ring">
+                  <ComboboxInput
+                    ref={searchInputRef}
+                    className="[&_input]:h-6.5 [&_input]:font-sans [&_input]:leading-6.5"
+                    inputClassName="rounded-none bg-transparent text-sm"
+                    placeholder="모델 검색..."
+                    showTrigger={false}
+                    startAddon={
+                      <SearchIcon className="-translate-x-0.5 size-4 shrink-0 text-muted-foreground opacity-70" />
+                    }
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
                         e.stopPropagation();
-                      }}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onTouchStart={(e) => e.stopPropagation()}
-                      size="sm"
-                      unstyled
-                    />
-                  </div>
-                </div>
-
-                {/* Model list */}
-                <div className="relative min-h-0 flex-1 overflow-hidden pr-px">
-                  <ComboboxListVirtualized className="size-full min-w-0 p-0 not-empty:p-0">
-                    <LegendList<string>
-                      ref={modelListRef}
-                      data={filteredItemKeys}
-                      extraData={modelListExtraData}
-                      keyExtractor={(modelKey) => modelKey}
-                      renderItem={({ item: modelKey, index }) => {
-                        if (legacySection?.key === modelKey) {
-                          return (
-                            <ComboboxItem
-                              hideIndicator
-                              index={index}
-                              value={modelKey}
-                              aria-expanded={legacySection.isExpanded}
-                              className="group w-full cursor-pointer rounded-md px-2 py-2"
-                              contentClassName="flex w-full items-center gap-3"
-                            >
-                              <div className="min-w-0 flex-1 text-left">
-                                <div className="text-xs font-medium leading-snug">이전 모델</div>
-                                <div className="mt-1 text-xs font-normal leading-snug text-muted-foreground/70">
-                                  모델 {legacySection.legacyModels.length}개
-                                </div>
-                              </div>
-                              <ChevronRightIcon
-                                className={cn(
-                                  "size-4 transition-transform",
-                                  legacySection.isExpanded && "rotate-90",
-                                )}
-                              />
-                            </ComboboxItem>
-                          );
-                        }
-                        const model = filteredModelByKey.get(modelKey);
-                        if (!model) {
-                          return null;
-                        }
-                        const disabledReason =
-                          getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
-                        return (
-                          <ModelListRow
-                            key={modelKey}
-                            index={index}
-                            model={model}
-                            instanceId={model.instanceId}
-                            driverKind={model.driverKind}
-                            providerDisplayName={model.instanceDisplayName}
-                            providerAccentColor={model.instanceAccentColor}
-                            isFavorite={favoritesSet.has(
-                              providerModelKey(model.instanceId, model.slug),
-                            )}
-                            isSelected={
-                              modelKey === modelPickerModelKey(props.activeInstanceId, props.model)
-                            }
-                            showProvider
-                            preferShortName={!isLocked}
-                            useTriggerLabel={false}
-                            showNewBadge={isModelPickerNewModel(model.driverKind, model.slug)}
-                            jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
-                            disabledReason={disabledReason}
-                            onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}
-                          />
+                        props.onRequestClose?.();
+                        return;
+                      }
+                      if (e.key === "Enter" && highlightedModelKeyRef.current) {
+                        (
+                          e as typeof e & { preventBaseUIHandler?: () => void }
+                        ).preventBaseUIHandler?.();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const legacyInstanceId = parseModelPickerLegacySectionKey(
+                          highlightedModelKeyRef.current,
                         );
-                      }}
-                      estimatedItemSize={52}
-                      drawDistance={480}
-                      recycleItems
-                      contentContainerClassName="pl-2 pr-px"
-                      ItemSeparatorComponent={ModelListSeparator}
-                      onLayout={updateModelListScrollFades}
-                      onScroll={updateModelListScrollFades}
-                      className={cn(
-                        "model-picker-list scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 [--fade-size:1.5rem]",
-                        showTopScrollFade && "model-picker-list-scroll-fade-top",
-                        showBottomScrollFade && "model-picker-list-scroll-fade-bottom",
-                      )}
-                    />
-                  </ComboboxListVirtualized>
+                        if (legacyInstanceId) {
+                          toggleLegacySection(legacyInstanceId);
+                          return;
+                        }
+                        const model = parseModelPickerModelKey(highlightedModelKeyRef.current);
+                        if (model) {
+                          handleModelSelect(model.slug, model.instanceId);
+                        }
+                        return;
+                      }
+                      e.stopPropagation();
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    size="sm"
+                    unstyled
+                  />
                 </div>
-                <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
-                  모델을 찾을 수 없습니다
-                </ComboboxEmpty>
               </div>
-            </Combobox>
-          </div>
-        )}
+
+              {/* Model list */}
+              <div className="relative min-h-0 flex-1 overflow-hidden pr-px">
+                <ComboboxListVirtualized className="size-full min-w-0 p-0 not-empty:p-0">
+                  <LegendList<string>
+                    ref={modelListRef}
+                    data={filteredItemKeys}
+                    extraData={modelListExtraData}
+                    keyExtractor={(modelKey) => modelKey}
+                    renderItem={({ item: modelKey, index }) => {
+                      if (legacySection?.key === modelKey) {
+                        return (
+                          <ComboboxItem
+                            hideIndicator
+                            index={index}
+                            value={modelKey}
+                            aria-expanded={legacySection.isExpanded}
+                            className="group w-full cursor-pointer rounded-md px-2 py-2"
+                            contentClassName="flex w-full items-center gap-3"
+                          >
+                            <div className="min-w-0 flex-1 text-left">
+                              <div className="text-xs font-medium leading-snug">이전 모델</div>
+                              <div className="mt-1 text-xs font-normal leading-snug text-muted-foreground/70">
+                                모델 {legacySection.legacyModels.length}개
+                              </div>
+                            </div>
+                            <ChevronRightIcon
+                              className={cn(
+                                "size-4 transition-transform",
+                                legacySection.isExpanded && "rotate-90",
+                              )}
+                            />
+                          </ComboboxItem>
+                        );
+                      }
+                      const model = filteredModelByKey.get(modelKey);
+                      if (!model) {
+                        return null;
+                      }
+                      const disabledReason =
+                        getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                      return (
+                        <ModelListRow
+                          key={modelKey}
+                          index={index}
+                          model={model}
+                          instanceId={model.instanceId}
+                          driverKind={model.driverKind}
+                          providerDisplayName={model.instanceDisplayName}
+                          providerAccentColor={model.instanceAccentColor}
+                          isFavorite={favoritesSet.has(
+                            providerModelKey(model.instanceId, model.slug),
+                          )}
+                          isSelected={
+                            modelKey === modelPickerModelKey(props.activeInstanceId, props.model)
+                          }
+                          showProvider
+                          preferShortName={!isLocked}
+                          useTriggerLabel={false}
+                          showNewBadge={isModelPickerNewModel(model.driverKind, model.slug)}
+                          jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
+                          disabledReason={disabledReason}
+                          onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}
+                        />
+                      );
+                    }}
+                    estimatedItemSize={52}
+                    drawDistance={480}
+                    recycleItems
+                    contentContainerClassName="pl-2 pr-px"
+                    ItemSeparatorComponent={ModelListSeparator}
+                    onLayout={updateModelListScrollFades}
+                    onScroll={updateModelListScrollFades}
+                    className={cn(
+                      "model-picker-list scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 [--fade-size:1.5rem]",
+                      showTopScrollFade && "model-picker-list-scroll-fade-top",
+                      showBottomScrollFade && "model-picker-list-scroll-fade-bottom",
+                    )}
+                  />
+                </ComboboxListVirtualized>
+              </div>
+              <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
+                모델을 찾을 수 없습니다
+              </ComboboxEmpty>
+            </div>
+          </Combobox>
+        </div>
       </div>
     </TooltipProvider>
   );

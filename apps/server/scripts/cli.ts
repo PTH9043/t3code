@@ -17,6 +17,7 @@ import {
 } from "../../../scripts/lib/brand-assets.ts";
 import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import serverPackageJson from "../package.json" with { type: "json" };
@@ -153,16 +154,40 @@ const buildCmd = Command.make(
       const serverDir = path.join(repoRoot, "apps/server");
 
       yield* Effect.log("[cli] Running tsdown...");
-      yield* runCommand(
-        ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
-          cwd: serverDir,
-          stdout: config.verbose ? "inherit" : "ignore",
-          stderr: "inherit",
-          shell: false,
-        }),
-      );
+      // node --run uses cmd.exe on Windows, which can drop an inherited PATH
+      // longer than 8191 characters. Invoke the local CLI without that shell.
+      const vpEntrypoint = path.join(repoRoot, "node_modules/vite-plus/bin/vp");
+      for (const args of [
+        ["pack"],
+        ["pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean"],
+      ]) {
+        yield* runCommand(
+          ChildProcess.make(process.execPath, [vpEntrypoint, ...args], {
+            cwd: serverDir,
+            stdout: config.verbose ? "inherit" : "ignore",
+            stderr: "inherit",
+            shell: false,
+          }),
+        );
+      }
 
       const webDist = path.join(repoRoot, "apps/web/dist");
+      if ((yield* HostProcessPlatform) === "win32") {
+        const architecture = yield* HostProcessArchitecture;
+        yield* runCommand(
+          ChildProcess.make(
+            process.execPath,
+            [
+              path.join(repoRoot, "native/hub-memory/build.mjs"),
+              "--architecture",
+              architecture,
+              "--output-directory",
+              path.join(serverDir, "dist/hub-memory", `win32-${architecture}`),
+            ],
+            { cwd: repoRoot, stdout: "inherit", stderr: "inherit" },
+          ),
+        );
+      }
       const clientTarget = path.join(serverDir, "dist/client");
 
       if (yield* fs.exists(webDist)) {

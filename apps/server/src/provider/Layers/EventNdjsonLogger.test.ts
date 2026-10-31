@@ -49,6 +49,33 @@ function parseLogLine(line: string) {
 }
 
 describe("EventNdjsonLogger", () => {
+  it.effect("evicts idle sink metadata so retention can reclaim old thread logs", () =>
+    Effect.gen(function* () {
+      const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-log-cache-"));
+      const basePath = NodePath.join(directory, "events.log");
+      try {
+        const store = yield* makeEventNdjsonLogStore(basePath, {
+          batchWindowMs: 0,
+          maxCachedSinks: 2,
+          maxTotalBytes: 1,
+          retentionCheckIntervalMs: 1,
+        });
+        const logger = store.logger("native");
+        for (const id of ["old", "recent", "latest"]) {
+          yield* TestClock.adjust("1 millis");
+          yield* logger.write({ id }, ThreadId.make(id));
+        }
+        assert.isFalse(NodeFS.existsSync(ownedLogPath(basePath, "old")));
+        assert.isTrue(NodeFS.existsSync(ownedLogPath(basePath, "latest")));
+        yield* logger.write({ id: "reopened" }, ThreadId.make("old"));
+        yield* store.close();
+        assert.include(NodeFS.readFileSync(ownedLogPath(basePath, "old"), "utf8"), "reopened");
+      } finally {
+        NodeFS.rmSync(directory, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("logs bounded diagnostics when an event cannot be serialized", () => {
     const messages: Array<unknown> = [];
     const logCapture = Logger.make<unknown, void>(({ message }) => {

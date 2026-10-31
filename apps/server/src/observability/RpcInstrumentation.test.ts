@@ -255,6 +255,18 @@ describe("RpcInstrumentation", () => {
     }),
   );
 
+  it.effect("labels local direct RPC spans separately from WebSocket spans", () =>
+    Effect.gen(function* () {
+      const spanNames = yield* collectSpanNames(
+        observeRpcEffect("server.getConfig", Effect.succeed("ok"), {
+          "rpc.transport": "desktop-direct",
+        }),
+      );
+
+      assert.deepStrictEqual(spanNames, ["direct.rpc.server.getConfig"]);
+    }),
+  );
+
   it.effect("does not create spans for disabled unary RPC handlers", () =>
     Effect.gen(function* () {
       const spanNames = yield* collectSpanNames(

@@ -10,6 +10,7 @@ import {
   buildWorkspaceCollaborationStepPrompt,
   buildWorkspaceCollaborationSteps,
   buildWorkspaceTaskNodePrompt,
+  formatGraphSchedulingReceipts,
 } from "./workspaceCollaboration.ts";
 import { buildInitialWorkspaceTaskGraph } from "./workspaceTaskGraph.ts";
 
@@ -30,6 +31,58 @@ const binding = (role: "coordinator" | "planner" | "implementer", enabled = true
 });
 
 describe("workspace collaboration planning", () => {
+  it("shows a validator the target's server-recorded prerequisites without inventing missing success", () => {
+    const initial = buildInitialWorkspaceTaskGraph("verify the report");
+    const base = initial.nodes[0]!;
+    const completedAt = "2026-09-13T04:00:00.000Z";
+    const prerequisite = {
+      ...base,
+      id: WorkspaceTaskNodeId.make("validate-compute"),
+      kind: "validation" as const,
+      status: "completed" as const,
+      completedAt,
+      validation: {
+        targetNodeId: WorkspaceTaskNodeId.make("compute"),
+        verdict: "pass" as const,
+        confidence: "high" as const,
+        summary: "independently checked",
+        evidence: [],
+        failureClassification: null,
+        nextAction: "continue",
+        recordedAt: completedAt,
+      },
+    };
+    const failed = {
+      ...prerequisite,
+      id: WorkspaceTaskNodeId.make("validate-audit"),
+      status: "failed" as const,
+      validation: { ...prerequisite.validation, verdict: "fail" as const },
+    };
+    const target = {
+      ...base,
+      id: WorkspaceTaskNodeId.make("report"),
+      startedAt: "2026-09-13T04:00:01.000Z",
+      dependsOn: [prerequisite.id, failed.id, WorkspaceTaskNodeId.make("missing")],
+    };
+    const validator = {
+      ...base,
+      id: WorkspaceTaskNodeId.make("validate-report"),
+      validationTargetId: target.id,
+      dependsOn: [target.id],
+    };
+    const unrelated = { ...base, id: WorkspaceTaskNodeId.make("unrelated-secret") };
+    const graph = { ...initial, nodes: [prerequisite, failed, target, validator, unrelated] };
+    const receipts = formatGraphSchedulingReceipts(graph, validator);
+    expect(receipts).toContain("Execution subject: report; startedAt=2026-09-13T04:00:01.000Z");
+    expect(receipts).toContain(
+      "validate-compute: status=completed; completedAt=2026-09-13T04:00:00.000Z; validationTarget=compute; verdict=pass",
+    );
+    expect(receipts).toContain("validate-audit: status=failed");
+    expect(receipts).toContain("verdict=fail");
+    expect(receipts).toContain("missing: receipt unavailable");
+    expect(receipts).not.toContain("unrelated-secret");
+  });
+
   it("freezes enabled bindings in deterministic kickoff, contribution, finalization order", () => {
     const steps = buildWorkspaceCollaborationSteps([
       binding("implementer"),
@@ -54,6 +107,53 @@ describe("workspace collaboration planning", () => {
     expect(
       buildWorkspaceCollaborationSteps([binding("coordinator", false), binding("implementer")]),
     ).toEqual([]);
+  });
+
+  it("asks the selected coordinator to plan by role without naming a fixed model", () => {
+    const graph = buildInitialWorkspaceTaskGraph("사용자가 선택한 모델로 작업");
+    const run = {
+      id: WorkspaceCollaborationRunId.make("run-selected-model"),
+      projectId,
+      source: "user" as const,
+      scheduleId: null,
+      incidentId: null,
+      task: "선택한 모델로 작업",
+      status: "running" as const,
+      steps: [],
+      graph,
+      meeting: null,
+      orchestra: null,
+      finalOutput: null,
+      error: null,
+      createdAt: "2026-08-08T00:00:00.000Z",
+      updatedAt: "2026-08-08T00:00:00.000Z",
+    };
+    const prompt = buildWorkspaceTaskNodePrompt({
+      workspacePrompt: "선택한 모델을 사용한다.",
+      run,
+      graph,
+      node: graph.nodes[0]!,
+      availableAgents: ["coordinator: codex / selected-model"],
+    });
+    expect(prompt).toContain('"agent":"coordinator"|"implementer"|"researcher"');
+    expect(prompt).toContain("accounts and models selected for this run");
+    expect(prompt).not.toMatch(/fable|페이블/iu);
+    const legacyNode = {
+      ...graph.nodes[0]!,
+      handoff: {
+        ...graph.nodes[0]!.handoff,
+        constraints: ["최신 정보는 Grok, 구현과 실행은 Codex, 판단과 종합은 Fable에 배정한다."],
+      },
+    };
+    const resumedPrompt = buildWorkspaceTaskNodePrompt({
+      workspacePrompt: "선택한 모델을 사용한다.",
+      run,
+      graph,
+      node: legacyNode,
+      availableAgents: ["coordinator: provider-selected / selected-model"],
+    });
+    expect(resumedPrompt).not.toMatch(/fable|페이블/iu);
+    expect(resumedPrompt).toContain("사용자가 선택한 모델과 참가자를 유지");
   });
 
   it("states user priority and treats memory and peer handoffs as non-authoritative", () => {

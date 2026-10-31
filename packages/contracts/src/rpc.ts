@@ -1,6 +1,104 @@
+import {
+  WORKSPACE_TASK_INBOX_WS_METHODS,
+  WorkspaceTaskInboxLookup,
+  WorkspaceTaskInboxOverview,
+  WorkspaceTaskLookup,
+  WorkspaceInboxTask,
+  WorkspaceTaskInboxError,
+  WorkspaceTaskRecipeSave,
+  WorkspaceTaskRecipe,
+  WorkspaceTaskSubmit,
+  WorkspaceTaskAction,
+} from "./workspaceTaskInbox.ts";
+import {
+  WORKSPACE_AGENT_CONTROL_WS_METHODS,
+  WorkspaceAttentionLookup,
+  WorkspaceAttentionOverview,
+  WorkspaceAgentControlLookup,
+  WorkspaceAgentControlOverview,
+  WorkspaceAgentControlAction,
+  WorkspaceAgentControlEvidenceInput,
+  WorkspaceAgentControlEvidence,
+  WorkspaceAgentControlError,
+} from "./workspaceAgentControl.ts";
+import {
+  WORKSPACE_WORKFLOW_WS_METHODS,
+  WorkflowLookup,
+  WorkflowSave,
+  WorkflowPreview,
+  WorkflowPreviewResult,
+  WorkflowStart,
+  WorkflowControl,
+  WorkflowOverview,
+  WorkflowSkillCatalog,
+  WorkflowRunLookup,
+  WorkspaceWorkflowError,
+} from "./workspaceWorkflow.ts";
+import { WorkflowVersion } from "./workflowGraph.ts";
+import { WorkspaceCollaborationRun } from "./orchestration.ts";
 import * as Schema from "effect/Schema";
+import {
+  WORKSPACE_RESEARCH_WS_METHODS,
+  WorkspaceResearchLookup,
+  WorkspaceResearchInput,
+  WorkspaceResearchCall,
+  WorkspaceResearchStatus,
+  WorkspaceResearchKeyInput,
+  WorkspaceResearchError,
+} from "./workspaceResearch.ts";
+import {
+  WORKSPACE_AUTOMATION_WS_METHODS,
+  WorkspaceAutomationLookup,
+  WorkspaceAutomationOverview,
+  WorkspaceAutomationEvidenceInput,
+  WorkspaceAutomationEvidence,
+  WorkspaceAutomationError,
+} from "./workspaceAutomation.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import { McpToolCatalog, McpToolsError } from "./mcpTools.ts";
+import {
+  ExtensionLookup,
+  ExtensionCatalog,
+  ExtensionActionInput,
+  ExtensionError,
+} from "./extensions.ts";
+import {
+  ConversationPreviewInput,
+  ConversationPreview,
+  ConversationImportInput,
+  ConversationExportInput,
+  ConversationExport,
+  ConversationTransferError,
+} from "./conversationTransfer.ts";
+import { ThreadId } from "./baseSchemas.ts";
+import { DesignImageUploadInput, DesignImageUploadError } from "./designReference.ts";
+import {
+  DeepSeekConnectInput,
+  DeepSeekConnectResult,
+  DeepSeekConnectionError,
+} from "./deepSeekConnection.ts";
+import {
+  AntseedConnectInput,
+  AntseedConnectResult,
+  AntseedConnectionError,
+} from "./antseedConnection.ts";
+import {
+  ProviderAccountLoginError,
+  ProviderAccountLoginInput,
+  ProviderAccountLoginResult,
+} from "./providerAccountLogin.ts";
+import {
+  WORKSPACE_DEVELOPMENT_WS_METHODS,
+  WorkspaceDevelopmentConfigure,
+  WorkspaceDevelopmentDirectInput,
+  WorkspaceDevelopmentError,
+  WorkspaceDevelopmentLookup,
+  WorkspaceDevelopmentReturnControl,
+  WorkspaceDevelopmentSnapshot,
+  WorkspaceDevelopmentState,
+  WorkspaceDevelopmentGoalInput,
+} from "./workspaceDevelopment.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -245,9 +343,19 @@ export const WS_METHODS = {
   // Server meta
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
+  serverGetMcpTools: "server.getMcpTools",
+  serverGetExtensions: "server.getExtensions",
+  serverManageExtension: "server.manageExtension",
+  conversationPreview: "conversation.preview",
+  conversationImport: "conversation.import",
+  conversationExport: "conversation.export",
+  designImageUpload: "design.imageUpload",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   geminiAuthBegin: "geminiAuth.begin",
+  deepSeekConnect: "deepseek.connect",
+  antseedConnect: "antseed.connect",
+  providerAccountLogin: "providerAccount.login",
   geminiAuthComplete: "geminiAuth.complete",
   geminiAuthCancel: "geminiAuth.cancel",
   serverUpdateServer: "server.updateServer",
@@ -313,6 +421,46 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
 });
 
+export const WsServerGetMcpToolsRpc = Rpc.make(WS_METHODS.serverGetMcpTools, {
+  payload: Schema.Struct({
+    check: Schema.optionalKey(Schema.Boolean),
+    workspaceRoot: Schema.optionalKey(Schema.String),
+  }),
+  success: McpToolCatalog,
+  error: Schema.Union([McpToolsError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerGetExtensionsRpc = Rpc.make(WS_METHODS.serverGetExtensions, {
+  payload: ExtensionLookup,
+  success: ExtensionCatalog,
+  error: Schema.Union([ExtensionError, EnvironmentAuthorizationError]),
+});
+export const WsServerManageExtensionRpc = Rpc.make(WS_METHODS.serverManageExtension, {
+  payload: ExtensionActionInput,
+  success: Schema.Struct({ message: Schema.String }),
+  error: Schema.Union([ExtensionError, EnvironmentAuthorizationError]),
+});
+export const WsConversationPreviewRpc = Rpc.make(WS_METHODS.conversationPreview, {
+  payload: ConversationPreviewInput,
+  success: ConversationPreview,
+  error: Schema.Union([ConversationTransferError, EnvironmentAuthorizationError]),
+});
+export const WsConversationImportRpc = Rpc.make(WS_METHODS.conversationImport, {
+  payload: ConversationImportInput,
+  success: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ConversationTransferError, EnvironmentAuthorizationError]),
+});
+export const WsConversationExportRpc = Rpc.make(WS_METHODS.conversationExport, {
+  payload: ConversationExportInput,
+  success: ConversationExport,
+  error: Schema.Union([ConversationTransferError, EnvironmentAuthorizationError]),
+});
+export const WsDesignImageUploadRpc = Rpc.make(WS_METHODS.designImageUpload, {
+  payload: DesignImageUploadInput,
+  success: Schema.Struct({ attachmentId: Schema.String, caption: Schema.String }),
+  error: Schema.Union([DesignImageUploadError, EnvironmentAuthorizationError]),
+});
+
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
     /**
@@ -337,6 +485,24 @@ export const WsGeminiAuthBeginRpc = Rpc.make(WS_METHODS.geminiAuthBegin, {
   payload: GeminiAuthBeginInput,
   success: GeminiAuthBeginResult,
   error: Schema.Union([GeminiAuthError, EnvironmentAuthorizationError]),
+});
+
+export const WsDeepSeekConnectRpc = Rpc.make(WS_METHODS.deepSeekConnect, {
+  payload: DeepSeekConnectInput,
+  success: DeepSeekConnectResult,
+  error: Schema.Union([DeepSeekConnectionError, EnvironmentAuthorizationError]),
+});
+
+export const WsAntseedConnectRpc = Rpc.make(WS_METHODS.antseedConnect, {
+  payload: AntseedConnectInput,
+  success: AntseedConnectResult,
+  error: Schema.Union([AntseedConnectionError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderAccountLoginRpc = Rpc.make(WS_METHODS.providerAccountLogin, {
+  payload: ProviderAccountLoginInput,
+  success: ProviderAccountLoginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
 });
 
 export const WsGeminiAuthCompleteRpc = Rpc.make(WS_METHODS.geminiAuthComplete, {
@@ -993,12 +1159,179 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
+export const WsDevelopmentGetRpc = Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.get, {
+  payload: WorkspaceDevelopmentLookup,
+  success: WorkspaceDevelopmentSnapshot,
+  error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+});
+export const WsDevelopmentSubscribeRpc = Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.subscribe, {
+  payload: WorkspaceDevelopmentLookup,
+  success: WorkspaceDevelopmentSnapshot,
+  stream: true,
+  error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+});
+export const WsDevelopmentConfigureRpc = Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.configure, {
+  payload: WorkspaceDevelopmentConfigure,
+  success: WorkspaceDevelopmentState,
+  error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+});
+export const WsDevelopmentDirectInputRpc = Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.directInput, {
+  payload: WorkspaceDevelopmentDirectInput,
+  success: WorkspaceDevelopmentState,
+  error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+});
+export const WsDevelopmentReturnControlRpc = Rpc.make(
+  WORKSPACE_DEVELOPMENT_WS_METHODS.returnControl,
+  {
+    payload: WorkspaceDevelopmentReturnControl,
+    success: WorkspaceDevelopmentState,
+    error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+  },
+);
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.getRun, {
+    payload: WorkflowRunLookup,
+    success: WorkspaceCollaborationRun,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.overview, {
+    payload: WorkflowLookup,
+    success: WorkflowOverview,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.skills, {
+    payload: WorkflowLookup,
+    success: WorkflowSkillCatalog,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.save, {
+    payload: WorkflowSave,
+    success: WorkflowVersion,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.preview, {
+    payload: WorkflowPreview,
+    success: WorkflowPreviewResult,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.start, {
+    payload: WorkflowStart,
+    success: WorkspaceCollaborationRun,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.control, {
+    payload: WorkflowControl,
+    success: WorkspaceCollaborationRun,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AGENT_CONTROL_WS_METHODS.attention, {
+    payload: WorkspaceAttentionLookup,
+    success: WorkspaceAttentionOverview,
+    stream: true,
+    error: Schema.Union([WorkspaceAgentControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AGENT_CONTROL_WS_METHODS.subscribe, {
+    payload: WorkspaceAgentControlLookup,
+    success: WorkspaceAgentControlOverview,
+    stream: true,
+    error: Schema.Union([WorkspaceAgentControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AGENT_CONTROL_WS_METHODS.overview, {
+    payload: WorkspaceAgentControlLookup,
+    success: WorkspaceAgentControlOverview,
+    error: Schema.Union([WorkspaceAgentControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AGENT_CONTROL_WS_METHODS.action, {
+    payload: WorkspaceAgentControlAction,
+    success: WorkspaceAgentControlOverview,
+    error: Schema.Union([WorkspaceAgentControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AGENT_CONTROL_WS_METHODS.evidence, {
+    payload: WorkspaceAgentControlEvidenceInput,
+    success: WorkspaceAgentControlEvidence,
+    error: Schema.Union([WorkspaceAgentControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.subscribe, {
+    payload: WorkspaceTaskInboxLookup,
+    success: WorkspaceTaskInboxOverview,
+    stream: true,
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.overview, {
+    payload: WorkspaceTaskInboxLookup,
+    success: WorkspaceTaskInboxOverview,
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.get, {
+    payload: WorkspaceTaskLookup,
+    success: Schema.NullOr(WorkspaceInboxTask),
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.saveRecipe, {
+    payload: WorkspaceTaskRecipeSave,
+    success: WorkspaceTaskRecipe,
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.submit, {
+    payload: WorkspaceTaskSubmit,
+    success: WorkspaceInboxTask,
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_TASK_INBOX_WS_METHODS.action, {
+    payload: WorkspaceTaskAction,
+    success: WorkspaceInboxTask,
+    error: Schema.Union([WorkspaceTaskInboxError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_RESEARCH_WS_METHODS.status, {
+    payload: WorkspaceResearchLookup,
+    success: WorkspaceResearchStatus,
+    error: Schema.Union([WorkspaceResearchError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_RESEARCH_WS_METHODS.run, {
+    payload: WorkspaceResearchInput,
+    success: WorkspaceResearchCall,
+    error: Schema.Union([WorkspaceResearchError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_RESEARCH_WS_METHODS.configureKey, {
+    payload: WorkspaceResearchKeyInput,
+    success: Schema.Struct({ apiKeyReady: Schema.Boolean }),
+    error: Schema.Union([WorkspaceResearchError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AUTOMATION_WS_METHODS.overview, {
+    payload: WorkspaceAutomationLookup,
+    success: WorkspaceAutomationOverview,
+    error: Schema.Union([WorkspaceAutomationError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_AUTOMATION_WS_METHODS.evidence, {
+    payload: WorkspaceAutomationEvidenceInput,
+    success: WorkspaceAutomationEvidence,
+    error: Schema.Union([WorkspaceAutomationError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.goal, {
+    payload: WorkspaceDevelopmentGoalInput,
+    success: WorkspaceDevelopmentState,
+    error: Schema.Union([WorkspaceDevelopmentError, EnvironmentAuthorizationError]),
+  }),
+  WsDevelopmentGetRpc,
+  WsDevelopmentSubscribeRpc,
+  WsDevelopmentConfigureRpc,
+  WsDevelopmentDirectInputRpc,
+  WsDevelopmentReturnControlRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
+  WsServerGetMcpToolsRpc,
+  WsServerGetExtensionsRpc,
+  WsServerManageExtensionRpc,
+  WsConversationPreviewRpc,
+  WsConversationImportRpc,
+  WsConversationExportRpc,
+  WsDesignImageUploadRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsGeminiAuthBeginRpc,
+  WsDeepSeekConnectRpc,
+  WsAntseedConnectRpc,
+  WsProviderAccountLoginRpc,
   WsGeminiAuthCompleteRpc,
   WsGeminiAuthCancelRpc,
   WsServerUpdateServerRpc,

@@ -43,6 +43,8 @@ export type RequestWorkspaceCollaborationRunInput =
   CommandInput<"project.collaboration.run.request">;
 export type CancelWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.cancel">;
 export type AnswerWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.answer">;
+export type ReviewWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.review">;
+export type VerifyWorkspaceCollaborationRunInput = CommandInput<"project.collaboration.run.verify">;
 export type InterjectWorkspaceCollaborationRunInput =
   CommandInput<"project.collaboration.run.interject">;
 export type UpsertWorkspaceScheduleInput = CommandInput<"project.schedule.upsert">;
@@ -293,6 +295,30 @@ export const answerWorkspaceCollaborationRun: (
     });
   },
 );
+
+export const reviewWorkspaceCollaborationRun = Effect.fn(
+  "EnvironmentCommands.reviewWorkspaceCollaborationRun",
+)(function* (input: ReviewWorkspaceCollaborationRunInput) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "project.collaboration.run.review",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const verifyWorkspaceCollaborationRun = Effect.fn(
+  "EnvironmentCommands.verifyWorkspaceCollaborationRun",
+)(function* (input: VerifyWorkspaceCollaborationRunInput) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "project.collaboration.run.verify",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
 
 export const interjectWorkspaceCollaborationRun: (
   input: InterjectWorkspaceCollaborationRunInput,

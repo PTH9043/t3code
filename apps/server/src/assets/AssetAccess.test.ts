@@ -31,6 +31,71 @@ const testLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
+  it.effect(
+    "downloads non-preview files with an exact capability and preserves the file name",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-asset-download-" });
+        const fileName = "한글 자료.zip";
+        const archivePath = path.join(root, fileName);
+        yield* fileSystem.writeFile(archivePath, new Uint8Array([80, 75, 3, 4, 0, 255]));
+        yield* fileSystem.writeFileString(path.join(root, "sibling.txt"), "private sibling");
+        const resource = {
+          _tag: "workspace-file" as const,
+          threadId: ThreadId.make("thread-1"),
+          path: archivePath,
+        };
+        const previewError = yield* issueAssetUrl({ resource, workspaceRoot: root }).pipe(
+          Effect.flip,
+        );
+        expect(previewError._tag).toBe("AssetPreviewTypeValidationError");
+        const result = yield* issueAssetUrl({
+          resource: { ...resource, download: true },
+          workspaceRoot: root,
+        });
+        const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separatorIndex = suffix.indexOf("/");
+        const token = suffix.slice(0, separatorIndex);
+        const download = yield* resolveAsset(token, suffix.slice(separatorIndex + 1));
+        expect(download).toEqual({
+          kind: "file",
+          path: yield* fileSystem.realPath(archivePath),
+          downloadName: fileName,
+        });
+        expect(yield* resolveAsset(token, "sibling.txt")).toBeNull();
+        expect(yield* resolveAsset(token, "../" + encodeURIComponent(fileName))).toBeNull();
+        expect(yield* resolveAsset(`${token}tampered`, encodeURIComponent(fileName))).toBeNull();
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects downloads outside the thread workspace and missing files", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-download-root-" });
+      const outside = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-download-outside-" });
+      const file = path.join(outside, "archive.zip");
+      yield* fileSystem.writeFileString(file, "outside");
+      const resource = {
+        _tag: "workspace-file" as const,
+        threadId: ThreadId.make("thread-1"),
+        path: file,
+        download: true,
+      };
+      const outsideError = yield* issueAssetUrl({ resource, workspaceRoot: root }).pipe(
+        Effect.flip,
+      );
+      expect(outsideError._tag).toBe("AssetWorkspacePathValidationError");
+      const missingError = yield* issueAssetUrl({
+        resource: { ...resource, path: path.join(root, "missing.zip") },
+        workspaceRoot: root,
+      }).pipe(Effect.flip);
+      expect(missingError._tag).toBe("AssetWorkspaceAssetNotFoundError");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("issues workspace URLs that resolve the entry file and sibling assets", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -320,6 +385,35 @@ describe("AssetAccess", () => {
       expect(error.message).toBe("Failed to resolve project favicon.");
       expect(error._tag).toBe("AssetProjectFaviconResolutionError");
       expect(error.cause).toBe(resolutionCause);
+    }).pipe(Effect.provide(testLayer)),
+  );
+  it.effect("signs bounded text preview and original download capabilities separately", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const id = "thread-1-12345678-1234-1234-1234-123456789abc";
+      yield* fileSystem.writeFileString(
+        path.join(config.attachmentsDir, id + ".bin"),
+        "한글 결과\r\n",
+      );
+      const preview = yield* issueAssetUrl({
+        resource: { _tag: "attachment", attachmentId: id, preview: true },
+      });
+      const download = yield* issueAssetUrl({
+        resource: { _tag: "attachment", attachmentId: id, downloadName: "한글 자료.txt" },
+      });
+      const resolve = (relative: string) => {
+        const suffix = relative.slice((ASSET_ROUTE_PREFIX + "/").length);
+        const separator = suffix.indexOf("/");
+        return resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1));
+      };
+      expect(yield* resolve(preview.relativeUrl)).toMatchObject({ kind: "file", preview: true });
+      expect(yield* resolve(download.relativeUrl)).toMatchObject({
+        kind: "file",
+        downloadName: "한글 자료.txt",
+      });
+      expect(preview.relativeUrl).not.toBe(download.relativeUrl);
     }).pipe(Effect.provide(testLayer)),
   );
 });

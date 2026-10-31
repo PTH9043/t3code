@@ -1,4 +1,14 @@
-import { ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
+import { WORKSPACE_WORKFLOW_WS_METHODS } from "@t3tools/contracts";
+import {
+  WORKSPACE_AGENT_CONTROL_WS_METHODS,
+  WORKSPACE_TASK_INBOX_WS_METHODS,
+} from "@t3tools/contracts";
+import {
+  ORCHESTRATION_WS_METHODS,
+  WORKSPACE_DEVELOPMENT_WS_METHODS,
+  WORKSPACE_AUTOMATION_WS_METHODS,
+  WORKSPACE_RESEARCH_WS_METHODS,
+} from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import {
@@ -12,6 +22,119 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
+    workflowRun: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workflow-run",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.getRun,
+      idleTtlMs: 0,
+    }),
+    workspaceWorkflows: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workflows",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.overview,
+      staleTimeMs: 1_000,
+    }),
+    workflowSkills: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workflow-skills",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.skills,
+      idleTtlMs: 0,
+    }),
+    saveWorkflow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workflow:save",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.save,
+    }),
+    previewWorkflow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workflow:preview",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.preview,
+    }),
+    startWorkflow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workflow:start",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.start,
+    }),
+    controlWorkflow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workflow:control",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.control,
+    }),
+    workspaceAttention: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:attention",
+      tag: WORKSPACE_AGENT_CONTROL_WS_METHODS.attention,
+    }),
+    workspaceAgentControl: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:agent-control",
+      tag: WORKSPACE_AGENT_CONTROL_WS_METHODS.subscribe,
+    }),
+    actOnAgentControl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:agent-control",
+      tag: WORKSPACE_AGENT_CONTROL_WS_METHODS.action,
+    }),
+    agentControlEvidence: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:agent-control:evidence",
+      tag: WORKSPACE_AGENT_CONTROL_WS_METHODS.evidence,
+      idleTtlMs: 0,
+    }),
+    taskInbox: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:task-inbox",
+      tag: WORKSPACE_TASK_INBOX_WS_METHODS.subscribe,
+    }),
+    taskInboxTask: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:task-inbox:task",
+      tag: WORKSPACE_TASK_INBOX_WS_METHODS.get,
+      staleTimeMs: 1000,
+      idleTtlMs: 0,
+    }),
+    saveTaskRecipe: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:task-inbox:recipe",
+      tag: WORKSPACE_TASK_INBOX_WS_METHODS.saveRecipe,
+    }),
+    submitInboxTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:task-inbox:submit",
+      tag: WORKSPACE_TASK_INBOX_WS_METHODS.submit,
+    }),
+    actOnInboxTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:task-inbox:action",
+      tag: WORKSPACE_TASK_INBOX_WS_METHODS.action,
+    }),
+    workspaceResearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workspace-research",
+      tag: WORKSPACE_RESEARCH_WS_METHODS.status,
+      staleTimeMs: 1_000,
+    }),
+    runWorkspaceResearch: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-research:run",
+      tag: WORKSPACE_RESEARCH_WS_METHODS.run,
+    }),
+    configureResearchKey: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-research:key",
+      tag: WORKSPACE_RESEARCH_WS_METHODS.configureKey,
+    }),
+    workspaceAutomation: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workspace-automation",
+      tag: WORKSPACE_AUTOMATION_WS_METHODS.overview,
+      staleTimeMs: 1_000,
+    }),
+    workspaceAutomationEvidence: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:workspace-automation:evidence",
+      tag: WORKSPACE_AUTOMATION_WS_METHODS.evidence,
+      idleTtlMs: 0,
+    }),
+    developmentGoal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-development:goal",
+      tag: WORKSPACE_DEVELOPMENT_WS_METHODS.goal,
+    }),
+    workspaceDevelopment: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:workspace-development",
+      tag: WORKSPACE_DEVELOPMENT_WS_METHODS.subscribe,
+    }),
+    configureDevelopment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-development:configure",
+      tag: WORKSPACE_DEVELOPMENT_WS_METHODS.configure,
+    }),
+    directDevelopmentInput: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-development:direct",
+      tag: WORKSPACE_DEVELOPMENT_WS_METHODS.directInput,
+    }),
+    returnDevelopmentControl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:workspace-development:return",
+      tag: WORKSPACE_DEVELOPMENT_WS_METHODS.returnControl,
+    }),
     threadTokenUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:thread-token-usage",
       tag: ORCHESTRATION_WS_METHODS.getThreadTokenUsage,

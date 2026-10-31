@@ -3327,6 +3327,9 @@ export default function Sidebar() {
                     render={
                       <SidebarMenuButton
                         aria-label="프로젝트별 대화 필터"
+                        data-file-drop-project={scopedProjectGroup?.id}
+                        data-file-drop-group="true"
+                        data-file-drop-environment={scopedProjectGroup?.environmentId}
                         className="min-w-0 flex-1 ps-[calc(var(--sidebar-row-content-inset)-1px)] focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                       />
                     }
@@ -3357,6 +3360,9 @@ export default function Sidebar() {
                         return (
                           <MenuRadioItem
                             key={scopeKey}
+                            data-file-drop-project={project.id}
+                            data-file-drop-group="true"
+                            data-file-drop-environment={project.environmentId}
                             value={scopeKey}
                             closeOnClick
                             className="h-8 min-h-8 px-1 py-0 text-sm font-medium [&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"

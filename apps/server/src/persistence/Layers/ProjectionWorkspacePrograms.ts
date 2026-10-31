@@ -6,6 +6,7 @@ import {
   WorkspaceIncidentStatus,
   WorkspaceProgram,
   WorkspaceProgramHealthCheck,
+  WorkspaceProgramHubMemory,
   WorkspaceProgramId,
   WorkspaceProgramIntegrity,
   WorkspaceProgramRun,
@@ -30,6 +31,7 @@ const ProgramDbRow = WorkspaceProgram.mapFields(
     healthCheck: Schema.NullOr(Schema.fromJsonString(WorkspaceProgramHealthCheck)),
     errorPatterns: Schema.fromJsonString(Schema.Array(Schema.String)),
     integrity: Schema.fromJsonString(WorkspaceProgramIntegrity),
+    hubMemory: Schema.fromJsonString(WorkspaceProgramHubMemory),
     enabled: Schema.Number,
   }),
 );
@@ -70,6 +72,7 @@ const encodeHealthCheck = Schema.encodeUnknownSync(
   Schema.fromJsonString(WorkspaceProgramHealthCheck),
 );
 const encodeIntegrity = Schema.encodeUnknownSync(Schema.fromJsonString(WorkspaceProgramIntegrity));
+const encodeHubMemory = Schema.encodeUnknownSync(Schema.fromJsonString(WorkspaceProgramHubMemory));
 const encodeStatuses = Schema.encodeUnknownSync(
   Schema.fromJsonString(Schema.Array(WorkspaceIncidentStatus)),
 );
@@ -82,6 +85,7 @@ const make = Effect.gen(function* () {
     environment_variable_names_json AS "environmentVariableNames",
     start_policy AS "startPolicy", health_check_json AS "healthCheck",
     error_patterns_json AS "errorPatterns", enabled, integrity_json AS "integrity",
+    hub_memory_json AS "hubMemory",
     created_at AS "createdAt", updated_at AS "updatedAt"
   `;
   const runColumns = sql`
@@ -200,13 +204,13 @@ const make = Effect.gen(function* () {
       INSERT INTO projection_workspace_programs (
         program_id, project_id, name, command, relative_directory,
         environment_variable_names_json, start_policy, health_check_json,
-        error_patterns_json, enabled, integrity_json, created_at, updated_at
+        error_patterns_json, enabled, integrity_json, hub_memory_json, created_at, updated_at
       ) VALUES (
         ${program.id}, ${program.projectId}, ${program.name}, ${program.command},
         ${program.relativeDirectory}, ${encodeStringArray(program.environmentVariableNames)},
         ${program.startPolicy}, ${program.healthCheck === null ? null : encodeHealthCheck(program.healthCheck)},
         ${encodeStringArray(program.errorPatterns)}, ${program.enabled ? 1 : 0},
-        ${encodeIntegrity(program.integrity)},
+        ${encodeIntegrity(program.integrity)}, ${encodeHubMemory(program.hubMemory)},
         ${program.createdAt}, ${program.updatedAt}
       )
       ON CONFLICT(project_id, program_id) DO UPDATE SET
@@ -215,7 +219,7 @@ const make = Effect.gen(function* () {
         environment_variable_names_json = excluded.environment_variable_names_json,
         start_policy = excluded.start_policy, health_check_json = excluded.health_check_json,
         error_patterns_json = excluded.error_patterns_json, enabled = excluded.enabled,
-        integrity_json = excluded.integrity_json,
+        integrity_json = excluded.integrity_json, hub_memory_json = excluded.hub_memory_json,
         updated_at = excluded.updated_at
     `.pipe(
       Effect.asVoid,

@@ -1,0 +1,704 @@
+{
+  "version": 1,
+  "capturedAt": "2026-09-12T12:41:20.223Z",
+  "status": "candidate evidence for human review; source expectations are fixed, chunk choices are not yet human-approved",
+  "corpusCapturedAt": "2026-09-12T12:05:53.262Z",
+  "corpusSha256": "7c74301ccfe58808f84916300c1baccad907e3a5dcfe966a938cdca3b94e673c",
+  "sources": [
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "hub-native-audit-2026-09-12",
+      "title": "허브 메모리 C++ 행 디코딩 성능 개선과 기능점검·실측 검증 2026-09-12",
+      "contentSha256": "5d07dacf7f93f49a45dc7b67ba4e776757401b3581ef8ca55c2686ed4f368568",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "0dd66dc2855314f2e3b65b4c1bac19478135c353b06587c4bdc80fc5af7d56c8",
+          "content": "현재 운영 구조: 데이터 본체는 Arrow IPC 바이너리 mmap이며 JSON은 작은 설정·검증 매니페스트와 변환 이후 journal tail에 사용한다. C++ Windows Job 가드는 suspended 생성 → Job 편입 → resume와 커밋 제한·중지 시 자식 종료를 유지한다. C++ RowIndex는 프로세스 내부 문자열 인덱스이고 primitive 행 디코더와 별개다. 확장이 없는 환경/지원하지 않는 자료형은 호환 경로를 유지한다.\n\n2026-09-12 후속 사용자 지시 \"성능 개선 적용해라\"를 완료했다. C++는 이미 최적화된 x64 기계어로 실행되며, 추가 어셈블리 재작성은 하지 않았다. 병목을 측정한 뒤 행마다 Table.slice().to_pylist()로 임시 테이블/목록을 만들던 경로를 제거했다.\n\n현재 구현: native/hub-memory/rows.h에서 primitive Arrow 컬럼을 최종 Python dict로 직접 디코드. 선택 마스크를 디코딩 전에 적용하고 최대 2,048행씩 반환. 디코드된 전체 데이터 캐시는 없다. 복합/시간/decimal/dictionary/extension 타입은 PyArrow 의미를 유지하고 단건은 캐시한 컬럼 scalar로 접근한다. Dataset.row_backend와 RowIndex.backend는 별개다. 기존 조회/get/values/items 호출에 자동 적용, 구형 확장/미설치 환경도 호환. 운영 venv .pyd 재빌드 완료이며 연구 프로세스는 다음 실행부터 적용된다.\n\n기존 C++ 버전 대비 실측: 10만 행, 64바이트 키, 중복 10%, primitive 2/19컬럼, variant별 새 프로세스 5회 교차 실행. 조회 1,000회 중앙값 2컬럼 8.532→1.419 ms(6.0배), 19컬럼 61.816→5.897 ms(10.5배). 전체 순회 45.767→33.326 ms(27% 감소), 176.026→101.279 ms(42% 감소). 초기화는 16.22→16.75 ms / 17.95→17.20 ms; 리더+인덱스 private 증가 9,838,592→9,945,088 B / 9,924,608→9,920,512 B. checksum 모두 동일. 이는 해당 합성 경로의 개선이며 전체 연구 속도 10.5배를 뜻하지 않는다. 이전 단계의 \"단건 조회가 소폭 느려졌다\"는 기록은 이번 최적화 이전의 역사적 결과다.\n\n집중 51"
+        },
+        {
+          "chunkId": "1",
+          "contentSha256": "e12e484307800937d9f88c71ad862eee36ad50886de779c339a0677f8240cbe1",
+          "content": "s / 17.95→17.20 ms; 리더+인덱스 private 증가 9,838,592→9,945,088 B / 9,924,608→9,920,512 B. checksum 모두 동일. 이는 해당 합성 경로의 개선이며 전체 연구 속도 10.5배를 뜻하지 않는다. 이전 단계의 \"단건 조회가 소폭 느려졌다\"는 기록은 이번 최적화 이전의 역사적 결과다.\n\n집중 51 passed(허브 46 + 실제 소비 코드 5), 핵심 Python ruff 통과. signed/unsigned 경계값·null·Unicode/NUL·float·binary·chunk/slice·수명·범위·복합 자료형 및 실제 블록 선택 결과 동등성 확인. 17:35 KST 운영 T3 임시 프로그램에서 backend=cpp, rowBackend=cpp, mmap 결과, 512 MiB 커밋 제한, 중지 시 가드와 Python 자식 소멸 확인 후 임시 프로그램 제거. 웹 5733/백엔드 13773 HTTP 200, 데스크톱 창 정상. 거래·데이터·실행 설정 변경 및 전체 연구 강제 재시작 없음.\n\n원본: D:/__NewAutoUsage/docs/internals/hub-memory-feasibility-2026-09-12.md 10절, D:/__OnChainBot/docs/hub_memory_phase1_2_receipt_2026-09-12_ko.md, D:/__OnChainBot/native/hub-memory/target/row-benchmark.json, D:/__NewAutoUsage/.t3/hub-native-verification/row-live-result.json.\n\n## 10. 행 디코딩 추가 성능 개선 (2026-09-12)\n\n사용자가 추가 성능 개선을 지시했다. C++는 이미 x64 기계어로 컴파일되어 실행된다. 이번에는 행을 한 건 읽을 때마다 `Table.slice().to_pylist()`로 중간 테이블·목록을 만들던 비용을 제거했다. MemeScan `native/hub-memory/rows.h`의 C++ 행 디코더가 primitive 컬럼을 최종 Python dict로 변환한다. 전체 순회는 선택 마스크를 먼저 적용하고 최대 2,048행 단위로 반환하며 전체 디코드 결과를 캐시하지 않는다. 기존 `RowIndex.get`, 인덱싱, `values/items` 호출에 자동 적용된다."
+        },
+        {
+          "chunkId": "2",
+          "contentSha256": "7a9881ddde50c8c05c2a953534bb0470179b8566a912d183bc5ebba3b752f485",
+          "content": "MemeScan `native/hub-memory/rows.h`의 C++ 행 디코더가 primitive 컬럼을 최종 Python dict로 변환한다. 전체 순회는 선택 마스크를 먼저 적용하고 최대 2,048행 단위로 반환하며 전체 디코드 결과를 캐시하지 않는다. 기존 `RowIndex.get`, 인덱싱, `values/items` 호출에 자동 적용된다.\n\n복합·시간·decimal·dictionary·extension 타입의 의미는 PyArrow가 유지한다. 이 경로의 단건 조회도 캐시한 컬럼에서 scalar를 읽는다. `Dataset.row_backend`와 `RowIndex.backend`를 별도로 확인할 수 있다. 옛 확장이나 확장 없는 환경도 호환한다. 운영 Python/PyArrow 환경으로 `.pyd` 재빌드 완료; 기존 연구 프로세스는 다음 시작부터 새 코드를 읽는다.\n\n| 기존 C++ 버전 대비 중앙값 | 2컬럼 | 19컬럼 |\n|---|---:|---:|\n| 조회 1,000회 | 8.532 → 1.419 ms (6.0배) | 61.816 → 5.897 ms (10.5배) |\n| 전체 순회 | 45.767 → 33.326 ms (27% 감소) | 176.026 → 101.279 ms (42% 감소) |\n| 리더+인덱스 초기화 | 16.22 → 16.75 ms | 17.95 → 17.20 ms |\n| 초기화 private bytes 증가 | 9,838,592 → 9,945,088 B | 9,924,608 → 9,920,512 B |\n\n10만 행·64바이트 키·중복 10%의 primitive 합성 데이터, variant별 새 프로세스 5회, 교차 실행 순서이며 출력 checksum은 모두 같았다. 이전 C++ 문자열 인덱스를 유지한 상태에서 비교했다. 원시 시행 값·소스 해시: MemeScan `native/hub-memory/target/row-benchmark.json`. 이 수치를 전체 연구 처리량 개선으로 해석하지 않는다.\n\n집중 테스트 51개 통과(허브 46, 실제 소비 코드 5), 핵심 Python ruff 통과. 17:35 KST 운영 서버의 임시 프로그램에서 `backend=cpp`와 `rowBackend=cpp`, mmap 결과, 512 MiB 캡, 중지 후 가드·Python 소멸 및 임시 프로그램 삭제를 확인했다. 웹·백엔드 HTTP 200과 데스크톱 창 정상. 거래·데이터·실행"
+        },
+        {
+          "chunkId": "3",
+          "contentSha256": "0c50a7b6b0f3be71399608f301489f3bda8d1d272efca7cc4fa5ee88b975ab92",
+          "content": "1개 통과(허브 46, 실제 소비 코드 5), 핵심 Python ruff 통과. 17:35 KST 운영 서버의 임시 프로그램에서 `backend=cpp`와 `rowBackend=cpp`, mmap 결과, 512 MiB 캡, 중지 후 가드·Python 소멸 및 임시 프로그램 삭제를 확인했다. 웹·백엔드 HTTP 200과 데스크톱 창 정상. 거래·데이터·실행 설정은 변경하지 않았다. 증거: `.t3/hub-native-verification/row-live-result.json`.\n\n\n원시 측정 및 운영 검증:\n{\n  \"benchmark\": {\n    \"at\": \"2026-09-12T08:32:37.594582+00:00\",\n    \"rows\": 100000,\n    \"key_bytes\": 64,\n    \"duplicates_percent\": 10,\n    \"baseline_sha256\": \"c56ad69f4b38225cc14cc9c693eda6abfbeda046576c167588e51d50a4ccf0f2\",\n    \"current_sha256\": \"f0190e25a7c3b4b3d227f8592f2fc4d8316228ed9f3126e10a89e6aef7b3a81f\",\n    \"cases\": [\n      {\n        \"columns\": 2,\n        \"medians\": {\n          \"before\": {\n            \"build_ms\": 16.22019999922486,\n            \"lookup_1000_ms\": 8.531899999070447,\n            \"iteration_ms\": 45.7672000011371,\n            \"reader_index_private_bytes\": 9838592\n          },\n          \"after\": {\n            \"build_ms\": 16.74769999954151,\n            \"lookup_1000_ms\": 1.4193999995768536,\n            \"iteration_ms\": 33.32570000202395,\n            \"reader_index_private_bytes\": 9945088\n          }\n        },\n        \"trials\": [\n          {\n            \"variant\": \"before\","
+        },
+        {
+          "chunkId": "4",
+          "contentSha256": "c10193cd1895db95dcdd456e1477670b8a88cb0a78cc250341f7cfd5f919217d",
+          "content": "68536,\n            \"iteration_ms\": 33.32570000202395,\n            \"reader_index_private_bytes\": 9945088\n          }\n        },\n        \"trials\": [\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 16.22019999922486,\n            \"lookup_1000_ms\": 8.471900000586174,\n            \"iteration_ms\": 46.59929999979795,\n            \"reader_index_private_bytes\": 9555968,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.74769999954151,\n            \"lookup_1000_ms\": 1.0987999994540587,\n            \"iteration_ms\": 33.46679999958724,\n            \"reader_index_private_bytes\": 9814016,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.751099999964936,\n            \"lookup_1000_ms\": 1.4193999995768536,\n            \"iteration_ms\": 32.63929999957327,"
+        },
+        {
+          "chunkId": "5",
+          "contentSha256": "e3ed490664f56bcaa70c8ce8c560eb476135c8f6858a876860d5fec4788ace66",
+          "content": "},\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.751099999964936,\n            \"lookup_1000_ms\": 1.4193999995768536,\n            \"iteration_ms\": 32.63929999957327,\n            \"reader_index_private_bytes\": 9879552,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 15.941699999530101,\n            \"lookup_1000_ms\": 8.721300000615884,\n            \"iteration_ms\": 45.7672000011371,\n            \"reader_index_private_bytes\": 9916416,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 16.2447999973665,\n            \"lookup_1000_ms\": 8.156700001563877,\n            \"iteration_ms\": 45.05380000045989,\n            \"reader_index_private_bytes\": 9936896,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,"
+        },
+        {
+          "chunkId": "6",
+          "contentSha256": "9e6076fca5fba28cec6c8234f894df7ea9cb9325c57c9be850810e048c47b66f",
+          "content": "teration_ms\": 45.05380000045989,\n            \"reader_index_private_bytes\": 9936896,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 17.615400000067893,\n            \"lookup_1000_ms\": 1.4431999989028554,\n            \"iteration_ms\": 31.64449999894714,\n            \"reader_index_private_bytes\": 10031104,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 15.595100001519313,\n            \"lookup_1000_ms\": 1.1230999989493284,\n            \"iteration_ms\": 33.32570000202395,\n            \"reader_index_private_bytes\": 9945088,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\":"
+        },
+        {
+          "chunkId": "7",
+          "contentSha256": "5e73e05f0e5f52c634b8de22b7c0223de797d85945a364440bcb51bec25d9d7d",
+          "content": "\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 15.451200000825338,\n            \"lookup_1000_ms\": 8.531899999070447,\n            \"iteration_ms\": 47.1285000021453,\n            \"reader_index_private_bytes\": 9838592,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 16.38000000093598,\n            \"lookup_1000_ms\": 9.935099998983787,\n            \"iteration_ms\": 44.39230000207317,\n            \"reader_index_private_bytes\": 9797632,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.693000001396285,\n            \"lookup_1000_ms\": 1.5915999974822626,\n            \"iteration_ms\": 36.42980000222451,"
+        },
+        {
+          "chunkId": "8",
+          "contentSha256": "714a59fbe371a370645a5ffc900ce31af5c9ac2620ec4374d3f5210df6db4495",
+          "content": "},\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.693000001396285,\n            \"lookup_1000_ms\": 1.5915999974822626,\n            \"iteration_ms\": 36.42980000222451,\n            \"reader_index_private_bytes\": 10014720,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          }\n        ]\n      },\n      {\n        \"columns\": 19,\n        \"medians\": {\n          \"before\": {\n            \"build_ms\": 17.95230000061565,\n            \"lookup_1000_ms\": 61.816299999918556,\n            \"iteration_ms\": 176.02570000235573,\n            \"reader_index_private_bytes\": 9924608\n          },\n          \"after\": {\n            \"build_ms\": 17.19750000120257,\n            \"lookup_1000_ms\": 5.897200000617886,\n            \"iteration_ms\": 101.27850000208127,\n            \"reader_index_private_bytes\": 9920512\n          }\n        },\n        \"trials\": [\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 17.95230000061565,\n            \"lookup_1000_ms\": 59.25479999859817,\n            \"iteration_ms\": 176.02570000235573,"
+        },
+        {
+          "chunkId": "9",
+          "contentSha256": "2337c8f7ac7ecb373816e823364aeb2df56f1f42269a96c8e8b4e5084b08d202",
+          "content": "[\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 17.95230000061565,\n            \"lookup_1000_ms\": 59.25479999859817,\n            \"iteration_ms\": 176.02570000235573,\n            \"reader_index_private_bytes\": 9912320,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 17.19750000120257,\n            \"lookup_1000_ms\": 6.180199998198077,\n            \"iteration_ms\": 101.27850000208127,\n            \"reader_index_private_bytes\": 9920512,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 18.594999997731065,\n            \"lookup_1000_ms\": 5.681100003130268,\n            \"iteration_ms\": 99.82499999750871,\n            \"reader_index_private_bytes\": 9920512,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,"
+        },
+        {
+          "chunkId": "10",
+          "contentSha256": "03481bac447a2751af1917596bc6f619b0bf569945784f0c1f894e4fd331ac9c",
+          "content": "iteration_ms\": 99.82499999750871,\n            \"reader_index_private_bytes\": 9920512,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 18.728600000031292,\n            \"lookup_1000_ms\": 64.92660000003525,\n            \"iteration_ms\": 180.11499999920488,\n            \"reader_index_private_bytes\": 9920512,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 15.804999999090796,\n            \"lookup_1000_ms\": 60.69970000316971,\n            \"iteration_ms\": 170.94189999988885,\n            \"reader_index_private_bytes\": 9924608,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\":"
+        },
+        {
+          "chunkId": "11",
+          "contentSha256": "261e9f4180944be62643f7c7f497c3b1335dfe29c6d426bcef57c5b7df887dd0",
+          "content": "4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.57810000324389,\n            \"lookup_1000_ms\": 6.654900000285124,\n            \"iteration_ms\": 105.7286999966891,\n            \"reader_index_private_bytes\": 9916416,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 17.79499999975087,\n            \"lookup_1000_ms\": 5.650999999488704,\n            \"iteration_ms\": 109.03690000122879,\n            \"reader_index_private_bytes\": 9998336,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 15.853699998842785,\n            \"lookup_1000_ms\": 61.816299999918556,\n            \"iteration_ms\": 172.8809000014735,"
+        },
+        {
+          "chunkId": "12",
+          "contentSha256": "084cb1c0a826882d2fb1fec5a9ad99f756a9ac41b3f23349658350d32298c67e",
+          "content": ",\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 15.853699998842785,\n            \"lookup_1000_ms\": 61.816299999918556,\n            \"iteration_ms\": 172.8809000014735,\n            \"reader_index_private_bytes\": 9949184,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"before\",\n            \"build_ms\": 18.88929999768152,\n            \"lookup_1000_ms\": 69.39950000014505,\n            \"iteration_ms\": 184.39800000123796,\n            \"reader_index_private_bytes\": 9973760,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"pyarrow\"\n          },\n          {\n            \"variant\": \"after\",\n            \"build_ms\": 16.231199999310775,\n            \"lookup_1000_ms\": 5.897200000617886,\n            \"iteration_ms\": 98.78399999797693,\n            \"reader_index_private_bytes\": 9875456,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,"
+        },
+        {
+          "chunkId": "13",
+          "contentSha256": "f84d082a932161c3d7a9867c57a811a349393d99f4e3bd955588fb80bec0d487",
+          "content": "\"iteration_ms\": 98.78399999797693,\n            \"reader_index_private_bytes\": 9875456,\n            \"checksum\": 55030500,\n            \"full_sum\": 4949955000,\n            \"unique_keys\": 90000,\n            \"index_backend\": \"cpp\",\n            \"row_backend\": \"cpp\"\n          }\n        ]\n      }\n    ],\n    \"data_equal\": true\n  },\n  \"live\": {\n    \"at\": \"2026-09-12T08:35:11.118Z\",\n    \"projectId\": \"a6faabb1-10fa-4985-9404-512250af2008\",\n    \"origin\": \"http://127.0.0.1:5733\",\n    \"guard\": {\n      \"ProcessId\": 5308,\n      \"ParentProcessId\": 22020,\n      \"ExecutablePath\": \"D:\\\\__NewAutoUsage\\\\apps\\\\server\\\\dist\\\\hub-memory\\\\win32-x64\\\\t3-hub-guard.exe\",\n      \"CreationDate\": \"/Date(1789202108012)/\"\n    },\n    \"probe\": {\n      \"pid\": 28668,\n      \"backend\": \"cpp\",\n      \"rowBackend\": \"cpp\",\n      \"capMiB\": \"512\",\n      \"smallAllocation\": true,\n      \"largeAllocationDenied\": true,\n      \"dataEqual\": true\n    },\n    \"statusAfterStop\": \"exited\",\n    \"childStopped\": true\n  }\n}\n\n이전 기능 점검·C++ 인덱스 전환 원문: hub-native-audit-original-2026-09-12; 초기 조사: knowledge-d62506c3-99cc-4685-808d-42ad52fd752d."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+      "title": "허브 메모리 C++ 운영·행 디코딩 성능 개선 완료 2026-09-12",
+      "contentSha256": "93fc58a91a873974850b8615e2903645f2f5550b5c80212ab648b3b635f39cdf",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "0dd66dc2855314f2e3b65b4c1bac19478135c353b06587c4bdc80fc5af7d56c8",
+          "content": "현재 운영 구조: 데이터 본체는 Arrow IPC 바이너리 mmap이며 JSON은 작은 설정·검증 매니페스트와 변환 이후 journal tail에 사용한다. C++ Windows Job 가드는 suspended 생성 → Job 편입 → resume와 커밋 제한·중지 시 자식 종료를 유지한다. C++ RowIndex는 프로세스 내부 문자열 인덱스이고 primitive 행 디코더와 별개다. 확장이 없는 환경/지원하지 않는 자료형은 호환 경로를 유지한다.\n\n2026-09-12 후속 사용자 지시 \"성능 개선 적용해라\"를 완료했다. C++는 이미 최적화된 x64 기계어로 실행되며, 추가 어셈블리 재작성은 하지 않았다. 병목을 측정한 뒤 행마다 Table.slice().to_pylist()로 임시 테이블/목록을 만들던 경로를 제거했다.\n\n현재 구현: native/hub-memory/rows.h에서 primitive Arrow 컬럼을 최종 Python dict로 직접 디코드. 선택 마스크를 디코딩 전에 적용하고 최대 2,048행씩 반환. 디코드된 전체 데이터 캐시는 없다. 복합/시간/decimal/dictionary/extension 타입은 PyArrow 의미를 유지하고 단건은 캐시한 컬럼 scalar로 접근한다. Dataset.row_backend와 RowIndex.backend는 별개다. 기존 조회/get/values/items 호출에 자동 적용, 구형 확장/미설치 환경도 호환. 운영 venv .pyd 재빌드 완료이며 연구 프로세스는 다음 실행부터 적용된다.\n\n기존 C++ 버전 대비 실측: 10만 행, 64바이트 키, 중복 10%, primitive 2/19컬럼, variant별 새 프로세스 5회 교차 실행. 조회 1,000회 중앙값 2컬럼 8.532→1.419 ms(6.0배), 19컬럼 61.816→5.897 ms(10.5배). 전체 순회 45.767→33.326 ms(27% 감소), 176.026→101.279 ms(42% 감소). 초기화는 16.22→16.75 ms / 17.95→17.20 ms; 리더+인덱스 private 증가 9,838,592→9,945,088 B / 9,924,608→9,920,512 B. checksum 모두 동일. 이는 해당 합성 경로의 개선이며 전체 연구 속도 10.5배를 뜻하지 않는다. 이전 단계의 \"단건 조회가 소폭 느려졌다\"는 기록은 이번 최적화 이전의 역사적 결과다.\n\n집중 51"
+        },
+        {
+          "chunkId": "1",
+          "contentSha256": "19a638ec1d4adaed83fbf6a430094398aac3ebff8c140c196c6b70563cec358d",
+          "content": "s / 17.95→17.20 ms; 리더+인덱스 private 증가 9,838,592→9,945,088 B / 9,924,608→9,920,512 B. checksum 모두 동일. 이는 해당 합성 경로의 개선이며 전체 연구 속도 10.5배를 뜻하지 않는다. 이전 단계의 \"단건 조회가 소폭 느려졌다\"는 기록은 이번 최적화 이전의 역사적 결과다.\n\n집중 51 passed(허브 46 + 실제 소비 코드 5), 핵심 Python ruff 통과. signed/unsigned 경계값·null·Unicode/NUL·float·binary·chunk/slice·수명·범위·복합 자료형 및 실제 블록 선택 결과 동등성 확인. 17:35 KST 운영 T3 임시 프로그램에서 backend=cpp, rowBackend=cpp, mmap 결과, 512 MiB 커밋 제한, 중지 시 가드와 Python 자식 소멸 확인 후 임시 프로그램 제거. 웹 5733/백엔드 13773 HTTP 200, 데스크톱 창 정상. 거래·데이터·실행 설정 변경 및 전체 연구 강제 재시작 없음.\n\n원본: D:/__NewAutoUsage/docs/internals/hub-memory-feasibility-2026-09-12.md 10절, D:/__OnChainBot/docs/hub_memory_phase1_2_receipt_2026-09-12_ko.md, D:/__OnChainBot/native/hub-memory/target/row-benchmark.json, D:/__NewAutoUsage/.t3/hub-native-verification/row-live-result.json.\n\n과거 단계의 원문: hub-native-index-history-2026-09-12, hub-native-memory-original-2026-09-12. 이전 측정은 그때의 조건으로만 해석한다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d",
+      "title": "허브 메모리 풀 자료조사 (2026-09-12): 프로세스 간 메모리 공유 방식 비교와 T3 허브 적용 권고",
+      "contentSha256": "d46528ebe6a8410777028d1757958d7d9b2dd8b7f66fdf57770e1f95a6f0279a",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "d70b6a47aaa9dc5e20389f2216f6e5214cfd75c1e201526c6c76847bb85f341c",
+          "content": "[2026-09-12 운영 갱신] 아래 자료는 초기 조사/설계 이력이다. 현재 운영은 Arrow mmap + C++ Windows 가드 + 프로세스 내부 C++ 문자열 RowIndex. 최종 결정·수정·성능 및 제약은 hub-native-audit-2026-09-12 및 공용 장기기억 \"허브 메모리 C++ 운영 전환 완료\"를 우선 참조한다.\n\n[이전 기록: C++ 운영 전환 이전의 조사·구현 이력]\n질문: 주축(허브) 프로그램(T3/NewAutoUsage)이 메모리를 관리하고 다른 프로그램(예: __OnChainBot memescan 연구 스크립트 45개, 같은 JSONL을 읽음)이 그 풀을 재사용하게 할 수 있는가? (Windows 11, Python 3.11, 대상 코드는 stdlib json만 사용)\n\n## 핵심 전제\n- CPython 객체(dict/list/str)는 프로세스 간 공유 불가. 공유되는 것은 바이트 버퍼뿐(multiprocessing.shared_memory의 buf/ShareableList). \"허브가 dict를 들고 있고 남이 쓴다\"는 설계는 어떤 도구로도 불가. https://docs.python.org/3/library/multiprocessing.shared_memory.html\n- 가능한 형태는 두 가지: (a) 데이터를 언어 중립 바이트 레이아웃(Arrow/LMDB/mmap)으로 한 번 바꾸고 모든 프로세스가 같은 물리 페이지를 매핑, (b) 허브가 서버가 되어 질의 결과만 돌려줌.\n- Windows는 파일 매핑(section object)으로 물리 페이지를 공유 — 같은 파일을 여러 프로세스가 매핑하면 물리 페이지 1벌. Windows는 spawn만 있고 fork(copy-on-write)가 없어 부모 힙 상속 트릭 불가.\n- JSON→dict 팽창은 파일 대비 수 배(~7배 보고). 빈 dict 240B, bool 28B. 2026-09-12 관측된 47 GB의 대부분은 데이터가 아니라 \"Python 객체 오버헤드 × 45 중복\".\n\n## 방식 비교 (적합도)\n1. Arrow IPC(Feather v2) 파일 + pyarrow.memory_map — 1순위. 컬럼 버퍼를 파일 그대로 매핑, 읽을 때 새 할당 없음, 허브 프로세스 불필요(OS 페이지 캐시가 허브). 코드 변경은 \"dict 순회 → RecordBatch/컬럼 접근\"으로 국한. .to_pylist()로 되돌리면"
+        },
+        {
+          "chunkId": "1",
+          "contentSha256": "d2a6cadf48b237250ee91ba08287998d390df1dbc8aae0c5182a3f4d262ab8b0",
+          "content": "중복\".\n\n## 방식 비교 (적합도)\n1. Arrow IPC(Feather v2) 파일 + pyarrow.memory_map — 1순위. 컬럼 버퍼를 파일 그대로 매핑, 읽을 때 새 할당 없음, 허브 프로세스 불필요(OS 페이지 캐시가 허브). 코드 변경은 \"dict 순회 → RecordBatch/컬럼 접근\"으로 국한. .to_pylist()로 되돌리면 팽창 복귀하므로 금지. 갱신은 새 파일 쓰기 후 이름 교체(열린 매핑은 truncate 불가). https://arrow.apache.org/docs/python/ipc.html\n2. LMDB(py-lmdb) — 키→레코드 랜덤 액세스가 주 패턴이면 2순위. 단일 파일 mmap, readers don't block writers, buffers=True zero-copy. Windows는 map_size 즉시 선할당, max_readers 기본 126, writemap 혼용 금지. https://lmdb.readthedocs.io/en/release/\n3. SQLite WAL + PRAGMA mmap_size — stdlib만 허용될 때의 차선. 읽기 전용 페이지를 OS 페이지 캐시와 공유. 분석 스캔 성능은 1·2보다 낮음. https://sqlite.org/mmap.html\n4. Arrow Flight 허브 — \"중앙 서버가 질의 처리\"가 꼭 필요할 때만. 로컬에서도 gRPC 복사 발생.\n5. Ray object store — Windows beta, numpy만 zero-copy, 독립 프로그램을 Ray 태스크로 재구조화 필요 → 비권장.\n- 탈락: Plasma(Arrow 10 deprecated, 12에서 제거), Vaex(메타 패키지 비활성), Redis/Dragonfly(값 복사 모델, Windows 공식 빌드 없음), Zarr(수치 배열용). DuckDB는 공유 메모리로는 부적합(프로세스별 버퍼 캐시, mmap 아님)이지만 JSONL→Parquet/IPC 변환 도구로는 최적.\n- multiprocessing.shared_memory: Windows에선 모든 핸들이 닫히면 블록 소멸 → 허브가 항상 살아 있어야 함. 바이트만 넣을 수 있음.\n\n## JSONL → 컬럼 변환 도구\n- DuckDB read_ndjson + COPY (FORMAT PARQUET): NDJSON 병렬 읽기."
+        },
+        {
+          "chunkId": "2",
+          "contentSha256": "b681d6064024274e28b49d7f5b9ff38c7f8dd64d98afee92b972a283c59525c6",
+          "content": "L→Parquet/IPC 변환 도구로는 최적.\n- multiprocessing.shared_memory: Windows에선 모든 핸들이 닫히면 블록 소멸 → 허브가 항상 살아 있어야 함. 바이트만 넣을 수 있음.\n\n## JSONL → 컬럼 변환 도구\n- DuckDB read_ndjson + COPY (FORMAT PARQUET): NDJSON 병렬 읽기. https://duckdb.org/docs/current/data/json/loading_json.html\n- Polars scan_ndjson().sink_ipc()/sink_parquet(): lazy, RAM보다 큰 입력도 스트리밍. https://docs.pola.rs/api/python/stable/reference/api/polars.scan_ndjson.html\n- pyarrow.json.open_json: 블록 단위 스트리밍(첫 블록에서 타입 고정). https://arrow.apache.org/docs/python/json.html\n- 레코드마다 스키마가 다른 필드는 string(원문 JSON) 컬럼으로 두고 필요 시 파싱.\n\n## 메모리 예산 강제 (Windows) — 허브(T3 프로그램 모니터링)가 맡을 부분\n- Job Object JOB_OBJECT_LIMIT_PROCESS_MEMORY(0x100)/JOB_OBJECT_LIMIT_JOB_MEMORY(0x200): 커밋 한도. 초과 시 할당 실패(Python MemoryError), 프로세스를 죽이지 않음. https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information\n- JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION: 소프트 한도, 초과해도 계속 실행하며 통지. 통지 후 QueryInformationJobObject(JobObjectLimitViolationInformation) 호출해야 다음 통지가 옴.\n- 한도는 커밋만 셈 → 읽기 전용 파일 매핑(페이지 캐시)은 안 잡힘 = mmap 설계와 궁합 좋음.\n- Python resource 모듈은 Unix 전용. tracemalloc은 Python 할당기만 추적. 커밋은 psutil/GetProcessMemoryInfo PrivateUsage로 로그.\n\n## 허브(T3) 역할 정의 권고\n-"
+        },
+        {
+          "chunkId": "3",
+          "contentSha256": "0d8a98404d652d50b764cf1eb6a139b531fbe9b3a863d67ff2ce60fef674c3ff",
+          "content": "다음 통지가 옴.\n- 한도는 커밋만 셈 → 읽기 전용 파일 매핑(페이지 캐시)은 안 잡힘 = mmap 설계와 궁합 좋음.\n- Python resource 모듈은 Unix 전용. tracemalloc은 Python 할당기만 추적. 커밋은 psutil/GetProcessMemoryInfo PrivateUsage로 로그.\n\n## 허브(T3) 역할 정의 권고\n- 허브는 \"메모리를 소유\"하는 게 아니라 (1) 공유 데이터 파일(Arrow IPC) 생성·갱신 담당, (2) 메모리 예산 풀: 프로그램별 커밋 상한·동시 실행 슬롯 부여·소프트 통지 수신, (3) 유휴 대기 프로그램은 상태 저장 후 종료시키고 트리거 시 --resume 재기동. T3의 프로그램 모니터링(programs/health/incidents/restart)에 얹는다.\n- memescan 적용 순서: ① 폴링 루프 재파싱 제거(crime_wallet_research_resume.py:95-96), 3중 로드 제거(crime_flap_cost_swing_comparison.py:107-111) ② resource_guard.py에 ProcessMemoryLimit(예 3 GB)+소프트 통지, 프로젝트 동시 연구 수 상한 ③ chain_wallet_research JSONL → Arrow IPC 1벌, 스크립트는 pa.memory_map + ipc.open_file (예상 47 GB → 파일 크기 1벌 수준) ④ sleep(3) 대기 루프 → 저장 후 종료.\n\n교훈: 성공한 선례(Plasma/Ray/Vaex/Arrow Datasets/SQLite/LMDB)는 전부 \"언어 중립 바이트 레이아웃 + OS 페이지 캐시\" 모델이고, 살아 있는 Python dict를 서빙하는 허브는 없다. 허브 프로세스를 두면 허브 사망 시 동반 장애, 요청/응답 복사, named shm 소멸 규칙을 떠안는다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+      "title": "허브 메모리 가능성·적용 결론 (2026-09-12): PoC 실측 16배 감소, T3 적용 3계층 설계",
+      "contentSha256": "c09c28cfdba08010800e5fec71b574f1f24aa513e63549e9a4e30540292195ee",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "825ab83621a0f1ebbb47638bbb165cea53c0686b2249954770a69faa9f58a369",
+          "content": "[2026-09-12 운영 갱신] 아래 자료는 초기 조사/설계 이력이다. 현재 운영은 Arrow mmap + C++ Windows 가드 + 프로세스 내부 C++ 문자열 RowIndex. 최종 결정·수정·성능 및 제약은 hub-native-audit-2026-09-12 및 공용 장기기억 \"허브 메모리 C++ 운영 전환 완료\"를 우선 참조한다.\n\n[이전 기록: C++ 운영 전환 이전의 조사·구현 이력]\n전체 보고서: D:\\__NewAutoUsage\\docs\\internals\\hub-memory-feasibility-2026-09-12.md (문헌 조사는 공용 RAG \"허브 메모리 풀 자료조사\", 계기 진단은 __OnChainBot 장기기억 \"메모리 폭주 진단\").\n\n## 결론\n- 허브 프로세스가 힙(Python dict)을 소유하고 다른 프로그램이 그 객체를 쓰는 형태: 불가(주소공간 분리, CPython 객체 재배치 불가, Windows fork 없음).\n- 허브가 데이터를 1벌만 두고 모든 프로그램이 공유: 가능. Arrow IPC(Feather v2 무압축) 파일 + pyarrow.memory_map → Windows 섹션 객체가 물리 페이지 1벌 공유. \"OS 페이지 캐시 = 허브 메모리\". 허브가 죽어도 리더 무영향.\n- 허브가 메모리 사용을 통제: 가능. Job Object ProcessMemoryLimit/JobMemoryLimit(커밋 하드캡) + NotificationLimit(소프트) + 동시 실행 슬롯. 파일 매핑은 커밋에 안 잡혀 공유 계층과 충돌 없음.\n- T3 적용: 가능하나 3곳 수정 필요(프로그램 스키마, 스폰 경로, 텔레메트리).\n\n## PoC 실측 (이 PC, 2026-09-12, development_positions.jsonl 119 MB / 46,250행 / 37컬럼)\n- list[dict] 파싱(memescan prefix() 동일): 리더당 커밋 506 MB(파일의 4.3배), USS 502 MB, 로드 5.5 s. 리더 3개 = 1,518 MB(시스템 커밋 +1,050 MB 실측).\n- Arrow IPC + memory_map: 리더당 커밋 32 MB(인터프리터+pyarrow 기본 16 MB 포함), USS 28 MB(파일 페이지는 USS에 없음 = 공유 확인), 로드 0.03 s. 리더 3개 = 96 MB. 변환 2.0 s, 파일 63 MB(원본 0.53배), 변환기"
+        },
+        {
+          "chunkId": "1",
+          "contentSha256": "724df40820e410bcb2a3ee4bf1d245009f943777aa309a327dee14661252f729",
+          "content": "3개 = 1,518 MB(시스템 커밋 +1,050 MB 실측).\n- Arrow IPC + memory_map: 리더당 커밋 32 MB(인터프리터+pyarrow 기본 16 MB 포함), USS 28 MB(파일 페이지는 USS에 없음 = 공유 확인), 로드 0.03 s. 리더 3개 = 96 MB. 변환 2.0 s, 파일 63 MB(원본 0.53배), 변환기 피크 577 MB 1회.\n- 리더당 16배 감소. 45개 리더 외삽: 47 GB → 수 GB 이내. 전제: 리더가 .to_pylist()/.to_pydict()로 되돌리지 않고 컬럼/배치 접근.\n- 스크립트: 세션 스크래치패드 hubpoc/poc.py (convert / reader-dict / reader-mmap, 자식 트리 합산 — venv python.exe는 런처 스텁).\n\n## T3(AutoUsage) 현재 구조에서 확인한 사실\n- 스폰: WorkspaceProgramSupervisor.ts:730 startProgram → cmd.exe /d /s /c 를 node-pty(ConPTY)로 실행. Job Object·taskkill 없음 → 손자 프로세스 생존 보장 없음.\n- 환경변수는 이름 허용목록만 통과(programEnvironment :256-279) → 허브 계산값 전달 통로 없음.\n- 텔레메트리: Rust 사이드카(native/resource-monitor)가 RSS·virtual만, 커밋 없음. 모니터링 memory 메트릭 = residentBytes 합.\n- 프로그램 스키마(orchestration.ts:1370-1392)에 자원 한도·데이터셋 필드 없음. 최신 마이그레이션 065, 패턴 050_ProjectionWorkspaceProgramIntegrity.\n- 자율 액션은 restart/stop/start-program, repair-run뿐.\n\n## 적용 설계 3계층\nA. 공유 데이터 계층(허브=변환·게시자): 프로젝트별 공유 데이터셋 {name, sourceGlob(JSONL), outputPath(.arrow)}; polars scan_ndjson→sink_ipc 또는 DuckDB; 갱신은 새 파일 후 원자적 이름 교체(atomicWrite.ts; 열린 매핑 truncate 불가); 프로그램엔 T3_HUB_DATASET_<NAME>=<path>, T3_HUB_MANIFEST 주입(programEnvironment 확장);"
+        },
+        {
+          "chunkId": "2",
+          "contentSha256": "d8ddf62353b696ac2e30c572ae73f96845bb3475a1c3d647f36fb037f58684d8",
+          "content": "L), outputPath(.arrow)}; polars scan_ndjson→sink_ipc 또는 DuckDB; 갱신은 새 파일 후 원자적 이름 교체(atomicWrite.ts; 열린 매핑 truncate 불가); 프로그램엔 T3_HUB_DATASET_<NAME>=<path>, T3_HUB_MANIFEST 주입(programEnvironment 확장); 프로그램 측 어댑터는 env 없으면 JSONL 폴백.\nB. 메모리 예산 계층(허브=통제자): 마이그레이션 066 memory_budget_json {commitLimitMb, softLimitMb, concurrencySlots} + shared_datasets_json; Job Object 가드는 Rust 사이드카에 \"job 하위 스폰+한도+통지\" 추가 권장(차선: ctypes 가드, resource_guard.py 구조); 부수 효과로 손자 kill 문제 해결(KILL_ON_JOB_CLOSE); 텔레메트리에 커밋 추가; 플레이북 액션 pause-program/queue-start; start_policy 슬롯 게이트로 에이전트의 \"전부 재기동\"도 예산 안에서만.\nC. 프로그램 측(memescan): ① 폴링 루프 재파싱 제거(crime_wallet_research_resume.py:95-96), 3중 로드 제거(crime_flap_cost_swing_comparison.py:107-111) ② resource_guard.py ProcessMemoryLimit+소프트 통지 ③ prefix() 호출부를 허브 데이터셋 어댑터로(헬퍼 1곳+순회 코드) ④ sleep(3) 대기 루프 → 저장 후 종료, --resume.\n\n## 권고 순서\n1. C-①·B의 resource_guard 한도(하루, 즉시 수 GB 회수) 2. A 최소판(변환기 CLI+어댑터+폴백, 16배) 3. T3 통합(066, env 주입, 사이드카 Job/커밋, 플레이북) 4. C-④ 대기 루프 제거·슬롯 큐잉.\n\n## 제약\nWindows spawn만; 매핑 파일 truncate 불가→이름 교체; 스키마 가변 필드는 string 컬럼; Job 한도는 커밋만(초과 시 MemoryError→소프트 한도 먼저); 허브 역할은 변환·예산·스케줄이지 메모리 소유가 아님."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "autousage-rag-token-research-2026-09-12",
+      "title": "Grok X 조사 검증 정정 공식 근거 토큰 사용량 영수증 2026-09-12",
+      "contentSha256": "b2fd857e51795df85e10db4ac0a2a1ca1b6e66df2f46adc863ca17be2c72bdbb",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "9e346aef9569b882bb728319ff5e969580169565f33d838010f077d914144a45",
+          "content": "# AutoUsage RAG·토큰 최적화 — Grok/X 수집 및 검증 기록\n\n2026-09-12 KST. 이 문서는 조사 영수증이며 개선 기능의 구현 완료 기록이 아니다.\n최종 판단은 [실행 계획](./rag-token-optimization-plan-2026-09-12.md), Grok의 원래 제안은 [원보고서](./rag-token-grok-report-2026-09-12.md)를 따른다. 둘이 다르면 검증 후 작성한 실행 계획을 우선한다.\n\n## 실제 수집\n\n- 설치 CLI: `grok 1.0.4 (d846eb93d9)`, 실행 결과 모델: `grok-4.6-build`.\n- 17:52 KST에 별도 조사 폴더에서 headless 실행. 공개 자료만 조사하도록 요청하고 코드 변경·셸 실행·하위 에이전트·별도 기억 기능을 사용하지 않았다.\n- 실행 옵션: `--prompt-file`, `--no-subagents`, `--no-memory`, `--permission-mode dontAsk`, `--output-format streaming-json`.\n- 완료 이벤트 기준 **WebSearch 31건**(검색과 페이지 열람 합계), **XSearch 9건**(키워드 검색 5, 의미 검색 1, 스레드 조회 3)을 확인했다. 웹 검색의 x.com 제한만으로 X 검색을 대신한 것이 아니다.\n- 마지막 별도 `web_fetch` 1건은 CLI에서 `User cancelled the execution for tool web_fetch`라는 결과를 남기고 수집 turn이 cancelled로 끝났다. 사용자가 직접 취소했다고 단정하지 않는다. 이 결과는 해당 조회에 한정된다.\n- 수집 세션을 `--resume`하고 웹 검색을 비활성화하여 기존 자료만 정리했다. 추가 도구 호출 **0건**, 최종 `end_turn`, 원보고서 **6,488자**로 완료했다.\n- session: `01a094d1-079b-7d82-bc74-db1986151f82`. 원시 이벤트는 `.t3/rag-token-research-2026-09-12/`에 보관한다. RAG에는 검색·출처·결과 메타데이터를 정리한 영수증을 저장하며 내부 thought 이벤트나 서명은 복제하지 않는다.\n\nX 검색어와 조회 ID:\n\n```text\nprompt caching compaction tool search from:OpenAI OR"
+        },
+        {
+          "chunkId": "1",
+          "contentSha256": "c41f678d7f1564fe1c73716dc1ccb5bc4ac10f0008b960535a6822156843532a",
+          "content": "82`. 원시 이벤트는 `.t3/rag-token-research-2026-09-12/`에 보관한다. RAG에는 검색·출처·결과 메타데이터를 정리한 영수증을 저장하며 내부 thought 이벤트나 서명은 복제하지 않는다.\n\nX 검색어와 조회 ID:\n\n```text\nprompt caching compaction tool search from:OpenAI OR from:AnthropicAI OR from:xai\nprompt caching compaction tool search token efficiency for coding agents\nfrom:AnthropicAI (prompt caching OR compaction OR tool search OR context engineering)\nfrom:OpenAI (prompt caching OR compaction OR tool search)\nfrom:xai (prompt caching OR cached tokens)\n(context engineering OR prompt caching OR compaction) (from:alexalbert__ OR from:thariq OR from:karpathy OR from:swyx OR from:simonw)\nx_thread_fetch: 1911918094106415212\nx_thread_fetch: 1823752104273699216\nx_thread_fetch: 2097049646636171505\n```\n\n웹 수집은 OpenAI/Anthropic/xAI의 캐시·압축·도구 검색·문맥 설계, SQLite FTS5, 하이브리드 검색·재순위 관련 자료를 대상으로 했다. 모든 실제 검색어·페이지 URL은 별도 `grok-evidence.json`의 trace와 AutoUsage RAG의 수집 영수증에 보존했다.\n\n## X 게시물의 사용 범위\n\n| Grok가 반환한 저자·URL | Grok가 보고한 날짜·내용 | 독립 검증 상태 |\n| --- | --- | --- |\n| [Alex Albert](https://x.com/alexalbert__/status/1823752104273699216) | 2024-08-14, 멀티턴 캐시 breakpoint 활용 | 동일 post ID의 native thread fetch 완료 이벤트 확인. 별도 웹 열람은 403, 본문·날짜는 독립 미확인. 현행 공식 캐시 문서로 기술 내용 대조 |\n|"
+        },
+        {
+          "chunkId": "2",
+          "contentSha256": "163eb37c3495c92965ce3258abd9303d0036936f6751f557a435010c12933c3e",
+          "content": "x Albert](https://x.com/alexalbert__/status/1823752104273699216) | 2024-08-14, 멀티턴 캐시 breakpoint 활용 | 동일 post ID의 native thread fetch 완료 이벤트 확인. 별도 웹 열람은 403, 본문·날짜는 독립 미확인. 현행 공식 캐시 문서로 기술 내용 대조 |\n| [Simon Willison](https://x.com/simonw/status/1911918094106415212) | 2025-04-14, 당시 GPT-4.1 캐시 가격 관찰 | native thread fetch 확인, 별도 웹은 403. 당시 가격 주장을 현행 가격으로 채택하지 않음 |\n| [anshuman](https://x.com/anshu_code/status/2097049646636171505) | 2026-09-07, 개인 캐시 비용 측정 | native thread fetch 확인, 별도 웹은 403. 본문·날짜·수치 모두 독립 미확인, 성능 근거로 제외 |\n| [AnthropicAI](https://x.com/AnthropicAI/status/1966236220868247701) | 검색 스니펫에 도구 작성 글 소개 | 웹 검색에서 URL 발견, CLI fetch 취소/별도 웹 403. 원문 미검증 |\n\nnative XSearch 이벤트는 호출명·질의·post ID를 제공하지만 게시물 본문 전체를 NDJSON으로 노출하지 않았다. 따라서 **호출 증거**와 **Grok가 보고한 게시물 내용**을 구분한다. X의 개인 측정은 실험 아이디어로만 사용한다. 현행 기능 판단은 직접 열람한 공식 문서에 근거한다.\n\n## 원보고서에서 수정하거나 채택하지 않은 내용\n\n1. Grok는 “런타임이 사용량 API를 제공하지 않음”이라고 썼지만, 실제 종료 이벤트에는 usage/modelUsage가 있었다. 아래 숫자는 보고서 문장이 아닌 런타임 이벤트에서 추출했다. 모델이 자기 사용량을 모르는 것과 런타임 미보고는 다르다.\n2. “성공당 캐시·reasoning을 합산”이라는 문장은 부분집합 중복 합산을 일으킬 수 있다. provider별 의미를 정규화하여 입력 전체+출력 전체만 더하고, 캐시/추론은 세부 내역으로 둔다.\n3. “캐시가 이미 깨진 시점에는 모델/effort 변경”은 사용자 선택 변경의 근거로 채택하지 않았다. 사용자 선택 모델·추론 수준은"
+        },
+        {
+          "chunkId": "3",
+          "contentSha256": "e34039b08e790f728dfaaf27858d67bd0928e74d5bc42caf1b88bea4b5c34f0b",
+          "content": "임 미보고는 다르다.\n2. “성공당 캐시·reasoning을 합산”이라는 문장은 부분집합 중복 합산을 일으킬 수 있다. provider별 의미를 정규화하여 입력 전체+출력 전체만 더하고, 캐시/추론은 세부 내역으로 둔다.\n3. “캐시가 이미 깨진 시점에는 모델/effort 변경”은 사용자 선택 변경의 근거로 채택하지 않았다. 사용자 선택 모델·추론 수준은 계속 유지한다.\n4. “주입 집합의 고유 경로 수 감소”는 좋은 중복 제거 지표가 아니다. 다양한 필요한 근거가 사라질 수 있다. 중복 구간 감소와 필수 근거 보존·정답 품질로 평가한다.\n5. “중간을 비우고 앞·뒤에 배치”를 일반 규칙으로 적용하지 않는다. 과거 위치 편향 연구를 현재 모델의 보장으로 확대하지 않고, 관련성·구조·안정적인 캐시 접두를 우선한다.\n6. 하이브리드 검색을 첫 단계로 도입하지 않는다. 현재 SQLite/한국어 분석을 유지하고, 이미 확인된 불필요한 기억 주입과 재시도 문제부터 고친다.\n7. Grok가 적은 SQLite 갱신일, 추가 모델 지원 하한, 부가 제품 발표일은 이 계획에서 독립 확인하지 않았으므로 구현 전제에서 제외했다. 가격·절감률은 현행 보장으로 사용하지 않는다.\n\n## 런타임 사용량 영수증\n\n| 요청 | 종료 | input_tokens | cache_read_input_tokens | output_tokens | reasoning_tokens | total_tokens |\n| --- | --- | ---: | ---: | ---: | ---: | ---: |\n| 공개 자료 수집 | cancelled (마지막 fetch) | 172,826 | 371,072 | 3,206 | 2,390 | 547,104 |\n| 기존 자료 종합 | end_turn | 136,915 | 1,408 | 5,306 | 1,949 | 143,629 |\n\n두 이벤트 모두 cache_creation_input_tokens=0. 각 표본은 `input + cache_read + output = total`이며 reasoning을 다시 더하지 않는다. `usage` 이벤트와 동일한 `end.usage`를 중복 집계하지 않는다. CLI가 자체 보고한 금액은 각각 USD 0.57428832, 0.1041658이며 **실제 결제·구독 차감 검증값이 아니다**. 단계별 원본을 유지하고 native 계측의 범위·누계 의미를 확정하기 전 AutoUsage 전체"
+        },
+        {
+          "chunkId": "4",
+          "contentSha256": "a5ff4c110c3abf022de3fcb61c92a953dd6cd74e75083e86cf1f9cf0ee358808",
+          "content": "tal`이며 reasoning을 다시 더하지 않는다. `usage` 이벤트와 동일한 `end.usage`를 중복 집계하지 않는다. CLI가 자체 보고한 금액은 각각 USD 0.57428832, 0.1041658이며 **실제 결제·구독 차감 검증값이 아니다**. 단계별 원본을 유지하고 native 계측의 범위·누계 의미를 확정하기 전 AutoUsage 전체 원장의 정상 집계로 승격하지 않는다.\n\n수집과 종합 사이에는 도구 설정이 달라졌고 두 요청의 cache read가 크게 다르다. 여러 조건이 함께 바뀌었으므로 이를 어떤 단일 최적화의 인과 효과나 일반 절감률로 주장하지 않는다. 같은 session ID만으로 캐시 히트가 보장되지 않는다는 운영상 주의 사례다.\n\n## 직접 대조한 공식 근거\n\n확인일은 모두 2026-09-12다. [실행 계획 6절](./rag-token-optimization-plan-2026-09-12.md)에 각 출처와 적용 범위를 정리했다.\n\n- [OpenAI 캐시](https://developers.openai.com/api/docs/guides/prompt-caching), [OpenAI 압축](https://developers.openai.com/api/docs/guides/compaction)\n- [Anthropic 캐시](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), [문맥 설계](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents), [Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval)\n- [Anthropic 도구 활용](https://www.anthropic.com/engineering/advanced-tool-use), [MCP 실행 결과 처리](https://www.anthropic.com/engineering/code-execution-with-mcp)\n- [xAI 캐시](https://docs.x.ai/developers/advanced-api-usage/prompt-caching/best-practices), [xAI X"
+        },
+        {
+          "chunkId": "5",
+          "contentSha256": "5c7d7313410d6ccd9ea33f9f72756acb2b925b8c657250b5057deb21597cebb6",
+          "content": "ing/advanced-tool-use), [MCP 실행 결과 처리](https://www.anthropic.com/engineering/code-execution-with-mcp)\n- [xAI 캐시](https://docs.x.ai/developers/advanced-api-usage/prompt-caching/best-practices), [xAI X Search](https://docs.x.ai/developers/tools/x-search)\n- [SQLite FTS5](https://sqlite.org/fts5.html)\n\n## 저장·검증 영수증\n\nAutoUsage 프로젝트에 짧은 장기기억과 상세 계획/검증 기록/Grok 원보고서/검색 trace를 각각 저장한다. Grok 원보고서는 위 수정사항을 앞에 붙이고 미검증 자료로 분류한다. 내용·출처·질의 이력을 보존하면서 원문 전체가 매번 장기기억으로 주입되지 않게 구분한다.\n\n실제 저장 결과는 `.t3/rag-token-research-2026-09-12/rag-storage-result.json`에 남긴다. 저장 완료 기록은 본문 일치·FTS 검색·prompt sourceReferences 확인 후에만 작성한다.\n\n2026-09-12 18:06 KST 최초 저장·검증 완료. AutoUsage 프로젝트(`a6faabb1-10fa-4985-9404-512250af2008`)에 프로젝트 범위로 아래 5건을 저장했다.\n\n| 항목 ID | 용도 | 검증 분류 |\n| --- | --- | --- |\n| `autousage-rag-token-memory-2026-09-12` | 짧은 장기기억·다음 구현 순서 | unverified: 제안 효과 미검증 |\n| `autousage-rag-token-design-2026-09-12` | 상세 실행 계획 | unverified: 구현/성과 미검증 |\n| `autousage-rag-token-research-2026-09-12` | 조사·독립 대조·정정 기록 | verified: 명시된 확인 범위와 한계 |\n| `autousage-rag-token-grok-2026-09-12` | 정정 링크가 붙은 Grok 원보고서 | unverified |\n| `autousage-rag-token-trace-2026-09-12` | 실제 검색어·URL·X 도구·사용량 영수증 | verified: 호출 metadata, 검색 결과 전체의"
+        },
+        {
+          "chunkId": "6",
+          "contentSha256": "6209606dbe4f14a78f062c5d6fafd04619cae5abe95307f8a4b67dbf142a02dc",
+          "content": "ied: 명시된 확인 범위와 한계 |\n| `autousage-rag-token-grok-2026-09-12` | 정정 링크가 붙은 Grok 원보고서 | unverified |\n| `autousage-rag-token-trace-2026-09-12` | 실제 검색어·URL·X 도구·사용량 영수증 | verified: 호출 metadata, 검색 결과 전체의 진위 보장 아님 |\n\n5건 모두 API 재조회 본문 일치, FTS 재검색, 각 항목 질의에 대한 prompt sourceReferences 포함을 확인했다. 검증 조합은 includeShared=false, ragLimit=20, maxContextChars=120000이며 모두 truncated=false였다. 별도 자연어 질의 “RAG 관련 기억 선택 토큰 최적화 형식 오류 재시도”에서도 상세 계획이 검색되었다. 이는 실제 모델 전송·모델 답변·절감률 검증이 아니다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-desktop-process-ownership",
+      "title": "개발용 Electron 프로세스 정리의 소유권",
+      "contentSha256": "091a7ef61a52fc6640f48005e851ae4246a4a08dee3569b60a5b11771e457107",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "091a7ef61a52fc6640f48005e851ae4246a4a08dee3569b60a5b11771e457107",
+          "content": "개발 앱 정리에서 이름이나 작업 경로로 프로세스를 찾아 일괄 종료하면 사용 중인 앱 또는 에이전트까지 종료할 수 있다. dev-electron 스크립트의 패턴 기반 오래된 앱 종료를 제거하고 시작 시 확보한 프로세스만 정리한다. 현재 사용 중인 앱의 데이터 디렉터리에 검증 서버를 시작하지 않는다. APPDATA·T3CODE_HOME·포트를 분리한 실제 Electron에서 BrowserWindow API로 최소화·복원·최대화·최대화 해제·소유한 창 닫기 이벤트를 확인했다. 실사용 앱은 CDP로 화면을 확인하고 연결한 브라우저의 close를 호출하지 않는다. Windows native caption overlay의 실제 40px 영역과 탭의 개별 위치까지 확인해야 한다. 물리적 caption 버튼 클릭은 computer-use bridge 부재로 검증하지 못했지만 네이티브 창 동작 이벤트는 검증했다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-desktop-windows-watcher-cpu",
+      "title": "Windows 빌드 폴더 감시기 폭주로 인한 렉과 CPU 100% 수정",
+      "contentSha256": "fa0d9f99cef32ce775fd7668cc937b93111644499ef60cfbefaa231900ef1e2d",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "fa0d9f99cef32ce775fd7668cc937b93111644499ef60cfbefaa231900ef1e2d",
+          "content": "실사용 T3 개발 실행기에서 한 코어 CPU 100.5%를 측정했다. 화면 렌더러는 약 1.9%였고 10초간 50ms 초과 프레임이 없었다. 원인은 fs.watch가 교체된 dist-electron 폴더 자체를 가리키는 rename 알림을 5초간 711900번 전달한 것이었다. 파일명 필터링만으로는 native 감시기 CPU 사용을 막지 못한다. 감시기 두 개를 닫고 기존 파일 확인 타이머를 유지하자 5초간 실행기 CPU 사용시간이 4.86초에서 0초로 줄었다. Windows에서는 필요한 실행 파일 3개만 1초 간격으로 stat 검사하고 다른 플랫폼은 native 감시와 타이머 대체 경로를 사용한다. inode·mtime·크기로 변경을 감지하며 빌드 폴더 교체 중 파일이 빠져 있으면 완성될 때까지 재시작을 미룬다. 유휴, 정리, 일괄 변경, 폴더 교체 및 불완전 빌드 회귀 테스트를 통과했다. 공식 Node 파일 감시 주의사항도 확인했다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-web-project-return-navigation",
+      "title": "프로젝트 제어센터 돌아가기의 OnChainBot 복귀 경계",
+      "contentSha256": "a4fe552826f057f6473a1a6ccb66df327804a79c1b5a555010da02c28e41723e",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "a4fe552826f057f6473a1a6ccb66df327804a79c1b5a555010da02c28e41723e",
+          "content": "OnChainBot 대화를 방문한 뒤 다른 프로젝트를 열고 OnChainBot 제어센터에서 돌아가면 전역 lastChatView 때문에 다른 프로젝트로 이동했다. 복귀 대상을 environmentId와 projectId 키별로 저장하고 현재 대화·초안의 실제 소속을 검증한다. 복귀 기록이 없거나 삭제되면 같은 프로젝트의 최근 보관되지 않은 일반 대화로, 대화가 없으면 같은 프로젝트의 새 초안으로 이동한다. 프로젝트를 모르는 초기 라우트는 이전 탭의 폴더로 추정하면 안 된다. 제어센터로 바뀐 탭에 원래 대화가 없어도 삭제와 초안 승격은 기억된 복귀 대상을 갱신한다. 브라우저에서 수정 전 잘못된 이동을 재현했고 수정 후 프로젝트 간 복귀, 새로고침 유지, 직접 링크, 빈 프로젝트, 사이드바 프로젝트 전환을 확인했다. 실제 Electron에서도 프로젝트 필터로 다른 대화를 방문한 뒤 OnChainBot 제어센터의 돌아가기를 눌러 원래 OnChainBot 대화로 복귀했다. 회귀 테스트 24개, 타입 검사, 린트, 웹 빌드가 통과했다. 복귀 버튼을 누를 때 대화 상태를 읽어 전체 프로젝트의 스트리밍 갱신을 불필요하게 구독하지 않는다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-mobile-shared-presentation",
+      "title": "모바일 오케스트라 블록과 공통 프로토콜 표시",
+      "contentSha256": "360548160cda09783f7b9fd21df8fc9c89da27e74ab099cc19b952fe62aa0c00",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "360548160cda09783f7b9fd21df8fc9c89da27e74ab099cc19b952fe62aa0c00",
+          "content": "웹과 모바일은 client-runtime state/presentation의 블록 메타데이터 및 프로토콜 텍스트 변환을 공유한다. 모바일 메시지 목록에 담당 AI, 모델, 상태, 재시도, 작업 지시를 표시하고 빈 스트리밍 블록도 유지한다. 활동 압축 시 orchestra.block의 지시와 메타데이터를 보존하고, 일반 활동 한도 밖의 오래된 블록도 메시지 보존 한도 내에서 유지한다. 후속 도구 로그 3100개 뒤에도 블록이 유지되는 테스트를 통과했다. 현재 설치된 native TypeScript preview는 React Navigation 제네릭에서 기존 오류를 보고하므로 TypeScript 6.0.3의 타입 검사도 사용한다. 모바일 네이티브 기기 UI 검증은 이번 환경에서 수행하지 못했다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-token-cursor-per-execution",
+      "title": "병렬 AI와 재시도의 토큰 사용량 분리",
+      "contentSha256": "7b23ee729a685a86b19f695002bfb2af455f9920bb82c0f282408c2ec860aea8",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "7b23ee729a685a86b19f695002bfb2af455f9920bb82c0f282408c2ec860aea8",
+          "content": "한 대화방에서 여러 provider 실행이 동일한 sourceId를 보고할 수 있다. orchestra.block의 messageId를 사용량 요청과 누적 커서 키에 포함해 작업 간 사용량이 섞이거나 재시도 카운터가 이전 작업에 차감되지 않도록 한다. 알 수 없는 사용량은 null로 유지하고 이전 시도의 비용을 지우지 않는다. 별도 실행 100·150·50 토큰이 각각 보존되는 회귀 테스트가 있다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-windows-npm-shim-path",
+      "title": "긴 Windows PATH에서 AI CLI 실행 실패 복구",
+      "contentSha256": "00c49f106069b1c6c655cd0ae22472e5238fa430d6f691a3fdd402e7935638dc",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "00c49f106069b1c6c655cd0ae22472e5238fa430d6f691a3fdd402e7935638dc",
+          "content": "이 환경의 PATH 길이 15270에서 cmd를 통해 실행한 node와 Codex npm shim이 명령을 찾지 못했다. 짧은 PATH와 Node 직접 실행에서는 정상 동작했다. stock npm Node .cmd 템플릿만 식별해 동일 Node 실행파일과 JavaScript 진입점을 shell 없이 실행하면 긴 PATH와 인수의 특수문자를 유지한다. 사용자 지정 batch 내용은 최적화하지 않는다. 변경 후 앱의 Codex·Claude 연결과 실제 오케스트라 실행을 확인했다. 전역 PATH나 레지스트리를 수정하지 않았다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-memory-scope-migration",
+      "title": "공용·프로젝트·폴더 기억의 검색 경계와 이전 자료 보존",
+      "contentSha256": "9e83797e6fd73cc31eab4c56876695c86d2a4ae40abf7994880cee91033b94ed",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "9e83797e6fd73cc31eab4c56876695c86d2a4ae40abf7994880cee91033b94ed",
+          "content": "migration 065는 기존 기억과 FTS 청크를 보존하며 project 범위를 기본값으로 부여한다. environment 범위만 다른 프로젝트와 공유한다. folder 범위는 contextPaths의 경로 구성요소 경계로 매칭하며 빈 경로에는 포함하지 않는다. itemId만으로 공유 기록을 식별하지 않고 소유 projectId를 함께 사용한다. 일반·apps/web/src·apps/server 검색에서 해당 폴더 기록의 포함과 제외를 실제 API로 확인했다. SQLite 연결에는 짧은 교차 프로세스 쓰기 경합을 위한 busy_timeout 5000ms를 설정한다."
+        }
+      ]
+    },
+    {
+      "projectId": "a6faabb1-10fa-4985-9404-512250af2008",
+      "id": "repair-server-scoped-execution",
+      "title": "한 대화방에서 독립 AI 실행·승인·재시도 처리",
+      "contentSha256": "a54c526cc9da3d229fee74e94c9ffb645f9f9b9e5b79f02049586e95a39a549d",
+      "chunks": [
+        {
+          "chunkId": "0",
+          "contentSha256": "a54c526cc9da3d229fee74e94c9ffb645f9f9b9e5b79f02049586e95a39a549d",
+          "content": "WorkspaceAgentExecutor는 ownerThreadId와 별개인 executionId로 provider 세션을 실행하며 메시지와 활동은 소유 대화에만 기록한다. executionId에 시도 번호를 포함해 이전 시도의 늦은 이벤트를 배제한다. 승인·질문 ID도 실행별로 분리하고 원래 providerRequestId로 응답한다. 종료 시 미완료 요청을 닫고 출력 블록을 완료 처리한다. 출력은 50ms 단위로 모아 저장한다. 스트림 구독은 작업 시작 전에 즉시 설치해야 첫 이벤트가 유실되지 않는다. 검색 기록 저장 시 본문·검색어뿐 아니라 제목에도 같은 자격 증명 마스킹을 적용해야 한다. 전체 저장 명령에서 테스트용 키가 제거되는 회귀 테스트를 통과했다."
+        }
+      ]
+    }
+  ],
+  "queryRequirements": [
+    {
+      "id": "D1",
+      "query": "허브 현재 행 디코딩 성능 19컬럼 조회 1000회",
+      "expectedSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12"
+      ],
+      "forbiddenSourceIds": [
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": ["5.897"],
+      "synthetic": false
+    },
+    {
+      "id": "D2",
+      "query": "Windows fs.watch rename CPU 100%",
+      "expectedSourceIds": ["repair-desktop-windows-watcher-cpu"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["711900"],
+      "synthetic": false
+    },
+    {
+      "id": "D3",
+      "query": "orchestra.block messageId 토큰 커서",
+      "expectedSourceIds": ["repair-token-cursor-per-execution"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "D4",
+      "query": "Windows PATH 15270 npm shim",
+      "expectedSourceIds": ["repair-windows-npm-shim-path"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "D5",
+      "query": "제어센터 돌아가기 OnChainBot 복귀",
+      "expectedSourceIds": ["repair-web-project-return-navigation"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "D6",
+      "query": "migration 065 scope environment folder",
+      "expectedSourceIds": ["repair-memory-scope-migration"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "D7",
+      "query": "모바일 오케스트라 빈 스트리밍 블록",
+      "expectedSourceIds": ["repair-mobile-shared-presentation"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "D8",
+      "query": "Grok CLI XSearch 9 WebSearch 31",
+      "expectedSourceIds": ["autousage-rag-token-research-2026-09-12"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K1",
+      "query": "파일을 지켜보는 기능 때문에 앱이 버벅이는 원인",
+      "expectedSourceIds": ["repair-desktop-windows-watcher-cpu"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K2",
+      "query": "길어진 실행파일 탐색 경로 때문에 인공지능 명령이 안 켜짐",
+      "expectedSourceIds": ["repair-windows-npm-shim-path"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K3",
+      "query": "여러 인공지능의 소비량이 한 작업으로 섞이는 현상",
+      "expectedSourceIds": ["repair-token-cursor-per-execution"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K4",
+      "query": "뒤로 가면 엉뚱한 프로젝트 대화로 이동한다",
+      "expectedSourceIds": ["repair-web-project-return-navigation"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K5",
+      "query": "휴대폰에서 담당 인공지능 발언 표시",
+      "expectedSourceIds": ["repair-mobile-shared-presentation"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K6",
+      "query": "개발 앱을 정리하다 사용 중인 다른 앱까지 죽이는 문제",
+      "expectedSourceIds": ["repair-desktop-process-ownership"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K7",
+      "query": "다른 작업의 답변과 허락 요청이 뒤섞이지 않게 실행을 나누는 방법",
+      "expectedSourceIds": ["repair-server-scoped-execution"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "K8",
+      "query": "같은 부모 아래 있는 옆 디렉터리의 기억을 보면 안 된다",
+      "expectedSourceIds": ["repair-memory-scope-migration"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "T1",
+      "query": "허브 메모리 현재 운영 결론",
+      "expectedSourceIds": ["knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6"],
+      "forbiddenSourceIds": [
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "T2",
+      "query": "허브 현재 단건 조회 최적화 성능",
+      "expectedSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12"
+      ],
+      "forbiddenSourceIds": [
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": ["5.897"],
+      "synthetic": false
+    },
+    {
+      "id": "T3",
+      "query": "허브 초기 가능성 조사와 현재 C++ 운영 비교",
+      "expectedSourceIds": [
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6"
+      ],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "T4",
+      "query": "허브 메모리 과거 공유 방식 설계 이력",
+      "expectedSourceIds": [
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845"
+      ],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "T5",
+      "query": "허브 초기 단건 조회가 느렸던 결과와 행 디코딩 개선 이후 비교",
+      "expectedSourceIds": ["knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["1.467", "5.897"],
+      "synthetic": false
+    },
+    {
+      "id": "T6",
+      "query": "허브 메모리 현재 JSON 사용 범위와 직접 행 디코딩",
+      "expectedSourceIds": ["knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["JSON", "2,048"],
+      "synthetic": false
+    },
+    {
+      "id": "T7",
+      "query": "평가용 timeout 상충 근거를 확인해",
+      "expectedSourceIds": ["evaluation-contradiction-a", "evaluation-contradiction-b"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["100ms", "250ms"],
+      "synthetic": true
+    },
+    {
+      "id": "T8",
+      "query": "평가용 timeout 최신 수정 시간만으로 결론을 정할 수 있나",
+      "expectedSourceIds": ["evaluation-contradiction-a", "evaluation-contradiction-b"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": true
+    },
+    {
+      "id": "U1",
+      "query": "웹 버튼 간격 수정",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U2",
+      "query": "README 오타를 고쳐",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U3",
+      "query": "로그인 버튼 색상을 보라색으로",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U4",
+      "query": "오늘 점심 메뉴를 골라",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U5",
+      "query": "날짜 문자열 형식 함수 이름을 변경",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U6",
+      "query": "설정 화면 제목 번역 수정",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U7",
+      "query": "휴대폰 목록 아래 여백 조정",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "U8",
+      "query": "상수 이름 오탈자 정리",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12",
+        "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+        "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S1",
+      "query": "Windows 감시기 CPU",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "repair-desktop-windows-watcher-cpu",
+        "repair-desktop-process-ownership"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S2",
+      "query": "Windows 감시기 CPU",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "repair-desktop-windows-watcher-cpu",
+        "repair-desktop-process-ownership"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S3",
+      "query": "Windows 감시기 CPU",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "repair-desktop-windows-watcher-cpu",
+        "repair-desktop-process-ownership"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S4",
+      "query": "Windows 감시기 CPU",
+      "expectedSourceIds": ["repair-desktop-windows-watcher-cpu"],
+      "forbiddenSourceIds": [],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S5",
+      "query": "프로젝트 복귀 OnChainBot",
+      "expectedSourceIds": [],
+      "forbiddenSourceIds": [
+        "repair-web-project-return-navigation",
+        "repair-desktop-windows-watcher-cpu",
+        "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+        "hub-native-audit-2026-09-12"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    },
+    {
+      "id": "S6",
+      "query": "웹 버튼 간격 수정",
+      "expectedSourceIds": ["evaluation-required-user-rule"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["필수 지침 원문 끝"],
+      "synthetic": true
+    },
+    {
+      "id": "S7",
+      "query": "웹 버튼 간격 수정",
+      "expectedSourceIds": ["evaluation-required-user-rule"],
+      "forbiddenSourceIds": [],
+      "requiredText": ["필수 지침 원문 끝"],
+      "synthetic": true
+    },
+    {
+      "id": "S8",
+      "query": "허브 현재 C++ 운영",
+      "expectedSourceIds": ["knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6"],
+      "forbiddenSourceIds": [
+        "autousage-rag-token-research-2026-09-12",
+        "repair-web-project-return-navigation"
+      ],
+      "requiredText": [],
+      "synthetic": false
+    }
+  ],
+  "syntheticNote": "The mandatory-rule and contradictory-timeout fixtures are constructed explicitly in evaluate-rag.ts and are not live knowledge. The revised contradiction titles identify timeout; their text/expected outcomes are unchanged."
+}

@@ -10,13 +10,13 @@ import { Card, CardAction, CardDescription, CardHeader, CardPanel, CardTitle } f
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 export const ROLE_LABELS: Readonly<Record<WorkspaceAgentRole, string>> = {
-  coordinator: "페이블 · 총괄 조정",
-  operator: "페이블 · 운영 진단",
-  planner: "페이블 · 계획 보조",
-  researcher: "그록 · 실시간 조사",
-  implementer: "코덱스 · 구현",
-  reviewer: "페이블 · 결과 검토",
-  verifier: "페이블 · 독립 검증",
+  coordinator: "총괄 조정",
+  operator: "운영 진단",
+  planner: "계획 보조",
+  researcher: "실시간 조사",
+  implementer: "구현",
+  reviewer: "결과 검토",
+  verifier: "독립 검증",
 };
 
 export function runStatusLabel(status: string): string {

@@ -205,6 +205,29 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(visitElements(panel, (element) => element.props.title === "제한된 권한")).toBeNull();
   });
 
+  it("updates Codex and Claude switches independently on the selected environment", () => {
+    const panel = renderPanel();
+    const codex = visitElements(
+      panel,
+      (element) => element.props["aria-label"] === "Codex 자동 전환",
+    );
+    const claude = visitElements(
+      panel,
+      (element) => element.props["aria-label"] === "Claude 자동 전환",
+    );
+    expect(codex?.props.checked).toBe(false);
+    expect(claude?.props.checked).toBe(false);
+    (codex!.props.onCheckedChange as (checked: boolean) => void)(true);
+    expect(settingsState.updateSettings).toHaveBeenLastCalledWith({
+      providerAutoSwitch: { codex: true },
+    });
+    (claude!.props.onCheckedChange as (checked: boolean) => void)(true);
+    expect(settingsState.updateSettings).toHaveBeenLastCalledWith({
+      providerAutoSwitch: { claudeAgent: true },
+    });
+    expect(settingsState.updateEnvironmentIds).toEqual([environmentId]);
+  });
+
   it("deletes and resets provider configuration without erasing shared preferences", () => {
     settingsState.value = {
       ...DEFAULT_UNIFIED_SETTINGS,

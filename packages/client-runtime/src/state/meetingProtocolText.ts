@@ -6,7 +6,15 @@
  */
 
 const PROTOCOL_TAG_PATTERN =
-  /<(t3_chair_verdict|t3_question|t3_task_graph|t3_validation|t3_synthesis|t3_responds_to)>([\s\S]*?)<\/\1>/g;
+  /<(t3_ready|t3_chair_verdict|t3_question|t3_task_graph|t3_validation|t3_synthesis|t3_responds_to)>([\s\S]*?)<\/\1>/g;
+const AGENT_ROLE_LABELS: Readonly<Record<string, string>> = {
+  fable: "총괄",
+  coordinator: "총괄",
+  codex: "구현",
+  implementer: "구현",
+  grok: "조사",
+  researcher: "조사",
+};
 
 function parseJsonPayload(raw: string): Record<string, unknown> | null {
   try {
@@ -112,7 +120,9 @@ function renderTaskGraph(body: string): string {
       if (typeof raw !== "object" || raw === null) return;
       const node = raw as Record<string, unknown>;
       const title = asString(node.title) ?? asString(node.id) ?? `작업 ${index + 1}`;
-      const assignee = asString(node.participantId) ?? asString(node.agent);
+      const participant = asString(node.participantId);
+      const agent = asString(node.agent);
+      const assignee = participant ?? (agent ? (AGENT_ROLE_LABELS[agent] ?? agent) : null);
       const dependsOn = stringItems(node.dependsOn);
       const head = `${index + 1}. **${title}**${assignee ? ` — ${assignee}` : ""}${
         dependsOn.length > 0 ? ` (의존: ${dependsOn.join(", ")})` : ""
@@ -170,6 +180,7 @@ function renderSynthesis(body: string): string {
 }
 
 const TAG_TITLES: Record<string, string> = {
+  t3_ready: "작업 범위 확인",
   t3_chair_verdict: "👑 의장 정리",
   t3_question: "❓ 사용자에게 질문",
   t3_task_graph: "📋 실행 계획",
@@ -192,6 +203,7 @@ function extractPartialString(body: string, field: string): string | null {
  */
 function renderStreamingTag(tag: string, body: string): string {
   if (tag === "t3_responds_to") return "";
+  if (tag === "t3_ready") return `\n${body.trim()}\n`;
   const title = TAG_TITLES[tag] ?? "오케스트라 메시지";
   const partial =
     extractPartialString(body, "summary") ??
@@ -220,6 +232,8 @@ export function formatMeetingProtocolText(text: string): string {
   if (!text.includes("<t3_")) return text;
   const completed = text.replace(PROTOCOL_TAG_PATTERN, (_match, tag: string, body: string) => {
     switch (tag) {
+      case "t3_ready":
+        return `\n${body.trim()}\n`;
       case "t3_chair_verdict":
         return renderChairVerdict(body);
       case "t3_question":
@@ -237,7 +251,7 @@ export function formatMeetingProtocolText(text: string): string {
     }
   });
   return completed.replace(
-    /<(t3_chair_verdict|t3_question|t3_task_graph|t3_validation|t3_synthesis|t3_responds_to)>([\s\S]*)$/,
+    /<(t3_ready|t3_chair_verdict|t3_question|t3_task_graph|t3_validation|t3_synthesis|t3_responds_to)>([\s\S]*)$/,
     (match, tag: string, body: string) =>
       body.includes(`</${tag}>`) ? match : renderStreamingTag(tag, body),
   );

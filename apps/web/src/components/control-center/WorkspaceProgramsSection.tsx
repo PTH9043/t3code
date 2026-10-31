@@ -5,10 +5,12 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   WorkspaceProgramId,
   type WorkspaceIncident,
   type WorkspaceProgram,
   type WorkspaceProgramHealthCheck,
+  type WorkspaceProgramHubMemory,
   type WorkspaceProgramRun,
 } from "@t3tools/contracts";
 import {
@@ -45,6 +47,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { parseWorkspaceProgramHubMemory } from "./workspaceProgramHubMemory";
 
 const SELECT_CLASS =
   "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-shadow focus:border-ring focus:ring-3 focus:ring-ring/20 dark:bg-input/32";
@@ -70,7 +73,7 @@ function timestamp(value: string | null): string {
 }
 
 function runStatusLabel(status: WorkspaceProgramRun["status"] | "idle") {
-  if (status === "starting") return "시작 중";
+  if (status === "starting") return "시작 대기";
   if (status === "running") return "실행 중";
   if (status === "stopping") return "중지 중";
   if (status === "exited") return "중지됨";
@@ -236,6 +239,10 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
   const [healthTarget, setHealthTarget] = useState("");
   const [errorPattern, setErrorPattern] = useState(DEFAULT_ERROR_PATTERN);
   const [environmentVariableNames, setEnvironmentVariableNames] = useState("");
+  const [hubCommitLimitMb, setHubCommitLimitMb] = useState("");
+  const [hubConcurrencyGroup, setHubConcurrencyGroup] = useState("");
+  const [hubConcurrencySlots, setHubConcurrencySlots] = useState("");
+  const [hubSharedDatasets, setHubSharedDatasets] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [repairInstructions, setRepairInstructions] = useState<Record<string, string>>({});
   const [integrityDrafts, setIntegrityDrafts] = useState<Record<string, string>>({});
@@ -320,6 +327,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
     integrityEnabled?: boolean;
     integrityValidationCommands?: string[];
     integrityRequiredCleanPasses?: number;
+    hubMemory?: WorkspaceProgramHubMemory;
   }) => {
     setBusyKey(`save:${input.id}`);
     try {
@@ -339,6 +347,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
           integrityEnabled: input.integrityEnabled ?? false,
           integrityValidationCommands: input.integrityValidationCommands ?? [],
           integrityRequiredCleanPasses: input.integrityRequiredCleanPasses ?? 2,
+          hubMemory: input.hubMemory ?? DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
         },
       });
       if (!notifyFailure(result, "프로그램을 저장하지 못했습니다")) {
@@ -380,6 +389,22 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
       .split("\n")
       .map((value) => value.trim())
       .filter(Boolean);
+    let hubMemory: WorkspaceProgramHubMemory;
+    try {
+      hubMemory = parseWorkspaceProgramHubMemory({
+        commitLimitMb: hubCommitLimitMb,
+        concurrencyGroup: hubConcurrencyGroup,
+        concurrencySlots: hubConcurrencySlots,
+        sharedDatasets: hubSharedDatasets,
+      });
+    } catch (error) {
+      toastManager.add({
+        type: "warning",
+        title: "허브 메모리 설정을 확인하세요.",
+        description: error instanceof Error ? error.message : "입력값을 확인하세요.",
+      });
+      return;
+    }
     const saved = await saveProgram({
       id: WorkspaceProgramId.make(
         `${
@@ -399,12 +424,17 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
       integrityEnabled,
       integrityValidationCommands: selectedValidationCommands,
       integrityRequiredCleanPasses,
+      hubMemory,
     });
     if (!saved) return;
     setName("");
     setCommand("");
     setRelativeDirectory("");
     setEnvironmentVariableNames("");
+    setHubCommitLimitMb("");
+    setHubConcurrencyGroup("");
+    setHubConcurrencySlots("");
+    setHubSharedDatasets("");
     setIntegrityValidationCommands("");
   };
 
@@ -466,6 +496,7 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
           ],
           integrityRequiredCleanPasses:
             integrity.requiredCleanPasses ?? program.integrity.requiredCleanPasses,
+          hubMemory: program.hubMemory,
         },
       });
       if (!notifyFailure(result, `${program.name} 무결성 설정을 저장하지 못했습니다`)) {
@@ -953,6 +984,45 @@ export function WorkspaceProgramsSection({ project }: { project: EnvironmentProj
                 </label>
               </>
             ) : null}
+          </div>
+          <div className="grid gap-2 rounded-md border border-border/60 p-3">
+            <div className="text-sm font-medium">허브 메모리</div>
+            <p className="text-xs text-muted-foreground">
+              Windows 환경에서는 각 프로세스의 메모리 할당량에 상한을 적용합니다. 다른
+              운영체제에서는 프로그램이 직접 한도를 적용해야 합니다. 같은 그룹은 지정한 수만큼
+              실행되며, 슬롯을 비우면 1개, 서로 다른 값을 지정하면 가장 작은 값을 사용합니다. 공유
+              데이터셋은 프로그램이 공유 파일 읽기를 지원해야 하며 자동 변환되지는 않습니다.
+              <code>이름=프로젝트 내 상대 경로</code>를 한 줄씩 입력하면
+              <code>T3_HUB_DATASET_이름</code> 환경변수로 전달됩니다.
+            </p>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <Input
+                value={hubCommitLimitMb}
+                aria-label="커밋 상한 MB"
+                onChange={(event) => setHubCommitLimitMb(event.currentTarget.value)}
+                placeholder="커밋 상한 MB (예: 3072)"
+                inputMode="numeric"
+              />
+              <Input
+                value={hubConcurrencyGroup}
+                aria-label="동시 실행 그룹"
+                onChange={(event) => setHubConcurrencyGroup(event.currentTarget.value)}
+                placeholder="동시 실행 그룹 (예: research)"
+              />
+              <Input
+                value={hubConcurrencySlots}
+                aria-label="동시 실행 슬롯"
+                onChange={(event) => setHubConcurrencySlots(event.currentTarget.value)}
+                placeholder="동시 실행 슬롯 (예: 4)"
+                inputMode="numeric"
+              />
+            </div>
+            <Textarea
+              value={hubSharedDatasets}
+              aria-label="공유 데이터셋"
+              onChange={(event) => setHubSharedDatasets(event.currentTarget.value)}
+              placeholder={"WALLET_EVENTS=data/wallet_events.jsonl\nQUOTES=data/quotes.jsonl"}
+            />
           </div>
           <Button
             disabled={!name.trim() || !command.trim() || busyKey !== null}

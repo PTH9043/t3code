@@ -6,6 +6,7 @@
  *
  * @module ClaudeAdapterLive
  */
+import { makeManagedMcpResolver, claudeManagedMcpServers } from "../../mcp/ManagedMcpTools.ts";
 import {
   type CanUseTool,
   query,
@@ -98,6 +99,10 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import {
+  makeProviderTurnHistoryFactory,
+  type ProviderTurnHistory,
+} from "../ProviderTurnHistory.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -141,7 +146,6 @@ interface ClaudeTurnState {
    * steered instead (the queued message continues the same turn).
    */
   readonly synthetic?: boolean;
-  readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -226,10 +230,7 @@ interface ClaudeSessionContext {
   resumeSessionId: string | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  readonly turns: Array<{
-    id: TurnId;
-    items: Array<unknown>;
-  }>;
+  readonly history: ProviderTurnHistory;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   readonly taskAgents: Map<string, ClaudeTaskAgentState>;
@@ -347,6 +348,18 @@ function isClaudeInterruptedCause(cause: Cause.Cause<ProviderAdapterProcessError
   );
 }
 
+const CLAUDE_REFUSAL_FALLBACK_MODELS = ["claude-opus-4-8", "claude-sonnet-4-6"] as const;
+
+/**
+ * Models Claude Code retries on when the selected model's safeguards refuse a
+ * message (or the model is overloaded), so the turn continues instead of ending
+ * with a "safeguards flagged this message" error.
+ */
+export function claudeRefusalFallbackModels(model: string | undefined): string | undefined {
+  const candidates = CLAUDE_REFUSAL_FALLBACK_MODELS.filter((candidate) => candidate !== model);
+  return candidates.length > 0 ? candidates.join(",") : undefined;
+}
+
 function resultErrorsText(result: SDKResultMessage): string {
   return "errors" in result && Array.isArray(result.errors)
     ? result.errors.join(" ").toLowerCase()
@@ -359,7 +372,10 @@ function resultErrorsText(result: SDKResultMessage): string {
  * so they must never become the error banner.
  */
 function resultUserFacingError(result: SDKResultMessage): string | undefined {
-  if (result.subtype === "success" || !Array.isArray(result.errors)) {
+  if (result.subtype === "success") {
+    return result.is_error === true ? result.result : undefined;
+  }
+  if (!Array.isArray(result.errors)) {
     return undefined;
   }
   return result.errors.find((error) => !error.startsWith("[ede_diagnostic]"));
@@ -1287,7 +1303,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
 
 function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
   if (result.subtype === "success") {
-    return "completed";
+    return result.is_error === true ? "failed" : "completed";
   }
 
   const errors = resultErrorsText(result);
@@ -1628,9 +1644,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("claudeAgent");
   const fileSystem = yield* FileSystem.FileSystem;
+  const resolveManagedMcp = yield* makeManagedMcpResolver();
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
   const crypto = yield* Crypto.Crypto;
+  const createTurnHistory = yield* makeProviderTurnHistoryFactory;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
@@ -1730,10 +1748,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     return {
       threadId,
-      turns: context.turns.map((turn) => ({
-        id: turn.id,
-        items: [...turn.items],
-      })),
+      turns: yield* context.history.read,
     };
   });
 
@@ -1747,7 +1762,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.history.count(),
     };
 
     context.session = {
@@ -2324,10 +2339,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    context.turns.push({
-      id: turnState.turnId,
-      items: [...turnState.items],
-    });
+    yield* context.history.complete(turnState.turnId);
 
     yield* emitThreadTokenUsage(context, usageSnapshot, {
       rawMethod: "claude/result",
@@ -2684,7 +2696,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
-      context.turnState.items.push(message.message);
+      yield* context.history.append(context.turnState.turnId, message.message);
     }
 
     for (const toolResult of toolResultBlocksFromUserMessage(message)) {
@@ -2875,7 +2887,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turnId,
         startedAt,
         synthetic: true,
-        items: [],
         assistantTextBlocks: new Map(),
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
@@ -2938,7 +2949,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
-      context.turnState.items.push(message.message);
+      yield* context.history.append(context.turnState.turnId, message.message);
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
     }
 
@@ -3379,11 +3390,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // deliberately so they don't masquerade as unknown-subtype warnings.
       // `background_tasks_changed` is a roster snapshot ({tasks: [...]}) —
       // the task_* lifecycle events carry the authoritative per-agent data.
-      // `model_refusal_no_fallback` is already reported by the turn's
+      // `model_refusal_no_fallback` (no fallback could run) is already reported by the turn's
       // result/error path; `control_request_progress` is a transport retry
       // heartbeat (see api_retry); `worker_shutting_down` is followed by the
       // stream ending, which the session teardown path reports.
       case "model_refusal_fallback":
+        yield* emitRuntimeWarning(
+          context,
+          `${message.original_model} 모델의 안전 필터가 응답을 막아 ${message.fallback_model} 모델로 이어서 진행했습니다.`,
+          message,
+        );
+        return;
       case "model_refusal_no_fallback":
       case "local_command_output":
       case "plugin_install":
@@ -4138,14 +4155,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
       const settings = {
+        ...(claudeSettings.promptCacheTtl && claudeSettings.promptCacheTtl !== "inherit"
+          ? { promptCacheTtl: claudeSettings.promptCacheTtl }
+          : {}),
+        ...(claudeSettings.subagentPromptCacheTtl &&
+        claudeSettings.subagentPromptCacheTtl !== "inherit"
+          ? { subagentPromptCacheTtl: claudeSettings.subagentPromptCacheTtl }
+          : {}),
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
+        switchModelsOnFlag: true,
       };
+      const fallbackModel = claudeRefusalFallbackModels(modelSelection?.model);
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const managedServers = claudeManagedMcpServers(yield* resolveManagedMcp(PROVIDER, input.cwd));
       const queryOptions: ClaudeQueryOptions = {
+        ...(input.workflowSkillPlugins?.length
+          ? {
+              plugins: input.workflowSkillPlugins.map((plugin) => ({
+                type: "local" as const,
+                path: plugin,
+              })),
+            }
+          : {}),
+        ...(Object.keys(managedServers).length > 0 ? { mcpServers: managedServers } : {}),
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
+        ...(fallbackModel ? { fallbackModel } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: {
           type: "preset",
@@ -4175,6 +4212,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(mcpSession
           ? {
               mcpServers: {
+                ...managedServers,
                 "t3-code": {
                   type: "http",
                   url: mcpSession.endpoint,
@@ -4228,6 +4266,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       const session: ProviderSession = {
+        continuity: existingResumeSessionId ? "resumed" : "new",
         threadId,
         provider: PROVIDER,
         providerInstanceId: boundInstanceId,
@@ -4258,7 +4297,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         resumeSessionId: sessionId,
         pendingApprovals,
         pendingUserInputs,
-        turns: [],
+        history: yield* createTurnHistory({
+          directory: path.join(serverConfig.stateDir, "provider-history", PROVIDER),
+          provider: PROVIDER,
+          threadId,
+        }),
         inFlightTools,
         claudeTasks,
         taskAgents,
@@ -4410,7 +4453,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const turnState: ClaudeTurnState = {
         turnId,
         startedAt: yield* nowIso,
-        items: [],
         assistantTextBlocks: new Map(),
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
@@ -4439,11 +4481,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const message = yield* buildUserMessageEffect(input, {
+    const preparedMessage = yield* buildUserMessageEffect(input, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
     });
+    const message: SDKUserMessage = {
+      ...preparedMessage,
+      uuid: (yield* randomUUIDv4) as NonNullable<SDKUserMessage["uuid"]>,
+    };
 
     yield* Queue.offer(context.promptQueue, {
       type: "message",
@@ -4453,6 +4499,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return {
       threadId: context.session.threadId,
       turnId,
+      nativeMessageId: message.uuid,
       ...(context.session.resumeCursor !== undefined
         ? { resumeCursor: context.session.resumeCursor }
         : {}),
@@ -4552,8 +4599,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
     function* (threadId, numTurns) {
       const context = yield* requireSession(threadId);
-      const nextLength = Math.max(0, context.turns.length - numTurns);
-      context.turns.splice(nextLength);
+      yield* context.history.rollback(numTurns);
       yield* updateResumeCursor(context);
       return yield* snapshotThread(context);
     },

@@ -1,7 +1,12 @@
 import * as NodeEvents from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), spawnSync: vi.fn(), watch: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  spawnSync: vi.fn(),
+  watch: vi.fn(),
+  inspectRestart: vi.fn(),
+}));
 vi.mock("node:child_process", () => mocks);
 vi.mock("node:os", () => ({ platform: () => "win32" }));
 vi.mock("./electron-launcher.mjs", () => ({
@@ -11,6 +16,7 @@ vi.mock("./electron-launcher.mjs", () => ({
 }));
 vi.mock("./wait-for-resources.mjs", () => ({ waitForResources: async () => {} }));
 vi.mock("./watch-desktop-bundles.mjs", () => ({ watchDesktopBundles: mocks.watch }));
+vi.mock("./dev-restart-guard.mjs", () => ({ inspectAutomaticRestart: mocks.inspectRestart }));
 
 let signals;
 let running;
@@ -25,6 +31,7 @@ beforeEach(() => {
   running = new Map();
   stopWatching = vi.fn();
   mocks.watch.mockReturnValue(stopWatching);
+  mocks.inspectRestart.mockReturnValue({ safe: true, reason: "idle" });
   const originalOnce = process.once;
   vi.spyOn(process, "once").mockImplementation(function (event, handler) {
     if (["SIGINT", "SIGTERM", "SIGHUP"].includes(event)) {
@@ -90,5 +97,49 @@ describe("desktop launcher process lifetime", () => {
     expect(running.size).toBe(0);
     expect(stopWatching).toHaveBeenCalledOnce();
     expect(process.exit).toHaveBeenCalledWith(130);
+  });
+
+  it("keeps active work alive across rebuilds and applies them after the guard clears", async () => {
+    mocks.inspectRestart.mockReturnValue({ safe: false, reason: "active-work" });
+    await import("./dev-electron.mjs");
+    const { onChange } = mocks.watch.mock.calls[0][0];
+    onChange();
+    await vi.advanceTimersByTimeAsync(1_000);
+    onChange();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(mocks.spawn).toHaveBeenCalledOnce();
+    expect(mocks.spawnSync).not.toHaveBeenCalled();
+    expect(running.size).toBe(1);
+
+    mocks.inspectRestart.mockReturnValue({ safe: true, reason: "idle" });
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(mocks.spawn).toHaveBeenCalledTimes(2);
+    expect(mocks.spawnSync).toHaveBeenCalledTimes(1);
+    expect(running.size).toBe(1);
+
+    signals.get("SIGTERM")();
+    await vi.runAllTimersAsync();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not terminate active work when the main process reports a load failure", async () => {
+    mocks.inspectRestart.mockReturnValue({ safe: false, reason: "active-work" });
+    await import("./dev-electron.mjs");
+    const app = [...running.values()][0];
+    app.stderr.emit("data", Buffer.from("App threw an error during load"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(mocks.spawnSync).not.toHaveBeenCalled();
+    expect(running.size).toBe(1);
+
+    mocks.inspectRestart.mockReturnValue({ safe: true, reason: "idle" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(mocks.spawnSync).toHaveBeenCalledOnce();
+    expect(running.size).toBe(0);
+    mocks.watch.mock.calls[0][0].onChange();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(running.size).toBe(1);
+    signals.get("SIGTERM")();
+    await vi.runAllTimersAsync();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

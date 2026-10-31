@@ -18,6 +18,7 @@ import {
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { navigateToTabView } from "./navigateToTabView";
 import { cn } from "~/lib/utils";
+import { useSidebarVisibility } from "../ui/sidebar";
 
 /**
  * One dot, most urgent first: the person's attention is a queue, not a
@@ -259,6 +260,7 @@ function ControlCenterTabItem(props: { readonly tab: WorkspaceTab; readonly inde
 }
 
 export function WorkspaceTabBar() {
+  const sidebarVisible = useSidebarVisibility();
   const tabs = useWorkspaceTabs();
   const activeTabId = useActiveWorkspaceTabId();
   const navigate = useNavigate();
@@ -332,7 +334,11 @@ export function WorkspaceTabBar() {
   return (
     <div
       role="tablist"
-      className="flex min-h-9 flex-none items-end gap-1 overflow-x-auto border-b border-border/60 bg-muted/20 px-2 pt-1"
+      className={cn(
+        "flex min-h-9 flex-none items-end gap-1 overflow-x-auto border-b border-border/60 bg-muted/20 px-2 pt-1",
+        !sidebarVisible &&
+          "min-h-[var(--workspace-topbar-height)] ml-[calc(var(--workspace-controls-left)+var(--workspace-titlebar-control-size)+0.25rem+var(--workspace-help-control-width)+var(--workspace-titlebar-control-gap))]",
+      )}
     >
       {tabs.map((tab, index) =>
         tab.view.kind === "thread" ? (

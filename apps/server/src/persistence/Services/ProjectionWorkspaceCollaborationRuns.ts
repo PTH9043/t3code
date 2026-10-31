@@ -1,4 +1,5 @@
 import type {
+  OrchestrationEvent,
   ProjectId,
   WorkspaceCollaborationRun,
   WorkspaceCollaborationRunId,
@@ -15,6 +16,21 @@ export interface ProjectionWorkspaceCollaborationRunRepositoryShape {
   readonly upsert: (
     run: WorkspaceCollaborationRun,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly recordControl: (
+    input: Extract<
+      OrchestrationEvent,
+      { type: "project.collaboration-run-control-requested" }
+    >["payload"],
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly recordReview: (
+    input: Extract<OrchestrationEvent, { type: "project.collaboration-run-reviewed" }>["payload"],
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly requestVerification: (
+    input: Extract<
+      OrchestrationEvent,
+      { type: "project.collaboration-verification-requested" }
+    >["payload"],
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly requestCancel: (input: {
     readonly projectId: ProjectId;
     readonly runId: WorkspaceCollaborationRunId;
@@ -30,6 +46,9 @@ export interface ProjectionWorkspaceCollaborationRunRepositoryShape {
     readonly question: string;
     readonly questionRef?: WorkspaceMeetingQuestionRef | undefined;
     readonly answer: string;
+    readonly imageReferences?:
+      | ReadonlyArray<{ readonly name: string; readonly path: string }>
+      | undefined;
     readonly answeredAt: string;
   }) => Effect.Effect<void, ProjectionRepositoryError>;
   /**

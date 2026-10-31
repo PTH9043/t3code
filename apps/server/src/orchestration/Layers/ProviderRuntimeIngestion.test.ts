@@ -208,7 +208,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | ServerConfig,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -238,6 +241,7 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const stateRoot = makeTempDir("t3-provider-state-");
     // Stubbed: the live resolver shells out to git on snapshot reads, and on
     // Windows each process spawn blocks the event loop long enough to starve
     // the polling assertions. These tests never assert repository identity.
@@ -267,7 +271,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), stateRoot)),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
@@ -341,6 +345,8 @@ describe("ProviderRuntimeIngestion", () => {
 
     return {
       engine,
+      workspaceRoot,
+      attachmentsDir: (await runtime.runPromise(Effect.service(ServerConfig))).attachmentsDir,
       readModel: () => runtime!.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
@@ -3508,5 +3514,103 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+  it.each([false, true])(
+    "persists generated file results through the real engine with streaming=%s",
+    async (streaming) => {
+      const harness = await createHarness({
+        serverSettings: { enableLegacyTokenStreaming: streaming },
+      });
+      const file = NodePath.join(harness.workspaceRoot, "생성 자료.txt");
+      NodeFS.writeFileSync(file, "결과 본문\r\n복사할 주소 https://example.com/a");
+      const stamp = {
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-output"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+      harness.emit({ ...stamp, type: "turn.started", eventId: asEventId("output-start") });
+      harness.emit({
+        ...stamp,
+        type: "content.delta",
+        itemId: asItemId("output-message"),
+        eventId: asEventId("output-delta"),
+        payload: { streamKind: "assistant_text", delta: "[생성 자료](<" + file + ">)" },
+      });
+      harness.emit({
+        ...stamp,
+        type: "item.completed",
+        itemId: asItemId("output-message"),
+        eventId: asEventId("output-complete"),
+        payload: { itemType: "assistant_message" },
+      });
+      harness.emit({
+        ...stamp,
+        type: "turn.completed",
+        eventId: asEventId("output-turn-complete"),
+        status: "completed",
+      });
+      await harness.drain();
+      const thread = (await harness.readModel()).threads.find((t) => t.id === "thread-1")!;
+      const results = thread.messages.flatMap((message) => message.attachments ?? []);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ name: "생성 자료.txt", result: { kind: "text" } });
+      NodeFS.unlinkSync(file);
+      expect(
+        NodeFS.readFileSync(NodePath.join(harness.attachmentsDir, results[0]!.id + ".bin"), "utf8"),
+      ).toContain("복사할 주소");
+      expect(
+        thread.messages
+          .filter((message) => message.role === "assistant")
+          .every((message) => !message.streaming),
+      ).toBe(true);
+    },
+  );
+
+  it("persists an image-only native result without an assistant text message", async () => {
+    const harness = await createHarness();
+    const stamp = {
+      provider: ProviderDriverKind.make("claude-code"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-native-output"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    harness.emit({ ...stamp, type: "turn.started", eventId: asEventId("native-output-start") });
+    harness.emit({
+      ...stamp,
+      type: "item.completed",
+      itemId: asItemId("native-image-tool"),
+      eventId: asEventId("native-output-image"),
+      payload: {
+        itemType: "mcp_tool_call",
+        status: "completed",
+        data: {
+          toolName: "mcp__image_gen__imagegen",
+          result: {
+            content: [
+              {
+                type: "image",
+                mimeType: "image/png",
+                data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
+              },
+            ],
+          },
+        },
+      },
+    });
+    harness.emit({
+      ...stamp,
+      type: "turn.completed",
+      eventId: asEventId("native-output-end"),
+      status: "completed",
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((t) => t.id === "thread-1")!;
+    const resultMessage = thread.messages.find((message) => message.attachments?.length);
+    expect(resultMessage).toMatchObject({ role: "assistant", text: "", streaming: false });
+    expect(resultMessage?.attachments?.[0]).toMatchObject({
+      type: "image",
+      result: { width: 1, height: 1 },
+    });
   });
 });

@@ -1,6 +1,7 @@
 import {
   type ApprovalRequestId,
   DEFAULT_MODEL,
+  CommandId,
   defaultInstanceIdForDriver,
   type EnvironmentId,
   type MessageId,
@@ -21,8 +22,6 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
-  WorkspaceCollaborationRunId,
-  WorkspaceMeetingParticipantId,
   type WorkspaceRuntimeSnapshot,
 } from "@t3tools/contracts";
 import {
@@ -46,6 +45,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
+import { executionProfileTask } from "@t3tools/shared/executionProfile";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
@@ -209,12 +209,16 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
-import { readMeetingComposerConfig, useMeetingComposerConfig } from "../meetingComposerStore";
 import {
-  ASK_FIRST_MEETING_PREFIX,
-  ASK_FIRST_TASK_PREFIX,
-  readAskFirstEnabled,
-} from "../askFirstStore";
+  meetingSetupFromConfig,
+  readMeetingComposerConfig,
+  useMeetingComposerConfig,
+} from "../meetingComposerStore";
+import { selectMeetingCoordinator } from "./chat/chatWorkflow";
+import { formatComposerRequest, readComposerRequestMode } from "../askFirstStore";
+import { TaskConditionsDialog } from "./chat/TaskConditionsDialog";
+import { createTaskConditionsDraft, type TaskConditionsDraft } from "../taskConditions";
+import { type ApprovedTaskConditions, renderApprovedTaskConditions } from "@t3tools/contracts";
 import { orchestrationEnvironment } from "../state/orchestration";
 import {
   appendTerminalContextsToPrompt,
@@ -258,6 +262,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { ComposerFileDropZone } from "./chat/ComposerFileDropZone";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -331,6 +336,10 @@ import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
+import {
+  DEFAULT_DEVELOPMENT_INPUT_TARGET,
+  type DevelopmentInputTarget,
+} from "./chat/WorkspaceDevelopmentPanel";
 import { Button } from "./ui/button";
 import {
   AlertDialog,
@@ -354,11 +363,21 @@ import {
 import { useAssetUrls } from "../assets/assetUrls";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+  "[User attached one or more files without additional text. Read the attached files and respond using the conversation context.]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+const uploadMeetingQuestionImages = (images: readonly ComposerImageAttachment[]) =>
+  Promise.all(
+    images.map(async (image) => ({
+      type: "image" as const,
+      name: image.name,
+      mimeType: image.mimeType,
+      sizeBytes: image.sizeBytes,
+      dataUrl: await readFileAsDataUrl(image.file),
+    })),
+  );
 // Module-level so the derived atom behind useEnvironmentQuerySelector stays
 // stable across renders. "" stands in for "no operations yet" so a null result
 // always means the snapshot itself has not arrived.
@@ -1230,7 +1249,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
   const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
-  const requestMeetingRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
+  const requestMeetingRun = useAtomCommand(orchestrationEnvironment.startWorkflow, {
     reportFailure: false,
   });
   const interjectMeetingRun = useAtomCommand(
@@ -1352,6 +1371,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
+  const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
@@ -1383,6 +1403,16 @@ function ChatViewContent(props: ChatViewProps) {
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [pendingTaskConditions, setPendingTaskConditions] = useState<{
+    contextKey: string;
+    threadId: string;
+    draft: TaskConditionsDraft;
+    workOnlyReason?: string;
+    directAnnotation?: {
+      annotation: PreviewAnnotationPayload;
+      image: ComposerImageAttachment | null;
+    };
+  } | null>(null);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
@@ -1413,6 +1443,18 @@ function ChatViewContent(props: ChatViewProps) {
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
+  const pendingQuestionImageUrlsRef = useRef(
+    new Map<string, { threadId: ThreadId; urls: Set<string> }>(),
+  );
+  useEffect(
+    () => () => {
+      for (const entry of pendingQuestionImageUrlsRef.current.values()) {
+        for (const url of entry.urls) URL.revokeObjectURL(url);
+      }
+      pendingQuestionImageUrlsRef.current.clear();
+    },
+    [],
+  );
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] =
     useState<Record<string, number>>({});
   const shouldUseRightPanelSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
@@ -1754,6 +1796,57 @@ function ChatViewContent(props: ChatViewProps) {
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
   const activeProject = useProject(activeProjectRef);
+  const developmentQuery = useEnvironmentQuery(
+    activeProject
+      ? orchestrationEnvironment.workspaceDevelopment({
+          environmentId,
+          input: { projectId: activeProject.id },
+        })
+      : null,
+  );
+  const developmentState = developmentQuery.data?.state ?? null;
+  const developmentEnabled =
+    developmentState?.enabled === true && developmentState.conversationId === activeThread?.id;
+  const [developmentTarget, setDevelopmentTarget] = useState<DevelopmentInputTarget>(
+    DEFAULT_DEVELOPMENT_INPUT_TARGET,
+  );
+  const sendDevelopmentInput = useAtomCommand(orchestrationEnvironment.directDevelopmentInput);
+  useEffect(() => {
+    setDevelopmentTarget(DEFAULT_DEVELOPMENT_INPUT_TARGET);
+  }, [activeThread?.id, environmentId, developmentEnabled]);
+  const developmentComposerContext = useMemo(
+    () =>
+      isServerThread &&
+      activeThread &&
+      activeProject &&
+      !activeThread.worktreePath &&
+      developmentQuery.data !== null
+        ? {
+            environmentId,
+            projectId: activeProject.id,
+            conversationId: activeThread.id,
+            mainModel: activeThread.modelSelection,
+            runtimeMode,
+            interactionMode,
+            state: developmentState,
+            target: developmentTarget,
+            onTargetChange: setDevelopmentTarget,
+          }
+        : null,
+    [
+      isServerThread,
+      activeThread?.id,
+      activeThread?.worktreePath,
+      activeThread?.modelSelection,
+      runtimeMode,
+      interactionMode,
+      activeProject?.id,
+      developmentQuery.data,
+      developmentState,
+      developmentTarget,
+      environmentId,
+    ],
+  );
   // Whether this conversation hosts a live meeting must be known on EVERY
   // send, not just armed ones: a plain turn started into a meeting thread
   // replaces the seat's turn mid-flight and kills the run ("Collaboration
@@ -1827,8 +1920,14 @@ function ChatViewContent(props: ChatViewProps) {
       const question = run?.meeting?.pendingQuestion;
       const trimmed = answer.trim().slice(0, 8_000);
       if (run === undefined || !question || trimmed.length === 0) return;
+      const attachments = [...composerImagesRef.current];
+      if (attachments.some((item) => item.type !== "image")) {
+        toastManager.add({ type: "warning", title: "질문에는 이미지 파일을 첨부하세요." });
+        return;
+      }
       setAnsweringOrchestraQuestion(true);
       try {
+        const images = await uploadMeetingQuestionImages(attachments);
         const answered = await answerMeetingRun({
           environmentId,
           input: {
@@ -1837,6 +1936,7 @@ function ChatViewContent(props: ChatViewProps) {
             question: question.question,
             questionRef: { nodeId: question.nodeId, askedAt: question.askedAt },
             answer: trimmed,
+            ...(images.length ? { images } : {}),
           },
         });
         if (answered._tag === "Failure") {
@@ -1851,6 +1951,7 @@ function ChatViewContent(props: ChatViewProps) {
           }
           return;
         }
+        for (const image of attachments) removeComposerDraftImage(composerDraftTarget, image.id);
         meetingRunsQuery.refresh();
         toastManager.add(
           stackedThreadToast({
@@ -1859,11 +1960,20 @@ function ChatViewContent(props: ChatViewProps) {
             description: "답변을 반영해 오케스트라가 이어집니다.",
           }),
         );
+      } catch {
+        toastManager.add({ type: "error", title: "질문에 첨부한 이미지를 읽지 못했습니다." });
       } finally {
         setAnsweringOrchestraQuestion(false);
       }
     },
-    [answerMeetingRun, environmentId, liveMeetingRun, meetingRunsQuery.refresh],
+    [
+      answerMeetingRun,
+      composerDraftTarget,
+      environmentId,
+      liveMeetingRun,
+      meetingRunsQuery.refresh,
+      removeComposerDraftImage,
+    ],
   );
   // Stopping stops EVERYTHING live in this conversation — a running meeting
   // and anything queued behind it — in one act.
@@ -2469,6 +2579,41 @@ function ChatViewContent(props: ChatViewProps) {
     () => derivePendingUserInputs(threadActivities),
     [threadActivities],
   );
+  useEffect(() => {
+    if (!activeThreadId) return;
+    const resolved = new Set<string>();
+    for (const activity of threadActivities) {
+      if (
+        activity.kind !== "user-input.resolved" ||
+        !activity.payload ||
+        typeof activity.payload !== "object"
+      )
+        continue;
+      const requestId = (activity.payload as Record<string, unknown>).requestId;
+      if (typeof requestId !== "string") continue;
+      if (pendingUserInputs.some((request) => request.requestId === requestId)) continue;
+      const entry = pendingQuestionImageUrlsRef.current.get(requestId);
+      if (!entry || entry.threadId !== activeThreadId) continue;
+      for (const url of entry.urls) URL.revokeObjectURL(url);
+      pendingQuestionImageUrlsRef.current.delete(requestId);
+      resolved.add(requestId);
+    }
+    if (!resolved.size) return;
+    setPendingUserInputAnswersByRequestId((existing) => {
+      const next = { ...existing };
+      for (const requestId of resolved) {
+        const answers = next[requestId];
+        if (!answers) continue;
+        next[requestId] = Object.fromEntries(
+          Object.entries(answers).map(([questionId, draft]) => [
+            questionId,
+            { ...draft, images: [] },
+          ]),
+        );
+      }
+      return next;
+    });
+  }, [activeThreadId, pendingUserInputAnswersByRequestId, pendingUserInputs, threadActivities]);
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
     () =>
@@ -4931,9 +5076,11 @@ function ChatViewContent(props: ChatViewProps) {
           ? "답변 대기"
           : liveMeetingRun.status === "queued"
             ? "시작 대기"
-            : isDirectCollaboration
-              ? "계획 수립 중"
-              : "논의 진행 중";
+            : liveMeetingRun.meeting?.phase === "clarifying"
+              ? "지휘 AI 확인 중"
+              : isDirectCollaboration
+                ? "계획 수립 중"
+                : "논의 진행 중";
     return {
       id: `meeting-run:${liveMeetingRun.id}`,
       variant: "info",
@@ -5446,6 +5593,7 @@ function ChatViewContent(props: ChatViewProps) {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
+    approvedTask?: { contextKey: string; conditions: ApprovedTaskConditions },
   ) => {
     e?.preventDefault();
     const notifyDirectAnnotationAttached = () => {
@@ -5484,7 +5632,10 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
-    if (activePendingProgress) {
+    if (
+      activePendingProgress &&
+      !(developmentEnabled && developmentTarget.workspaceId && !directAnnotation)
+    ) {
       if (directAnnotation) {
         notifyDirectAnnotationAttached();
         return;
@@ -5493,7 +5644,11 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     const sendCtx = composerRef.current?.getSendContext();
-    if (!sendCtx?.providerAvailable) {
+    if (
+      !sendCtx ||
+      (!sendCtx.providerAvailable &&
+        !(developmentEnabled && developmentTarget.workspaceId && !directAnnotation))
+    ) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -5530,6 +5685,7 @@ function ChatViewContent(props: ChatViewProps) {
           ]
         : sendContextPreviewAnnotations;
     const promptForSend = promptRef.current;
+    const requestMode = readComposerRequestMode();
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -5544,6 +5700,131 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
+    const conditionMeeting = readMeetingComposerConfig();
+    const conditionWorkOnlyReason =
+      !directAnnotation &&
+      ((developmentEnabled && developmentTarget.workspaceId) ||
+        (conditionMeeting.enabled && !developmentEnabled) ||
+        (showPlanFollowUpPrompt && activeProposedPlan))
+        ? "현재 선택한 협업·계획 실행 경로는 실행 작업을 전달합니다."
+        : null;
+    const conditionContextKey = JSON.stringify([
+      environmentId,
+      activeThread.id,
+      activeProject?.workspaceRoot,
+      promptForSend,
+      composerImages.map((image) => [image.id, image.name, image.sizeBytes]),
+      composerTerminalContexts,
+      composerElementContexts,
+      composerPreviewAnnotations,
+      composerReviewComments,
+      ctxSelectedModelSelection,
+      activeThread.runtimeMode,
+      activeThread.interactionMode,
+      developmentEnabled,
+      developmentTarget,
+      conditionMeeting,
+      conditionWorkOnlyReason,
+      requestMode,
+    ]);
+    if (approvedTask && approvedTask.contextKey !== conditionContextKey) {
+      setPendingTaskConditions(null);
+      toastManager.add({
+        type: "warning",
+        title: "요청이나 첨부 내용이 변경됐습니다. 조건을 다시 확인하세요.",
+      });
+      return;
+    }
+    if (approvedTask?.conditions.mode === "inspect" && conditionWorkOnlyReason) {
+      toastManager.add({ type: "warning", title: "조회 전용 작업은 일반 대화에서 보내세요." });
+      return;
+    }
+    if (
+      !approvedTask &&
+      requestMode === "conditions" &&
+      hasSendableContent &&
+      !liveMeetingRun &&
+      !/^(stop|cancel|멈춰|멈춰줘|중지|중단|그만)$/i.test(trimmed)
+    ) {
+      setPendingTaskConditions((previous) =>
+        previous?.contextKey === conditionContextKey
+          ? previous
+          : {
+              contextKey: conditionContextKey,
+              threadId: activeThread.id,
+              draft: createTaskConditionsDraft(promptForSend, activeProject?.workspaceRoot ?? ""),
+              ...(conditionWorkOnlyReason ? { workOnlyReason: conditionWorkOnlyReason } : {}),
+              ...(directAnnotation ? { directAnnotation } : {}),
+            },
+      );
+      return;
+    }
+    if (
+      developmentEnabled &&
+      developmentTarget.workspaceId &&
+      activeProject &&
+      activeThread &&
+      !directAnnotation
+    ) {
+      if (
+        composerImages.length ||
+        composerElementContexts.length ||
+        composerPreviewAnnotations.length ||
+        composerReviewComments.length ||
+        sendableComposerTerminalContexts.length
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Owner 직접 지시는 현재 텍스트 입력을 지원합니다.",
+            description: "첨부 내용은 Main에게 보내거나 텍스트로 정리하세요.",
+          }),
+        );
+        return;
+      }
+      const workspace = developmentState?.workspaces.find(
+        (workspace) => workspace.id === developmentTarget.workspaceId,
+      );
+      if (!workspace || !trimmed) return;
+      beginSendInFlight();
+      try {
+        const settingsResult = await persistThreadSettingsForNextTurn({
+          threadId: activeThread.id,
+          createdAt: new Date().toISOString(),
+          runtimeMode,
+          interactionMode,
+        });
+        if (settingsResult._tag === "Failure") {
+          if (!isAtomCommandInterrupted(settingsResult)) {
+            setThreadError(activeThread.id, "작업실 실행 설정을 저장하지 못했습니다.");
+          }
+          return;
+        }
+        const result = await sendDevelopmentInput({
+          environmentId,
+          input: {
+            projectId: activeProject.id,
+            conversationId: activeThread.id,
+            workspaceId: workspace.id,
+            commandId: CommandId.make(randomUUID()),
+            expectedRevision: workspace.stateRevision,
+            text: approvedTask
+              ? renderApprovedTaskConditions(approvedTask.conditions, trimmed)
+              : formatComposerRequest(trimmed, requestMode),
+            mode: developmentTarget.mode,
+            requirementChange: developmentTarget.requirementChange,
+          },
+        });
+        if (result._tag === "Success") {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        }
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
     if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -5553,7 +5834,9 @@ function ChatViewContent(props: ChatViewProps) {
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       await onSubmitPlanFollowUp({
-        text: followUp.text,
+        text: approvedTask
+          ? renderApprovedTaskConditions(approvedTask.conditions, followUp.text)
+          : formatComposerRequest(followUp.text, requestMode),
         interactionMode: followUp.interactionMode,
       });
       return;
@@ -5647,10 +5930,18 @@ function ChatViewContent(props: ChatViewProps) {
         // The run is parked on a question for the person; a message typed
         // into its own conversation IS the answer — send it as one so the
         // meeting wakes up, instead of an interjection it would never read.
-        const answerText = promptForSend.trim().slice(0, 8_000);
+        if (composerImages.some((item) => item.type !== "image")) {
+          toastManager.add({ type: "warning", title: "질문에는 이미지 파일을 첨부하세요." });
+          return;
+        }
+        const attachments = [...composerImages];
+        const answerText =
+          promptForSend.trim().slice(0, 8_000) ||
+          (attachments.length ? "첨부한 이미지를 참고하세요." : "");
         if (answerText.length === 0) return;
         beginSendInFlight();
         try {
+          const images = await uploadMeetingQuestionImages(attachments);
           const answered = await answerMeetingRun({
             environmentId,
             input: {
@@ -5662,6 +5953,7 @@ function ChatViewContent(props: ChatViewProps) {
                 askedAt: meetingPendingQuestion.askedAt,
               },
               answer: answerText,
+              ...(images.length ? { images } : {}),
             },
           });
           if (answered._tag === "Failure") {
@@ -5676,9 +5968,12 @@ function ChatViewContent(props: ChatViewProps) {
             }
             return;
           }
-          promptRef.current = "";
-          clearComposerDraftContent(composerDraftTarget);
-          composerRef.current?.resetCursorState();
+          for (const image of attachments) removeComposerDraftImage(composerDraftTarget, image.id);
+          if (promptRef.current === promptForSend) {
+            promptRef.current = "";
+            setComposerDraftPrompt(composerDraftTarget, "");
+            composerRef.current?.resetCursorState();
+          }
           toastManager.add(
             stackedThreadToast({
               type: "success",
@@ -5686,6 +5981,8 @@ function ChatViewContent(props: ChatViewProps) {
               description: "답변을 반영해 오케스트라가 이어집니다.",
             }),
           );
+        } catch {
+          toastManager.add({ type: "error", title: "질문에 첨부한 이미지를 읽지 못했습니다." });
         } finally {
           sendInFlightRef.current = false;
         }
@@ -5700,6 +5997,14 @@ function ChatViewContent(props: ChatViewProps) {
               "논의는 끝나 계획을 실행 중이라 개입할 수 없습니다. 중단하려면 위의 '오케스트라 중지' 버튼을 누르거나 '멈춰'라고 보내세요.",
           }),
         );
+        return;
+      }
+      if (composerImages.length > 0) {
+        toastManager.add({
+          type: "warning",
+          title: "진행 중인 논의에는 아직 사진을 추가할 수 없습니다.",
+          description: "첨부한 사진은 작성창에 보관됩니다.",
+        });
         return;
       }
       const interjectionText = promptForSend.trim().slice(0, 8_000);
@@ -5746,7 +6051,7 @@ function ChatViewContent(props: ChatViewProps) {
     // the roster discusses it, agrees a plan, and executes it — no thread turn
     // is started, so this leaves the current conversation untouched.
     const meetingDraft = readMeetingComposerConfig();
-    if (meetingDraft.enabled && !directAnnotation) {
+    if (meetingDraft.enabled && !developmentEnabled && !directAnnotation) {
       // Never convene a meeting while this conversation's meeting state is
       // still unknown — a moment of unloaded query data must not turn a
       // message meant for a live meeting into a brand-new one. Refresh so an
@@ -5766,8 +6071,8 @@ function ChatViewContent(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "오케스트라 주제에는 이미지를 첨부할 수 없습니다",
-            description: "이미지를 제거하거나 오케스트라를 끄고 보내세요.",
+            title: "오케스트라 주제에는 파일을 첨부할 수 없습니다",
+            description: "첨부 파일을 제거하거나 오케스트라를 끄고 보내세요.",
           }),
         );
         return;
@@ -5777,7 +6082,21 @@ function ChatViewContent(props: ChatViewProps) {
           stackedThreadToast({
             type: "warning",
             title: "오케스트라 참가자가 부족합니다",
-            description: "모델 선택기의 오케스트라에서 참가자를 2명 이상 선택하세요.",
+            description: "AI 작업 설정에서 참가자를 2명 이상 선택하세요.",
+          }),
+        );
+        return;
+      }
+      const coordinator = selectMeetingCoordinator(
+        meetingSetupFromConfig(meetingDraft),
+        ctxSelectedModelSelection,
+      );
+      if (!coordinator.meeting) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "선택한 총괄 모델을 사용할 수 없습니다",
+            description: coordinator.error ?? "참가자 구성을 확인하세요.",
           }),
         );
         return;
@@ -5793,45 +6112,42 @@ function ChatViewContent(props: ChatViewProps) {
         composerReviewComments,
       ).trim();
       if (meetingTopic.length === 0) return;
-      // "질문 먼저": the first seat raises its clarifying questions via
-      // <t3_question> — the server already parks the run on them — before
-      // the actual discussion begins.
-      const meetingTask = (
-        readAskFirstEnabled() ? ASK_FIRST_MEETING_PREFIX + meetingTopic : meetingTopic
-      ).slice(0, 20_000);
+      const meetingTask = executionProfileTask(
+        approvedTask
+          ? renderApprovedTaskConditions(approvedTask.conditions, meetingTopic)
+          : meetingTopic,
+        meetingDraft.executionProfile,
+      );
+      if (meetingTask.length > 20_000) {
+        toastManager.add({
+          type: "warning",
+          title: "작업과 프로필 지침을 합쳐 20,000자 이하로 입력하세요.",
+        });
+        return;
+      }
       beginSendInFlight();
       try {
         const result = await requestMeetingRun({
           environmentId,
           input: {
-            runId: WorkspaceCollaborationRunId.make(randomUUID()),
             projectId: activeProject.id,
             task: meetingTask,
+            requestId: randomUUID(),
+            requestMode,
+            conditionsConfirmed: requestMode !== "conditions" || !!approvedTask,
+            runtimeMode,
+            interactionMode,
+            roleModels: {
+              coordinator: ctxSelectedModelSelection,
+              implementer: ctxSelectedModelSelection,
+              researcher: ctxSelectedModelSelection,
+            },
+            ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             meeting: {
-              mode: meetingDraft.mode,
-              participants: meetingDraft.seats.map((seat) => ({
-                id: WorkspaceMeetingParticipantId.make(seat.id),
-                displayName: seat.displayName,
-                modelSelection: {
-                  instanceId: seat.instanceId,
-                  model: seat.model,
-                  // Per-seat effort (and any other provider option) rides the
-                  // same options field a plain turn's model selection uses.
-                  ...(seat.options && seat.options.length > 0 ? { options: seat.options } : {}),
-                },
-              })),
-              chairParticipantId:
-                meetingDraft.chairSeatId === null
-                  ? null
-                  : WorkspaceMeetingParticipantId.make(meetingDraft.chairSeatId),
-              // 협업 is a zero-round meeting on the wire; the stored round
-              // count stays untouched for when the person switches back, and
-              // the person's revision cap rides along as the 횟수 제한.
-              maxRounds: meetingDraft.style === "collaboration" ? 0 : meetingDraft.maxRounds,
-              ...(meetingDraft.style === "collaboration"
-                ? { maxRevisions: meetingDraft.maxRevisions }
-                : {}),
-              userInLoop: meetingDraft.userInLoop,
+              ...coordinator.meeting,
+              askFirst: !approvedTask && requestMode === "ask-first",
+              runtimeMode,
+              interactionMode,
               ...(meetingThreadId !== undefined ? { threadId: meetingThreadId } : {}),
             },
             // 오케스트라는 상시 모드다: armed면 항상 병렬 실행 설정을 싣는다
@@ -5839,6 +6155,14 @@ function ChatViewContent(props: ChatViewProps) {
             orchestra: {
               maxParallel: meetingDraft.maxParallel,
               isolateWorktrees: meetingDraft.isolateWorktrees,
+              reviewPlan: meetingDraft.reviewPlan === true,
+              resumeAfterLimit: meetingDraft.resumeAfterLimit === true,
+              verificationCommands: (meetingDraft.verificationCommands ?? [])
+                .map((command) => command.trim())
+                .filter(Boolean),
+              ...(meetingDraft.maxWorkerTurns === undefined
+                ? {}
+                : { maxWorkerTurns: meetingDraft.maxWorkerTurns }),
             },
           },
         });
@@ -5937,12 +6261,10 @@ function ChatViewContent(props: ChatViewProps) {
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
     );
-    // "질문 먼저": the AI must answer with its plan and questions and wait,
-    // instead of starting work. Rides inside the message with user authority.
-    const messageTextForSend =
-      readAskFirstEnabled() && assembledMessageText.trim().length > 0
-        ? ASK_FIRST_TASK_PREFIX + assembledMessageText
-        : assembledMessageText;
+    const messageTextForSend = formatComposerRequest(
+      assembledMessageText || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      approvedTask ? "conditions" : requestMode,
+    );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
@@ -5954,7 +6276,7 @@ function ChatViewContent(props: ChatViewProps) {
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
+        type: image.type,
         name: image.name,
         mimeType: image.mimeType,
         sizeBytes: image.sizeBytes,
@@ -5962,7 +6284,7 @@ function ChatViewContent(props: ChatViewProps) {
       })),
     );
     const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
+      type: image.type,
       id: image.id,
       name: image.name,
       mimeType: image.mimeType,
@@ -6022,10 +6344,10 @@ function ChatViewContent(props: ChatViewProps) {
         firstComposerImageName = firstComposerImage.name;
       }
     }
-    let titleSeed = trimmed;
+    let titleSeed = approvedTask?.conditions.goal ?? trimmed;
     if (!titleSeed) {
       if (firstComposerImageName) {
-        titleSeed = `이미지: ${firstComposerImageName}`;
+        titleSeed = `첨부 파일: ${firstComposerImageName}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
       } else if (composerElementContextsSnapshot.length > 0) {
@@ -6122,6 +6444,12 @@ function ChatViewContent(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: title,
+          ...(approvedTask
+            ? {
+                requireTaskConditions: true,
+                taskConditions: approvedTask.conditions,
+              }
+            : {}),
           runtimeMode,
           interactionMode,
           ...(bootstrap ? { bootstrap } : {}),
@@ -6193,7 +6521,12 @@ function ChatViewContent(props: ChatViewProps) {
     }
     const result = await interruptThreadTurn({
       environmentId,
-      input: buildThreadTurnInterruptInput(activeThread),
+      input: buildThreadTurnInterruptInput(
+        activeThread,
+        activePendingUserInput?.requestId.startsWith("async:")
+          ? { questionRequestId: activePendingUserInput.requestId }
+          : undefined,
+      ),
     });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       setThreadError(activeThread.id, "현재 턴을 중단하지 못했습니다.");
@@ -6224,6 +6557,57 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThreadId, environmentId, respondToThreadApproval, setThreadError],
   );
 
+  const onAddPendingQuestionImages = useCallback(
+    (requestId: ApprovalRequestId, questionId: string, images: ComposerImageAttachment[]) => {
+      if (!activeThreadId) return;
+      const tracked = pendingQuestionImageUrlsRef.current.get(requestId) ?? {
+        threadId: activeThreadId,
+        urls: new Set<string>(),
+      };
+      for (const image of images) {
+        if (image.previewUrl.startsWith("blob:")) tracked.urls.add(image.previewUrl);
+      }
+      pendingQuestionImageUrlsRef.current.set(requestId, tracked);
+      setPendingUserInputAnswersByRequestId((existing) => {
+        const answers = existing[requestId] ?? {};
+        const draft = answers[questionId] ?? {};
+        return {
+          ...existing,
+          [requestId]: {
+            ...answers,
+            [questionId]: { ...draft, images: [...(draft.images ?? []), ...images] },
+          },
+        };
+      });
+    },
+    [activeThreadId],
+  );
+  const onRemovePendingQuestionImage = useCallback(
+    (requestId: ApprovalRequestId, questionId: string, imageId: string) => {
+      setPendingUserInputAnswersByRequestId((existing) => {
+        const answers = existing[requestId];
+        const draft = answers?.[questionId];
+        const removed = draft?.images?.find((image) => image.id === imageId);
+        if (!answers || !draft || !removed) return existing;
+        if (removed.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(removed.previewUrl);
+          pendingQuestionImageUrlsRef.current.get(requestId)?.urls.delete(removed.previewUrl);
+        }
+        return {
+          ...existing,
+          [requestId]: {
+            ...answers,
+            [questionId]: {
+              ...draft,
+              images: draft.images!.filter((image) => image.id !== imageId),
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
   const onRespondToUserInput = useCallback(
     async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
       if (!activeThreadId) return;
@@ -6231,21 +6615,48 @@ function ChatViewContent(props: ChatViewProps) {
       setRespondingUserInputRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
-      const result = await respondToThreadUserInput({
-        environmentId,
-        input: {
-          threadId: activeThreadId,
-          requestId,
-          answers,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        setThreadError(activeThreadId, "입력 내용을 제출하지 못했습니다.");
+      try {
+        const drafts = pendingUserInputAnswersByRequestId[requestId] ?? {};
+        const images = await Promise.all(
+          Object.entries(drafts).flatMap(([questionId, draft]) =>
+            (draft.images ?? []).map(async (image) => ({
+              questionId,
+              image: {
+                type: "image" as const,
+                name: image.name,
+                mimeType: image.mimeType,
+                sizeBytes: image.sizeBytes,
+                dataUrl: await readFileAsDataUrl(image.file),
+              },
+            })),
+          ),
+        );
+        const result = await respondToThreadUserInput({
+          environmentId,
+          input: {
+            threadId: activeThreadId,
+            requestId,
+            answers,
+            ...(images.length ? { images } : {}),
+          },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          setThreadError(activeThreadId, "입력 내용을 제출하지 못했습니다.");
+        }
+        return result;
+      } catch {
+        setThreadError(activeThreadId, "질문에 첨부한 이미지를 읽지 못했습니다.");
+      } finally {
+        setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       }
-      setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
-      return result;
     },
-    [activeThreadId, environmentId, respondToThreadUserInput, setThreadError],
+    [
+      activeThreadId,
+      environmentId,
+      pendingUserInputAnswersByRequestId,
+      respondToThreadUserInput,
+      setThreadError,
+    ],
   );
 
   const setActivePendingUserInputQuestionIndex = useCallback(
@@ -6686,7 +7097,7 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
 
   const onProviderModelSelect = useCallback(
-    (instanceId: ProviderInstanceId, model: string) => {
+    (instanceId: ProviderInstanceId, model: string, options?: ModelSelection["options"]) => {
       if (!activeThread) return;
       // Look up the configured instance so model normalization and custom
       // model lookup stay scoped to that exact instance. Unknown instance ids
@@ -6727,6 +7138,7 @@ function ChatViewContent(props: ChatViewProps) {
       const nextModelSelection: ModelSelection = {
         instanceId,
         model: resolvedModel,
+        ...(options ? { options } : {}),
       };
       setComposerDraftModelSelection(
         scopeThreadRef(activeThread.environmentId, activeThread.id),
@@ -6926,7 +7338,7 @@ function ChatViewContent(props: ChatViewProps) {
   ) : null;
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+    <ComposerFileDropZone onFiles={(files) => composerRef.current?.addFiles(files) ?? false}>
       {rightPanelOpen && !shouldUseRightPanelSheet ? panelLayoutControls : null}
       <div
         className={cn(
@@ -6995,6 +7407,7 @@ function ChatViewContent(props: ChatViewProps) {
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 orchestraBlocks={orchestraBlocks}
+                orchestraRuns={meetingRunsQuery.data?.runs}
                 agentPanelModel={agentPanelModel}
                 onOpenAgents={addAgentsSurface}
                 key={activeThread.id}
@@ -7110,10 +7523,41 @@ function ChatViewContent(props: ChatViewProps) {
                     >
                       <div className="chat-composer-glass-host relative z-10 w-full rounded-[22px]">
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
+                          {pendingTaskConditions?.threadId === activeThread.id ? (
+                            <TaskConditionsDialog
+                              draft={pendingTaskConditions.draft}
+                              {...(pendingTaskConditions.workOnlyReason
+                                ? { workOnlyReason: pendingTaskConditions.workOnlyReason }
+                                : {})}
+                              onChange={(draft) =>
+                                setPendingTaskConditions((current) =>
+                                  current ? { ...current, draft } : null,
+                                )
+                              }
+                              onCancel={() => setPendingTaskConditions(null)}
+                              onApprove={(conditions) => {
+                                const review = pendingTaskConditions;
+                                setPendingTaskConditions(null);
+                                void onSend(undefined, review.directAnnotation, {
+                                  contextKey: review.contextKey,
+                                  conditions,
+                                });
+                              }}
+                            />
+                          ) : null}
                           <ChatComposer
                             composerRef={composerRef}
                             composerDraftTarget={composerDraftTarget}
+                            workflowProject={activeProject}
                             environmentId={environmentId}
+                            development={developmentComposerContext}
+                            {...(isServerThread && developmentQuery.data === null
+                              ? {
+                                  developmentUnavailableReason: developmentQuery.error
+                                    ? "지속 작업실 상태를 불러오지 못했습니다. 서버 연결을 확인하세요."
+                                    : "지속 작업실 상태를 불러오는 중입니다.",
+                                }
+                              : {})}
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
                             draftId={draftId}
@@ -7124,7 +7568,9 @@ function ChatViewContent(props: ChatViewProps) {
                             isLocalDraftThread={isLocalDraftThread}
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
-                            phase={phase}
+                            phase={
+                              developmentEnabled && developmentTarget.workspaceId ? "ready" : phase
+                            }
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
                             sendDisabledReason={threadDetailLoading ? "메시지 불러오는 중" : null}
@@ -7133,7 +7579,11 @@ function ChatViewContent(props: ChatViewProps) {
                             activePendingApproval={activePendingApproval}
                             pendingApprovals={pendingApprovals}
                             pendingUserInputs={pendingUserInputs}
-                            activePendingProgress={activePendingProgress}
+                            activePendingProgress={
+                              developmentEnabled && developmentTarget.workspaceId
+                                ? null
+                                : activePendingProgress
+                            }
                             activePendingResolvedAnswers={activePendingResolvedAnswers}
                             activePendingIsResponding={activePendingIsResponding}
                             activePendingDraftAnswers={activePendingDraftAnswers}
@@ -7176,10 +7626,11 @@ function ChatViewContent(props: ChatViewProps) {
                             onSelectActivePendingUserInputOption={
                               onSelectActivePendingUserInputOption
                             }
-                            onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
                             onPreviousActivePendingUserInputQuestion={
                               onPreviousActivePendingUserInputQuestion
                             }
+                            onAddPendingQuestionImages={onAddPendingQuestionImages}
+                            onRemovePendingQuestionImage={onRemovePendingQuestionImage}
                             onChangeActivePendingUserInputCustomAnswer={
                               onChangeActivePendingUserInputCustomAnswer
                             }
@@ -7384,7 +7835,7 @@ function ChatViewContent(props: ChatViewProps) {
           onClose={closeExpandedImage}
         />
       )}
-    </div>
+    </ComposerFileDropZone>
   );
 }
 

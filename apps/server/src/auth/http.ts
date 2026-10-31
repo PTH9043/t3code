@@ -1,6 +1,8 @@
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
+  AuthAccessTokenType,
+  AuthEnvironmentScopes,
   AuthStandardClientScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -26,9 +28,12 @@ import type { AuthEnvironmentScope } from "@t3tools/contracts";
 import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Cookies from "effect/unstable/http/Cookies";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -36,6 +41,8 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
+import { createGoogleAccountAuth, matchesEnrolledGoogleAccount } from "./GoogleAccountAuth.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
@@ -44,6 +51,8 @@ const CREDENTIAL_RESPONSE_HEADERS = {
   "cache-control": "no-store",
   pragma: "no-cache",
 } as const;
+
+class GoogleVerificationError extends Data.TaggedError("GoogleVerificationError")<{}> {}
 
 const appendCredentialResponseHeaders = HttpEffect.appendPreResponseHandler((_request, response) =>
   Effect.succeed(HttpServerResponse.setHeaders(response, CREDENTIAL_RESPONSE_HEADERS)),
@@ -203,8 +212,194 @@ export const authHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    const secrets = yield* ServerSecretStore.ServerSecretStore;
+    const google = createGoogleAccountAuth();
+    const googleSecretName = "google-login-account";
+    const googleAccountSchema = Schema.Struct({
+      clientId: Schema.String,
+      subject: Schema.String,
+      scopes: AuthEnvironmentScopes,
+    });
+    const decodeGoogleAccount = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(googleAccountSchema),
+    );
+    const encodeGoogleAccount = Schema.encodeEffect(Schema.fromJsonString(googleAccountSchema));
+    const loadGoogleAccount = () =>
+      secrets.get(googleSecretName).pipe(
+        Effect.flatMap((value) =>
+          Option.isNone(value)
+            ? Effect.succeed(null)
+            : decodeGoogleAccount(new TextDecoder().decode(value.value)),
+        ),
+        Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+      );
+    const verifyGoogle = (input: {
+      challenge: string;
+      idToken: string;
+      ownerSessionId: string | null;
+      expectedSubject?: string;
+    }) =>
+      Effect.tryPromise({
+        try: () => google.verify(input),
+        catch: () => new GoogleVerificationError(),
+      }).pipe(Effect.catch(() => failEnvironmentAuthInvalid("invalid_credential")));
+    const issueGoogleChallenge = (clientId: string, ownerSessionId: string | null) =>
+      Effect.try({
+        try: () => google.challenge(clientId, ownerSessionId),
+        catch: () => new GoogleVerificationError(),
+      }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+    const authenticateGoogle = Effect.fn("environment.auth.authenticateGoogle")(
+      function* (payload: { readonly challenge: string; readonly idToken: string }) {
+        const expectedAccount = yield* loadGoogleAccount();
+        if (!expectedAccount) return yield* failEnvironmentAuthInvalid("invalid_credential");
+        const { identity, clientId } = yield* verifyGoogle({
+          ...payload,
+          ownerSessionId: null,
+          expectedSubject: expectedAccount.subject,
+        });
+        const account = yield* loadGoogleAccount();
+        if (!matchesEnrolledGoogleAccount(account, clientId, identity.subject)) {
+          return yield* failEnvironmentAuthInvalid("invalid_credential");
+        }
+        return { identity, account };
+      },
+    );
 
     return handlers
+      .handle(
+        "googleEnrollment",
+        Effect.fn("environment.auth.googleEnrollment")(function* () {
+          yield* requireEnvironmentScope(AuthAccessWriteScope);
+          const account = yield* loadGoogleAccount();
+          yield* appendCredentialResponseHeaders;
+          return { registered: account !== null };
+        }),
+      )
+      .handle(
+        "googleEnrollChallenge",
+        Effect.fn("environment.auth.googleEnrollChallenge")(function* (args) {
+          const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+          yield* appendCredentialResponseHeaders;
+          return yield* issueGoogleChallenge(args.payload.clientId, principal.sessionId);
+        }),
+      )
+      .handle(
+        "googleEnroll",
+        Effect.fn("environment.auth.googleEnroll")(function* (args) {
+          const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+          const { identity, clientId } = yield* verifyGoogle({
+            ...args.payload,
+            ownerSessionId: principal.sessionId,
+          });
+          const existing = yield* loadGoogleAccount();
+          if (existing) {
+            if (!matchesEnrolledGoogleAccount(existing, clientId, identity.subject)) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            yield* appendCredentialResponseHeaders;
+            return { subject: identity.subject };
+          }
+          const serialized = yield* encodeGoogleAccount({
+            clientId,
+            subject: identity.subject,
+            scopes: [...principal.scopes],
+          }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          yield* secrets
+            .create(googleSecretName, new TextEncoder().encode(serialized))
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          yield* appendCredentialResponseHeaders;
+          return { subject: identity.subject };
+        }),
+      )
+      .handle(
+        "googleUnenroll",
+        Effect.fn("environment.auth.googleUnenroll")(function* () {
+          yield* requireEnvironmentScope(AuthAccessWriteScope);
+          const account = yield* loadGoogleAccount();
+          yield* secrets
+            .remove(googleSecretName)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          yield* appendCredentialResponseHeaders;
+          return { removed: account !== null };
+        }),
+      )
+      .handle(
+        "googleChallenge",
+        Effect.fn("environment.auth.googleChallenge")(function* () {
+          const account = yield* loadGoogleAccount();
+          if (!account) return yield* failEnvironmentAuthInvalid("invalid_credential");
+          yield* appendCredentialResponseHeaders;
+          return yield* issueGoogleChallenge(account.clientId, null);
+        }),
+      )
+      .handle(
+        "googleSession",
+        Effect.fn("environment.auth.googleSession")(function* (args) {
+          const { identity, account } = yield* authenticateGoogle(args.payload);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const session = yield* sessions
+            .issue({
+              method: "browser-session-cookie",
+              subject: `google:${identity.subject}`,
+              scopes: account.scopes,
+              client: deriveAuthClientMetadata({ request }),
+            })
+            .pipe(
+              Effect.catch((error) =>
+                failEnvironmentInternal("browser_session_issuance_failed", error),
+              ),
+            );
+          const sessionCookies = yield* Effect.fromResult(
+            Cookies.set(Cookies.empty, sessions.cookieName, session.token, {
+              expires: DateTime.toDate(session.expiresAt),
+              httpOnly: true,
+              path: "/",
+              sameSite: "lax",
+            }),
+          ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+          yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+            Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
+          );
+          yield* appendCredentialResponseHeaders;
+          return {
+            authenticated: true as const,
+            scopes: session.scopes,
+            sessionMethod: session.method,
+            expiresAt: DateTime.toUtc(session.expiresAt),
+          };
+        }),
+      )
+      .handle(
+        "googleToken",
+        Effect.fn("environment.auth.googleToken")(function* (args) {
+          const { identity, account } = yield* authenticateGoogle(args.payload);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const session = yield* sessions
+            .issue({
+              method: "bearer-access-token",
+              subject: `google:${identity.subject}`,
+              scopes: account.scopes,
+              client: deriveAuthClientMetadata({ request }),
+            })
+            .pipe(
+              Effect.catch((error) =>
+                failEnvironmentInternal("access_token_issuance_failed", error),
+              ),
+            );
+          const now = yield* DateTime.now;
+          yield* appendCredentialResponseHeaders;
+          return {
+            access_token: session.token,
+            issued_token_type: AuthAccessTokenType,
+            token_type: "Bearer" as const,
+            expires_in: Math.max(
+              0,
+              Math.floor((session.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
+            ),
+            scope: session.scopes.join(" "),
+          };
+        }),
+      )
       .handle(
         "session",
         Effect.fn("environment.auth.session")(

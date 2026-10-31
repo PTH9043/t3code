@@ -125,7 +125,10 @@ function normalizeRateLimitWindow(
 
 function normalizeCredits(value: unknown): ServerProviderUsageCredits | undefined {
   if (!Predicate.isObject(value)) return undefined;
-  const balance = trimmedString(readProperty(value, "balance"));
+  const rawBalance = readProperty(value, "balance");
+  const balance =
+    trimmedString(rawBalance) ??
+    (finiteNumber(rawBalance) !== undefined ? String(rawBalance) : undefined);
   const rawHasCredits = readFirst(value, ["hasCredits", "has_credits"]);
   const rawUnlimited = readProperty(value, "unlimited");
   const hasCredits = Predicate.isBoolean(rawHasCredits) ? rawHasCredits : undefined;
@@ -215,7 +218,7 @@ export function reduceProviderAccountUsage(
     return { ...state, activeSessions, updatedAt: event.createdAt };
   }
 
-  if (event.type === "thread.token-usage.updated") {
+  if (event.type === "thread.token-usage.updated" && event.payload.usage !== undefined) {
     const threadTokens = new Map(state.threadTokens);
     const sessions = new Set(state.sessions);
     const observedTokens =

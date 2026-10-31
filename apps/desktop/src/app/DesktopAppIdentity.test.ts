@@ -145,6 +145,20 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
+  it.effect("isolates an explicitly configured development home from the existing desktop", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        assert.equal(yield* identity.resolveUserDataPath, "/upgrade/.t3/userdata/desktop-profile");
+      }),
+      {
+        environment: {
+          env: { T3CODE_HOME: "/upgrade/.t3", VITE_DEV_SERVER_URL: "http://localhost:6000" },
+        },
+        legacyPathExists: true,
+      },
+    ),
+  );
   it.effect("stores the packaged Windows Electron profile under the E drive state root", () =>
     withIdentity(
       Effect.gen(function* () {

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   ProjectId,
   WorkspaceIncidentId,
@@ -37,6 +38,7 @@ function program(projectId: ProjectId, id: WorkspaceProgramId, name: string): Wo
     errorPatterns: ["fatal|panic"],
     enabled: true,
     integrity: DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
+    hubMemory: DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
     createdAt: at,
     updatedAt: at,
   };
@@ -120,7 +122,24 @@ layer("ProjectionWorkspaceProgramRepository", (it) => {
       const incidentA = WorkspaceIncidentId.make("program-incident-a");
       const incidentB = WorkspaceIncidentId.make("program-incident-b");
 
-      yield* repository.upsertProgram(program(workspaceA, sharedProgramId, "A 개발 서버"));
+      const hubMemory = {
+        commitLimitMb: 256,
+        concurrencyGroup: "research",
+        concurrencySlots: 2,
+        sharedDatasets: [{ name: "EVENTS", relativeSource: "data/events.jsonl" }],
+      };
+      const programA = { ...program(workspaceA, sharedProgramId, "A 개발 서버"), hubMemory };
+      yield* repository.upsertProgram(programA);
+      expect(
+        yield* repository.getProgram({ projectId: workspaceA, programId: sharedProgramId }),
+      ).toEqual(Option.some(programA));
+      yield* repository.upsertProgram({
+        ...programA,
+        hubMemory: { ...hubMemory, commitLimitMb: 512 },
+      });
+      expect(
+        yield* repository.getProgram({ projectId: workspaceA, programId: sharedProgramId }),
+      ).toEqual(Option.some({ ...programA, hubMemory: { ...hubMemory, commitLimitMb: 512 } }));
       yield* repository.upsertProgram(program(workspaceB, sharedProgramId, "B 개발 서버"));
       yield* repository.upsertRun(run(workspaceA, sharedProgramId, runA));
       yield* repository.upsertRun(run(workspaceB, sharedProgramId, runB));

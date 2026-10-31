@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "number",
+      "enum": [1]
+    },
+    "projectId": {
+      "type": "string"
+    },
+    "policyRevision": {
+      "type": "integer",
+      "allOf": [
+        {
+          "minimum": 0
+        }
+      ]
+    },
+    "ownerModels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "instanceId": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {},
+          "options": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["model"],
+        "additionalProperties": false
+      },
+      "allOf": [
+        {
+          "minItems": 1
+        },
+        {
+          "maxItems": 8
+        }
+      ]
+    },
+    "maxParallelOwners": {
+      "type": "integer",
+      "allOf": [
+        {
+          "minimum": 1,
+          "maximum": 3
+        }
+      ]
+    },
+    "verificationCommands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["command", "args"],
+        "additionalProperties": false
+      },
+      "allOf": [
+        {
+          "maxItems": 8
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "policyRevision",
+    "ownerModels",
+    "maxParallelOwners",
+    "verificationCommands"
+  ],
+  "additionalProperties": false
+}

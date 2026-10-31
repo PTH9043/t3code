@@ -17,13 +17,19 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 it("keeps only the Claude 5 family out of legacy models", () => {
   assert.deepStrictEqual(
-    ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"].map((model) => [
-      model,
-      isLegacyClaudeModel(model),
-    ]),
+    [
+      "claude-fable-5",
+      "claude-opus-5-5",
+      "claude-opus-5",
+      "claude-sonnet-5-5",
+      "claude-sonnet-5",
+      "claude-opus-4-8",
+    ].map((model) => [model, isLegacyClaudeModel(model)]),
     [
       ["claude-fable-5", false],
+      ["claude-opus-5-5", false],
       ["claude-opus-5", false],
+      ["claude-sonnet-5-5", false],
       ["claude-sonnet-5", false],
       ["claude-opus-4-8", true],
     ],

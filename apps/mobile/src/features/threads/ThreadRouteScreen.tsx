@@ -510,10 +510,12 @@ function ThreadRouteContent(
     void navigation.navigate("Connections");
   }, [navigation]);
   const handleStopThread = useCallback(() => {
+    const questionRequestId = requests.activePendingUserInput?.requestId;
     if (
       !selectedThread ||
       (selectedThread.session?.status !== "running" &&
-        selectedThread.session?.status !== "starting")
+        selectedThread.session?.status !== "starting" &&
+        !questionRequestId?.startsWith("async:"))
     ) {
       return;
     }
@@ -521,12 +523,13 @@ function ThreadRouteContent(
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
-        ...(selectedThread.session.activeTurnId
+        ...(questionRequestId?.startsWith("async:") ? { questionRequestId } : {}),
+        ...(selectedThread.session?.activeTurnId
           ? { turnId: selectedThread.session.activeTurnId }
           : {}),
       },
     });
-  }, [interruptThreadTurn, selectedThread]);
+  }, [interruptThreadTurn, requests.activePendingUserInput, selectedThread]);
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
@@ -840,6 +843,9 @@ function ThreadRouteContent(
           onSelectUserInputOption={requests.onSelectUserInputOption}
           onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}
           onSubmitUserInput={requests.onSubmitUserInput}
+          pickingUserInputId={requests.pickingUserInputId}
+          onPickUserInputImages={requests.onPickUserInputImages}
+          onRemoveUserInputImage={requests.onRemoveUserInputImage}
         />
       </View>
     </>

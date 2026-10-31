@@ -1549,7 +1549,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // WINDOWS_ASAR_UNPACK); macOS and Linux stay packed — smart unpack
     // extracts native libraries, which fff-node finds in app.asar.unpacked.
     ...(platform === "win" ? { asarUnpack: [...WINDOWS_ASAR_UNPACK] } : {}),
-    extraResources: DESKTOP_EXTRA_RESOURCES,
+    extraResources:
+      platform === "win"
+        ? [
+            ...DESKTOP_EXTRA_RESOURCES,
+            { from: "apps/desktop/prod-resources/windows-file-drop", to: "windows-file-drop" },
+          ]
+        : DESKTOP_EXTRA_RESOURCES,
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
@@ -1843,6 +1849,38 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  if (options.platform === "win") {
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "native/hub-memory/build.mjs"),
+          "--architecture",
+          options.arch,
+          "--output-directory",
+          path.join(stageAppDir, "apps/server/dist/hub-memory", `win32-${options.arch}`),
+        ],
+        { cwd: repoRoot },
+      ),
+      { label: "Build native hub memory guard", verbose: options.verbose },
+    );
+  }
+  if (options.platform === "win") {
+    yield* runCommand(
+      ChildProcess.make(
+        "node",
+        [
+          path.join(repoRoot, "native/windows-file-drop/build.mjs"),
+          "--architecture",
+          options.arch,
+          "--output-directory",
+          path.join(stageResourcesDir, "windows-file-drop"),
+        ],
+        { cwd: repoRoot },
+      ),
+      { label: "Build Windows file-drop receiver", verbose: options.verbose },
+    );
+  }
   yield* stageResourceMonitor({
     repoRoot,
     stageResourcesDir,

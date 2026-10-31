@@ -1,0 +1,4 @@
+{$T3_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy server:3773
+}

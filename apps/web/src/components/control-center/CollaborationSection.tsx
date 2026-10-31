@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { WorkspaceCollaborationRunId, type WorkspaceMeetingQuestion } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -13,14 +13,22 @@ import {
 } from "lucide-react";
 
 import { randomUUID } from "~/lib/utils";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
+import { useComposerRequestModeStore } from "~/askFirstStore";
+import { ExecutionProfileSelect } from "./ExecutionProfiles";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { projectEnvironment } from "~/state/projects";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import ChatMarkdown from "../ChatMarkdown";
+import { OrchestraRunControls } from "../chat/OrchestraRunControls";
+import { WorkflowRunControls } from "./WorkflowRunControls";
+import { WorkspaceWorkflowSection } from "./WorkspaceWorkflowSection";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import { toastManager } from "../ui/toast";
+import { WorktreeOperationsBoard } from "./WorktreeOperationsBoard";
 import { WorkspaceMeetingView } from "./WorkspaceMeetingView";
 import { WorkspaceTaskGraphView } from "./WorkspaceTaskGraphView";
 import { WorktreeDiffDialog, type WorktreeDiffTarget } from "./WorktreeDiffDialog";
@@ -51,8 +59,8 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
     }),
   );
   useOperationsRevisionRefresh(runtime.data, runs.refresh);
-  const requestRun = useAtomCommand(projectEnvironment.requestWorkspaceCollaborationRun, {
-    label: "오케스트라 실행 요청",
+  const requestRun = useAtomCommand(orchestrationEnvironment.startWorkflow, {
+    label: "AI 작업 실행 요청",
     reportFailure: false,
   });
   const cancelRun = useAtomCommand(projectEnvironment.cancelWorkspaceCollaborationRun, {
@@ -68,7 +76,26 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
     reportFailure: false,
   });
   const [task, setTask] = useState("");
+  const [profileId, setProfileId] = useState("");
+  const requestMode = useComposerRequestModeStore(
+    (state) => state.modeByFolder[`${project.environmentId}:${project.id}`] ?? "direct",
+  );
+  const profiles = useEnvironmentSettings(
+    project.environmentId,
+    (settings) => settings.executionProfiles,
+  );
   const [submitting, setSubmitting] = useState(false);
+  const [confirmedConfiguration, setConfirmedConfiguration] = useState<string | null>(null);
+  const startRequest = useRef<{ requestId: string; configuration: string } | null>(null);
+  const configuration = JSON.stringify({
+    task: task.trim(),
+    profileId,
+    profile: profiles[profileId] ?? null,
+    model: project.defaultModelSelection,
+    requestMode,
+  });
+  const pendingChanged =
+    startRequest.current !== null && startRequest.current.configuration !== configuration;
   const [answeringRunId, setAnsweringRunId] = useState<WorkspaceCollaborationRunId | null>(null);
   const [diffTarget, setDiffTarget] = useState<WorktreeDiffTarget | null>(null);
   // A node conversation stuck on a provider approval parks the person just
@@ -132,18 +159,49 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
 
   const submit = async () => {
     if (!task.trim()) return;
+    if (profileId && !profiles[profileId]) {
+      toastManager.add({ type: "warning", title: "선택한 프로필을 다시 선택하세요." });
+      return;
+    }
+    if (!profiles[profileId] && !project.defaultModelSelection) {
+      toastManager.add({
+        type: "warning",
+        title: "프로젝트 기본 모델이나 실행 프로필을 선택하세요.",
+      });
+      return;
+    }
+    if (
+      pendingChanged ||
+      (requestMode === "conditions" && confirmedConfiguration !== configuration)
+    )
+      return;
+    startRequest.current ??= { requestId: randomUUID(), configuration };
     setSubmitting(true);
     try {
       const result = await requestRun({
         environmentId: project.environmentId,
         input: {
-          runId: WorkspaceCollaborationRunId.make(randomUUID()),
           projectId: project.id,
           task: task.trim(),
+          requestId: startRequest.current.requestId,
+          requestMode,
+          conditionsConfirmed: confirmedConfiguration === configuration,
+          ...(profiles[profileId] ? { executionProfile: profiles[profileId] } : {}),
+          ...(!profiles[profileId] && project.defaultModelSelection
+            ? {
+                roleModels: {
+                  coordinator: project.defaultModelSelection,
+                  implementer: project.defaultModelSelection,
+                  researcher: project.defaultModelSelection,
+                },
+              }
+            : {}),
         },
       });
-      if (!notifyCommandFailure(result, "오케스트라 실행 요청 실패")) {
+      if (!notifyCommandFailure(result, "AI 작업 실행 요청 실패")) {
         setTask("");
+        startRequest.current = null;
+        setConfirmedConfiguration(null);
         runs.refresh();
         notifySuccess(
           "사용자 최우선 실행을 시작했습니다.",
@@ -170,28 +228,79 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
     <SectionCard
       id="project-runs"
       icon={CrownIcon}
-      title="사용자 목표 기반 작업 그래프"
-      description="페이블이 목표를 의존성 그래프로 분해하고 코덱스·그록 작업을 필요한 순서와 병렬 경로로 실행합니다. 생성 결과는 별도 검증을 통과해야 종합되며, 실패하면 분류에 맞는 새 경로를 추가합니다. 사용자 요청은 같은 프로젝트의 무인 작업보다 항상 우선합니다."
+      title="AI 작업 실행"
+      description="AI가 계획한 작업과 저장된 워크플로의 진행, 검증과 결과를 함께 확인합니다. 사용자 요청은 같은 프로젝트의 무인 작업보다 항상 우선합니다."
       action={<Badge variant="warning">사용자 최우선</Badge>}
     >
       <div className="grid gap-5">
+        <WorktreeOperationsBoard
+          project={project}
+          runs={runs.data?.runs ?? []}
+          onDiff={setDiffTarget}
+        />
         <div className="rounded-xl border border-primary/25 bg-primary/4 p-4">
+          <div className="mb-3">
+            <ExecutionProfileSelect
+              environmentId={project.environmentId}
+              value={profileId}
+              onChange={setProfileId}
+            />
+          </div>
           <Textarea
             size="lg"
             value={task}
             onChange={(event) => setTask(event.currentTarget.value)}
-            placeholder="달성할 최종 목표를 입력하세요. 페이블이 작업 그래프를 설계합니다."
+            placeholder="달성할 최종 목표를 입력하세요. 선택한 총괄 모델이 작업 그래프를 설계합니다."
           />
+          <p className="mt-2 text-xs text-muted-foreground">
+            {profiles[profileId]
+              ? "선택한 실행 프로필의 참가자와 권한을 사용합니다."
+              : project.defaultModelSelection
+                ? `프로젝트에서 선택한 모델: ${project.defaultModelSelection.model}`
+                : "프로젝트 기본 모델 또는 실행 프로필을 선택하세요."}
+          </p>
+          {requestMode === "conditions" ? (
+            <label className="mt-2 flex gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={confirmedConfiguration === configuration}
+                onChange={(event) =>
+                  setConfirmedConfiguration(event.target.checked ? configuration : null)
+                }
+              />
+              목표와 실행 설정을 확인했습니다.
+            </label>
+          ) : null}
+          {pendingChanged ? (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              이전 실행 요청의 결과를 확인하려면 원래 설정으로 되돌리세요.
+            </p>
+          ) : null}
           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-muted-foreground">
               지침·목표·메모리·RAG는 이 폴더에서만 결합되며 사용자 명령을 덮어쓸 수 없습니다.
             </p>
-            <Button size="lg" onClick={() => void submit()} disabled={!task.trim() || submitting}>
+            <Button
+              size="lg"
+              onClick={() => void submit()}
+              disabled={
+                !task.trim() ||
+                submitting ||
+                pendingChanged ||
+                (!profiles[profileId] && !project.defaultModelSelection) ||
+                (requestMode === "conditions" && confirmedConfiguration !== configuration)
+              }
+            >
               {submitting ? <RefreshCcwIcon /> : <PlayIcon />}
               작업 그래프 실행
             </Button>
           </div>
         </div>
+
+        <WorkspaceWorkflowSection
+          key={`workflow:${project.environmentId}:${project.id}`}
+          project={project}
+        />
 
         {attention.length > 0 ? (
           <div className="grid gap-2 rounded-xl border border-amber-500/45 bg-amber-500/8 p-3">
@@ -266,13 +375,15 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                 <span className="min-w-0 flex-1">
                   <span className="line-clamp-2 text-sm font-medium">{run.task}</span>
                   <span className="mt-1 block text-[11px] text-muted-foreground">
-                    {run.source === "user"
-                      ? "사용자 명령"
-                      : run.source === "incident"
-                        ? `프로그램 장애 ${run.incidentId}`
-                        : run.source === "integrity"
-                          ? "무결성 수렴"
-                          : `스케줄 ${run.scheduleId}`}{" "}
+                    {run.source === "automation"
+                      ? "자동 업무"
+                      : run.source === "user"
+                        ? "사용자 명령"
+                        : run.source === "incident"
+                          ? `프로그램 장애 ${run.incidentId}`
+                          : run.source === "integrity"
+                            ? "무결성 수렴"
+                            : `스케줄 ${run.scheduleId}`}{" "}
                     · {formatTimestamp(run.createdAt)}
                   </span>
                 </span>
@@ -281,6 +392,9 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                     오케스트라 · 폭 {run.orchestra.maxParallel}
                     {run.orchestra.isolateWorktrees ? " · 격리" : ""}
                   </Badge>
+                ) : null}
+                {run.workflow ? (
+                  <Badge variant="info">워크플로 · v{run.workflow.definitionRevision}</Badge>
                 ) : null}
                 {["completed", "failed", "cancelled"].includes(run.status) &&
                 runKeptWorktreeCount(run.graph) > 0 ? (
@@ -298,6 +412,12 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                     onAnswer={(question, text) => void answer(run.id, question, text)}
                   />
                 ) : null}
+                <OrchestraRunControls environmentId={project.environmentId} run={run} />
+                <WorkflowRunControls
+                  environmentId={project.environmentId}
+                  run={run}
+                  onRefresh={runs.refresh}
+                />
                 {run.graph ? (
                   <WorkspaceTaskGraphView
                     graph={run.graph}

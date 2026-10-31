@@ -1,9 +1,11 @@
 import {
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
   EventId,
+  renderApprovedTaskConditions,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationProject,
@@ -15,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as PlatformError from "effect/PlatformError";
+import { executionProfileTask, profileMeeting } from "@t3tools/shared/executionProfile";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
@@ -30,8 +33,21 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { taskConditionsError } from "./taskConditions.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+function deliveryOrchestra(
+  settings: WorkspaceOrchestraSettings | null,
+  commands?: readonly string[],
+): WorkspaceOrchestraSettings | null {
+  return settings === null
+    ? null
+    : {
+        ...settings,
+        completionCheck: true,
+        ...(commands === undefined ? {} : { verificationCommands: commands }),
+      };
+}
 
 // Session adoption takes seconds; a user message still unadopted after this
 // window is a failed/stale start, not pending work. Mirrors the client's
@@ -401,6 +417,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           workspaceControl: {
             isolationMode: "strict",
             longTermMemoryRoot: command.longTermMemoryRoot,
+            ...((command.completionAutomation ?? project.workspaceControl?.completionAutomation)
+              ? {
+                  completionAutomation:
+                    command.completionAutomation ?? project.workspaceControl!.completionAutomation!,
+                }
+              : {}),
+            ...(command.contextOptimization !== undefined
+              ? { contextOptimization: command.contextOptimization }
+              : project.workspaceControl?.contextOptimization !== undefined
+                ? { contextOptimization: project.workspaceControl.contextOptimization }
+                : {}),
             conversationRag:
               command.conversationRag ??
               project.workspaceControl?.conversationRag ??
@@ -671,28 +698,61 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "project.workflow.run.request":
     case "project.collaboration.run.request": {
       const runProject = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
       });
-      if (command.meeting !== undefined) {
+      const runThreadId = command.workflow?.threadId ?? command.runContext?.threadId;
+      if (runThreadId) {
+        const targetThread = yield* requireThreadNotArchived({
+          readModel,
+          command,
+          threadId: runThreadId,
+        });
+        if (targetThread.projectId !== command.projectId || targetThread.deletedAt !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "워크플로 실행 채팅방은 삭제되지 않았고 같은 프로젝트에 속해야 합니다.",
+          });
+        }
+      }
+      const meeting = command.executionProfile
+        ? {
+            ...profileMeeting(command.executionProfile),
+            ...(command.meeting?.threadId ? { threadId: command.meeting.threadId } : {}),
+            ...(command.meeting?.runtimeMode === undefined
+              ? {}
+              : { runtimeMode: command.meeting.runtimeMode }),
+            ...(command.meeting?.interactionMode === undefined
+              ? {}
+              : { interactionMode: command.meeting.interactionMode }),
+          }
+        : command.meeting;
+      const task = executionProfileTask(command.task, command.executionProfile);
+      if (task.length > 20_000)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Task and execution profile exceed 20,000 characters.",
+        });
+      if (meeting !== undefined) {
         yield* requireCoherentMeetingSetup({
           commandType: command.type,
-          participantIds: command.meeting.participants.map((participant) => participant.id),
-          chairParticipantId: command.meeting.chairParticipantId,
+          participantIds: meeting.participants.map((participant) => participant.id),
+          chairParticipantId: meeting.chairParticipantId,
         });
-        if (command.meeting.threadId !== undefined) {
+        if (meeting.threadId !== undefined) {
           const meetingThread = yield* requireThreadNotArchived({
             readModel,
             command,
-            threadId: command.meeting.threadId,
+            threadId: meeting.threadId,
           });
           if (meetingThread.projectId !== command.projectId) {
             return yield* new OrchestrationCommandInvariantError({
               commandType: command.type,
-              detail: `Thread '${command.meeting.threadId}' belongs to another project; a meeting can only run in a conversation of its own project.`,
+              detail: `Thread '${meeting.threadId}' belongs to another project; a meeting can only run in a conversation of its own project.`,
             });
           }
         }
@@ -712,26 +772,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             source: command.source ?? "user",
             scheduleId: null,
             incidentId: null,
-            task: command.task,
+            task,
             status: "queued",
             steps: [],
             graph: null,
+            ...(command.workflow ? { workflow: command.workflow } : {}),
+            ...(command.runContext ? { runContext: command.runContext } : {}),
+            runControl: {
+              control: command.workflow?.control ?? "active",
+              controlRevision: command.workflow?.controlRevision ?? 0,
+              ...(command.workflow?.executionRevision === undefined
+                ? {}
+                : { executionRevision: command.workflow.executionRevision }),
+              updatedAt: command.createdAt,
+            },
             // The setup is the roster and the rules; everything the meeting
             // accumulates starts empty and is server-owned from here on.
             meeting:
-              command.meeting === undefined
+              meeting === undefined
                 ? null
                 : {
-                    ...command.meeting,
-                    phase: "discussing",
-                    threadId: command.meeting.threadId ?? null,
+                    ...meeting,
+                    phase: meeting.askFirst === true ? "clarifying" : "discussing",
+                    threadId: meeting.threadId ?? null,
                     rounds: [],
                     pendingQuestion: null,
                     answers: [],
                     interjections: [],
                   },
             // Fixed here: a later settings change never re-shapes a run under way.
-            orchestra: command.orchestra ?? orchestraFromWorkspaceDefaults(runProject),
+            orchestra: deliveryOrchestra(
+              command.executionProfile?.orchestra ??
+                command.orchestra ??
+                orchestraFromWorkspaceDefaults(runProject),
+              command.executionProfile?.verificationCommands,
+            ),
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -750,6 +825,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
+      const meeting = command.executionProfile
+        ? profileMeeting(command.executionProfile)
+        : undefined;
+      const task = executionProfileTask(command.task, command.executionProfile);
+      if (task.length > 20_000)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Task and execution profile exceed 20,000 characters.",
+        });
+      if (meeting)
+        yield* requireCoherentMeetingSetup({
+          commandType: command.type,
+          participantIds: meeting.participants.map((participant) => participant.id),
+          chairParticipantId: meeting.chairParticipantId,
+        });
       return {
         ...(yield* withEventBase({
           aggregateKind: "project",
@@ -765,15 +855,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             source: "schedule",
             scheduleId: command.scheduleId,
             incidentId: null,
-            task: command.task,
+            task,
             status: "queued",
             steps: [],
             graph: null,
-            // Schedules carry no roster: nobody is at the keyboard to pick one.
-            meeting: null,
-            // The keyboard is empty here too, so the project's stored
-            // orchestra defaults are the only way to opt a schedule in.
-            orchestra: orchestraFromWorkspaceDefaults(scheduleProject),
+            meeting: meeting
+              ? {
+                  ...meeting,
+                  phase: meeting.askFirst === true ? "clarifying" : "discussing",
+                  threadId: null,
+                  rounds: [],
+                  pendingQuestion: null,
+                  answers: [],
+                  interjections: [],
+                }
+              : null,
+            orchestra: deliveryOrchestra(
+              command.executionProfile?.orchestra ??
+                orchestraFromWorkspaceDefaults(scheduleProject),
+              command.executionProfile?.verificationCommands,
+            ),
             finalOutput: null,
             error: null,
             createdAt: command.createdAt,
@@ -781,6 +882,40 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         },
       };
+    }
+
+    case "project.collaboration.run.review":
+    case "project.collaboration.run.verify": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const base = yield* withEventBase({
+        aggregateKind: "project",
+        aggregateId: command.projectId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      });
+      return command.type === "project.collaboration.run.review"
+        ? {
+            ...base,
+            type: "project.collaboration-run-reviewed",
+            payload: {
+              projectId: command.projectId,
+              runId: command.runId,
+              expectedRevision: command.expectedRevision,
+              edits: command.edits,
+              approve: command.approve,
+              reviewedAt: command.createdAt,
+            },
+          }
+        : {
+            ...base,
+            type: "project.collaboration-verification-requested",
+            payload: {
+              projectId: command.projectId,
+              runId: command.runId,
+              verificationCommands: command.verificationCommands,
+              requestedAt: command.createdAt,
+            },
+          };
     }
 
     case "project.collaboration.run.answer": {
@@ -803,6 +938,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           question: command.question,
           questionRef: command.questionRef,
           answer: command.answer,
+          ...(command.imageReferences ? { imageReferences: command.imageReferences } : {}),
           answeredAt: command.createdAt,
         },
       };
@@ -827,6 +963,58 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runId: command.runId,
           text: command.text,
           interjectedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "project.workflow.save": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.definition.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.workflow-saved",
+        payload: {
+          projectId: command.projectId,
+          definition: command.definition,
+          expectedRevision: command.expectedRevision,
+        },
+      };
+    }
+    case "project.workflow.delivery": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const { type: _type, commandId: _id, ...payload } = command;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.workflow-delivery-recorded",
+        payload,
+      };
+    }
+    case "project.collaboration.run.control": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.collaboration-run-control-requested",
+        payload: {
+          projectId: command.projectId,
+          runId: command.runId,
+          expectedRevision: command.expectedRevision,
+          action: command.action,
+          ...(command.nodeId === undefined ? {} : { nodeId: command.nodeId }),
+          createdAt: command.createdAt,
         },
       };
     }
@@ -975,6 +1163,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               status: command.integrityEnabled === true ? "queued" : "disabled",
               updatedAt: command.createdAt,
             },
+            hubMemory: command.hubMemory ?? DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
           },
@@ -1241,6 +1430,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           branch: command.branch,
           worktreePath: command.worktreePath,
           orchestraRunThreadId: command.orchestraRunThreadId ?? null,
+          ...(command.importedConversation
+            ? { importedConversation: command.importedConversation }
+            : {}),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -1801,6 +1993,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.start": {
+      const conditionsError = taskConditionsError(command);
+      if (conditionsError !== null)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: conditionsError,
+        });
       const targetThread = yield* requireThread({
         readModel,
         command,
@@ -1843,7 +2041,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.message.messageId,
           role: "user",
           inputOrigin: command.inputOrigin ?? "user",
-          text: command.message.text,
+          text: command.taskConditions
+            ? renderApprovedTaskConditions(command.taskConditions, command.message.text)
+            : command.message.text,
           attachments: command.message.attachments,
           turnId: null,
           streaming: false,
@@ -1867,8 +2067,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           inputOrigin: command.inputOrigin ?? "user",
           modelSelection: command.modelSelection ?? targetThread.modelSelection,
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
-          runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
+          runtimeMode:
+            command.taskConditions?.mode === "inspect"
+              ? "approval-required"
+              : targetThread.runtimeMode,
+          interactionMode:
+            command.taskConditions?.mode === "inspect" ? "plan" : targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           createdAt: command.createdAt,
         },
@@ -1931,6 +2135,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+          ...(command.questionRequestId !== undefined
+            ? { questionRequestId: command.questionRequestId }
+            : {}),
           ...(command.stopBackground !== undefined
             ? { stopBackground: command.stopBackground }
             : {}),
@@ -1986,6 +2193,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           requestId: command.requestId,
           answers: command.answers,
+          ...(command.images ? { images: command.images } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -2085,6 +2293,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [unsettledEvent, sessionSetEvent];
     }
 
+    case "thread.message.user.append": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          role: "user",
+          inputOrigin: "user",
+          text: command.text,
+          turnId: null,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.message.assistant.delta": {
       yield* requireThread({
         readModel,
@@ -2131,6 +2363,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.messageId,
           role: "assistant",
           text: "",
+          ...(command.attachments !== undefined ? { attachments: command.attachments } : {}),
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

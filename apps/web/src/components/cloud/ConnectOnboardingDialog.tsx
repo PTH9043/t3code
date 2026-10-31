@@ -87,6 +87,7 @@ function ConfiguredConnectOnboardingDialog() {
   const [dontShowAgain, setDontShowAgain] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const prefilledFromLinkStateRef = useRef(false);
+  const autoAppliedAccountRef = useRef<string | null>(null);
   const observedAccountRef = useRef<string | null | undefined>(undefined);
 
   const optOutAccounts = optOutState.optOutAccounts;
@@ -126,6 +127,7 @@ function ConfiguredConnectOnboardingDialog() {
     if (!sessionScopesKnown || !publishStepDecided) return;
     setRequestedAccount(null);
     prefilledFromLinkStateRef.current = false;
+    autoAppliedAccountRef.current = null;
     setExposeEnvironment(true);
     setPublishAgentActivity(true);
     setDontShowAgain(false);
@@ -140,34 +142,6 @@ function ConfiguredConnectOnboardingDialog() {
     requestedAccount,
     sessionScopesKnown,
   ]);
-
-  // Signing out (or switching accounts) mid-wizard invalidates everything the
-  // wizard would do — close it and let the sign-in trigger re-evaluate.
-  useEffect(() => {
-    if (openForAccount !== null && (!isSignedIn || userId !== openForAccount)) {
-      setOpenForAccount(null);
-    }
-    if (requestedAccount !== null && (!isSignedIn || userId !== requestedAccount)) {
-      setRequestedAccount(null);
-    }
-  }, [isSignedIn, openForAccount, requestedAccount, userId]);
-
-  // Toggles default on, but an environment that is already linked should show
-  // its actual configuration instead of silently proposing to rewrite it.
-  // Only when the link belongs to the account being onboarded, though — after
-  // an account switch the cached link state can still describe the previous
-  // account's setup.
-  const linkStateData = controller.linkState.data;
-  useEffect(() => {
-    if (openForAccount === null || prefilledFromLinkStateRef.current || linkStateData === null) {
-      return;
-    }
-    prefilledFromLinkStateRef.current = true;
-    if (linkStateData.linked && linkStateData.cloudUserId === openForAccount) {
-      setExposeEnvironment(linkStateData.managedTunnelActive ?? linkStateData.linked);
-      setPublishAgentActivity(linkStateData.publishAgentActivity);
-    }
-  }, [linkStateData, openForAccount]);
 
   const complete = () => {
     // Keep the wizard up while a link request is in flight so its outcome
@@ -207,6 +181,46 @@ function ConfiguredConnectOnboardingDialog() {
     });
     setStep("devices");
   };
+
+  // Auto-apply the publish selection once the wizard opens: the user's goal is
+  // to be connected, not to click through a confirmation they already gave by
+  // signing in. If the link fails, the wizard stays open so the error is
+  // visible and the user can adjust the toggles or retry.
+  useEffect(() => {
+    if (openForAccount === null || !canManageRelay || controller.linkState.target === null) return;
+    if (controller.linked || isApplying) return;
+    if (autoAppliedAccountRef.current === openForAccount) return;
+    autoAppliedAccountRef.current = openForAccount;
+    void applyPublishSelection();
+    // applyPublishSelection is stable per render and re-created with fresh toggle state;
+    // re-running on its identity would re-fire after the first call.
+  }, [canManageRelay, controller.linkState.target, controller.linked, isApplying, openForAccount]);
+
+  useEffect(() => {
+    if (openForAccount !== null && (!isSignedIn || userId !== openForAccount)) {
+      setOpenForAccount(null);
+    }
+    if (requestedAccount !== null && (!isSignedIn || userId !== requestedAccount)) {
+      setRequestedAccount(null);
+    }
+  }, [isSignedIn, openForAccount, requestedAccount, userId]);
+
+  // Toggles default on, but an environment that is already linked should show
+  // its actual configuration instead of silently proposing to rewrite it.
+  // Only when the link belongs to the account being onboarded, though — after
+  // an account switch the cached link state can still describe the previous
+  // account's setup.
+  const linkStateData = controller.linkState.data;
+  useEffect(() => {
+    if (openForAccount === null || prefilledFromLinkStateRef.current || linkStateData === null) {
+      return;
+    }
+    prefilledFromLinkStateRef.current = true;
+    if (linkStateData.linked && linkStateData.cloudUserId === openForAccount) {
+      setExposeEnvironment(linkStateData.managedTunnelActive ?? linkStateData.linked);
+      setPublishAgentActivity(linkStateData.publishAgentActivity);
+    }
+  }, [linkStateData, openForAccount]);
 
   return (
     <Dialog

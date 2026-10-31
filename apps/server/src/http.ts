@@ -27,6 +27,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { OtlpTracer } from "effect/unstable/observability";
 
 import * as ServerConfig from "./config.ts";
+import { readGeneratedTextPreview } from "./generatedResults.ts";
 import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -205,11 +206,38 @@ export const assetRouteLayer = HttpRouter.add(
     if (!asset) {
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
+    if (asset.preview) {
+      const preview = yield* Effect.tryPromise(() => readGeneratedTextPreview(asset.path)).pipe(
+        Effect.option,
+      );
+      if (Option.isNone(preview))
+        return HttpServerResponse.text("Text preview unavailable", { status: 422 });
+      return HttpServerResponse.text(preview.value.text, {
+        headers: {
+          "Cache-Control": "private, max-age=3600",
+          "X-Content-Type-Options": "nosniff",
+          "X-T3-Preview-Truncated": String(preview.value.truncated),
+          "X-T3-Asset-Bytes": String(preview.value.byteLength),
+          "Access-Control-Expose-Headers":
+            "X-T3-Preview-Truncated, X-T3-Asset-Bytes, Content-Length",
+        },
+      });
+    }
     return yield* HttpServerResponse.file(asset.path, {
       status: 200,
       headers: {
         "Cache-Control": "private, max-age=3600",
         "X-Content-Type-Options": "nosniff",
+        ...(asset.downloadName
+          ? {
+              "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(
+                asset.downloadName,
+              ).replace(
+                /['()*]/g,
+                (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+              )}`,
+            }
+          : {}),
       },
     }).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),

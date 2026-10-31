@@ -1,0 +1,52 @@
+name: newautousage
+
+services:
+  server:
+    image: ${T3_IMAGE:-newautousage-server:local}
+    build:
+      context: ../..
+      dockerfile: infra/server/Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+    ports:
+      - "127.0.0.1:${T3_HTTP_PORT:-3773}:3773"
+    volumes:
+      - server_home:/home/node
+      - projects:/workspaces
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    profiles: [https]
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      T3_DOMAIN: ${T3_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  server_home:
+  projects:
+  caddy_data:
+  caddy_config:

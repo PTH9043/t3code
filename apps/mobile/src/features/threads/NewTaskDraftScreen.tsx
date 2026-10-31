@@ -751,7 +751,13 @@ export function NewTaskDraftScreen(props: {
     if (isIncomingShareTransferPending) {
       return;
     }
-    const result = await pickComposerImages({ existingCount: flow.attachments.length });
+    const result = await pickComposerImages({
+      existingBytes: flow.attachments.reduce(
+        (total, attachment) => total + attachment.sizeBytes,
+        0,
+      ),
+      existingCount: flow.attachments.length,
+    });
     if (result.images.length > 0) {
       flow.appendAttachments(result.images);
     }
@@ -762,6 +768,10 @@ export function NewTaskDraftScreen(props: {
       try {
         const images = await convertPastedImagesToAttachments({
           uris,
+          existingBytes: flow.attachments.reduce(
+            (total, attachment) => total + attachment.sizeBytes,
+            0,
+          ),
           existingCount: flow.attachments.length,
         });
         if (images.length > 0) {

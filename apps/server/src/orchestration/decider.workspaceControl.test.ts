@@ -5,11 +5,16 @@ import {
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
   ProjectId,
+  ProviderInstanceId,
+  WorkspaceCollaborationRunId,
+  WorkspaceMeetingParticipantId,
+  WorkspaceCollaborationRun,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -85,6 +90,11 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
             commandId: CommandId.make("update-workspace-a-memory"),
             projectId,
             longTermMemoryRoot: "F:/LongMemory/workspace-a",
+            contextOptimization: {
+              memoryMode: "relevant",
+              compactHandoffs: true,
+              autoChatMemory: true,
+            },
             conversationRag: {
               enabled: false,
               redactSensitiveData: true,
@@ -100,6 +110,11 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
         sequence: 2,
       } as OrchestrationEvent);
       expect(updatedModel.projects[0]?.workspaceControl).toEqual({
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: true,
+          autoChatMemory: true,
+        },
         isolationMode: "strict",
         longTermMemoryRoot: "F:/LongMemory/workspace-a",
         conversationRag: {
@@ -135,6 +150,11 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
         sequence: 3,
       } as OrchestrationEvent);
       expect(agentUpdatedModel.projects[0]?.workspaceControl).toEqual({
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: true,
+          autoChatMemory: true,
+        },
         isolationMode: "strict",
         longTermMemoryRoot: "F:/LongMemory/workspace-a",
         conversationRag: {
@@ -253,3 +273,134 @@ it.layer(NodeServices.layer)("Workspace control decider", (it) => {
     }),
   );
 });
+
+const runJson = Schema.fromJsonString(WorkspaceCollaborationRun);
+const encodeRun = Schema.encodeSync(runJson);
+const decodeRun = Schema.decodeUnknownSync(runJson);
+for (const askFirst of [undefined, false, true]) {
+  it.effect(`persists a conductor clarification phase only when askFirst is ${askFirst}`, () =>
+    Effect.gen(function* () {
+      const projectId = asProjectId("ask-first");
+      const created = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.create",
+            commandId: CommandId.make("create-ask-first"),
+            projectId,
+            title: "Ask first",
+            workspaceRoot: "D:/ask-first",
+            createdAt: now,
+          },
+          readModel: createEmptyReadModel(now),
+        }),
+      );
+      const readModel = yield* projectEvent(createEmptyReadModel(now), {
+        ...created,
+        sequence: 1,
+      } as OrchestrationEvent);
+      const result = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          readModel,
+          command: {
+            type: "project.collaboration.run.request",
+            commandId: CommandId.make("ask-first-run"),
+            projectId,
+            runId: WorkspaceCollaborationRunId.make("run"),
+            task: "질문을 먼저 받으세요",
+            createdAt: now,
+            meeting: {
+              ...(askFirst === undefined ? {} : { askFirst }),
+              mode: "fixed-rounds",
+              maxRounds: 0,
+              userInLoop: false,
+              chairParticipantId: WorkspaceMeetingParticipantId.make("second"),
+              participants: ["first", "second"].map((id) => ({
+                id: WorkspaceMeetingParticipantId.make(id),
+                displayName: id,
+                modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+              })),
+            },
+          },
+        }),
+      );
+      expect(result.type).toBe("project.collaboration-run-requested");
+      if (result.type !== "project.collaboration-run-requested") return;
+      const persisted = decodeRun(encodeRun(result.payload.run));
+      expect(persisted.meeting?.phase).toBe(askFirst ? "clarifying" : "discussing");
+      expect(persisted.meeting?.chairParticipantId).toBe("second");
+      expect(persisted.graph).toBeNull();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+}
+
+for (const runtimeMode of ["approval-required", "full-access"] as const) {
+  it.effect(`keeps current app policy over saved profile policy (${runtimeMode})`, () =>
+    Effect.gen(function* () {
+      const projectId = asProjectId("app-policy-profile");
+      const created = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "project.create",
+            commandId: CommandId.make("create-policy"),
+            projectId,
+            title: "App policy",
+            workspaceRoot: "D:/app-policy",
+            createdAt: now,
+          },
+          readModel: createEmptyReadModel(now),
+        }),
+      );
+      const readModel = yield* projectEvent(createEmptyReadModel(now), {
+        ...created,
+        sequence: 1,
+      } as OrchestrationEvent);
+      const meeting = {
+        mode: "fixed-rounds" as const,
+        maxRounds: 0,
+        userInLoop: false,
+        chairParticipantId: null,
+        participants: ["first", "second"].map((id) => ({
+          id: WorkspaceMeetingParticipantId.make(id),
+          displayName: id,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+        })),
+      };
+      const result = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          readModel,
+          command: {
+            type: "project.collaboration.run.request",
+            commandId: CommandId.make("app-policy-run"),
+            projectId,
+            runId: WorkspaceCollaborationRunId.make("run"),
+            task: "research",
+            createdAt: now,
+            meeting: { ...meeting, runtimeMode, interactionMode: "default" },
+            executionProfile: {
+              id: "profile",
+              name: "Saved profile",
+              revision: 1,
+              instructions: "research",
+              verificationCommands: [],
+              orchestra: { maxParallel: 2, isolateWorktrees: false },
+              meeting: {
+                ...meeting,
+                maxRounds: 1,
+                runtimeMode: runtimeMode === "full-access" ? "approval-required" : "full-access",
+                interactionMode: "plan",
+              },
+            },
+          },
+        }),
+      );
+      expect(result.type).toBe("project.collaboration-run-requested");
+      if (result.type !== "project.collaboration-run-requested") return;
+      const saved = decodeRun(encodeRun(result.payload.run));
+      expect(saved.meeting).toMatchObject({
+        runtimeMode,
+        interactionMode: "default",
+        maxRounds: 1,
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+}

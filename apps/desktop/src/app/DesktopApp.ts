@@ -5,10 +5,12 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as NetService from "@t3tools/shared/Net";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Crypto from "effect/Crypto";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+import { desktopDevPipeRequest } from "../electron/DesktopDevPipe.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
@@ -16,6 +18,13 @@ import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
+import * as DesktopDirectRpcHub from "../backend/DesktopDirectRpcHub.ts";
+import { WSL_DIRECT_HOST } from "../backend/DesktopLocalProtocolHost.ts";
+import {
+  directHttpRequest,
+  selectDirectHttpBearerToken,
+} from "../backend/DesktopDirectHttpClient.ts";
+import { getSelectedGoogleBearerToken } from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./DesktopLinuxUrlHandler.ts";
@@ -175,6 +184,14 @@ const bootstrap = Effect.gen(function* () {
   const serverExposureState = yield* serverExposure.configureFromSettings({ port: backendPort });
   const backendConfig = yield* serverExposure.backendConfig;
   const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
+  const directRpcHub = yield* Effect.serviceOption(DesktopDirectRpcHub.DesktopDirectRpcHub);
+  const processEnvironment = yield* HostProcessEnvironment;
+  const devPipe = environment.isDevelopment
+    ? processEnvironment.T3CODE_DESKTOP_DEV_PIPE
+    : undefined;
+  const devPipeToken = environment.isDevelopment
+    ? processEnvironment.T3CODE_DESKTOP_DEV_PIPE_TOKEN
+    : undefined;
   const rendererTarget = environment.isDevelopment
     ? Option.getOrThrow(environment.devServerUrl)
     : backendConfig.httpBaseUrl;
@@ -183,6 +200,41 @@ const bootstrap = Effect.gen(function* () {
     targetOrigin: rendererTarget,
     backendOrigin: backendConfig.httpBaseUrl,
     clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
+    ...(Option.isSome(directRpcHub)
+      ? {
+          local: {
+            staticRoot: environment.isPackaged
+              ? environment.path.join(environment.appRoot, "apps/server/dist/client")
+              : environment.path.join(environment.appRoot, "apps/web/dist"),
+            request: (request: Request, backendId?: string) =>
+              directHttpRequest(
+                directRpcHub.value,
+                request,
+                backendId,
+                selectDirectHttpBearerToken(request, backendId, getSelectedGoogleBearerToken()),
+              ),
+            ...(devPipe && devPipeToken
+              ? {
+                  devRequest: (request: Request) =>
+                    desktopDevPipeRequest(devPipe, devPipeToken, request),
+                }
+              : {}),
+            resolveSecondaryBackendId: async (host: string) => {
+              if (host !== WSL_DIRECT_HOST) return undefined;
+              const instances = await Effect.runPromise(pool.list);
+              return instances.find((instance) => instance.id.startsWith("wsl:"))?.id;
+            },
+            useDirect: async () => {
+              const config = await Effect.runPromise(primaryBackend.currentConfig);
+              return (
+                Option.isNone(config) ||
+                (config.value.bootstrap.desktopDirectRpcInputFd !== undefined &&
+                  config.value.bootstrap.desktopDirectRpcOutputFd !== undefined)
+              );
+            },
+          },
+        }
+      : {}),
   });
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,

@@ -326,6 +326,27 @@ export function deriveWorkspaceRuntimeSnapshot(
   let activeCollaborationCount = 0;
   let failedCollaborationCount = 0;
   for (const run of input.collaborationRuns) {
+    if (
+      run.status === "running" &&
+      (run.graph?.planReview?.status === "pending" ||
+        (run.graph?.delivery !== undefined &&
+          !["verifying", "passed"].includes(run.graph.delivery.status)))
+    ) {
+      items.push(
+        evidence({
+          status: run.graph.delivery?.status === "failed" ? "failed" : "blocked",
+          source: "collaboration",
+          sourceId: run.id,
+          title: run.task,
+          detail:
+            run.graph.planReview?.status === "pending"
+              ? "실행 계획 확인을 기다리고 있습니다."
+              : run.graph.delivery!.detail,
+          observedAt: run.updatedAt,
+        }),
+      );
+      continue;
+    }
     if (run.status === "queued" || run.status === "running" || run.status === "cancel-requested") {
       activeCollaborationCount += 1;
       items.push(

@@ -1,3 +1,4 @@
+import { WorkspaceTaskInbox } from "../WorkspaceTaskInbox.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -26,6 +27,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const workspaceKnowledgeReactor = yield* WorkspaceKnowledgeReactor;
   const workspaceCollaborationReactor = yield* WorkspaceCollaborationReactor;
   const workspaceSchedulerReactor = yield* WorkspaceSchedulerReactor;
+  const taskInbox = yield* Effect.serviceOption(WorkspaceTaskInbox);
   const workspaceProgramSupervisor = yield* Effect.serviceOption(WorkspaceProgramSupervisor);
   const workspaceMonitoringReactor = yield* Effect.serviceOption(WorkspaceMonitoringReactor);
   const sessionRecoveryReactor = yield* Effect.serviceOption(SessionRecoveryReactor);
@@ -40,6 +42,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* workspaceKnowledgeReactor.start();
     yield* workspaceCollaborationReactor.start();
     yield* workspaceSchedulerReactor.start();
+    if (taskInbox._tag === "Some") yield* taskInbox.value.start();
     if (workspaceProgramSupervisor._tag === "Some") {
       yield* workspaceProgramSupervisor.value.start();
     }

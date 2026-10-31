@@ -7,6 +7,7 @@ import {
   tokenUsagePhaseLabel,
   tokenUsageSummary,
   tokenUsageOutcomeLabel,
+  tokenUsageDiagnosticRows,
 } from "@t3tools/client-runtime/state/token-usage";
 import { useEffect, useRef, useState } from "react";
 import { orchestrationEnvironment } from "~/state/orchestration";
@@ -134,6 +135,14 @@ export function TokenUsageButton(props: {
                     {tokenUsageOutcomeLabel[report.outcome]} ·{" "}
                     {report.finality === "final" ? "보고 종료" : "잠정 집계"} · 품질 판정 별도
                   </p>
+                  <dl className="grid grid-cols-2 gap-2 rounded-md border border-border p-2">
+                    {tokenUsageDiagnosticRows(report).map((row) => (
+                      <div key={row.label} className="contents">
+                        <dt>{row.label}</dt>
+                        <dd className="text-right tabular-nums">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
                   {report.breakdown.length > 0 ? (
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">

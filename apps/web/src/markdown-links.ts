@@ -9,6 +9,25 @@ const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d
 const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
+
+type MarkdownLinkAstNode = { type?: string; url?: string; children?: MarkdownLinkAstNode[] };
+
+/** Preserve Windows destinations before the Markdown sanitizer checks URI schemes. */
+export function remarkNormalizeWindowsFileLinks() {
+  return (tree: MarkdownLinkAstNode) => {
+    const visit = (node: MarkdownLinkAstNode) => {
+      if (
+        (node.type === "link" || node.type === "image" || node.type === "definition") &&
+        node.url &&
+        WINDOWS_DRIVE_PATH_PATTERN.test(node.url)
+      ) {
+        node.url = `file:///${node.url.replaceAll("\\", "/")}`;
+      }
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
+}
 // Standard OS and dev-container roots; deliberately excludes app-route-ish
 // prefixes like /app/ or /chat/ so SPA routes never read as files.
 const POSIX_FILE_ROOT_PREFIXES = [

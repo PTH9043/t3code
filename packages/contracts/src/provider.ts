@@ -19,6 +19,7 @@ import {
   ProviderRequestKind,
   ProviderSandboxMode,
   ProviderUserInputAnswers,
+  QuestionImageAttachment,
   RuntimeMode,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
@@ -33,6 +34,7 @@ const ProviderSessionStatus = Schema.Literals([
 ]);
 
 export const ProviderSession = Schema.Struct({
+  continuity: Schema.optional(Schema.Literals(["new", "resumed", "resume-fallback"])),
   provider: ProviderDriverKind,
   // Optional during the driver/instance migration. Once every producer
   // populates it (post-slice-4), routing flips to instance-id-only and the
@@ -52,6 +54,7 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
+  workflowSkillPlugins: Schema.optionalKey(Schema.Array(Schema.String)),
   threadId: ThreadId,
   execution: Schema.optionalKey(ProviderExecutionContext),
   provider: Schema.optional(ProviderDriverKind),
@@ -67,6 +70,9 @@ export const ProviderSessionStartInput = Schema.Struct({
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
+  workflowSkills: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ name: Schema.String, path: Schema.String })),
+  ),
   threadId: ThreadId,
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
@@ -82,6 +88,7 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  nativeMessageId: Schema.optional(Schema.String),
   resumeCursor: Schema.optional(Schema.Unknown),
 });
 export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
@@ -89,6 +96,7 @@ export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 export const ProviderInterruptTurnInput = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  questionRequestId: Schema.optional(ApprovalRequestId),
   /** See the orchestration command: true stops standing watch loops too. */
   stopBackground: Schema.optional(Schema.Boolean),
 });
@@ -110,6 +118,7 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  images: Schema.optionalKey(Schema.Array(QuestionImageAttachment)),
 });
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 

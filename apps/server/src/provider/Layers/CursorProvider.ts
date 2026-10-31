@@ -34,7 +34,7 @@ import {
   buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
-  collectStreamAsString,
+  spawnAndCollect,
   isCommandMissingCause,
   providerModelsFromSettings,
   type CommandResult,
@@ -947,7 +947,6 @@ const runCursorCommand = (
   environment?: NodeJS.ProcessEnv,
 ) =>
   Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const spawnCommand = yield* resolveSpawnCommand(
       cursorSettings.binaryPath,
       args,
@@ -957,18 +956,7 @@ const runCursorCommand = (
       ...(environment ? { env: environment } : { extendEnv: true }),
       shell: spawnCommand.shell,
     });
-
-    const child = yield* spawner.spawn(command);
-    const [stdout, stderr, exitCode] = yield* Effect.all(
-      [
-        collectStreamAsString(child.stdout),
-        collectStreamAsString(child.stderr),
-        child.exitCode.pipe(Effect.map(Number)),
-      ],
-      { concurrency: "unbounded" },
-    );
-
-    return { stdout, stderr, code: exitCode } satisfies CommandResult;
+    return yield* spawnAndCollect(cursorSettings.binaryPath, command);
   }).pipe(Effect.scoped);
 
 const runCursorAboutCommand = (cursorSettings: CursorSettings, environment?: NodeJS.ProcessEnv) =>

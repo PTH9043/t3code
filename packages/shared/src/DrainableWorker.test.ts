@@ -2,6 +2,8 @@ import { it } from "@effect/vitest";
 import { describe, expect } from "vite-plus/test";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 
 import { makeDrainableWorker, makeKeyedDrainableWorker } from "./DrainableWorker.ts";
 
@@ -125,10 +127,13 @@ describe("makeKeyedDrainableWorker", () => {
             }),
         );
 
+        const enqueued = yield* Deferred.make<void>();
         yield* Effect.forkChild(worker.enqueue("one"));
-        yield* Effect.forkChild(worker.enqueue("two"));
+        yield* Effect.forkChild(
+          worker.enqueue("two").pipe(Effect.andThen(Deferred.succeed(enqueued, undefined))),
+        );
         yield* Deferred.await(firstEntered);
-        yield* Effect.sleep("25 millis");
+        yield* Deferred.await(enqueued);
         // A duplicate worker for the key would have started the second item
         // while the first is parked.
         expect(entered.length).toBe(1);
@@ -175,6 +180,101 @@ describe("makeKeyedDrainableWorker", () => {
 
         expect(processed).toContain("a:1");
         expect(processed).toContain("c:1");
+      }),
+    ),
+  );
+
+  it.live("releases all idle keys and safely recreates a finished key", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const worker = yield* makeKeyedDrainableWorker(
+          (key: string) => key,
+          (key) =>
+            Effect.sync(() => {
+              processed.push(key);
+            }),
+        );
+        for (let i = 0; i < 2_000; i++) yield* worker.enqueue(`thread-${i}`);
+        yield* worker.drain;
+        expect(yield* worker.activeKeyCount).toBe(0);
+        yield* worker.enqueue("thread-0");
+        yield* worker.drain;
+        expect(yield* worker.activeKeyCount).toBe(0);
+        expect(processed).toHaveLength(2_001);
+        expect(processed.filter((key) => key === "thread-0")).toHaveLength(2);
+      }),
+    ),
+  );
+
+  it.live("keeps session-scoped work alive after its command queue becomes idle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const release = yield* Deferred.make<void>();
+        const finished = yield* Deferred.make<void>();
+        const worker = yield* makeKeyedDrainableWorker(
+          () => "session",
+          () =>
+            Deferred.await(release).pipe(
+              Effect.andThen(Deferred.succeed(finished, undefined)),
+              Effect.forkScoped,
+              Effect.asVoid,
+            ),
+        );
+        yield* worker.enqueue("start");
+        yield* worker.drain;
+        expect(yield* worker.activeKeyCount).toBe(0);
+        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(finished);
+      }),
+    ),
+  );
+
+  it.live("drains later items after a handler fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const worker = yield* makeKeyedDrainableWorker(
+          () => "same",
+          (item: string) =>
+            item === "fail"
+              ? Effect.fail("expected failure")
+              : Effect.sync(() => {
+                  processed.push(item);
+                }),
+        );
+        yield* worker.enqueue("fail");
+        yield* worker.enqueue("after");
+        yield* worker.drain;
+        expect(processed).toEqual(["after"]);
+        expect(yield* worker.activeKeyCount).toBe(0);
+      }),
+    ),
+  );
+
+  it.live("releases pending keys when its owning scope closes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const owner = yield* Scope.make();
+        const started = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const worker = yield* makeKeyedDrainableWorker(
+          () => "same",
+          () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(stopped, undefined)),
+            ),
+        ).pipe(Effect.provideService(Scope.Scope, owner));
+        yield* worker.enqueue("active");
+        yield* worker.enqueue("pending");
+        yield* Deferred.await(started);
+        yield* Scope.close(owner, Exit.void);
+        yield* Deferred.await(stopped);
+        yield* worker.drain;
+        expect(yield* worker.activeKeyCount).toBe(0);
+        yield* worker.enqueue("closed");
+        expect(yield* worker.activeKeyCount).toBe(0);
       }),
     ),
   );

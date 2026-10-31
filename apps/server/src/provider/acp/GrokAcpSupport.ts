@@ -34,12 +34,15 @@ export function buildGrokAcpSpawnInput(
   cwd: string,
   environment?: NodeJS.ProcessEnv,
 ): AcpSessionRuntime.AcpSpawnInput {
+  const binary = grokSettings?.binaryPath || "grok";
+  const isScript = /\.[cm]?js$/i.test(binary);
   return {
-    command: grokSettings?.binaryPath || "grok",
-    args: ["agent", "stdio"],
+    command: isScript ? process.execPath : binary,
+    args: [...(isScript ? [binary] : []), "--no-auto-update", "agent", "stdio"],
     cwd,
     env: {
       ...environment,
+      ...(isScript ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
       [GROK_OAUTH2_REFERRER_ENV]: T3_CODE_OAUTH_REFERRER,
     },
   };
@@ -97,12 +100,17 @@ export function applyGrokAcpModelSelection<E>(input: {
   readonly requestedModelId: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
+  // Grok's default alias follows the model advertised by the installed CLI.
+  const requestedModelId =
+    input.requestedModelId === "grok-build" && input.currentModelId !== undefined
+      ? input.currentModelId
+      : input.requestedModelId;
   const shouldSwitchModel =
-    input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
+    requestedModelId !== undefined && requestedModelId !== input.currentModelId;
   if (!shouldSwitchModel) {
     return Effect.succeed(input.currentModelId);
   }
   return input.runtime
-    .setSessionModel(input.requestedModelId)
-    .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
+    .setSessionModel(requestedModelId)
+    .pipe(Effect.mapError(input.mapError), Effect.as(requestedModelId));
 }

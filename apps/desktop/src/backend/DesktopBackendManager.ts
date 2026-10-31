@@ -44,6 +44,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
+  DesktopDirectRpcOutput,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   DesktopTelemetryControlMessage,
   type DesktopTelemetryControlMessage as DesktopTelemetryControlMessageValue,
@@ -52,6 +53,8 @@ import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/http
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+import * as DesktopDirectRpcHub from "./DesktopDirectRpcHub.ts";
+import { directHttpRequest } from "./DesktopDirectHttpClient.ts";
 
 const INITIAL_RESTART_DELAY = Duration.millis(500);
 const MAX_RESTART_DELAY = Duration.seconds(10);
@@ -137,6 +140,7 @@ export class BackendReadinessTimeoutError extends Schema.TaggedErrorClass<Backen
     return `Timed out after ${this.timeoutMs}ms waiting for desktop backend readiness at ${this.readinessUrl.href}.`;
   }
 }
+const isBackendReadinessTimeoutError = Schema.is(BackendReadinessTimeoutError);
 
 export class BackendProcessBootstrapEncodeError extends Schema.TaggedErrorClass<BackendProcessBootstrapEncodeError>()(
   "BackendProcessBootstrapEncodeError",
@@ -212,11 +216,14 @@ export const BackendProcessError = Schema.Union([
   BackendProcessBootstrapEncodeError,
   BackendProcessSpawnError,
   BackendProcessExitStatusError,
+  DesktopDirectRpcHub.DesktopDirectRpcError,
 ]);
 export type BackendProcessError = typeof BackendProcessError.Type;
 
 interface RunBackendProcessOptions extends DesktopBackendStartConfig {
+  readonly backendId?: string;
   readonly desktopTelemetryStream: Stream.Stream<Uint8Array>;
+  readonly directRpcHub?: DesktopDirectRpcHub.DesktopDirectRpcHub["Service"];
   readonly onDesktopTelemetryControl?: (
     message: DesktopTelemetryControlMessageValue,
   ) => Effect.Effect<void>;
@@ -431,6 +438,20 @@ const encodeBootstrapJson = Schema.encodeEffect(Schema.fromJsonString(DesktopBac
 const decodeDesktopTelemetryControlLine = Schema.decodeUnknownEffect(
   Schema.fromJsonString(DesktopTelemetryControlMessage),
 );
+const decodeDirectRpcOutputLine = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(DesktopDirectRpcOutput),
+);
+
+/** A malformed line is isolated to that frame and cannot close the shared pipe. */
+export const decodeDirectRpcOutputStream = <E, R>(input: Stream.Stream<Uint8Array, E, R>) =>
+  input.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.filter((line) => line.trim().length > 0),
+    Stream.mapEffect((line) => decodeDirectRpcOutputLine(line).pipe(Effect.option)),
+    Stream.filter(Option.isSome),
+    Stream.map((frame) => frame.value),
+  );
 
 export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   options: RunBackendProcessOptions,
@@ -451,6 +472,22 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   const onOutput = options.onOutput ?? (() => Effect.void);
   const bootstrapStream = Stream.encodeText(Stream.make(`${bootstrapJson}\n`));
   const additionalFds: Record<`fd${number}`, ChildProcess.AdditionalFdConfig> = {};
+  const directInputFd = options.bootstrap.desktopDirectRpcInputFd;
+  const directOutputFd = options.bootstrap.desktopDirectRpcOutputFd;
+  const wantsDirectRpc = directInputFd !== undefined || directOutputFd !== undefined;
+  if (
+    wantsDirectRpc &&
+    (directInputFd === undefined ||
+      directOutputFd === undefined ||
+      options.directRpcHub === undefined)
+  ) {
+    return yield* new DesktopDirectRpcHub.DesktopDirectRpcError({
+      detail: "로컬 직접 연결의 프로세스 파이프를 준비하지 못했습니다.",
+    });
+  }
+  const directAttachment = wantsDirectRpc
+    ? yield* options.directRpcHub!.attachBackend(options.backendId ?? PRIMARY_LOCAL_ENVIRONMENT_ID)
+    : undefined;
   if (options.bootstrapDelivery === "fd3") {
     additionalFds.fd3 = {
       type: "input",
@@ -467,6 +504,10 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         type: "output",
       };
     }
+    if (directAttachment && directInputFd !== undefined && directOutputFd !== undefined) {
+      additionalFds[`fd${directInputFd}`] = { type: "input", stream: directAttachment.encoded };
+      additionalFds[`fd${directOutputFd}`] = { type: "output" };
+    }
   }
   const command = ChildProcess.make(options.executablePath, options.args, {
     cwd: options.cwd,
@@ -474,7 +515,12 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     extendEnv: options.extendEnv,
     // In Electron main, process.execPath points to the Electron binary.
     // Run the child in Node mode so this backend process does not become a GUI app instance.
-    stdin: options.bootstrapDelivery === "stdin" ? bootstrapStream : "ignore",
+    stdin:
+      options.bootstrapDelivery === "stdin"
+        ? directAttachment
+          ? Stream.concat(bootstrapStream, directAttachment.encoded)
+          : bootstrapStream
+        : "ignore",
     stdout: options.captureOutput ? "pipe" : "inherit",
     stderr: options.captureOutput ? "pipe" : "inherit",
     killSignal: "SIGTERM",
@@ -500,6 +546,20 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   const outputFibers: Array<Fiber.Fiber<void, never>> = [];
 
   yield* options.onStarted?.(handle.pid) ?? Effect.void;
+  if (directAttachment && directOutputFd !== undefined) {
+    const directOutput =
+      options.bootstrapDelivery === "stdin" ? handle.stdout : handle.getOutputFd(directOutputFd);
+    yield* decodeDirectRpcOutputStream(directOutput).pipe(
+      Stream.runForEach(directAttachment.receive),
+      Effect.catchCause((cause) =>
+        logBackendProcessWarning("desktop direct RPC output stream stopped", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.ensuring(directAttachment.close),
+      Effect.forkScoped,
+    );
+  }
   if (
     options.bootstrap.desktopTelemetryControlFd !== undefined &&
     options.onDesktopTelemetryControl !== undefined
@@ -546,14 +606,18 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       pid: Number(handle.pid),
     };
     const onOutputFailure = options.onOutputFailure ?? (() => Effect.void);
+    if (!(directAttachment && options.bootstrapDelivery === "stdin")) {
+      outputFibers.push(
+        yield* drainBackendOutput(
+          outputContext,
+          "stdout",
+          handle.stdout,
+          onOutput,
+          onOutputFailure,
+        ).pipe(Effect.forkScoped),
+      );
+    }
     outputFibers.push(
-      yield* drainBackendOutput(
-        outputContext,
-        "stdout",
-        handle.stdout,
-        onOutput,
-        onOutputFailure,
-      ).pipe(Effect.forkScoped),
       yield* drainBackendOutput(
         outputContext,
         "stderr",
@@ -563,13 +627,41 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       ).pipe(Effect.forkScoped),
     );
   }
-  yield* waitForHttpReady({
+  const readinessOptions = {
     executablePath: options.executablePath,
     entryPath: options.entryPath,
     cwd: options.cwd,
     httpBaseUrl: options.httpBaseUrl,
     timeout: options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
-  }).pipe(
+  };
+  const readinessError = (cause: unknown) =>
+    new BackendReadinessTimeoutError({
+      ...readinessOptions,
+      readinessUrl: new URL(BACKEND_READINESS_PATH, readinessOptions.httpBaseUrl),
+      timeoutMs: Duration.toMillis(readinessOptions.timeout),
+      cause,
+    });
+  const readiness =
+    directAttachment && options.directRpcHub
+      ? Effect.tryPromise({
+          try: async (signal) => {
+            const response = await directHttpRequest(
+              options.directRpcHub!,
+              new Request(`http://desktop.invalid${BACKEND_READINESS_PATH}`, { signal }),
+              options.backendId,
+            );
+            if (!response.ok) throw new Error(`Local readiness returned ${response.status}.`);
+            await response.body?.cancel();
+          },
+          catch: readinessError,
+        }).pipe(
+          Effect.timeout(readinessOptions.timeout),
+          Effect.mapError((cause) =>
+            isBackendReadinessTimeoutError(cause) ? cause : readinessError(cause),
+          ),
+        )
+      : waitForHttpReady(readinessOptions);
+  yield* readiness.pipe(
     Effect.tap(() => options.onReady?.() ?? Effect.void),
     Effect.catchTags({
       BackendReadinessTimeoutError: (error) => options.onReadinessFailure?.(error) ?? Effect.void,
@@ -631,6 +723,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
   const backendOutputLogFactory = yield* DesktopObservability.DesktopBackendOutputLogFactory;
   const backendOutputLog = yield* backendOutputLogFactory.forInstance(spec.id);
   const desktopTelemetryPublisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
+  const directRpcHub = yield* Effect.serviceOption(DesktopDirectRpcHub.DesktopDirectRpcHub);
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const state = yield* Ref.make(initialState);
@@ -888,7 +981,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
 
         const program = runBackendProcess({
           ...config.value,
+          backendId: spec.id,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
+          ...(Option.isSome(directRpcHub) ? { directRpcHub: directRpcHub.value } : {}),
           onDesktopTelemetryControl: (message) =>
             desktopTelemetryPublisher.handleControlForSource(spec.id, message),
           onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {

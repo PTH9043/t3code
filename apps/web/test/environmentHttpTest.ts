@@ -83,6 +83,13 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
         ),
         HttpApiBuilder.group(EnvironmentHttpApi, "auth", (handlers) =>
           handlers
+            .handle("googleEnrollChallenge", () => unexpectedEndpoint("auth.googleEnrollChallenge"))
+            .handle("googleEnroll", () => unexpectedEndpoint("auth.googleEnroll"))
+            .handle("googleChallenge", () => unexpectedEndpoint("auth.googleChallenge"))
+            .handle("googleSession", () => unexpectedEndpoint("auth.googleSession"))
+            .handle("googleToken", () => unexpectedEndpoint("auth.googleToken"))
+            .handle("googleEnrollment", () => unexpectedEndpoint("auth.googleEnrollment"))
+            .handle("googleUnenroll", () => unexpectedEndpoint("auth.googleUnenroll"))
             .handle(
               "session",
               Effect.fn("test.environment.auth.session")(function* () {

@@ -17,6 +17,15 @@ describe("resolveGrokAcpBaseModelId", () => {
 });
 
 describe("buildGrokAcpSpawnInput", () => {
+  it("runs JavaScript launchers through Node on web and Electron backends", () => {
+    expect(
+      buildGrokAcpSpawnInput({ binaryPath: "C:\\tools\\grok.mjs" }, "C:\\project", {}),
+    ).toMatchObject({
+      command: process.execPath,
+      args: ["C:\\tools\\grok.mjs", "--no-auto-update", "agent", "stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+  });
   it("passes the T3 Code referrer through Grok OAuth env", () => {
     const spawn = buildGrokAcpSpawnInput({ binaryPath: "/usr/local/bin/grok" }, "/tmp/project", {
       XAI_API_KEY: "secret",
@@ -25,7 +34,7 @@ describe("buildGrokAcpSpawnInput", () => {
 
     expect(spawn).toEqual({
       command: "/usr/local/bin/grok",
-      args: ["agent", "stdio"],
+      args: ["--no-auto-update", "agent", "stdio"],
       cwd: "/tmp/project",
       env: {
         XAI_API_KEY: "secret",
@@ -36,6 +45,25 @@ describe("buildGrokAcpSpawnInput", () => {
 });
 
 describe("applyGrokAcpModelSelection", () => {
+  it.effect("resolves the default alias to the installed CLI's advertised build model", () =>
+    Effect.gen(function* () {
+      let switched = false;
+      const model = yield* applyGrokAcpModelSelection({
+        runtime: {
+          setSessionModel: () =>
+            Effect.sync(() => {
+              switched = true;
+              return {};
+            }),
+        },
+        currentModelId: "grok-4.7",
+        requestedModelId: "grok-build",
+        mapError: (cause) => cause,
+      });
+      expect(model).toBe("grok-4.7");
+      expect(switched).toBe(false);
+    }),
+  );
   const makeRecordingRuntime = (failure?: EffectAcpErrors.AcpError) => {
     const modelCalls: Array<string> = [];
     const runtime = {

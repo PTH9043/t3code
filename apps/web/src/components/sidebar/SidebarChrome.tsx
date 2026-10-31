@@ -1,4 +1,4 @@
-import { BrainCircuitIcon, SettingsIcon } from "lucide-react";
+import { BookOpenIcon, BrainCircuitIcon, SettingsIcon } from "lucide-react";
 import { memo, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 
@@ -22,6 +22,8 @@ import {
 } from "../ui/sidebar";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
+import { openAiHelp } from "../help/aiHelpStore";
+import { AiHelpButton } from "../help/AiHelpButton";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -65,6 +67,10 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           {pillLabel}
         </Badge>
       ) : null}
+      <AiHelpButton
+        className="relative z-10 ml-auto md:mr-3"
+        onBackdrop={backdropVariant !== null}
+      />
     </SidebarHeader>
   );
 });
@@ -74,7 +80,7 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
     <Link
       aria-label="대화 목록으로 이동"
       className={cn(
-        "sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
+        "sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
         onBackdrop ? "text-white" : "text-foreground",
       )}
       to="/"
@@ -113,6 +119,17 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
       <SidebarProviderUpdatePill />
       <SidebarUpdatePill />
       <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            onClick={() => {
+              if (isMobile) setOpenMobile(false);
+              openAiHelp();
+            }}
+          >
+            <BookOpenIcon />
+            <span>AI 사용 도움말</span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
         <SidebarMenuItem>
           <SidebarMenuButton onClick={handleControlCenterClick}>
             <BrainCircuitIcon />

@@ -329,7 +329,8 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
-  usage: ThreadTokenUsageSnapshot,
+  /** Some providers report consumption without reporting current context occupancy. */
+  usage: Schema.optional(ThreadTokenUsageSnapshot),
   consumption: Schema.optional(Schema.Array(TokenUsageObservation)),
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
@@ -469,6 +470,7 @@ export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  reason: Schema.optionalKey(Schema.String),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
 

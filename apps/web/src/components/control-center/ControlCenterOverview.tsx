@@ -8,6 +8,7 @@ import {
   FolderKanbanIcon,
   PlusIcon,
   Settings2Icon,
+  SearchIcon,
   ShieldCheckIcon,
 } from "lucide-react";
 
@@ -16,10 +17,16 @@ import { deriveProviderInstanceEntries } from "~/providerInstances";
 import { useEnvironments } from "~/state/environments";
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { Badge } from "../ui/badge";
+import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "../ui/card";
 import { AddProviderInstanceDialog } from "../settings/AddProviderInstanceDialog";
 import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
+import { McpToolsSection } from "../settings/McpToolsSection";
+import { ExtensionsSection } from "../settings/ExtensionsSection";
+import { AttentionInbox } from "./AttentionInbox";
+import { TaskDashboard } from "./TaskDashboard";
+import { JasnaSection } from "./JasnaSection";
 
 function providerStatusLabel(status: string): string {
   if (status === "ready") return "준비됨";
@@ -56,6 +63,7 @@ export function ControlCenterOverview() {
   const serverConfigs = useServerConfigs();
   const { environments } = useEnvironments();
   const [addProviderOpen, setAddProviderOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState("");
   const [targetEnvironmentId, setTargetEnvironmentId] = useState<EnvironmentId | null>(null);
   const targetEnvironment =
     environments.find((environment) => environment.environmentId === targetEnvironmentId) ??
@@ -80,6 +88,21 @@ export function ControlCenterOverview() {
   const activeProviders = providerRows.filter(
     ({ provider }) => provider.enabled && provider.isAvailable,
   ).length;
+  const providerRowGroups = useMemo(() => {
+    const groups = new Map<string, typeof providerRows>();
+    for (const row of providerRows) {
+      const key = `${row.environmentId}:${row.provider.driverKind}`;
+      const list = groups.get(key) ?? [];
+      list.push(row);
+      groups.set(key, list);
+    }
+    return [...groups.entries()].map(([key, rows]) => ({
+      key,
+      driverKind: rows[0]!.provider.driverKind,
+      environmentLabel: rows[0]!.environmentLabel,
+      rows,
+    }));
+  }, [providerRows]);
   const memoryRoots = projects.filter(
     (project) => project.workspaceControl?.longTermMemoryRoot != null,
   ).length;
@@ -87,16 +110,24 @@ export function ControlCenterOverview() {
     (project) => project.workspaceControl?.conversationRag.enabled !== false,
   ).length;
   const sortedProjects = [...projects].sort((left, right) => left.title.localeCompare(right.title));
+  const query = projectSearch.trim().toLocaleLowerCase();
+  const visibleProjects = sortedProjects.filter(
+    (project) =>
+      !query ||
+      `${project.title} ${project.workspaceRoot} ${environmentLabels.get(project.environmentId) ?? ""}`
+        .toLocaleLowerCase()
+        .includes(query),
+  );
 
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto">
+    <main className="workspace-control-center min-h-0 flex-1 overflow-y-auto bg-muted/15">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <section className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">공용 제어센터</h1>
+            <p className="mb-1 text-xs font-semibold tracking-wide text-primary">WORKSPACE</p>
+            <h1 className="text-2xl font-semibold tracking-tight">AI 작업실</h1>
             <p className="mt-1 max-w-3xl text-sm leading-relaxed text-muted-foreground">
-              폴더 하나를 하나의 장기 운영 단위로 취급합니다. 지침·목표·RAG·메모리·프롬프트와 실행
-              이력은 프로젝트 ID로 분리되며 다른 폴더로 섞이지 않습니다.
+              프로젝트별 작업과 기억을 이어가고, AI 계정과 MCP 도구를 한곳에서 관리하세요.
             </p>
           </div>
           <Button size="sm" onClick={() => openCommandPalette({ open: "add-project" })}>
@@ -132,6 +163,10 @@ export function ControlCenterOverview() {
           />
         </section>
 
+        <AttentionInbox />
+        <TaskDashboard />
+        <JasnaSection />
+
         <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(20rem,0.8fr)]">
           <Card>
             <CardHeader>
@@ -139,9 +174,19 @@ export function ControlCenterOverview() {
               <CardDescription>
                 같은 CLI 계정을 사용해도 지식과 장기기억은 각 프로젝트 경계를 넘지 않습니다.
               </CardDescription>
+              <label className="mt-3 flex items-center gap-2 rounded-lg border border-input bg-background px-3">
+                <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
+                <Input
+                  aria-label="프로젝트 검색"
+                  className="border-0 bg-transparent shadow-none focus-visible:ring-0"
+                  placeholder="프로젝트·폴더·환경 검색"
+                  value={projectSearch}
+                  onChange={(event) => setProjectSearch(event.currentTarget.value)}
+                />
+              </label>
             </CardHeader>
             <CardPanel className="grid gap-2">
-              {sortedProjects.map((project) => (
+              {visibleProjects.map((project) => (
                 <button
                   key={`${project.environmentId}:${project.id}`}
                   type="button"
@@ -182,9 +227,11 @@ export function ControlCenterOverview() {
                   </span>
                 </button>
               ))}
-              {sortedProjects.length === 0 ? (
+              {visibleProjects.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center text-sm text-muted-foreground">
-                  먼저 독립 운영할 폴더를 프로젝트로 추가하세요.
+                  {query
+                    ? "검색한 프로젝트가 없습니다."
+                    : "먼저 운영할 폴더를 프로젝트로 추가하세요."}
                 </div>
               ) : null}
             </CardPanel>
@@ -197,47 +244,68 @@ export function ControlCenterOverview() {
                 클로드, 코덱스, 그록 등 복수 인스턴스를 역할별로 선택할 수 있습니다.
               </CardDescription>
             </CardHeader>
-            <CardPanel className="grid gap-2">
-              {providerRows.map(({ environmentId, environmentLabel, provider }) => (
-                <div
-                  key={`${environmentId}:${provider.instanceId}`}
-                  className="grid gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span
-                      className="size-2.5 shrink-0 rounded-full"
-                      style={{
-                        backgroundColor:
-                          provider.accentColor ??
-                          (provider.enabled && provider.status === "ready"
-                            ? "var(--color-success)"
-                            : "var(--color-muted-foreground)"),
-                      }}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-sm font-medium">{provider.displayName}</span>
-                        <Badge variant="outline" size="sm">
-                          {provider.driverKind}
-                        </Badge>
-                      </span>
-                      <span className="block truncate text-[11px] text-muted-foreground">
-                        {provider.snapshot.auth.email ??
-                          provider.snapshot.auth.label ??
-                          provider.instanceId}
-                        {` · ${environmentLabel}`}
-                      </span>
-                    </span>
-                    <Badge
-                      variant={
-                        provider.enabled && provider.status === "ready" ? "success" : "outline"
-                      }
-                    >
-                      {providerStatusLabel(provider.status)}
-                    </Badge>
+            <CardPanel className="grid gap-3">
+              {providerRowGroups.map((group) => (
+                <section key={group.key} className="grid gap-2">
+                  <div className="flex min-w-0 items-center justify-between gap-3 px-1">
+                    <div className="min-w-0">
+                      <h3 className="truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {group.driverKind}
+                      </h3>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {group.environmentLabel} · 계정 {group.rows.length}개
+                      </p>
+                    </div>
+                    {group.rows.length > 1 ? (
+                      <Badge variant="outline" size="sm">
+                        그룹
+                      </Badge>
+                    ) : null}
                   </div>
-                  <ProviderAccountUsage usage={provider.snapshot.usage} />
-                </div>
+                  {group.rows.map(({ environmentId, environmentLabel, provider }) => (
+                    <div
+                      key={`${environmentId}:${provider.instanceId}`}
+                      className="grid gap-3 rounded-xl border border-border/60 bg-background/35 px-3 py-3"
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span
+                          className="size-2.5 shrink-0 rounded-full"
+                          style={{
+                            backgroundColor:
+                              provider.accentColor ??
+                              (provider.enabled && provider.status === "ready"
+                                ? "var(--color-success)"
+                                : "var(--color-muted-foreground)"),
+                          }}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-sm font-medium">
+                              {provider.displayName}
+                            </span>
+                            <Badge variant="outline" size="sm">
+                              {provider.driverKind}
+                            </Badge>
+                          </span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            {provider.snapshot.auth.email ??
+                              provider.snapshot.auth.label ??
+                              provider.instanceId}
+                            {` · ${environmentLabel}`}
+                          </span>
+                        </span>
+                        <Badge
+                          variant={
+                            provider.enabled && provider.status === "ready" ? "success" : "outline"
+                          }
+                        >
+                          {providerStatusLabel(provider.status)}
+                        </Badge>
+                      </div>
+                      <ProviderAccountUsage usage={provider.snapshot.usage} />
+                    </div>
+                  ))}
+                </section>
               ))}
               {providerRows.length === 0 ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">
@@ -292,6 +360,20 @@ export function ControlCenterOverview() {
           </Card>
         </section>
       </div>
+      {targetEnvironment ? (
+        <div className="mx-auto w-full max-w-7xl px-4 pb-6 sm:px-6 lg:px-8">
+          <McpToolsSection
+            key={targetEnvironment.environmentId}
+            environmentId={targetEnvironment.environmentId}
+          />
+          <div className="mt-6">
+            <ExtensionsSection
+              key={targetEnvironment.environmentId}
+              environmentId={targetEnvironment.environmentId}
+            />
+          </div>
+        </div>
+      ) : null}
       {targetEnvironment ? (
         <AddProviderInstanceDialog
           key={targetEnvironment.environmentId}

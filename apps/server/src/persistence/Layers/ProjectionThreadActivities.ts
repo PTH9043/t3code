@@ -101,8 +101,18 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   const listProjectionThreadActivityRowsByKind = SqlSchema.findAll({
     Request: ListProjectionThreadActivitiesByKindInput,
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, kinds }) =>
-      sql`
+    execute: ({ threadId, kinds, completedToolNames }) => {
+      const kindsFilter = sql`(thread_id = ${threadId} AND kind IN ${sql.in([...kinds])})`;
+      const toolsFilter = sql`(thread_id = ${threadId} AND kind = 'tool.completed'
+        AND json_extract(payload_json, '$.data.toolName') IN ${sql.in([...(completedToolNames ?? [])])})`;
+      // Each OR branch includes its thread so SQLite can use both targeted indexes.
+      const filter =
+        kinds.length === 0
+          ? toolsFilter
+          : (completedToolNames?.length ?? 0) === 0
+            ? kindsFilter
+            : sql`${kindsFilter} OR ${toolsFilter}`;
+      return sql`
         SELECT
           activity_id AS "activityId",
           thread_id AS "threadId",
@@ -114,14 +124,14 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           sequence,
           created_at AS "createdAt"
         FROM projection_thread_activities
-        WHERE thread_id = ${threadId}
-          AND kind IN ${sql.in([...kinds])}
+        WHERE ${filter}
         ORDER BY
           CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
           sequence ASC,
           created_at ASC,
           activity_id ASC
-      `,
+      `;
+    },
   });
 
   const deleteProjectionThreadActivityRows = SqlSchema.void({
@@ -175,7 +185,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
 
   const listByThreadIdAndKinds: ProjectionThreadActivityRepositoryShape["listByThreadIdAndKinds"] =
     (input) =>
-      input.kinds.length === 0
+      input.kinds.length === 0 && (input.completedToolNames?.length ?? 0) === 0
         ? Effect.succeed([])
         : listProjectionThreadActivityRowsByKind(input).pipe(
             Effect.mapError(

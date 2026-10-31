@@ -18,6 +18,106 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
+  it("preserves AI search choices when only the research budget changes", () => {
+    const current = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      aiSearch: { semanticEnabled: false, embeddingModel: "local-custom-model", ocrEnabled: false },
+    });
+    const next = applyServerSettingsPatch(current, { aiSearch: { researchDailyUsd: 0.75 } });
+    expect(next.aiSearch).toEqual({ ...current.aiSearch, researchDailyUsd: 0.75 });
+    expect(
+      applyServerSettingsPatch(next, { aiSearch: { researchDailyUsd: null } }).aiSearch
+        .researchDailyUsd,
+    ).toBeNull();
+  });
+  it("replaces MCP transport definitions atomically and removes only selected registrations", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      customMcpServersToUpsert: {
+        docs: {
+          name: "docs",
+          label: "Docs",
+          enabled: true,
+          providers: ["grok"],
+          workspaceRoot: null,
+          transport: "stdio",
+          command: "node",
+          args: ["old.js"],
+          env: { TOKEN: "${DOCS_TOKEN}" },
+        },
+        keep: {
+          name: "keep",
+          label: "Keep",
+          enabled: true,
+          providers: ["codex"],
+          workspaceRoot: null,
+          transport: "http",
+          url: "https://keep.example/mcp",
+          headers: {},
+        },
+      },
+      mcpProjectProfilesToUpsert: {
+        "/project": { workspaceRoot: "/project", enabledBuiltins: ["filesystem"] },
+      },
+    });
+    const next = applyServerSettingsPatch(first, {
+      customMcpServersToUpsert: {
+        docs: {
+          name: "docs",
+          label: "Docs",
+          enabled: false,
+          providers: ["grok", "claudeAgent"],
+          workspaceRoot: "/project",
+          transport: "http",
+          url: "https://docs.example/mcp",
+          headers: { Authorization: "Bearer ${DOCS_TOKEN}" },
+        },
+      },
+      mcpProjectProfilesToUpsert: {
+        "/project": { workspaceRoot: "/project", enabledBuiltins: ["openaiDocs"] },
+      },
+    });
+    expect(next.customMcpServers.docs).not.toHaveProperty("command");
+    expect(next.customMcpServers.docs).not.toHaveProperty("env");
+    expect(next.customMcpServers.keep).toEqual(first.customMcpServers.keep);
+    expect(next.mcpProjectProfiles["/project"]?.enabledBuiltins).toEqual(["openaiDocs"]);
+    const removed = applyServerSettingsPatch(next, {
+      customMcpServerIdsToRemove: ["docs"],
+      mcpProjectProfileRootsToRemove: ["/project"],
+    });
+    expect(Object.keys(removed.customMcpServers)).toEqual(["keep"]);
+    expect(removed.mcpProjectProfiles).toEqual({});
+    expect(removed).not.toHaveProperty("customMcpServersToUpsert");
+  });
+  it("patches and disables each account auto switch independently", () => {
+    const codex = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      providerAutoSwitch: { codex: true },
+    });
+    expect(codex.providerAutoSwitch).toEqual({ codex: true, claudeAgent: true });
+    const both = applyServerSettingsPatch(codex, { providerAutoSwitch: { claudeAgent: true } });
+    expect(
+      applyServerSettingsPatch(both, { providerAutoSwitch: { codex: false } }).providerAutoSwitch,
+    ).toEqual({ codex: false, claudeAgent: true });
+  });
+  it("upserts an account atomically without replacing other current accounts", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("codex_personal")]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+        },
+      },
+    };
+    const updated = applyServerSettingsPatch(current, {
+      providerInstancesToUpsert: {
+        [ProviderInstanceId.make("deepseek_test")]: {
+          driver: ProviderDriverKind.make("opencode"),
+          displayName: "DeepSeek",
+        },
+      },
+    });
+    expect(Object.keys(updated.providerInstances)).toEqual(["codex_personal", "deepseek_test"]);
+    expect(updated).not.toHaveProperty("providerInstancesToUpsert");
+  });
   it("normalizes optional persisted strings", () => {
     expect(normalizePersistedServerSettingString(undefined)).toBeUndefined();
     expect(normalizePersistedServerSettingString("   ")).toBeUndefined();

@@ -24,6 +24,7 @@ export interface ProviderSettingsFieldModel {
   readonly placeholder?: string | undefined;
   readonly clearWhenEmpty: "omit" | "persist";
   readonly defaultBooleanValue?: boolean | undefined;
+  readonly options?: ProviderSettingsFormAnnotation["options"];
 }
 
 function titleizeFieldKey(key: string): string {
@@ -103,6 +104,7 @@ export function deriveProviderSettingsFields(
             ? { placeholder: formAnnotation.placeholder }
             : {}),
           clearWhenEmpty: formAnnotation.clearWhenEmpty ?? "omit",
+          ...(formAnnotation.options ? { options: formAnnotation.options } : {}),
           ...(formAnnotation.control === "switch"
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
             : {}),
@@ -213,6 +215,30 @@ function ProviderSettingsFieldRow({
             aria-label={field.label}
           />
         </div>
+      </FieldFrame>
+    );
+  }
+
+  if (field.control === "select") {
+    return (
+      <FieldFrame variant={variant}>
+        <label htmlFor={inputId}>{label}</label>
+        <select
+          id={inputId}
+          aria-label={field.label}
+          className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          value={readProviderConfigString(value, field.key) || field.options?.[0]?.value || ""}
+          onChange={(event) =>
+            onChange(nextProviderConfigWithFieldValue(value, field, event.currentTarget.value))
+          }
+        >
+          {field.options?.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {description}
       </FieldFrame>
     );
   }

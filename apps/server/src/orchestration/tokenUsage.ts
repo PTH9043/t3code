@@ -14,13 +14,15 @@ export const TOKEN_COUNT_KEYS = [
   "output",
   "cacheRead",
   "cacheWrite",
+  "cacheWrite5m",
+  "cacheWrite1h",
   "reasoning",
 ] as const;
 
 /** Null means not reported. Known subtotals remain useful but are never called complete. */
 export function addTokenCounts(a: TokenCounts, b: TokenCounts): TokenCounts {
   const sum = (key: keyof TokenCounts) =>
-    a[key] === null ? b[key] : b[key] === null ? a[key] : a[key] + b[key];
+    a[key] == null ? (b[key] ?? null) : b[key] == null ? a[key] : a[key] + b[key];
   return {
     total: sum("total"),
     input: sum("input"),
@@ -28,6 +30,8 @@ export function addTokenCounts(a: TokenCounts, b: TokenCounts): TokenCounts {
     cacheRead: sum("cacheRead"),
     cacheWrite: sum("cacheWrite"),
     reasoning: sum("reasoning"),
+    ...(sum("cacheWrite5m") === null ? {} : { cacheWrite5m: sum("cacheWrite5m")! }),
+    ...(sum("cacheWrite1h") === null ? {} : { cacheWrite1h: sum("cacheWrite1h")! }),
   };
 }
 
@@ -48,15 +52,28 @@ export function advanceTokenUsage(
   }
   if (
     TOKEN_COUNT_KEYS.some(
-      (key) => previous[key] !== null && next[key] !== null && next[key] < previous[key],
+      (key) => previous[key] != null && next[key] != null && next[key] < previous[key],
     )
   ) {
     return { cursor: previous, delta: emptyTokenCounts(), issue: "counter-regressed" };
   }
   const diff = (key: keyof TokenCounts) =>
-    previous[key] === null || next[key] === null ? null : next[key] - previous[key];
+    previous[key] == null || next[key] == null ? null : next[key] - previous[key];
   return {
-    cursor: next,
+    cursor: {
+      total: next.total ?? previous.total,
+      input: next.input ?? previous.input,
+      output: next.output ?? previous.output,
+      cacheRead: next.cacheRead ?? previous.cacheRead,
+      cacheWrite: next.cacheWrite ?? previous.cacheWrite,
+      reasoning: next.reasoning ?? previous.reasoning,
+      ...((next.cacheWrite5m ?? previous.cacheWrite5m) !== undefined
+        ? { cacheWrite5m: next.cacheWrite5m ?? previous.cacheWrite5m }
+        : {}),
+      ...((next.cacheWrite1h ?? previous.cacheWrite1h) !== undefined
+        ? { cacheWrite1h: next.cacheWrite1h ?? previous.cacheWrite1h }
+        : {}),
+    },
     delta: {
       total: diff("total"),
       input: diff("input"),
@@ -64,6 +81,8 @@ export function advanceTokenUsage(
       cacheRead: diff("cacheRead"),
       cacheWrite: diff("cacheWrite"),
       reasoning: diff("reasoning"),
+      ...(diff("cacheWrite5m") === null ? {} : { cacheWrite5m: diff("cacheWrite5m")! }),
+      ...(diff("cacheWrite1h") === null ? {} : { cacheWrite1h: diff("cacheWrite1h")! }),
     },
     issue: null,
   };

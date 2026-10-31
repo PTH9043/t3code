@@ -38,6 +38,11 @@ import {
 } from "./AddProviderInstanceDialog.logic";
 import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps";
 import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
+import { OpenCodeApiSettings } from "./OpenCodeApiSettings";
+import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
+import { GlmConnectionDialog } from "./GlmConnectionDialog";
+import { AntseedConnectionDialog } from "./AntseedConnectionDialog";
+import { CliAccountLoginDialog } from "./CliAccountLoginDialog";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -129,6 +134,10 @@ export function AddProviderInstanceDialog({
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
 
   const [wizardStep, setWizardStep] = useState(0);
+  const [isDeepSeekSelected, setIsDeepSeekSelected] = useState(false);
+  const [isGlmSelected, setIsGlmSelected] = useState(false);
+  const [isAntseedSelected, setIsAntseedSelected] = useState(false);
+  const [loginDriver, setLoginDriver] = useState<"codex" | "claudeAgent" | null>(null);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
   const [accentColor, setAccentColor] = useState<string>("");
@@ -233,6 +242,47 @@ export function AddProviderInstanceDialog({
     }
   };
 
+  if (isDeepSeekSelected)
+    return (
+      <DeepSeekConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsDeepSeekSelected(false)}
+      />
+    );
+
+  if (isGlmSelected)
+    return (
+      <GlmConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsGlmSelected(false)}
+      />
+    );
+
+  if (isAntseedSelected)
+    return (
+      <AntseedConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsAntseedSelected(false)}
+      />
+    );
+
+  if (loginDriver !== null)
+    return (
+      <CliAccountLoginDialog
+        open={open}
+        environmentId={environmentId}
+        driver={loginDriver}
+        onOpenChange={onOpenChange}
+        onBack={() => setLoginDriver(null)}
+      />
+    );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl overflow-hidden">
@@ -317,6 +367,23 @@ export function AddProviderInstanceDialog({
                     );
                   })}
                 </RadioGroup>
+                <Button variant="outline" onClick={() => setIsDeepSeekSelected(true)}>
+                  DeepSeek API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setIsGlmSelected(true)}>
+                  GLM API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setIsAntseedSelected(true)}>
+                  Antseed 게이트웨이 연결
+                </Button>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="outline" onClick={() => setLoginDriver("codex")}>
+                    Codex 계정 브라우저 로그인
+                  </Button>
+                  <Button variant="outline" onClick={() => setLoginDriver("claudeAgent")}>
+                    Claude 계정 브라우저 로그인
+                  </Button>
+                </div>
               </div>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
@@ -401,6 +468,15 @@ export function AddProviderInstanceDialog({
               </div>
 
               <div className={cn("grid gap-5", wizardStep !== 2 && "hidden")}>
+                {driver === "opencode" ? (
+                  <OpenCodeApiSettings
+                    instance={{ driver, config: configDraft, environment }}
+                    onUpdate={(next) => {
+                      setConfigDraft(next.config as Record<string, unknown>);
+                      setEnvironment(next.environment ?? []);
+                    }}
+                  />
+                ) : null}
                 {driverSettingsFields.length > 0 ? (
                   <ProviderSettingsForm
                     definition={driverOption}

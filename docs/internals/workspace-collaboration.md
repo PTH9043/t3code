@@ -28,8 +28,8 @@
 2. 크기가 제한된 태그 형식의 JSON 그래프 제안을 파싱합니다.
 3. 중복 ID, 존재하지 않는 의존성, 순환, 기존 ID 충돌, 호환되지 않는 경로 배정을 거부합니다.
 4. 모든 코덱스 또는 그록 생성자 뒤에 페이블 검증 관문을 넣고, 마지막에 종합 작업을 넣습니다.
-5. 의존성이 해소된 작업을 한 웨이브에 최대 세 개까지 시작하고 각 작업의 제공자 턴을 동시에 실행합니다.
-6. 웨이브를 원자적으로 적용하고, 그래프 스냅샷을 저장하고, 준비된 작업 경계를 갱신한 뒤 계속 진행합니다.
+5. 설정한 병렬 폭의 빈 자리에 의존성이 해소된 작업을 배정합니다. 실행 중인 작업과 회수 전 완료 신호를 모두 폭에 포함하며 같은 write chain은 중복 배정하지 않습니다.
+6. 작업 결과는 공용 semaphore 아래 최신 그래프에 개별 적용합니다. 완료 Queue에서 신호 하나를 받을 때마다 슬롯을 채웁니다. 느린 형제 작업을 기다리는 wave barrier는 두지 않습니다.
 
 각 배정에는 페이블에 필요한 프로젝트 프롬프트와 해당 작업이 의존하는 작업들의 직접 출력만 담깁니다. 모델과 테스트가 인계 제목에 의존하므로 다음 제목은 고정되어 있습니다: `TASK`, `GOAL`, `CONTEXT`, `INPUT`, `CONSTRAINTS`, `EXPECTED OUTPUT`, `DEPENDENCIES`, `SUCCESS CRITERIA`.
 
@@ -66,3 +66,11 @@
 웹과 데스크톱은 병렬 레인이 있는 위상 정렬 열로 의존성 간선, 시도 기록, 검증 근거, 그래프 변경, 기억 후보, 대화 링크를 표시합니다. 모바일은 같은 읽기 모델을 세로 그래프 모니터로 제공하며 대화 이동과 취소를 지원하지만, 실행 생성과 역할 설정은 웹·데스크톱 제어센터에 남겨 둡니다.
 
 레이아웃 헬퍼는 순수 함수이며, 존재하지 않는 의존성, 중복 ID, 순환, 순환의 하위 작업을 클라이언트를 중단시키지 않고 격리합니다.
+
+## 계획 검토와 실제 검증
+
+WorkspaceOrchestraSettings.reviewPlan은 선택 사항이다. graph.planReview에서 멈춘 실행은 run.review 명령이 독립된 revision으로 수정·확인한다. 프로젝션은 저장된 상태와 revision을 비교하고 DAG와 선택된 roster를 검증한다. producer 의존성은 검증 gate를 거치며 synthesis는 모든 producer 결과를 기다린다. 사람의 수정 revision은 자동 복구 예산과 무관하다.
+
+새 요청은 completionCheck를 고정한다. synthesis 완료와 run 완료를 분리하고 graph.delivery에 실제 영수증을 저장한다. WorkspaceDevelopmentGit.inspect/verify를 재사용해 공통 저장소·worker HEAD의 통합 여부·통합 checkout의 fingerprint·프로세스 종료 코드를 확인한다. 미통합 worktree를 보존하며 자동 커밋·병합은 하지 않는다. run.verify 이벤트로 검증만 재개하며 취소 이벤트는 검증 프로세스를 중단한다. Windows Git·검증 호출은 ProcessRunInput.background의 명시적인 windowsHide 경로를 사용한다.
+
+maxWorkerTurns는 지속된 graph attempt 수로 계산해 재시작으로 초기화하지 않는다. 토큰·요금 한도와 여러 서버의 실행 소유권 lease는 이 설정으로 표현하지 않는다.

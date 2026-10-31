@@ -1,4 +1,4 @@
-import type { WorkspaceScheduleTiming } from "@t3tools/contracts";
+import type { WorkspaceCollaborationRun, WorkspaceScheduleTiming } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 export interface WorkspaceScheduleResolution {
@@ -77,6 +77,7 @@ export function resolveWorkspaceScheduleNextTrigger(input: {
   readonly timing: WorkspaceScheduleTiming;
   readonly now: string;
   readonly lastTriggeredAt: string | null;
+  readonly predecessor?: WorkspaceCollaborationRun | null;
 }): WorkspaceScheduleResolution {
   const now = parseInstant(input.now, "now");
   if (typeof now === "string") return { nextTriggerAt: null, error: now };
@@ -85,6 +86,44 @@ export function resolveWorkspaceScheduleNextTrigger(input: {
   if (typeof last === "string") return { nextTriggerAt: null, error: last };
 
   switch (input.timing.kind) {
+    case "after-run": {
+      if (last !== null) return { nextTriggerAt: null, error: null };
+      const run = input.predecessor;
+      if (!run || run.id !== input.timing.runId) {
+        return { nextTriggerAt: null, error: "The preceding run is unavailable in this project." };
+      }
+      if (run.status === "failed" || run.status === "cancelled") {
+        return {
+          nextTriggerAt: null,
+          error: `The preceding run ${run.status}; follow-up is held.`,
+        };
+      }
+      if (run.status !== "completed") return { nextTriggerAt: null, error: null };
+      if (input.timing.condition === "verified") {
+        const receipts =
+          run.graph?.nodes.flatMap((node) => (node.validation ? [node.validation] : [])) ?? [];
+        const verified =
+          run.graph?.status === "completed" &&
+          (run.graph.overallConfidence === "high" || run.graph.overallConfidence === "medium") &&
+          receipts.length > 0 &&
+          receipts.every(
+            (receipt) =>
+              receipt.verdict === "pass" &&
+              receipt.confidence !== "low" &&
+              receipt.evidence.some((evidence) => evidence.trim().length > 0),
+          );
+        if (!verified)
+          return {
+            nextTriggerAt: null,
+            error:
+              "The preceding run completed without passing validation evidence; follow-up is held.",
+          };
+      }
+      const completedAt = parseInstant(run.updatedAt, "preceding run updatedAt");
+      return typeof completedAt === "string"
+        ? { nextTriggerAt: null, error: completedAt }
+        : { nextTriggerAt: DateTime.formatIso(DateTime.makeUnsafe(completedAt)), error: null };
+    }
     case "once": {
       if (last !== null) return { nextTriggerAt: null, error: null };
       const runAt = parseInstant(input.timing.runAt, "runAt");

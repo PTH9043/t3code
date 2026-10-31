@@ -186,8 +186,14 @@ function extractTaggedJson(output: string, tag: string): unknown {
   const endToken = `</${tag}>`;
   const start = output.indexOf(startToken);
   const end = output.indexOf(endToken, start + startToken.length);
-  if (start < 0 || end < 0) return fail(`Missing ${startToken} JSON payload.`);
-  const body = output.slice(start + startToken.length, end).trim();
+  if (start >= 0 && end < 0) return fail(`Missing ${startToken} JSON payload.`);
+  // Recover only an unambiguous wrapper: one complete JSON object or one JSON fence.
+  // Schema validation still rejects missing facts; never splice multiple candidate blocks.
+  const candidate = (start < 0 ? output : output.slice(start + startToken.length, end)).trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/iu.exec(candidate);
+  const body = (fenced?.[1] ?? candidate).trim();
+  if (start < 0 && !(body.startsWith("{") && body.endsWith("}")))
+    return fail(`Missing ${startToken} JSON payload.`);
   if (body.length === 0) return fail(`${startToken} payload is empty.`);
   try {
     return JSON.parse(body) as unknown;
@@ -216,10 +222,23 @@ function parsePlanNode(
   let agent: WorkspaceOrchestrationAgent;
   let participantId: WorkspaceMeetingParticipantId | null;
   if (meeting === null) {
-    agent = oneOf(source.agent, ORCHESTRATION_AGENTS, `${path}.agent`);
+    const roleAgent =
+      source.agent === "coordinator"
+        ? "fable"
+        : source.agent === "implementer"
+          ? "codex"
+          : source.agent === "researcher"
+            ? "grok"
+            : source.agent;
+    if (typeof roleAgent !== "string" || !ORCHESTRATION_AGENTS.some((item) => item === roleAgent)) {
+      return fail(`${path}.agent must be coordinator, implementer, or researcher.`);
+    }
+    agent = oneOf(roleAgent, ORCHESTRATION_AGENTS, `${path}.agent`);
     const expectedAgent = expectedAgentForKind(kind);
     if (agent !== expectedAgent) {
-      return fail(`${path} routes ${kind} to ${agent}; it must route to ${expectedAgent}.`);
+      return fail(
+        `${path} routes ${kind} to ${roleForAgent(agent)}; it must route to ${roleForAgent(expectedAgent)}.`,
+      );
     }
     participantId = null;
   } else {
@@ -413,13 +432,13 @@ function normalizeFollowUpNode(
   if (task === undefined) return null;
   const rawKind = typeof source.kind === "string" ? source.kind.trim().toLowerCase() : "";
   const kindFromAgent =
-    source.agent === "grok"
+    source.agent === "grok" || source.agent === "researcher"
       ? "research"
-      : source.agent === "codex"
+      : source.agent === "codex" || source.agent === "implementer"
         ? defaultKind === "debug"
           ? "debug"
           : "implementation"
-        : source.agent === "fable"
+        : source.agent === "fable" || source.agent === "coordinator"
           ? "orchestration"
           : defaultKind;
   const kind =
@@ -487,7 +506,7 @@ function parseFollowUpNodes(
   return nodes;
 }
 
-/** Decode and validate one graph proposal — Fable's, or the meeting chair's when `meeting` is set. */
+/** Decode and validate a graph proposal from the chosen coordinator or meeting chair. */
 export function parseWorkspaceTaskGraphProposal(
   output: string,
   meeting: WorkspaceMeetingPlanContext | null = null,
@@ -546,7 +565,7 @@ export function grantsFreeRetryAfterInterruption(node: WorkspaceTaskNode): boole
   );
 }
 
-/** Decode one Fable synthesis payload and bounded durable-memory candidates. */
+/** Decode one synthesis payload and bounded durable-memory candidates. */
 export function parseWorkspaceSynthesisPayload(output: string): WorkspaceSynthesisPayload {
   const source = record(extractTaggedJson(output, "t3_synthesis"), "synthesis");
   const candidates = array(source.memoryCandidates ?? [], "synthesis.memoryCandidates");
@@ -658,7 +677,7 @@ function emptyNode(input: {
   };
 }
 
-/** Create the first Fable node before any model-authored graph exists. */
+/** Create the coordinator node before any model-authored graph exists. */
 export function buildInitialWorkspaceTaskGraph(task: string): WorkspaceTaskGraph {
   return {
     revision: 0,
@@ -678,7 +697,7 @@ export function buildInitialWorkspaceTaskGraph(task: string): WorkspaceTaskGraph
         constraints: [
           "실제 의존성만 연결한다.",
           "독립 작업은 병렬 경로로 둔다.",
-          "최신 정보는 Grok, 구현과 실행은 Codex, 판단과 종합은 Fable에 배정한다.",
+          "사용자가 선택한 모델과 참가자를 유지하고, 작업 종류에 맞는 역할로 배정한다.",
         ],
         expectedOutput: "서버가 검증할 수 있는 구조화된 작업 그래프",
         successCriteria: [
@@ -691,7 +710,7 @@ export function buildInitialWorkspaceTaskGraph(task: string): WorkspaceTaskGraph
       }),
     ],
     changes: [],
-    nextAction: "Fable이 목표를 분석하고 작업 그래프를 설계합니다.",
+    nextAction: "선택한 총괄 모델이 목표를 분석하고 작업 그래프를 설계합니다.",
     overallConfidence: null,
     repairApproved: null,
     memoryCandidates: [],
@@ -749,7 +768,7 @@ function requireBinding(
 ): WorkspaceAgentRoleBinding {
   const role = roleForAgent(agent);
   const binding = bindings.find((candidate) => candidate.role === role && candidate.enabled);
-  if (binding === undefined) return fail(`Enabled ${role} binding is required for ${agent}.`);
+  if (binding === undefined) return fail(`An enabled ${role} role binding is required.`);
   return binding;
 }
 
@@ -1084,4 +1103,46 @@ export function refreshWorkspaceTaskGraphQueue(graph: WorkspaceTaskGraph): Works
       return { ...node, status: ready.has(String(node.id)) ? "queued" : "blocked" };
     }),
   };
+}
+
+/** Selects work for free slots without overlapping writes in an active checkout. */
+export function dispatchableWorkspaceTaskNodes(
+  graph: WorkspaceTaskGraph,
+  options: {
+    readonly width: number;
+    readonly isolateWorktrees: boolean;
+    readonly inFlight: ReadonlySet<string>;
+    readonly nowMs?: number;
+  },
+): ReadonlyArray<WorkspaceTaskNode> {
+  const active = graph.nodes.filter(
+    (node) => node.status === "running" || options.inFlight.has(String(node.id)),
+  );
+  const slots = Math.max(0, options.width - active.length);
+  if (slots === 0) return [];
+  if (!options.isolateWorktrees && active.some((node) => WRITE_NODE_KINDS.has(node.kind)))
+    return [];
+  const chains = chainKeyByNodeId(computeWriteChains(graph.nodes));
+  const activeChains = new Set(
+    active.flatMap((node) => {
+      const key = chains.get(String(node.id));
+      return key === undefined ? [] : [key];
+    }),
+  );
+  const ready = readyWorkspaceTaskNodes(graph).filter((node) => {
+    if (options.inFlight.has(String(node.id))) return false;
+    if (
+      node.usageRecovery?.phase === "waiting" &&
+      Date.parse(node.usageRecovery.resumeAt) > (options.nowMs ?? 0)
+    )
+      return false;
+    if (!options.isolateWorktrees) return active.length === 0 || !WRITE_NODE_KINDS.has(node.kind);
+    const chain = chains.get(String(node.id));
+    return chain === undefined || !activeChains.has(chain);
+  });
+  return selectGraphWaveNodes(ready, {
+    width: slots,
+    soloWrites: !options.isolateWorktrees,
+    chainByNodeId: chains,
+  });
 }

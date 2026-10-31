@@ -6,6 +6,7 @@ import { APP_DISPLAY_NAME } from "../../branding";
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
+  fetchSessionState,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
 } from "../../environments/primary";
@@ -13,6 +14,7 @@ import { readHostedPairingRequest } from "../../hostedPairing";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { resetDesktopPrimaryBearerToken } from "../../environments/primary/desktopAuth";
 
 export function PairingPendingSurface() {
   return (
@@ -53,6 +55,7 @@ export function PairingRouteSurface({
     initialErrorMessage ? "인증에 실패했습니다. 페어링 정보를 확인하세요." : "",
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
   const autoSubmitAttemptedRef = useRef(false);
 
   const submitCredential = useCallback(
@@ -86,6 +89,26 @@ export function PairingRouteSurface({
     },
     [submitCredential, credential],
   );
+
+  const handleGoogleLogin = useCallback(async () => {
+    const login = window.desktopBridge?.googleSignIn?.loginT3;
+    if (!login) return;
+    setIsSubmitting(true);
+    setIsGoogleSubmitting(true);
+    setErrorMessage("");
+    try {
+      await login();
+      resetDesktopPrimaryBearerToken();
+      const session = await fetchSessionState();
+      if (!session.authenticated) throw new Error("T3 session was not established.");
+      startTransition(() => onAuthenticated());
+    } catch {
+      setErrorMessage("T3 Google 로그인에 실패했습니다. 등록된 계정과 설정을 확인하세요.");
+    } finally {
+      setIsSubmitting(false);
+      setIsGoogleSubmitting(false);
+    }
+  }, [onAuthenticated]);
 
   useEffect(() => {
     const token = autoPairTokenRef.current;
@@ -152,6 +175,27 @@ export function PairingRouteSurface({
             >
               앱 새로고침
             </Button>
+            {window.desktopBridge?.googleSignIn?.loginT3 ? (
+              <Button
+                disabled={isSubmitting}
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={() => void handleGoogleLogin()}
+              >
+                Google 계정으로 T3 로그인
+              </Button>
+            ) : null}
+            {isGoogleSubmitting ? (
+              <Button
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={() => void window.desktopBridge?.googleSignIn?.cancel()}
+              >
+                Google 로그인 취소
+              </Button>
+            ) : null}
           </div>
         </form>
 

@@ -76,6 +76,21 @@ describe("workspace conversation RAG compaction", () => {
     expect(first?.tags).toContain("auto-conversation");
   });
 
+  it("keeps captured conversation memory scoped to its worktree folder when provided", () => {
+    const item = toConversationRagKnowledgeItem({
+      projectId: ProjectId.make("project-a"),
+      threadId: ThreadId.make("thread-folder"),
+      threadTitle: "폴더 대화",
+      sourceId: MessageId.make("message-folder"),
+      text: "폴더별 작업 기억",
+      attachments: [],
+      createdAt: "2026-08-10T00:00:00.000Z",
+      settings,
+      relativeFolder: "apps/web",
+    });
+    expect(item?.relativeFolder).toBe("apps/web");
+  });
+
   it("indexes attachment metadata and honors the project capture switch", () => {
     const input = {
       projectId: ProjectId.make("project-a"),

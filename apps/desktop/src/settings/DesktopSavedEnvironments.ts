@@ -9,6 +9,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Ref from "effect/Ref";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -29,11 +30,13 @@ interface PersistedSavedEnvironmentStorageRecord extends Omit<
 interface SavedEnvironmentRegistryDocument {
   readonly version: number;
   readonly records: readonly PersistedSavedEnvironmentStorageRecord[];
+  readonly encryptedPrimaryGoogleToken?: string;
 }
 
 interface SavedEnvironmentRegistryStorageDocument {
   readonly version?: number;
   readonly records?: readonly PersistedSavedEnvironmentStorageRecord[];
+  readonly encryptedPrimaryGoogleToken?: string;
 }
 
 const DesktopSshTargetSchema = Schema.Struct({
@@ -58,6 +61,7 @@ const PersistedSavedEnvironmentStorageRecordSchema = Schema.Struct({
 const SavedEnvironmentRegistryDocumentSchema = Schema.Struct({
   version: Schema.optionalKey(Schema.Number),
   records: Schema.optionalKey(Schema.Array(PersistedSavedEnvironmentStorageRecordSchema)),
+  encryptedPrimaryGoogleToken: Schema.optionalKey(Schema.String),
 });
 
 const SavedEnvironmentRegistryDocumentJson = fromLenientJson(
@@ -189,6 +193,14 @@ export class DesktopSavedEnvironments extends Context.Service<
     readonly removeSecret: (
       environmentId: string,
     ) => Effect.Effect<void, DesktopSavedEnvironmentsMutationError>;
+    readonly getPrimaryGoogleSecret: Effect.Effect<
+      Option.Option<string>,
+      DesktopSavedEnvironmentsGetSecretError
+    >;
+    readonly setPrimaryGoogleSecret: (
+      secret: string,
+    ) => Effect.Effect<boolean, DesktopSavedEnvironmentsSetSecretError>;
+    readonly removePrimaryGoogleSecret: Effect.Effect<void, DesktopSavedEnvironmentsMutationError>;
   }
 >()("@t3tools/desktop/settings/DesktopSavedEnvironments") {}
 
@@ -238,6 +250,9 @@ function normalizeSavedEnvironmentRegistryDocument(
   return {
     version: document.version ?? 1,
     records: document.records ?? [],
+    ...(document.encryptedPrimaryGoogleToken
+      ? { encryptedPrimaryGoogleToken: document.encryptedPrimaryGoogleToken }
+      : {}),
   };
 }
 
@@ -303,26 +318,28 @@ const writeRegistryDocument = Effect.fn("desktop.savedEnvironments.writeRegistry
           }),
       ),
     );
-    yield* input.fileSystem.writeFileString(tempPath, `${encoded}\n`).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DesktopSavedEnvironmentsWriteError({
-            operation: "write-temporary-file",
-            path: tempPath,
-            cause,
-          }),
-      ),
-    );
-    yield* input.fileSystem.rename(tempPath, input.registryPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DesktopSavedEnvironmentsWriteError({
-            operation: "replace-registry-file",
-            path: input.registryPath,
-            cause,
-          }),
-      ),
-    );
+    yield* Effect.gen(function* () {
+      yield* input.fileSystem.writeFileString(tempPath, `${encoded}\n`).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopSavedEnvironmentsWriteError({
+              operation: "write-temporary-file",
+              path: tempPath,
+              cause,
+            }),
+        ),
+      );
+      yield* input.fileSystem.rename(tempPath, input.registryPath).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopSavedEnvironmentsWriteError({
+              operation: "replace-registry-file",
+              path: input.registryPath,
+              cause,
+            }),
+        ),
+      );
+    }).pipe(Effect.ensuring(input.fileSystem.remove(tempPath).pipe(Effect.ignore)));
   },
 );
 
@@ -340,6 +357,9 @@ function preserveExistingSecrets(
 
   return {
     version: currentDocument.version,
+    ...(currentDocument.encryptedPrimaryGoogleToken
+      ? { encryptedPrimaryGoogleToken: currentDocument.encryptedPrimaryGoogleToken }
+      : {}),
     records: records.map((record) => {
       const encryptedBearerToken = encryptedBearerTokenById.get(record.environmentId);
       return toSavedEnvironmentStorageRecord(record, Option.fromNullishOr(encryptedBearerToken));
@@ -371,6 +391,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const crypto = yield* Crypto.Crypto;
+  const mutationLock = yield* Semaphore.make(1);
 
   const writeDocument = (document: SavedEnvironmentRegistryDocument) =>
     crypto.randomUUIDv4.pipe(
@@ -394,7 +415,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  return DesktopSavedEnvironments.of({
+  const service = DesktopSavedEnvironments.of({
     getRegistry: readRegistryDocument(fileSystem, environment.savedEnvironmentRegistryPath).pipe(
       Effect.map((document) =>
         document.records.map((record) => toPersistedSavedEnvironmentRecord(record)),
@@ -420,7 +441,7 @@ export const make = Effect.gen(function* () {
         }
 
         yield* writeDocument({
-          version: document.version,
+          ...document,
           records: document.records.filter((record) => record.environmentId !== environmentId),
         });
       },
@@ -510,7 +531,7 @@ export const make = Effect.gen(function* () {
       );
       let found = false;
       const nextDocument: SavedEnvironmentRegistryDocument = {
-        version: document.version,
+        ...document,
         records: document.records.map((record) => {
           if (record.environmentId !== environmentId) {
             return record;
@@ -542,7 +563,7 @@ export const make = Effect.gen(function* () {
       }
 
       yield* writeDocument({
-        version: document.version,
+        ...document,
         records: document.records.map((record) => {
           if (record.environmentId !== environmentId) {
             return record;
@@ -551,6 +572,99 @@ export const make = Effect.gen(function* () {
         }),
       });
     }),
+    getPrimaryGoogleSecret: Effect.gen(function* () {
+      const environmentId = "primary-google";
+      const document = yield* readRegistryDocument(
+        fileSystem,
+        environment.savedEnvironmentRegistryPath,
+      );
+      if (!document.encryptedPrimaryGoogleToken) return Option.none<string>();
+      const available = yield* safeStorage.isEncryptionAvailable.pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopSavedEnvironmentSecretProtectionError({
+              operation: "check-encryption-availability",
+              environmentId,
+              registryPath: environment.savedEnvironmentRegistryPath,
+              cause,
+            }),
+        ),
+      );
+      if (!available) return Option.none<string>();
+      const bytes = yield* decodeSecretBytes(
+        environmentId,
+        environment.savedEnvironmentRegistryPath,
+        document.encryptedPrimaryGoogleToken,
+      );
+      const value = yield* safeStorage.decryptString(bytes).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopSavedEnvironmentSecretProtectionError({
+              operation: "decrypt-secret",
+              environmentId,
+              registryPath: environment.savedEnvironmentRegistryPath,
+              cause,
+            }),
+        ),
+      );
+      return Option.some(value);
+    }).pipe(Effect.withSpan("desktop.savedEnvironments.getPrimaryGoogleSecret")),
+    setPrimaryGoogleSecret: Effect.fn("desktop.savedEnvironments.setPrimaryGoogleSecret")(
+      function* (secret) {
+        const environmentId = "primary-google";
+        const document = yield* readRegistryDocument(
+          fileSystem,
+          environment.savedEnvironmentRegistryPath,
+        );
+        const available = yield* safeStorage.isEncryptionAvailable.pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopSavedEnvironmentSecretProtectionError({
+                operation: "check-encryption-availability",
+                environmentId,
+                registryPath: environment.savedEnvironmentRegistryPath,
+                cause,
+              }),
+          ),
+        );
+        if (!available) return false;
+        const bytes = yield* safeStorage.encryptString(secret).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopSavedEnvironmentSecretProtectionError({
+                operation: "encrypt-secret",
+                environmentId,
+                registryPath: environment.savedEnvironmentRegistryPath,
+                cause,
+              }),
+          ),
+        );
+        yield* writeDocument({
+          ...document,
+          encryptedPrimaryGoogleToken: Encoding.encodeBase64(bytes),
+        });
+        return true;
+      },
+    ),
+    removePrimaryGoogleSecret: Effect.gen(function* () {
+      const document = yield* readRegistryDocument(
+        fileSystem,
+        environment.savedEnvironmentRegistryPath,
+      );
+      if (!document.encryptedPrimaryGoogleToken) return;
+      const { encryptedPrimaryGoogleToken: _, ...rest } = document;
+      yield* writeDocument(rest);
+    }).pipe(Effect.withSpan("desktop.savedEnvironments.removePrimaryGoogleSecret")),
+  });
+  return DesktopSavedEnvironments.of({
+    ...service,
+    setRegistry: (records) => mutationLock.withPermits(1)(service.setRegistry(records)),
+    removeEnvironment: (id) => mutationLock.withPermits(1)(service.removeEnvironment(id)),
+    setSecret: (input) => mutationLock.withPermits(1)(service.setSecret(input)),
+    removeSecret: (id) => mutationLock.withPermits(1)(service.removeSecret(id)),
+    setPrimaryGoogleSecret: (secret) =>
+      mutationLock.withPermits(1)(service.setPrimaryGoogleSecret(secret)),
+    removePrimaryGoogleSecret: mutationLock.withPermits(1)(service.removePrimaryGoogleSecret),
   });
 });
 
@@ -565,6 +679,7 @@ export const layerTest = (input?: {
     Effect.gen(function* () {
       const recordsRef = yield* Ref.make(input?.records ?? []);
       const secretsRef = yield* Ref.make(new Map(input?.secrets ?? []));
+      const googleRef = yield* Ref.make(Option.none<string>());
 
       return DesktopSavedEnvironments.of({
         getRegistry: Ref.get(recordsRef),
@@ -604,6 +719,10 @@ export const layerTest = (input?: {
             nextSecrets.delete(environmentId);
             return nextSecrets;
           }),
+        getPrimaryGoogleSecret: Ref.get(googleRef),
+        setPrimaryGoogleSecret: (secret) =>
+          Ref.set(googleRef, Option.some(secret)).pipe(Effect.as(true)),
+        removePrimaryGoogleSecret: Ref.set(googleRef, Option.none()),
       });
     }),
   );

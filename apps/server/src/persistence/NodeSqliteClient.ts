@@ -7,6 +7,7 @@
 import * as NodeSqlite from "node:sqlite";
 
 import * as Cache from "effect/Cache";
+import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -267,8 +268,46 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         );
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
-      executeStream(_sql, _params) {
-        return Stream.die(new UnsupportedNodeSqliteOperationError());
+      executeStream(query, params, transform) {
+        return Stream.unwrap(
+          Effect.gen(function* () {
+            // A stream owns its statement until completion or cancellation.
+            const statement = yield* prepare(query);
+            const safeIntegers = yield* Client.SafeIntegers;
+            const iterator = yield* Effect.try({
+              try: () => {
+                statement.setReadBigInts(safeIntegers);
+                return statement.iterate(...(params as Parameters<typeof statement.iterate>));
+              },
+              catch: (cause) =>
+                new SqlError({
+                  reason: classifySqliteError(cause, {
+                    operation: "execute",
+                    message: "Failed to open SQLite row stream",
+                  }),
+                }),
+            });
+            const pull = Effect.try({
+              try: () => iterator.next(),
+              catch: (cause) =>
+                new SqlError({
+                  reason: classifySqliteError(cause, {
+                    operation: "execute",
+                    message: "Failed to read SQLite row stream",
+                  }),
+                }),
+            }).pipe(
+              Effect.flatMap((next) =>
+                next.done
+                  ? Cause.done()
+                  : Effect.succeed([transform ? transform([next.value])[0]! : next.value] as const),
+              ),
+            );
+            return Stream.fromPull(Effect.succeed(pull)).pipe(
+              Stream.ensuring(Effect.try(() => iterator.return?.()).pipe(Effect.ignore)),
+            );
+          }),
+        );
       },
     });
   });

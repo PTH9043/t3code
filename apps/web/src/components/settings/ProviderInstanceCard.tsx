@@ -40,6 +40,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { ProviderAccountUsage } from "./ProviderAccountUsage";
 import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
+import { OpenCodeApiSettings } from "./OpenCodeApiSettings";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -538,7 +539,7 @@ export function ProviderInstanceCard({
       </div>
 
       <div className="px-3 pb-3 sm:px-4">
-        <ProviderAccountUsage usage={liveProvider?.usage} />
+        <ProviderAccountUsage driver={instance.driver} usage={liveProvider?.usage} />
       </div>
 
       <Collapsible open={isExpanded} onOpenChange={onExpandedChange}>
@@ -577,6 +578,16 @@ export function ProviderInstanceCard({
                 onChange={updateEnvironment}
               />
             </div>
+
+            {instance.driver === "opencode" ? (
+              <OpenCodeApiSettings
+                key={JSON.stringify(
+                  (instance.config as Record<string, unknown> | undefined)?.apiConnection ?? null,
+                )}
+                instance={instance}
+                onUpdate={onUpdate}
+              />
+            ) : null}
 
             {driverOption ? (
               <ProviderSettingsForm

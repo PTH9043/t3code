@@ -29,7 +29,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { isWindowsCommandNotFound, runHiddenWindowsProcess } from "../processRunner.ts";
 import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -40,6 +40,12 @@ const OPENCODE_EMPTY_CONFIG_CONTENT = "{}";
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
+
+/** Pinned v1 identifiers: six time bytes followed by random characters, with a msg prefix. */
+export function openCodeInputMessageId(timestamp: number, uuid: string): string {
+  const time = (BigInt(timestamp) * 0x1000n) & 0xffffffffffffn;
+  return `msg_${time.toString(16).padStart(12, "0")}${uuid.replaceAll("-", "").slice(0, 14)}`;
+}
 export interface OpenCodeServerProcess {
   readonly url: string;
   readonly exitCode: Effect.Effect<number, never>;
@@ -397,6 +403,26 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
   const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
     Effect.gen(function* () {
       const spawnCommand = yield* resolveCommand(input.binaryPath, input.args, input.environment);
+      if (hostPlatform === "win32") {
+        const result = yield* runHiddenWindowsProcess({
+          command: spawnCommand.command,
+          args: spawnCommand.args,
+          shell: spawnCommand.shell,
+          ...(input.environment ? { env: input.environment, replaceEnv: true } : {}),
+          maxOutputBytes: Number.POSITIVE_INFINITY,
+        });
+        if (yield* isWindowsCommandNotFound(result.code, result.stderr)) {
+          return yield* new OpenCodeRuntimeError({
+            operation: "runOpenCodeCommand",
+            detail: `spawn ${input.binaryPath} ENOENT`,
+          });
+        }
+        return {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          code: result.code ?? 0,
+        } satisfies OpenCodeCommandResult;
+      }
       const child = yield* spawner.spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           shell: spawnCommand.shell,
@@ -461,7 +487,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
             shell: spawnCommand.shell,
             env: {
               ...input.environment,
-              OPENCODE_CONFIG_CONTENT: OPENCODE_EMPTY_CONFIG_CONTENT,
+              OPENCODE_CONFIG_CONTENT:
+                input.environment?.OPENCODE_CONFIG_CONTENT ?? OPENCODE_EMPTY_CONFIG_CONTENT,
             },
             extendEnv: input.environment === undefined,
           }),

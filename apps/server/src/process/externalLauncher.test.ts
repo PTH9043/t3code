@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -155,6 +156,58 @@ it.effect("discovers editors through the service API", () =>
     assert.equal(editors.includes("vscode"), true);
     assert.equal(editors.includes("file-manager"), true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "starts independent editor lookups together while preserving their configured order",
+  () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>();
+      let started = 0;
+      const fileInfo = { type: "File" } as FileSystem.File.Info;
+      const launcherLayer = ExternalLauncher.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            FileSystem.layerNoop({
+              stat: () =>
+                Effect.suspend(() => {
+                  started += 1;
+                  return Deferred.await(gate).pipe(Effect.as(fileInfo));
+                }),
+            }),
+            Path.layer,
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() => Effect.sync(() => makeMockDetachedHandle())),
+            ),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const launcher = yield* ExternalLauncher.ExternalLauncher;
+        const fiber = yield* Effect.forkChild(launcher.resolveAvailableEditors());
+        for (let turn = 0; turn < 100; turn += 1) {
+          if (started >= 2) break;
+          yield* Effect.yieldNow;
+        }
+        assert.isAtLeast(started, 2);
+        yield* Deferred.succeed(gate, undefined);
+        const editors = yield* Fiber.join(fiber);
+        assert.isBelow(editors.indexOf("cursor"), editors.indexOf("vscode"));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            launcherLayer,
+            Layer.succeed(HostProcessPlatform, "win32"),
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: { PATH: "C:\\t3-editor-concurrent-discovery-test", PATHEXT: ".EXE;.CMD" },
+              }),
+            ),
+          ),
+        ),
+      );
+    }),
 );
 
 it.effect("memoizes editor discovery and refreshes after the cache window", () => {

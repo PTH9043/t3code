@@ -15,7 +15,7 @@ import type {
   TerminalSummary,
 } from "@t3tools/contracts";
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
-import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { CommonActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -26,13 +26,18 @@ import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
-import { useProjects } from "../../state/entities";
+import { useThreadShells, useProjects } from "../../state/entities";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { terminalEnvironment } from "../../state/terminal";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { layoutMobileTaskGraph, type MobileTaskGraphLayout } from "./mobileTaskGraphLayout";
+import { AttentionInbox } from "./AttentionInbox";
+import { WorkspaceFollowUps } from "./WorkspaceFollowUps";
+import { OrchestraRunControls } from "./OrchestraRunControls";
+import { WorkspaceAutomationSummary } from "./WorkspaceAutomationSummary";
+import { WorkflowRunControls, WorkspaceWorkflowTemplates } from "./WorkspaceWorkflowControls";
 
 type RouteProps = StaticScreenProps<{
   readonly environmentId: string;
@@ -42,9 +47,9 @@ type RouteProps = StaticScreenProps<{
 type TagTone = "neutral" | "info" | "success" | "warning" | "error";
 
 const AGENT_LABELS: Readonly<Record<WorkspaceOrchestrationAgent, string>> = {
-  fable: "페이블 · 총괄",
-  codex: "코덱스 · 구현",
-  grok: "그록 · 조사",
+  fable: "총괄",
+  codex: "구현",
+  grok: "조사",
 };
 
 const NODE_KIND_LABELS: Readonly<Record<WorkspaceTaskNodeKind, string>> = {
@@ -583,13 +588,15 @@ function RunCard({
             <Tag label={RUN_STATUS_LABELS[run.status]} tone={runTone(run.status)} />
             <Tag
               label={
-                run.source === "user"
-                  ? "사용자 요청"
-                  : run.source === "schedule"
-                    ? "예약 실행"
-                    : run.source === "integrity"
-                      ? "무결성 수렴"
-                      : "장애 복구"
+                run.source === "automation"
+                  ? "자동 업무"
+                  : run.source === "user"
+                    ? "사용자 요청"
+                    : run.source === "schedule"
+                      ? "예약 실행"
+                      : run.source === "integrity"
+                        ? "무결성 수렴"
+                        : "장애 복구"
               }
             />
           </View>
@@ -629,6 +636,8 @@ function RunCard({
 
       {expanded ? (
         <View className="gap-3 border-t border-border px-3 py-3.5">
+          <OrchestraRunControls environmentId={environmentId} run={run} />
+          <WorkflowRunControls environmentId={environmentId} run={run} />
           {run.graph ? (
             <MobileGraphSummary
               environmentId={environmentId}
@@ -664,6 +673,7 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const projects = useProjects();
+  const attentionThreads = useThreadShells();
   const iconColor = useThemeColor("--color-icon-muted");
   const environmentIdRaw = firstRouteParam(props.route.params.environmentId)?.trim() || null;
   const projectIdRaw = firstRouteParam(props.route.params.projectId)?.trim() || null;
@@ -850,6 +860,45 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 24 }}
         ListHeaderComponent={
           <View className="mb-1 gap-3">
+            {environmentId && projectId && (
+              <AttentionInbox
+                threads={attentionThreads}
+                environmentId={environmentId}
+                projectId={projectId}
+                onSelect={(thread) =>
+                  navigation.dispatch(
+                    CommonActions.navigate({
+                      name: "Thread",
+                      params: { environmentId: thread.environmentId, threadId: thread.id },
+                    }),
+                  )
+                }
+              />
+            )}
+            {environmentId && projectId ? (
+              <WorkspaceAutomationSummary
+                key={`${environmentId}:${projectId}`}
+                environmentId={environmentId}
+                projectId={projectId}
+              />
+            ) : null}
+            {environmentId && projectId && project ? (
+              <WorkspaceWorkflowTemplates
+                environmentId={environmentId}
+                projectId={projectId}
+                revision={runtimeQuery.data?.operationsUpdatedAt ?? null}
+              />
+            ) : null}
+            {environmentId && projectId && project ? (
+              <WorkspaceFollowUps
+                environmentId={environmentId}
+                projectId={projectId}
+                workspaceRoot={project.workspaceRoot}
+                runs={runs}
+                revision={runtimeQuery.data?.operationsUpdatedAt ?? null}
+                refreshRuns={runsQuery.refresh}
+              />
+            ) : null}
             <View className="flex-row items-start gap-3 rounded-2xl bg-fill p-3.5">
               <View className="min-w-0 flex-1 gap-1">
                 <Text className="text-lg font-t3-bold text-foreground">프로젝트 운영 현황</Text>

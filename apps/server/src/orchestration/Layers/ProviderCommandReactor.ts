@@ -1,5 +1,11 @@
 import { buildConversationHandoff, prepareCompactHandoff } from "../conversationHandoff.ts";
+import { describeInputComposition } from "../inputComposition.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
+import { prepareAttachmentDocumentRag } from "../../documents/attachmentDocumentRag.ts";
 import { ServerConfig } from "../../config.ts";
+import { prepareFileAttachmentsForProvider } from "../../provider/fileAttachments.ts";
+import { withFullAccessExecutionPolicy } from "../../provider/fullAccessExecutionPolicy.ts";
+import { WorkspaceDevelopment } from "../WorkspaceDevelopment.ts";
 import {
   type ChatAttachment,
   CommandId,
@@ -39,8 +45,15 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import {
+  chooseAutomaticAccount,
+  isActualRateLimitFailure,
+} from "../../provider/providerAccountSwitch.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionThreadRuntimeRead,
+} from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -76,7 +89,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.session-set";
   }
 >;
 
@@ -172,13 +186,17 @@ function collectRecentThreadTitleContext(
     if (section.length > available) {
       if (available > 0) {
         context = `${section.slice(-available)}${separator}${context}`;
-        retainedAttachments.unshift(...(message.attachments ?? []));
+        retainedAttachments.unshift(
+          ...(message.attachments ?? []).filter((attachment) => attachment.type === "image"),
+        );
       }
       truncated = true;
       break;
     }
     context = `${section}${separator}${context}`;
-    retainedAttachments.unshift(...(message.attachments ?? []));
+    retainedAttachments.unshift(
+      ...(message.attachments ?? []).filter((attachment) => attachment.type === "image"),
+    );
   }
 
   return { context, attachments: retainedAttachments, truncated };
@@ -216,7 +234,9 @@ function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMessage>): 
     "\n\n".length -
     THREAD_TITLE_CONTEXT_TRUNCATION_MARKER.length;
   const retainedRecent = collectRecentThreadTitleContext(messages, recentContextBudget);
-  const pinnedAttachment = firstUserMessage.attachments?.[0];
+  const pinnedAttachment = firstUserMessage.attachments?.find(
+    (attachment) => attachment.type === "image",
+  );
   const recentAttachments = retainedRecent.attachments.filter(
     (attachment) => attachment.id !== pinnedAttachment?.id,
   );
@@ -358,6 +378,119 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const userTurnAccounts = new Map<ThreadId, string>();
+
+  const selectAutomaticAccount = Effect.fn("selectAutomaticAccount")(function* (
+    thread: OrchestrationThread,
+    selection: ModelSelection,
+    createdAt: string,
+  ) {
+    const settings = yield* serverSettingsService.getSettings;
+    if (!settings.providerAutoSwitch.codex && !settings.providerAutoSwitch.claudeAgent)
+      return selection;
+    const development = yield* Effect.serviceOption(WorkspaceDevelopment);
+    if (Option.isSome(development)) {
+      const state = yield* development.value.get(thread.projectId);
+      if (state?.enabled && state.bindings.some((binding) => binding.sessionKey === thread.id))
+        return selection;
+    }
+    const sessions = yield* providerService.listSessions();
+    if (
+      sessions.some(
+        (session) =>
+          session.threadId === thread.id &&
+          (session.status === "running" || session.activeTurnId != null),
+      )
+    )
+      return selection;
+    const providers = yield* providerRegistry.getProviders;
+    const current = providers.find((provider) => provider.instanceId === selection.instanceId);
+    if (
+      !current ||
+      (current.driver !== "codex" && current.driver !== "claudeAgent") ||
+      !(current.driver === "codex"
+        ? settings.providerAutoSwitch.codex
+        : settings.providerAutoSwitch.claudeAgent)
+    )
+      return selection;
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const blocked = new Set<string>();
+    if (
+      thread.session?.providerInstanceId &&
+      isActualRateLimitFailure(thread.session.lastError) &&
+      nowMs - Date.parse(thread.session.updatedAt) < 5 * 60_000
+    )
+      blocked.add(thread.session.providerInstanceId);
+    if (projectionSnapshotQuery.getRateLimitedAccountIds !== undefined) {
+      const ids = yield* projectionSnapshotQuery.getRateLimitedAccountIds(
+        DateTime.formatIso(DateTime.makeUnsafe(nowMs - 5 * 60_000)),
+      );
+      for (const instanceId of ids) blocked.add(instanceId);
+    }
+    // A second configured label pointing at the same account is not a fallback account.
+    const currentInfo = yield* providerService.getInstanceInfo(selection.instanceId);
+    const independent = yield* Effect.filter(providers, (candidate) =>
+      candidate.driver !== current.driver || candidate.instanceId === current.instanceId
+        ? Effect.succeed(true)
+        : providerService.getInstanceInfo(candidate.instanceId).pipe(
+            Effect.map(
+              (info) =>
+                info.continuationIdentity.continuationKey !==
+                currentInfo.continuationIdentity.continuationKey,
+            ),
+            Effect.catch(() => Effect.succeed(false)),
+          ),
+    );
+    const candidate = chooseAutomaticAccount({
+      selection,
+      providers: independent,
+      settings: settings.providerAutoSwitch,
+      blockedInstanceIds: blocked,
+      nowMs,
+    });
+    if (!candidate) return selection;
+    const latest = yield* resolveThread(thread.id);
+    if (!latest || !Equal.equals(latest.modelSelection, selection))
+      return latest?.modelSelection ?? selection;
+    const latestSessions = yield* providerService.listSessions();
+    if (
+      latestSessions.some(
+        (session) =>
+          session.threadId === thread.id &&
+          (session.status === "running" || session.activeTurnId != null),
+      )
+    )
+      return selection;
+    const next = { ...selection, instanceId: candidate.instanceId };
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: yield* serverCommandId("account-auto-switch"),
+      threadId: thread.id,
+      modelSelection: next,
+    });
+    threadModelSelections.set(thread.id, next);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* serverCommandId("account-auto-switch-activity"),
+      threadId: thread.id,
+      createdAt,
+      activity: {
+        id: yield* serverEventId(),
+        kind: "provider.account.auto-switched",
+        tone: "info",
+        summary: `${current.driver === "codex" ? "Codex" : "Claude"} 계정 자동 전환: ${candidate.displayName ?? candidate.instanceId}`,
+        payload: {
+          previousInstanceId: selection.instanceId,
+          nextInstanceId: candidate.instanceId,
+          reason: blocked.has(selection.instanceId) ? "rate-limit-429" : "quota-exhausted",
+          requestReplayed: false,
+        },
+        turnId: null,
+        createdAt,
+      },
+    });
+    return next;
+  });
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -461,9 +594,22 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
-  const resolveThread = Effect.fnUntraced(function* (threadId: ThreadId) {
+  const resolveThread = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    read?: ProjectionThreadRuntimeRead,
+  ) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadRuntimeContext(threadId, {
+        activityKinds: [
+          "conversation.imported",
+          "orchestra.block",
+          "approval.requested",
+          "approval.resolved",
+          "user-input.requested",
+          "user-input.resolved",
+        ],
+        ...read,
+      })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -473,6 +619,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly runtimeMode?: RuntimeMode;
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -480,7 +627,7 @@ const make = Effect.gen(function* () {
       return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
     }
 
-    const desiredRuntimeMode = thread.runtimeMode;
+    const desiredRuntimeMode = options?.runtimeMode ?? thread.runtimeMode;
     const requestedModelSelection = options?.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
@@ -662,7 +809,7 @@ const make = Effect.gen(function* () {
         ? thread.id
         : null;
     if (existingSessionThreadId) {
-      const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
+      const runtimeModeChanged = desiredRuntimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
       const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
         .sessionModelSwitch;
@@ -723,7 +870,10 @@ const make = Effect.gen(function* () {
         cwd: restartedSession.cwd,
       });
       yield* bindSessionToThread(restartedSession);
-      return { sessionThreadId: restartedSession.threadId, contextHandoff: false };
+      return {
+        sessionThreadId: restartedSession.threadId,
+        contextHandoff: restartedSession.continuity === "resume-fallback",
+      };
     }
 
     const startedSession = yield* startProviderSession(undefined);
@@ -739,7 +889,13 @@ const make = Effect.gen(function* () {
       previousSessionProvider !== desiredInfo.driverKind;
     return {
       sessionThreadId: startedSession.threadId,
-      contextHandoff: releasedSessionForSwitch || crossDriverFreshStart,
+      contextHandoff:
+        startedSession.continuity === "resume-fallback" ||
+        releasedSessionForSwitch ||
+        thread.activities.some((activity) => activity.kind === "conversation.imported") ||
+        crossDriverFreshStart ||
+        (thread.session?.providerInstanceId !== undefined &&
+          thread.session.providerInstanceId !== desiredInstanceId),
     };
   });
 
@@ -751,6 +907,7 @@ const make = Effect.gen(function* () {
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
+    readonly runtimeMode?: RuntimeMode;
     readonly createdAt: string;
     /**
      * Automation turns (meeting seats, programs) compose their own prompts
@@ -767,18 +924,27 @@ const make = Effect.gen(function* () {
     }
     const ensured = yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      ...(input.runtimeMode !== undefined ? { runtimeMode: input.runtimeMode } : {}),
       pendingTurnStart: true,
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
-    let handoff =
-      ensured.contextHandoff && input.userInitiated !== false
-        ? buildConversationHandoff(thread.messages, input.messageId)
+    const memory = yield* Effect.serviceOption(WorkspaceMemory);
+    const needsHandoff = ensured.contextHandoff && input.userInitiated !== false;
+    const handoffThread =
+      needsHandoff && Option.isNone(memory)
+        ? thread.handoffMode === "compact"
+          ? Option.getOrUndefined(yield* projectionSnapshotQuery.getThreadDetailById(thread.id))
+          : yield* resolveThread(thread.id, { messages: true })
         : undefined;
-    if (handoff !== undefined && thread.handoffMode === "compact") {
+    let handoff =
+      handoffThread === undefined
+        ? undefined
+        : buildConversationHandoff(handoffThread.messages, input.messageId);
+    if (handoff !== undefined && handoffThread?.handoffMode === "compact") {
       const prepared = yield* prepareCompactHandoff({
-        thread,
+        thread: handoffThread,
         currentMessageId: input.messageId,
         stateDir: serverConfig.stateDir,
         standardHandoff: handoff,
@@ -816,10 +982,241 @@ const make = Effect.gen(function* () {
           ),
         );
     }
-    const normalizedInput = toNonEmptyProviderInput(
-      handoff === undefined ? input.messageText : `${handoff}\n\n${input.messageText}`,
+    if (handoff !== undefined) {
+      const imported = handoffThread?.activities.find(
+        (item) => item.kind === "conversation.imported",
+      );
+      const payload = imported?.payload;
+      const hash =
+        payload && typeof payload === "object" && "sourceHash" in payload
+          ? payload.sourceHash
+          : null;
+      if (typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)) {
+        handoff += `\nCLI 원본 대화·도구·할일 기록: ${serverConfig.stateDir}/conversation-imports/${hash}.txt\n필요한 이전 작업 근거는 이 원본 파일에서 확인하라.`;
+      }
+    }
+    let taskInput = input.messageText;
+    let hasRag = false;
+    const development = yield* Effect.serviceOption(WorkspaceDevelopment);
+    const developmentState =
+      input.userInitiated === false && Option.isSome(development)
+        ? yield* development.value.get(thread.projectId)
+        : null;
+    const documentRag = yield* prepareAttachmentDocumentRag({
+      projectId: thread.projectId,
+      threadId: thread.id,
+      messageId: input.messageId,
+      attachments: input.attachments ?? [],
+      query: developmentState?.goal?.objective ?? input.messageText,
+      createdAt: input.createdAt,
+      stateDir: serverConfig.stateDir,
+      attachmentsDir: serverConfig.attachmentsDir,
+      engine: orchestrationEngine,
+      queries: projectionSnapshotQuery,
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not prepare attachment document RAG", { cause }).pipe(
+          Effect.as({
+            prompt: "",
+            extracted: new Map<string, { path: string; partial: boolean }>(),
+            reports: [],
+          }),
+        ),
+      ),
     );
-    const normalizedAttachments = input.attachments ?? [];
+    let folderScopeAvailable = true;
+    let composedWorkspacePrompt = false;
+    if (projectionSnapshotQuery.composeWorkspacePrompt !== undefined) {
+      const settings =
+        projectionSnapshotQuery.getWorkspaceContextSettings !== undefined
+          ? yield* projectionSnapshotQuery.getWorkspaceContextSettings(thread.projectId)
+          : (yield* projectionSnapshotQuery.getCommandReadModel()).projects.find(
+              (candidate) => candidate.id === thread.projectId,
+            )?.workspaceControl?.contextOptimization;
+      if (settings?.autoChatMemory === true) {
+        const compose =
+          projectionSnapshotQuery.composeWorkspacePromptForExecution ??
+          projectionSnapshotQuery.composeWorkspacePrompt;
+        const project = yield* resolveProject(thread.projectId);
+        const cwd = resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] });
+        const contextPathsResult =
+          Option.isSome(memory) && cwd
+            ? yield* memory.value
+                .contextPaths({
+                  projectId: thread.projectId,
+                  threadId: thread.id,
+                  messageId: input.messageId,
+                  cwd,
+                  recordCurrent: true,
+                })
+                .pipe(
+                  Effect.map((paths) => ({ paths, available: true as const })),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning(
+                          "Could not determine the current folder for workspace memory",
+                          { cause },
+                        ).pipe(
+                          Effect.as({
+                            paths: [] as ReadonlyArray<string>,
+                            available: false as const,
+                          }),
+                        ),
+                  ),
+                )
+            : { paths: [] as ReadonlyArray<string>, available: false as const };
+        folderScopeAvailable = contextPathsResult.available;
+        if (contextPathsResult.available) {
+          const composed = yield* compose({
+            projectId: thread.projectId,
+            task: input.messageText,
+            sourceMessageId: input.messageId,
+            contextMode: settings.memoryMode,
+            includeShared: false,
+            includeSharedLibrary: false,
+            ...(contextPathsResult.paths.length > 0
+              ? { contextPaths: contextPathsResult.paths }
+              : {}),
+            maxContextChars: 16_000,
+            includeAttachmentDocuments: false,
+          });
+          taskInput = composed.prompt;
+          composedWorkspacePrompt = true;
+          hasRag = true;
+        } else {
+          taskInput = `${taskInput}\n\n<t3_folder_memory_unavailable>현재 요청에 적용할 기억의 폴더 범위를 확인하지 못해 폴더 전용 기억이 누락되었을 수 있습니다. 폴더가 없다는 뜻은 아닙니다. 폴더 기억을 읽었다고 추측하지 말고 사용자에게 알리세요.</t3_folder_memory_unavailable>`;
+        }
+      }
+    }
+    if (documentRag.prompt) {
+      taskInput = `${taskInput}\n\n${documentRag.prompt}`;
+      hasRag = true;
+    }
+    if (needsHandoff && Option.isSome(memory)) {
+      handoff = !folderScopeAvailable
+        ? "<t3_folder_memory_unavailable>현재 요청에 적용할 기억의 폴더 범위를 확인하지 못해 이전 대화 인계를 생략했습니다. 폴더가 없다는 뜻은 아닙니다.</t3_folder_memory_unavailable>"
+        : yield* memory.value
+            .handoff(thread.projectId, thread.id, input.messageId, thread.handoffMode === "compact")
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Could not prepare bounded conversation handoff", { cause }).pipe(
+                  Effect.as(
+                    "<t3_folder_memory_unavailable>이전 대화 인계의 폴더 범위를 확인하지 못했습니다.</t3_folder_memory_unavailable>",
+                  ),
+                ),
+              ),
+            );
+    }
+    if (Option.isSome(memory)) {
+      const memoryResult = yield* memory.value
+        .context(thread.projectId, input.messageText, !folderScopeAvailable, {
+          threadId: thread.id,
+          messageId: input.messageId,
+          ...(input.userInitiated === false ? { inheritFolder: true } : {}),
+          ...(composedWorkspacePrompt ? { excludeDirectives: true } : {}),
+          // A resumed native session already holds this conversation; the
+          // composed prompt's RAG copy repeats it. Keep the recent block only
+          // when a fresh session must be rehydrated.
+          ...(composedWorkspacePrompt && input.userInitiated !== false && !needsHandoff
+            ? { excludeRecentConversation: true }
+            : {}),
+        })
+        .pipe(
+          Effect.map((text) => ({ text, available: true as const })),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("Could not prepare workspace memory index", { cause }).pipe(
+                  Effect.as({
+                    text: "<t3_memory_unavailable>이전 대화 기억과 사용자 필수 지침을 불러오지 못했습니다. 기억을 읽었다고 추측하지 말고 이 사실을 사용자에게 알리세요. 가능한 경우 workspace_memory status/search/read로 복구하고, 필요한 맥락이 확인되지 않으면 임의로 채우지 마세요.</t3_memory_unavailable>",
+                    available: false as const,
+                  }),
+                ),
+          ),
+        );
+      if (memoryResult.text) {
+        taskInput += `\n\n${memoryResult.text}`;
+        hasRag ||= memoryResult.available;
+      }
+      if (
+        !memoryResult.available ||
+        !folderScopeAvailable ||
+        memoryResult.text.includes("<t3_folder_memory_unavailable>")
+      ) {
+        yield* orchestrationEngine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: yield* serverCommandId("workspace-memory-unavailable"),
+            threadId: thread.id,
+            createdAt: input.createdAt,
+            activity: {
+              id: yield* serverEventId(),
+              kind: "workspace.memory.unavailable",
+              tone: "error",
+              summary: memoryResult.available
+                ? "현재 요청의 기억에 적용할 폴더 범위를 확인하지 못해 AI에 알렸습니다."
+                : "이전 대화 기억을 불러오지 못해 AI에 누락 사실을 알렸습니다.",
+              payload: {},
+              turnId: null,
+              createdAt: input.createdAt,
+            },
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("Could not record memory preparation failure"),
+            ),
+          );
+      }
+    }
+    if (Option.isSome(development))
+      taskInput = yield* development.value.prepareMainInput(thread.id, taskInput, input.messageId);
+    taskInput = withFullAccessExecutionPolicy(
+      taskInput,
+      input.runtimeMode ?? thread.runtimeMode,
+      input.interactionMode ?? thread.interactionMode,
+    );
+    const providerAttachments = prepareFileAttachmentsForProvider({
+      text: toNonEmptyProviderInput(
+        handoff === undefined ? taskInput : `${handoff}\n\n${taskInput}`,
+      ),
+      attachments: input.attachments ?? [],
+      attachmentsDir: serverConfig.attachmentsDir,
+      extractedDocuments: documentRag.extracted,
+    });
+    const normalizedInput = providerAttachments.text;
+    const normalizedAttachments = providerAttachments.attachments;
+    const composition = describeInputComposition({
+      prompt: normalizedInput ?? "",
+      path: input.userInitiated === false ? "automation" : "chat",
+      parts: [
+        {
+          kind: hasRag ? "rag-assembly" : input.userInitiated === false ? "assignment" : "task",
+          chars: taskInput.length,
+        },
+        ...(handoff === undefined ? [] : [{ kind: "handoff" as const, chars: handoff.length }]),
+      ],
+      attachmentCount: input.attachments?.length ?? 0,
+    });
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.activity.append",
+        commandId: yield* serverCommandId("input-composition"),
+        threadId: thread.id,
+        createdAt: input.createdAt,
+        activity: {
+          id: yield* serverEventId(),
+          kind: "input.composition.prepared",
+          tone: "info",
+          summary: `AI 입력 준비: ${composition.promptChars.toLocaleString()}자 · 실제 토큰 미계측`,
+          payload: composition,
+          turnId: null,
+          createdAt: input.createdAt,
+        },
+      })
+      .pipe(Effect.catchCause(() => Effect.logWarning("Could not record input composition")));
     const activeSession = yield* providerService
       .listSessions()
       .pipe(
@@ -875,7 +1272,9 @@ const make = Effect.gen(function* () {
 
     const oldBranch = input.branch;
     const cwd = input.worktreePath;
-    const attachments = input.attachments ?? [];
+    const attachments = (input.attachments ?? []).filter(
+      (attachment) => attachment.type === "image",
+    );
     yield* Effect.gen(function* () {
       const settings = yield* serverSettingsService.getSettings;
       const modelSelection =
@@ -926,7 +1325,9 @@ const make = Effect.gen(function* () {
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly titleSeed?: string;
     }) {
-      const attachments = input.attachments ?? [];
+      const attachments = (input.attachments ?? []).filter(
+        (attachment) => attachment.type === "image",
+      );
       yield* Effect.gen(function* () {
         const { textGenerationModelSelection: modelSelection } =
           yield* serverSettingsService.getSettings;
@@ -971,7 +1372,7 @@ const make = Effect.gen(function* () {
       return { _tag: "Superseded" } as const;
     }
 
-    const thread = yield* resolveThread(event.payload.threadId);
+    const thread = yield* resolveThread(event.payload.threadId, { messages: true });
     if (!thread || thread.titleRegeneration?.requestId !== requestId) {
       return { _tag: "Superseded" } as const;
     }
@@ -1146,7 +1547,9 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
+    const messageThread = yield* resolveThread(thread.id, { messages: true });
+    if (!messageThread) return;
+    const message = messageThread.messages.find((entry) => entry.id === event.payload.messageId);
     if (!message || message.role !== "user") {
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
@@ -1160,7 +1563,7 @@ const make = Effect.gen(function* () {
     }
 
     const isFirstUserMessageTurn =
-      thread.messages.filter((entry) => entry.role === "user").length === 1;
+      messageThread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
       const project = yield* resolveProject(thread.projectId);
       const generationCwd =
@@ -1226,16 +1629,40 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    const accountResult =
+      event.payload.inputOrigin === "automation"
+        ? Option.some(event.payload.modelSelection)
+        : yield* selectAutomaticAccount(
+            thread,
+            event.payload.modelSelection ?? thread.modelSelection,
+            event.payload.createdAt,
+          ).pipe(
+            Effect.map(Option.some),
+            Effect.catchCause((cause) =>
+              handleTurnStartFailure(cause).pipe(Effect.as(Option.none())),
+            ),
+          );
+    if (Option.isNone(accountResult)) return;
+    const selectedAccount = accountResult.value;
+    const selectedModel =
+      selectedAccount?.instanceId !== thread.modelSelection.instanceId
+        ? selectedAccount
+        : event.payload.modelSelection;
+    if (event.payload.inputOrigin === "automation") userTurnAccounts.delete(thread.id);
+    else
+      userTurnAccounts.set(
+        thread.id,
+        selectedAccount?.instanceId ?? thread.modelSelection.instanceId,
+      );
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
       messageId: event.payload.messageId,
       beforeSequence: event.sequence,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
+      ...(selectedModel !== undefined ? { modelSelection: selectedModel } : {}),
       interactionMode: event.payload.interactionMode,
+      runtimeMode: event.payload.runtimeMode,
       createdAt: event.payload.createdAt,
       userInitiated: event.payload.inputOrigin !== "automation",
     }).pipe(
@@ -1276,10 +1703,42 @@ const make = Effect.gen(function* () {
           runId,
           createdAt: event.payload.createdAt,
         });
-      return;
+      if (event.payload.questionRequestId === undefined) return;
     }
     const session = thread.session;
     if (!session || session.status === "stopped") {
+      const questionRequestId = event.payload.questionRequestId;
+      const matchesQuestion = (activity: (typeof thread.activities)[number]) =>
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        "requestId" in activity.payload &&
+        activity.payload.requestId === questionRequestId;
+      if (
+        questionRequestId?.startsWith("async:") &&
+        thread.activities.some(
+          (activity) => activity.kind === "user-input.requested" && matchesQuestion(activity),
+        ) &&
+        !thread.activities.some(
+          (activity) => activity.kind === "user-input.resolved" && matchesQuestion(activity),
+        )
+      ) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`question-stop:${event.eventId}`),
+          threadId: event.payload.threadId,
+          createdAt: event.payload.createdAt,
+          activity: {
+            id: EventId.make(`question-stop:${event.eventId}`),
+            kind: "user-input.resolved",
+            tone: "info",
+            summary: "중지한 질문을 닫았습니다.",
+            payload: { requestId: questionRequestId, answers: {}, reason: "provider-resolved" },
+            turnId: null,
+            createdAt: event.payload.createdAt,
+          },
+        });
+        return;
+      }
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.interrupt.failed",
@@ -1296,7 +1755,11 @@ const make = Effect.gen(function* () {
     // turn the provider has not acknowledged yet (activeTurnId is still null
     // in that window), and dropping the interrupt there leaves the provider
     // running a turn the projection already recorded as interrupted.
-    if (session.activeTurnId === null && session.status === "ready") {
+    if (
+      session.activeTurnId === null &&
+      session.status === "ready" &&
+      event.payload.questionRequestId === undefined
+    ) {
       return;
     }
 
@@ -1308,6 +1771,9 @@ const make = Effect.gen(function* () {
     const failureDetail = yield* providerService
       .interruptTurn({
         threadId: event.payload.threadId,
+        ...(event.payload.questionRequestId !== undefined
+          ? { questionRequestId: event.payload.questionRequestId }
+          : {}),
         ...(event.payload.stopBackground !== undefined
           ? { stopBackground: event.payload.stopBackground }
           : {}),
@@ -1453,6 +1919,7 @@ const make = Effect.gen(function* () {
               : ThreadId.make(executionRequest.executionId),
           requestId: executionRequest?.providerRequestId ?? event.payload.requestId,
           answers: event.payload.answers,
+          ...(event.payload.images ? { images: event.payload.images } : {}),
         })
         .pipe(
           Effect.catchCause((cause) =>
@@ -1565,6 +2032,41 @@ const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.session-set": {
+        const session = event.payload.session;
+        if (
+          session.status !== "error" ||
+          !isActualRateLimitFailure(session.lastError) ||
+          session.providerInstanceId === undefined ||
+          (session.providerName !== "codex" && session.providerName !== "claudeAgent")
+        )
+          return;
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`provider:rate-limit-fact:${event.eventId}`),
+          threadId: event.payload.threadId,
+          createdAt: session.updatedAt,
+          activity: {
+            id: EventId.make(`rate-limit:${event.eventId}`),
+            kind: "provider.account.rate-limited",
+            tone: "error",
+            summary: "계정 요청 제한 확인 (HTTP 429)",
+            payload: { instanceId: session.providerInstanceId, sourceEventId: event.eventId },
+            turnId: null,
+            createdAt: session.updatedAt,
+          },
+        });
+        if (userTurnAccounts.get(event.payload.threadId) !== session.providerInstanceId) return;
+        const thread = yield* resolveThread(event.payload.threadId);
+        if (
+          !thread ||
+          thread.modelSelection.instanceId !== session.providerInstanceId ||
+          thread.session?.status !== "error"
+        )
+          return;
+        yield* selectAutomaticAccount(thread, thread.modelSelection, event.occurredAt);
+        return;
+      }
     }
   });
 
@@ -1617,7 +2119,10 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        (event.type === "thread.session-set" &&
+          event.payload.session.status === "error" &&
+          isActualRateLimitFailure(event.payload.session.lastError))
       ) {
         return yield* worker.enqueue(event);
       }

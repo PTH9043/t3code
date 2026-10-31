@@ -151,6 +151,65 @@ const withSavedEnvironments = <A, E, R>(
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 describe("DesktopSavedEnvironments", () => {
+  it.effect("restores the encrypted primary Google session in a new service instance", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-saved-environments-test-",
+      });
+      const first = yield* DesktopSavedEnvironments.DesktopSavedEnvironments.pipe(
+        Effect.provide(makeLayer(baseDir)),
+      );
+      yield* Effect.all(
+        [
+          first.setRegistry([savedRegistryRecord]),
+          first.setPrimaryGoogleSecret("google-session-secret"),
+        ],
+        { concurrency: "unbounded" },
+      );
+      const reopened = yield* DesktopSavedEnvironments.DesktopSavedEnvironments.pipe(
+        Effect.provide(makeLayer(baseDir)),
+      );
+      assert.deepEqual(
+        yield* reopened.getPrimaryGoogleSecret,
+        Option.some("google-session-secret"),
+      );
+      assert.deepEqual(yield* reopened.getRegistry, [savedRegistryRecord]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("encrypts the primary Google session and preserves it through registry edits", () =>
+    withSavedEnvironments(
+      Effect.gen(function* () {
+        const saved = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* saved.setRegistry([savedRegistryRecord]);
+        assert.isTrue(yield* saved.setPrimaryGoogleSecret("google-session-secret"));
+        assert.notInclude(
+          yield* fileSystem.readFileString(environment.savedEnvironmentRegistryPath),
+          "google-session-secret",
+        );
+        yield* saved.setRegistry([savedRegistryRecord]);
+        assert.deepEqual(yield* saved.getPrimaryGoogleSecret, Option.some("google-session-secret"));
+        assert.deepEqual(yield* saved.getRegistry, [savedRegistryRecord]);
+        yield* saved.removePrimaryGoogleSecret;
+        assert.deepEqual(yield* saved.getPrimaryGoogleSecret, Option.none());
+        assert.deepEqual(yield* saved.getRegistry, [savedRegistryRecord]);
+      }),
+    ),
+  );
+
+  it.effect("never persists the primary Google secret without OS encryption", () =>
+    withSavedEnvironments(
+      Effect.gen(function* () {
+        const saved = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
+        assert.isFalse(yield* saved.setPrimaryGoogleSecret("google-session-secret"));
+        assert.deepEqual(yield* saved.getPrimaryGoogleSecret, Option.none());
+      }),
+      { availableSecretStorage: false },
+    ),
+  );
   it.effect("persists and reloads saved environment metadata", () =>
     withSavedEnvironments(
       Effect.gen(function* () {
@@ -467,6 +526,43 @@ describe("DesktopSavedEnvironments", () => {
         `Desktop saved-environment write failed during create-directory at ${stateDir}.`,
       );
       assert.notEqual(error.message, permissionError.message);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("removes its temporary registry file when replacement fails", () =>
+    Effect.gen(function* () {
+      const base = yield* FileSystem.FileSystem;
+      const baseDir = yield* base.makeTempDirectoryScoped({
+        prefix: "t3-desktop-saved-environments-test-",
+      });
+      const permissionError = PlatformError.systemError({
+        _tag: "PermissionDenied",
+        module: "FileSystem",
+        method: "rename",
+        pathOrDescriptor: baseDir,
+      });
+      let temporaryPath = "";
+      const fileSystemLayer = Layer.succeed(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          readFileString: base.readFileString,
+          makeDirectory: base.makeDirectory,
+          writeFileString: (path, value, options) => {
+            temporaryPath = path;
+            return base.writeFileString(path, value, options);
+          },
+          rename: () => Effect.fail(permissionError),
+          remove: base.remove,
+        }),
+      );
+      const saved = yield* DesktopSavedEnvironments.DesktopSavedEnvironments.pipe(
+        Effect.provide(makeLayer(baseDir, undefined, fileSystemLayer)),
+      );
+      const error = yield* saved.setRegistry([savedRegistryRecord]).pipe(Effect.flip);
+      assert.instanceOf(error, DesktopSavedEnvironments.DesktopSavedEnvironmentsWriteError);
+      assert.equal(error.operation, "replace-registry-file");
+      assert.isTrue(temporaryPath.endsWith(".tmp"));
+      assert.isFalse(yield* base.exists(temporaryPath));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 

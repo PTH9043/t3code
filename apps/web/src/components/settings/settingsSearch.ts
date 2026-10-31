@@ -38,6 +38,14 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
  */
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "ai-document-search",
+    title: "AI 문서 검색 · RAG · OCR · Grok 조사",
+    to: "/settings/general",
+    targetId: "ai-search",
+  },
+  { id: "codex-auto-switch", title: "Codex 자동 전환", to: "/settings/providers" },
+  { id: "claude-auto-switch", title: "Claude 자동 전환", to: "/settings/providers" },
+  {
     id: "color-scheme",
     title: "색상 모드",
     to: "/settings/appearance",
@@ -185,6 +193,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "source-control",
     title: "소스 제어",
     to: "/settings/source-control",
+  },
+  {
+    id: "google-account",
+    title: "Google 로그인",
+    to: "/settings/connections",
   },
   {
     id: "remote-environments",

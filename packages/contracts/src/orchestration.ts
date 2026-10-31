@@ -1,4 +1,8 @@
 import { ConversationHandoffMode } from "./conversationHandoff.ts";
+import { WorkflowExecutionContext, WorkflowVersion } from "./workflowGraph.ts";
+import { WorkspaceDesignReference } from "./designReference.ts";
+import { WorkspaceCompletionAutomation } from "./completionAutomation.ts";
+import { ImportedConversation } from "./conversationTransfer.ts";
 import * as Effect from "effect/Effect";
 import {
   GetThreadTokenUsageInput,
@@ -36,6 +40,7 @@ import {
   WorkspaceIncidentId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ApprovedTaskConditions } from "./taskConditions.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   getThreadTokenUsage: "orchestration.getThreadTokenUsage",
@@ -174,7 +179,12 @@ export type ProviderUserInputAnswers = typeof ProviderUserInputAnswers.Type;
 export const PROVIDER_SEND_TURN_MAX_INPUT_CHARS = 120_000;
 export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 50 * 1024 * 1024;
+export const PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+export const PROVIDER_SEND_TURN_MAX_IMAGE_SOURCE_BYTES = 50 * 1024 * 1024;
 const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
+const PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS =
+  Math.ceil(PROVIDER_SEND_TURN_MAX_FILE_BYTES / 3) * 4 + 256;
 const CHAT_ATTACHMENT_ID_MAX_CHARS = 128;
 // Correlation id is command id by design in this model.
 export const CorrelationId = CommandId;
@@ -186,12 +196,23 @@ const ChatAttachmentId = TrimmedNonEmptyString.check(
 );
 export type ChatAttachmentId = typeof ChatAttachmentId.Type;
 
+export const ChatResultMetadata = Schema.Struct({
+  kind: Schema.Literals(["image", "text", "file"]),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  sourcePath: Schema.optional(Schema.String.check(Schema.isMaxLength(4096))),
+  language: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  width: Schema.optional(PositiveInt),
+  height: Schema.optional(PositiveInt),
+});
+export type ChatResultMetadata = typeof ChatResultMetadata.Type;
+
 export const ChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   id: ChatAttachmentId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100), Schema.isPattern(/^image\//i)),
-  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES)),
+  sizeBytes: NonNegativeInt,
+  result: Schema.optional(ChatResultMetadata),
 });
 export type ChatImageAttachment = typeof ChatImageAttachment.Type;
 
@@ -206,9 +227,39 @@ const UploadChatImageAttachment = Schema.Struct({
 });
 export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
-export const ChatAttachment = Schema.Union([ChatImageAttachment]);
+export const QuestionImageAttachment = Schema.Struct({
+  questionId: TrimmedNonEmptyString,
+  image: ChatImageAttachment,
+});
+export type QuestionImageAttachment = typeof QuestionImageAttachment.Type;
+const UploadQuestionImageAttachment = Schema.Struct({
+  questionId: TrimmedNonEmptyString,
+  image: UploadChatImageAttachment,
+});
+
+export const ChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  id: ChatAttachmentId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt,
+  result: Schema.optional(ChatResultMetadata),
+});
+export type ChatFileAttachment = typeof ChatFileAttachment.Type;
+
+const UploadChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  dataUrl: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS),
+  ),
+});
+
+export const ChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment]);
 export type ChatAttachment = typeof ChatAttachment.Type;
-const UploadChatAttachment = Schema.Union([UploadChatImageAttachment]);
+const UploadChatAttachment = Schema.Union([UploadChatImageAttachment, UploadChatFileAttachment]);
 export type UploadChatAttachment = typeof UploadChatAttachment.Type;
 
 export const ProjectScriptIcon = Schema.Literals([
@@ -461,7 +512,20 @@ export const DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS: WorkspaceOrchestraDefaults = 
 };
 
 export const WorkspaceControlSettings = Schema.Struct({
+  completionAutomation: Schema.optionalKey(WorkspaceCompletionAutomation),
   isolationMode: Schema.Literal("strict"),
+  /** Explicit rollout switches; missing settings retain existing request behavior. */
+  contextOptimization: Schema.optionalKey(
+    Schema.Struct({
+      memoryMode: Schema.Literals(["standard", "relevant"]),
+      compactHandoffs: Schema.Boolean,
+      autoChatMemory: Schema.Boolean,
+      /** Reference-token budget for the assembled workspace prompt; null disables it. */
+      maxContextTokens: Schema.optionalKey(
+        Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 256, maximum: 120_000 }))),
+      ),
+    }),
+  ),
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
   conversationRag: WorkspaceConversationRagSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS)),
@@ -532,11 +596,49 @@ const WorkspaceKnowledgeLocationFields = {
   appliesToFolder: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeRelativeFolder)),
 };
 
+/** Explicit relationships, stored with the existing research JSON and replayed with its event. */
+export const WorkspaceKnowledgeLineage = Schema.Struct({
+  canonicalId: TrimmedNonEmptyString,
+  revision: PositiveInt,
+  supersedes: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeItemId)),
+  validFrom: Schema.optionalKey(IsoDateTime),
+  validTo: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+  evidenceRefs: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+});
+export type WorkspaceKnowledgeLineage = typeof WorkspaceKnowledgeLineage.Type;
+
 export const WorkspaceResearchRecord = Schema.Struct({
+  attachment: Schema.optionalKey(
+    Schema.Struct({
+      threadId: ThreadId,
+      messageId: MessageId,
+      attachmentId: Schema.String,
+      name: Schema.String,
+      contentHash: Schema.String,
+      parserVersion: Schema.String,
+      partial: Schema.Boolean,
+      location: Schema.optionalKey(Schema.String),
+      locations: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            start: NonNegativeInt,
+            end: NonNegativeInt,
+            label: Schema.String,
+          }),
+        ),
+      ),
+    }),
+  ),
   query: Schema.String,
   sources: Schema.Array(Schema.String),
   capturedAt: IsoDateTime,
   verification: Schema.Literals(["unverified", "verified", "contradicted"]),
+  design: Schema.optionalKey(WorkspaceDesignReference),
+  lineage: Schema.optionalKey(WorkspaceKnowledgeLineage),
+  /** Optional subject gate for automatic context, e.g. traces that quote unrelated tasks. */
+  contextTopics: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(16)),
+  ),
 });
 export type WorkspaceResearchRecord = typeof WorkspaceResearchRecord.Type;
 
@@ -589,12 +691,17 @@ export const WorkspaceKnowledgeListResult = Schema.Struct({
 export type WorkspaceKnowledgeListResult = typeof WorkspaceKnowledgeListResult.Type;
 
 export const WorkspaceRagSearchInput = Schema.Struct({
+  attachmentsOnly: Schema.optionalKey(Schema.Boolean),
   projectId: ProjectId,
   includeShared: Schema.optionalKey(Schema.Boolean),
   contextPaths: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeRelativeFolder)),
   query: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
   includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
+  /** Total result limit still applies; omitted keeps the legacy one-chunk behavior. */
+  maxChunksPerItem: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3 })),
+  ),
 });
 export type WorkspaceRagSearchInput = typeof WorkspaceRagSearchInput.Type;
 
@@ -611,12 +718,26 @@ export const WorkspaceRagMatch = Schema.Struct({
    */
   content: Schema.optionalKey(Schema.String),
   score: Schema.Number,
+  /** Cosine similarity is distinct from BM25/RRF rank; omitted by keyword-only and older servers. */
+  semanticSimilarity: Schema.optionalKey(
+    Schema.Number.check(Schema.isBetween({ minimum: -1, maximum: 1 })),
+  ),
   updatedAt: IsoDateTime,
+  chunkId: Schema.optionalKey(TrimmedNonEmptyString),
+  research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
 });
 export type WorkspaceRagMatch = typeof WorkspaceRagMatch.Type;
 
 export const WorkspaceRagSearchResult = Schema.Struct({
   matches: Schema.Array(WorkspaceRagMatch),
+  retrieval: Schema.optionalKey(
+    Schema.Struct({
+      method: Schema.Literals(["keyword", "hybrid"]),
+      indexedChunks: NonNegativeInt,
+      totalChunks: NonNegativeInt,
+      message: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 export type WorkspaceRagSearchResult = typeof WorkspaceRagSearchResult.Type;
 
@@ -640,6 +761,9 @@ export const SharedLibraryMatch = Schema.Struct({
 export type SharedLibraryMatch = typeof SharedLibraryMatch.Type;
 
 export const WorkspacePromptComposeInput = Schema.Struct({
+  includeAttachmentDocuments: Schema.optionalKey(Schema.Boolean),
+  /** Avoid re-injecting the automatic RAG copy of the message being sent. */
+  sourceMessageId: Schema.optionalKey(MessageId),
   projectId: ProjectId,
   includeShared: Schema.optionalKey(Schema.Boolean),
   contextPaths: Schema.optionalKey(Schema.Array(WorkspaceKnowledgeRelativeFolder)),
@@ -647,14 +771,92 @@ export const WorkspacePromptComposeInput = Schema.Struct({
   includeRag: Schema.optionalKey(Schema.Boolean),
   includeWorkingMemory: Schema.optionalKey(Schema.Boolean),
   includeLongTermMemory: Schema.optionalKey(Schema.Boolean),
-  /** Omitted or true lets design-relevant shared library references in. */
+  contextMode: Schema.optionalKey(Schema.Literals(["standard", "relevant"])),
+  maxChunksPerItem: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3 })),
+  ),
+  /** Include past revisions for explicit historical questions; otherwise current evidence wins. */
+  includeHistory: Schema.optionalKey(Schema.Boolean),
+  /** Only explicit true includes shared library references; omitted stays project-local. */
   includeSharedLibrary: Schema.optionalKey(Schema.Boolean),
   ragLimit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
   maxContextChars: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 2_000, maximum: 120_000 })),
   ),
+  /** Missing inherits project settings; null explicitly disables the reference-token budget. */
+  maxContextTokens: Schema.optionalKey(
+    Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 256, maximum: 120_000 }))),
+  ),
 });
 export type WorkspacePromptComposeInput = typeof WorkspacePromptComposeInput.Type;
+
+export const WorkspacePromptDecision = Schema.Struct({
+  projectId: ProjectId,
+  itemId: WorkspaceKnowledgeItemId,
+  chunkId: Schema.optionalKey(TrimmedNonEmptyString),
+  title: Schema.String,
+  selected: Schema.Boolean,
+  reason: Schema.Literals([
+    "mandatory",
+    "relevant",
+    "standard",
+    "low-relevance",
+    "duplicate",
+    "superseded",
+    "disabled",
+    "budget",
+    "included-history",
+    "contradicted",
+    "not-yet-valid",
+    "topic-mismatch",
+    "current-task",
+  ]),
+  sourceChars: NonNegativeInt,
+  injectedChars: NonNegativeInt,
+  matchedTerms: Schema.Array(Schema.String),
+  revision: Schema.optionalKey(PositiveInt),
+  temporalStatus: Schema.Literals(["current", "history", "future", "unknown"]),
+  verification: WorkspaceResearchRecord.fields.verification,
+  contentHash: TrimmedNonEmptyString,
+  sourceUpdatedAt: IsoDateTime,
+});
+export type WorkspacePromptDecision = typeof WorkspacePromptDecision.Type;
+
+export const WorkspacePromptDiagnostics = Schema.Struct({
+  version: Schema.Literal(1),
+  mode: Schema.Literals(["standard", "relevant"]),
+  contextRevision: TrimmedNonEmptyString,
+  taskChars: NonNegativeInt,
+  mandatoryChars: NonNegativeInt,
+  memoryChars: NonNegativeInt,
+  libraryChars: NonNegativeInt,
+  promptChars: NonNegativeInt,
+  budgetChars: NonNegativeInt,
+  mandatoryOverflowChars: NonNegativeInt,
+  /** No tokenizer is assumed for a provider-owned prompt. */
+  tokenCount: Schema.Null,
+  tokenCountStatus: Schema.Literal("unavailable"),
+  decisions: Schema.Array(WorkspacePromptDecision),
+});
+export type WorkspacePromptDiagnostics = typeof WorkspacePromptDiagnostics.Type;
+
+/** Counts only text assembled by T3, not provider instructions, history, tools, or billed usage. */
+export const WorkspacePromptTokenEstimate = Schema.Struct({
+  version: Schema.Literal(1),
+  status: Schema.Literal("estimated"),
+  scope: Schema.Literal("workspace-prompt"),
+  encoding: Schema.Literal("o200k_base"),
+  total: NonNegativeInt,
+  limit: Schema.NullOr(PositiveInt),
+  mandatoryOverflow: NonNegativeInt,
+  sections: Schema.Struct({
+    task: NonNegativeInt,
+    instructions: NonNegativeInt,
+    memory: NonNegativeInt,
+    library: NonNegativeInt,
+  }),
+});
+export type WorkspacePromptTokenEstimate = typeof WorkspacePromptTokenEstimate.Type;
 
 export const WorkspacePromptComposeResult = Schema.Struct({
   prompt: Schema.String,
@@ -671,6 +873,8 @@ export const WorkspacePromptComposeResult = Schema.Struct({
   /** Shared library references the prompt actually carries. */
   libraryMatches: Schema.optionalKey(Schema.Array(SharedLibraryMatch)),
   truncated: Schema.Boolean,
+  diagnostics: Schema.optionalKey(WorkspacePromptDiagnostics),
+  tokenEstimate: Schema.optionalKey(WorkspacePromptTokenEstimate),
 });
 export type WorkspacePromptComposeResult = typeof WorkspacePromptComposeResult.Type;
 
@@ -823,6 +1027,14 @@ export const WorkspaceTaskAttempt = Schema.Struct({
   threadId: ThreadId,
   status: WorkspaceTaskAttemptStatus,
   output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
+  /** Full rejected output remains in its original message; this receipt verifies recovery input. */
+  formatRepair: Schema.optionalKey(
+    Schema.Struct({
+      messageId: MessageId,
+      chars: NonNegativeInt,
+      sha256: TrimmedNonEmptyString,
+    }),
+  ),
   error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8_000))),
   failureClassification: Schema.NullOr(WorkspaceFailureClassification),
   confidence: Schema.NullOr(WorkspaceValidationConfidence),
@@ -911,6 +1123,15 @@ export const WorkspaceTaskNode = Schema.Struct({
    */
   maxAttempts: PositiveInt.check(Schema.isLessThanOrEqualTo(10)),
   attempts: Schema.Array(WorkspaceTaskAttempt),
+  usageRecovery: Schema.optionalKey(
+    Schema.Struct({
+      fingerprint: Schema.String,
+      resumeAt: IsoDateTime,
+      count: PositiveInt,
+      phase: Schema.Literals(["waiting", "resumed"]),
+      lastError: Schema.String,
+    }),
+  ),
   // Wide enough for real deliverables (work tables, multi-session plans);
   // 40k silently beheaded them in transit and stalled meeting executions.
   output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(120_000))),
@@ -943,7 +1164,48 @@ export const WorkspaceMemoryCandidate = Schema.Struct({
 });
 export type WorkspaceMemoryCandidate = typeof WorkspaceMemoryCandidate.Type;
 
+export const WorkspaceOrchestraPlanEdit = Schema.Struct({
+  nodeId: WorkspaceTaskNodeId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  participantId: Schema.NullOr(WorkspaceMeetingParticipantId),
+  dependsOn: Schema.Array(WorkspaceTaskNodeId).check(Schema.isMaxLength(24)),
+});
+export type WorkspaceOrchestraPlanEdit = typeof WorkspaceOrchestraPlanEdit.Type;
+
+export const WorkspaceOrchestraDelivery = Schema.Struct({
+  status: Schema.Literals([
+    "verifying",
+    "passed",
+    "failed",
+    "needs-verification",
+    "awaiting-integration",
+  ]),
+  detail: Schema.String,
+  checkedAt: Schema.NullOr(IsoDateTime),
+  fingerprint: Schema.NullOr(Schema.String),
+  worktrees: Schema.Array(Schema.String),
+  commands: Schema.Array(
+    Schema.Struct({
+      command: Schema.String,
+      exitCode: Schema.NullOr(Schema.Number),
+      timedOut: Schema.Boolean,
+      logPath: Schema.String,
+    }),
+  ),
+});
+export type WorkspaceOrchestraDelivery = typeof WorkspaceOrchestraDelivery.Type;
+
 export const WorkspaceTaskGraph = Schema.Struct({
+  workspaceBaseline: Schema.optionalKey(Schema.String),
+  planReview: Schema.optionalKey(
+    Schema.Struct({
+      revision: NonNegativeInt,
+      status: Schema.Literals(["pending", "approved"]),
+      updatedAt: IsoDateTime,
+    }),
+  ),
+  delivery: Schema.optionalKey(WorkspaceOrchestraDelivery),
   revision: NonNegativeInt,
   status: WorkspaceTaskGraphStatus,
   nodes: Schema.Array(WorkspaceTaskNode),
@@ -1008,6 +1270,7 @@ export type WorkspaceCollaborationStep = typeof WorkspaceCollaborationStep.Type;
 export const WorkspaceCollaborationRunSource = Schema.Literals([
   "user",
   "schedule",
+  "automation",
   "incident",
   "integrity",
 ]);
@@ -1029,6 +1292,7 @@ export const WorkspaceMeetingMode = Schema.Literals([
 export type WorkspaceMeetingMode = typeof WorkspaceMeetingMode.Type;
 
 export const WorkspaceMeetingPhase = Schema.Literals([
+  "clarifying",
   "discussing",
   "planning",
   "executing",
@@ -1107,9 +1371,29 @@ export const WorkspaceMeetingInterjection = Schema.Struct({
 });
 export type WorkspaceMeetingInterjection = typeof WorkspaceMeetingInterjection.Type;
 
+const WorkspaceQuestionImageReference = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+});
+
 export const WorkspaceMeeting = Schema.Struct({
+  workspaceBaseline: Schema.optionalKey(Schema.String),
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
   mode: WorkspaceMeetingMode,
   phase: WorkspaceMeetingPhase,
+  /** Server-owned failure budget, persisted with the run so restart cannot replenish retries. */
+  turnFailures: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        key: TrimmedNonEmptyString,
+        count: PositiveInt,
+        message: Schema.String,
+      }),
+    ),
+  ),
+  /** False confines planning and recovery to the user-selected roster. */
+  allowAdditionalWorkers: Schema.optionalKey(Schema.Boolean),
   participants: Schema.Array(WorkspaceMeetingParticipant).check(
     Schema.isMinLength(2),
     Schema.isMaxLength(8),
@@ -1138,6 +1422,7 @@ export const WorkspaceMeeting = Schema.Struct({
     Schema.Struct({
       question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
       answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+      imageReferences: Schema.optionalKey(Schema.Array(WorkspaceQuestionImageReference)),
       answeredAt: IsoDateTime,
       /** Copied from the question it answered; null for meeting-phase answers. */
       nodeId: Schema.NullOr(WorkspaceTaskNodeId).pipe(
@@ -1163,7 +1448,13 @@ export type WorkspaceMeeting = typeof WorkspaceMeeting.Type;
  * so a client cannot inject rounds or pre-answer its own questions.
  */
 export const WorkspaceMeetingSetup = Schema.Struct({
+  /** The conductor asks first; no discussion or execution before the user's answer. */
+  askFirst: Schema.optionalKey(Schema.Boolean),
+  /** The app-selected policies for this run, including draft conversations. */
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
   mode: WorkspaceMeetingMode,
+  allowAdditionalWorkers: Schema.optionalKey(Schema.Boolean),
   participants: Schema.Array(WorkspaceMeetingParticipant).check(
     Schema.isMinLength(2),
     Schema.isMaxLength(8),
@@ -1191,6 +1482,17 @@ export type WorkspaceMeetingSetup = typeof WorkspaceMeetingSetup.Type;
 export const WorkspaceOrchestraSettings = Schema.Struct({
   /** Nodes executed at once. */
   maxParallel: PositiveInt.check(Schema.isLessThanOrEqualTo(6)),
+  /** Pauses once the executable plan is ready; off preserves direct execution. */
+  reviewPlan: Schema.optionalKey(Schema.Boolean),
+  /** Commands supplied by the user or selected execution profile. */
+  verificationCommands: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))).check(Schema.isMaxLength(8)),
+  ),
+  /** Absent keeps historical runs readable. */
+  completionCheck: Schema.optionalKey(Schema.Boolean),
+  maxWorkerTurns: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(500))),
+  /** Wait for a known provider reset and resume at most three times; absent is off. */
+  resumeAfterLimit: Schema.optionalKey(Schema.Boolean),
   /**
    * Give each write chain its own worktree (Phase 2). While off, write nodes
    * run one at a time so parallel edits never collide in the project root.
@@ -1198,6 +1500,52 @@ export const WorkspaceOrchestraSettings = Schema.Struct({
   isolateWorktrees: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type WorkspaceOrchestraSettings = typeof WorkspaceOrchestraSettings.Type;
+
+/** Server-owned, reusable settings; each execution keeps its own revision. */
+export const WorkspaceExecutionProfile = Schema.Struct({
+  id: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  revision: NonNegativeInt,
+  instructions: Schema.String.check(Schema.isMaxLength(4_000)),
+  verificationCommands: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))).check(
+    Schema.isMaxLength(8),
+  ),
+  meeting: WorkspaceMeetingSetup,
+  orchestra: WorkspaceOrchestraSettings,
+});
+export type WorkspaceExecutionProfile = typeof WorkspaceExecutionProfile.Type;
+
+export const WorkflowRoleModels = Schema.Struct({
+  coordinator: ModelSelection,
+  implementer: ModelSelection,
+  researcher: ModelSelection,
+});
+export type WorkflowRoleModels = typeof WorkflowRoleModels.Type;
+
+export const WorkspaceWorkflowContext = Schema.Struct({
+  ...WorkflowExecutionContext.fields,
+  definition: WorkflowVersion,
+  roleBindings: Schema.Array(WorkspaceAgentRoleBinding),
+  roleModels: Schema.optionalKey(WorkflowRoleModels),
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type WorkspaceWorkflowContext = typeof WorkspaceWorkflowContext.Type;
+
+export const WorkspaceRunControl = Schema.Struct({
+  control: WorkflowExecutionContext.fields.control,
+  controlRevision: WorkflowExecutionContext.fields.controlRevision,
+  executionRevision: WorkflowExecutionContext.fields.executionRevision,
+  updatedAt: IsoDateTime,
+});
+export type WorkspaceRunControl = typeof WorkspaceRunControl.Type;
+
+export const WorkspaceRunContext = Schema.Struct({
+  requestDigest: Schema.String,
+  threadId: Schema.optionalKey(ThreadId),
+  roleBindings: Schema.optionalKey(Schema.Array(WorkspaceAgentRoleBinding)),
+  requestMode: Schema.optionalKey(Schema.Literals(["direct", "ask-first", "conditions"])),
+});
+export type WorkspaceRunContext = typeof WorkspaceRunContext.Type;
 
 export const WorkspaceCollaborationRun = Schema.Struct({
   id: WorkspaceCollaborationRunId,
@@ -1211,10 +1559,12 @@ export const WorkspaceCollaborationRun = Schema.Struct({
   status: WorkspaceCollaborationRunStatus,
   steps: Schema.Array(WorkspaceCollaborationStep),
   graph: Schema.NullOr(WorkspaceTaskGraph).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  workflow: Schema.optionalKey(Schema.NullOr(WorkspaceWorkflowContext)),
+  runControl: Schema.optionalKey(Schema.NullOr(WorkspaceRunControl)),
+  runContext: Schema.optionalKey(Schema.NullOr(WorkspaceRunContext)),
   /**
-   * Set only on runs the person started from the model picker. Null decodes the
-   * role-bound path — every run recorded before meetings existed, plus schedule
-   * and integrity runs, which have no roster to speak of.
+   * Present for a roster chosen in the model picker or a saved execution profile.
+   * Null keeps the role-bound path for runs without an explicit roster.
    */
   meeting: Schema.NullOr(WorkspaceMeeting).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   orchestra: Schema.NullOr(WorkspaceOrchestraSettings).pipe(
@@ -1230,6 +1580,8 @@ export type WorkspaceCollaborationRun = typeof WorkspaceCollaborationRun.Type;
 export const WorkspaceCollaborationRunListInput = Schema.Struct({
   projectId: ProjectId,
   statuses: Schema.optionalKey(Schema.Array(WorkspaceCollaborationRunStatus)),
+  workflowOnly: Schema.optionalKey(Schema.Boolean),
+  runId: Schema.optionalKey(WorkspaceCollaborationRunId),
 });
 export type WorkspaceCollaborationRunListInput = typeof WorkspaceCollaborationRunListInput.Type;
 
@@ -1238,20 +1590,41 @@ export const WorkspaceCollaborationRunListResult = Schema.Struct({
 });
 export type WorkspaceCollaborationRunListResult = typeof WorkspaceCollaborationRunListResult.Type;
 
+export const WorkspaceScheduleTaskRecipe = Schema.Struct({
+  recipeId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  revision: NonNegativeInt,
+  inputs: Schema.Record(TrimmedNonEmptyString, Schema.String.check(Schema.isMaxLength(4000))),
+});
+export type WorkspaceScheduleTaskRecipe = typeof WorkspaceScheduleTaskRecipe.Type;
+
 export const WorkspaceScheduleTiming = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("once"),
     runAt: IsoDateTime,
+    executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
+    taskRecipe: Schema.optionalKey(WorkspaceScheduleTaskRecipe),
   }),
   Schema.Struct({
     kind: Schema.Literal("interval"),
     everyMinutes: PositiveInt.check(Schema.isLessThanOrEqualTo(10_080)),
     startAt: IsoDateTime,
+    executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
+    taskRecipe: Schema.optionalKey(WorkspaceScheduleTaskRecipe),
   }),
   Schema.Struct({
     kind: Schema.Literal("daily"),
     localTime: TrimmedNonEmptyString.check(Schema.isPattern(/^(?:[01]\d|2[0-3]):[0-5]\d$/)),
     timeZone: TrimmedNonEmptyString,
+    executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
+    taskRecipe: Schema.optionalKey(WorkspaceScheduleTaskRecipe),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("after-run"),
+    runId: WorkspaceCollaborationRunId,
+    condition: Schema.Literals(["completed", "verified"]),
+    onFailure: Schema.Literals(["hold", "cancel"]),
+    executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
+    taskRecipe: Schema.optionalKey(WorkspaceScheduleTaskRecipe),
   }),
 ]);
 export type WorkspaceScheduleTiming = typeof WorkspaceScheduleTiming.Type;
@@ -1367,6 +1740,53 @@ export const WorkspaceProgramHealthCheck = Schema.Union([
 );
 export type WorkspaceProgramHealthCheck = typeof WorkspaceProgramHealthCheck.Type;
 
+/**
+ * A shared dataset prepared and consumed by the program's adapter (for example,
+ * an Arrow IPC mapping). The hub publishes its project-relative source as an
+ * absolute `T3_HUB_DATASET_<NAME>` path; it does not convert the file itself.
+ */
+export const WorkspaceProgramSharedDataset = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(40), Schema.isPattern(/^[A-Z][A-Z0-9_]*$/)),
+  relativeSource: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(240),
+    Schema.makeFilter((value) => {
+      const normalized = value.replaceAll("\\", "/");
+      const segments = normalized.split("/");
+      return (
+        normalized !== "." &&
+        !normalized.startsWith("/") &&
+        !/^[A-Za-z]:/.test(normalized) &&
+        segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+      );
+    }),
+  ),
+});
+export type WorkspaceProgramSharedDataset = typeof WorkspaceProgramSharedDataset.Type;
+
+/**
+ * Hub memory budget for one program. `commitLimitMb` becomes a Windows Job
+ * Object per-process commit cap around the program (allocation failure, never
+ * a kill; file mappings are exempt). Programs sharing a `concurrencyGroup` run
+ * at most `concurrencySlots` at a time per project; extra starts queue. A missing
+ * slot count means one, and conflicting group settings use the strictest cap.
+ */
+export const WorkspaceProgramHubMemory = Schema.Struct({
+  commitLimitMb: Schema.NullOr(
+    Schema.Int.check(Schema.isBetween({ minimum: 64, maximum: 1_048_576 })),
+  ),
+  concurrencyGroup: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(64))),
+  concurrencySlots: Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 64 }))),
+  sharedDatasets: Schema.Array(WorkspaceProgramSharedDataset).check(Schema.isMaxLength(32)),
+});
+export type WorkspaceProgramHubMemory = typeof WorkspaceProgramHubMemory.Type;
+
+export const DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY: WorkspaceProgramHubMemory = {
+  commitLimitMb: null,
+  concurrencyGroup: null,
+  concurrencySlots: null,
+  sharedDatasets: [],
+};
+
 export const WorkspaceProgram = Schema.Struct({
   id: WorkspaceProgramId,
   projectId: ProjectId,
@@ -1385,6 +1805,9 @@ export const WorkspaceProgram = Schema.Struct({
   enabled: Schema.Boolean,
   integrity: WorkspaceProgramIntegrity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_PROGRAM_INTEGRITY)),
+  ),
+  hubMemory: WorkspaceProgramHubMemory.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY)),
   ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -2092,6 +2515,8 @@ const ProjectWorkspaceControlUpdateCommand = Schema.Struct({
   type: Schema.Literal("project.workspace-control.update"),
   commandId: CommandId,
   projectId: ProjectId,
+  completionAutomation: Schema.optionalKey(WorkspaceCompletionAutomation),
+  contextOptimization: WorkspaceControlSettings.fields.contextOptimization,
   longTermMemoryRoot: Schema.NullOr(TrimmedNonEmptyString),
   conversationRag: Schema.optionalKey(WorkspaceConversationRagSettings),
   agentKnowledge: Schema.optionalKey(WorkspaceAgentKnowledgeSettings),
@@ -2206,7 +2631,7 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
   projectId: ProjectId,
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
   /** Omitted by clients, which always speak for a person. */
-  source: Schema.optionalKey(Schema.Literals(["user", "integrity"])),
+  source: Schema.optionalKey(Schema.Literals(["user", "integrity", "automation"])),
   /**
    * Whether starting this run should cancel the project's queued scheduled runs. Defaults to
    * true for a person's request, false for anything the server starts on its own.
@@ -2220,6 +2645,45 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
   meeting: Schema.optionalKey(WorkspaceMeetingSetup),
   /** Present to run the execution nodes in parallel; absent keeps the current behaviour. */
   orchestra: Schema.optionalKey(WorkspaceOrchestraSettings),
+  executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
+  workflow: Schema.optionalKey(WorkspaceWorkflowContext),
+  runContext: Schema.optionalKey(WorkspaceRunContext),
+  createdAt: IsoDateTime,
+});
+
+const ProjectWorkflowRunCommand = Schema.Struct({
+  ...ProjectCollaborationRunRequestCommand.fields,
+  type: Schema.Literal("project.workflow.run.request"),
+  workflow: WorkspaceWorkflowContext,
+});
+
+const ProjectWorkflowSaveCommand = Schema.Struct({
+  type: Schema.Literal("project.workflow.save"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  definition: WorkflowVersion,
+  expectedRevision: NonNegativeInt,
+});
+const ProjectWorkflowDeliveryCommand = Schema.Struct({
+  type: Schema.Literal("project.workflow.delivery"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  nodeId: Schema.String,
+  executionId: Schema.String,
+  phase: Schema.Literals(["submitting", "accepted", "stopped"]),
+  confirmed: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+
+const ProjectCollaborationRunControlCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.control"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  expectedRevision: NonNegativeInt,
+  action: Schema.Literals(["pause", "resume", "cancel", "retry"]),
+  nodeId: Schema.optionalKey(Schema.String),
   createdAt: IsoDateTime,
 });
 
@@ -2241,7 +2705,7 @@ const ProjectCollaborationRunInterjectCommand = Schema.Struct({
  * text and identity so a stale client cannot answer a replacement question,
  * including one with the same text. Older clients must refresh before answering.
  */
-const ProjectCollaborationRunAnswerCommand = Schema.Struct({
+const ProjectCollaborationRunAnswerFields = {
   type: Schema.Literal("project.collaboration.run.answer"),
   commandId: CommandId,
   runId: WorkspaceCollaborationRunId,
@@ -2249,6 +2713,43 @@ const ProjectCollaborationRunAnswerCommand = Schema.Struct({
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
   questionRef: WorkspaceMeetingQuestionRef,
   answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  createdAt: IsoDateTime,
+};
+const ProjectCollaborationRunAnswerCommand = Schema.Struct({
+  ...ProjectCollaborationRunAnswerFields,
+  imageReferences: Schema.optionalKey(
+    Schema.Array(WorkspaceQuestionImageReference).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
+  ),
+});
+const ClientProjectCollaborationRunAnswerCommand = Schema.Struct({
+  ...ProjectCollaborationRunAnswerFields,
+  images: Schema.optionalKey(
+    Schema.Array(UploadChatImageAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
+  ),
+});
+
+const ProjectCollaborationRunReviewCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.review"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  expectedRevision: NonNegativeInt,
+  edits: Schema.Array(WorkspaceOrchestraPlanEdit).check(Schema.isMaxLength(24)),
+  approve: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+const ProjectCollaborationRunVerifyCommand = Schema.Struct({
+  type: Schema.Literal("project.collaboration.run.verify"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  runId: WorkspaceCollaborationRunId,
+  verificationCommands: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(500))).check(
+    Schema.isMaxLength(8),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -2299,6 +2800,21 @@ const ProjectProgramUpsertCommand = Schema.Struct({
   ),
   integrityRequiredCleanPasses: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5 })),
+  ),
+  /** Omitted (older clients): the program runs with no hub budget or datasets. */
+  hubMemory: Schema.optionalKey(
+    WorkspaceProgramHubMemory.check(
+      Schema.makeFilter(
+        (budget) => budget.concurrencyGroup !== null || budget.concurrencySlots === null,
+        { message: "Concurrency slots require a group name." },
+      ),
+      Schema.makeFilter(
+        (budget) =>
+          new Set(budget.sharedDatasets.map((dataset) => dataset.name)).size ===
+          budget.sharedDatasets.length,
+        { message: "Shared dataset names must be unique." },
+      ),
+    ),
   ),
   createdAt: IsoDateTime,
 });
@@ -2380,6 +2896,7 @@ const ThreadCreateCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   projectId: ProjectId,
+  importedConversation: Schema.optionalKey(Schema.suspend(() => ImportedConversation)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -2536,6 +3053,8 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  requireTaskConditions: Schema.optional(Schema.Boolean),
+  taskConditions: Schema.optional(ApprovedTaskConditions),
   usageContext: Schema.optional(TokenUsageContext),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -2544,7 +3063,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
     text: Schema.String,
-    attachments: Schema.Array(ChatAttachment),
+    attachments: Schema.Array(ChatAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
   }),
   inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
@@ -2559,6 +3080,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
+  requireTaskConditions: Schema.optional(Schema.Boolean),
+  taskConditions: Schema.optional(ApprovedTaskConditions),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -2566,7 +3089,15 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
     text: Schema.String,
-    attachments: Schema.Array(UploadChatAttachment),
+    attachments: Schema.Array(UploadChatAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+      Schema.makeFilter(
+        (attachments) =>
+          attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0) <=
+            PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES ||
+          "Attachments exceed the 50 MB combined limit.",
+      ),
+    ),
   }),
   inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
@@ -2583,6 +3114,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  questionRequestId: Schema.optional(ApprovalRequestId),
   /**
    * Stop scope. Absent/false: end the turn and the agent work it spawned,
    * but leave standing background watch loops (Monitor loops, background
@@ -2608,6 +3140,25 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  images: Schema.optionalKey(
+    Schema.Array(QuestionImageAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
+  ),
+  createdAt: IsoDateTime,
+});
+
+const ClientThreadUserInputRespondCommand = Schema.Struct({
+  type: Schema.Literal("thread.user-input.respond"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  answers: ProviderUserInputAnswers,
+  images: Schema.optionalKey(
+    Schema.Array(UploadQuestionImageAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -2639,8 +3190,11 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectAgentRoleUpsertCommand,
   ProjectAgentRoleRemoveCommand,
   ProjectCollaborationRunRequestCommand,
+  ProjectCollaborationRunControlCommand,
   ProjectCollaborationRunCancelCommand,
   ProjectCollaborationRunAnswerCommand,
+  ProjectCollaborationRunReviewCommand,
+  ProjectCollaborationRunVerifyCommand,
   ProjectCollaborationRunInterjectCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
@@ -2691,8 +3245,11 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectAgentRoleUpsertCommand,
   ProjectAgentRoleRemoveCommand,
   ProjectCollaborationRunRequestCommand,
+  ProjectCollaborationRunControlCommand,
   ProjectCollaborationRunCancelCommand,
-  ProjectCollaborationRunAnswerCommand,
+  ClientProjectCollaborationRunAnswerCommand,
+  ProjectCollaborationRunReviewCommand,
+  ProjectCollaborationRunVerifyCommand,
   ProjectCollaborationRunInterjectCommand,
   ProjectScheduleUpsertCommand,
   ProjectScheduleRemoveCommand,
@@ -2723,7 +3280,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
-  ThreadUserInputRespondCommand,
+  ClientThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
 ]);
@@ -2747,8 +3304,18 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadMessageUserAppendCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.user.append"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  text: Schema.String,
+  createdAt: IsoDateTime,
+});
+
 const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.message.assistant.complete"),
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
@@ -2815,6 +3382,7 @@ const ProjectScheduledCollaborationRunRequestCommand = Schema.Struct({
   scheduleId: WorkspaceScheduleId,
   projectId: ProjectId,
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+  executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
   createdAt: IsoDateTime,
 });
 
@@ -2881,6 +3449,7 @@ const ProjectMonitoringRuntimeUpdateCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadMessageUserAppendCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
@@ -2902,6 +3471,9 @@ const InternalOrchestrationCommand = Schema.Union([
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
 export const OrchestrationCommand = Schema.Union([
+  ProjectWorkflowRunCommand,
+  ProjectWorkflowSaveCommand,
+  ProjectWorkflowDeliveryCommand,
   DispatchableClientOrchestrationCommand,
   InternalOrchestrationCommand,
 ]);
@@ -2919,8 +3491,13 @@ export const OrchestrationEventType = Schema.Literals([
   "project.agent-role-removed",
   "project.collaboration-run-requested",
   "project.collaboration-run-cancel-requested",
+  "project.collaboration-run-control-requested",
+  "project.workflow-saved",
+  "project.workflow-delivery-recorded",
   "project.collaboration-run-upserted",
   "project.collaboration-run-answered",
+  "project.collaboration-run-reviewed",
+  "project.collaboration-verification-requested",
   "project.collaboration-run-interjected",
   "project.schedule-upserted",
   "project.schedule-removed",
@@ -3072,6 +3649,7 @@ export const ProjectCollaborationRunAnsweredPayload = Schema.Struct({
   // Absent on persisted events from clients predating question identity.
   questionRef: Schema.optionalKey(WorkspaceMeetingQuestionRef),
   answer: TrimmedNonEmptyString.check(Schema.isMaxLength(8_000)),
+  imageReferences: Schema.optionalKey(Schema.Array(WorkspaceQuestionImageReference)),
   answeredAt: IsoDateTime,
 });
 
@@ -3172,6 +3750,7 @@ export const ProjectDeletedPayload = Schema.Struct({
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
+  importedConversation: Schema.optionalKey(Schema.suspend(() => ImportedConversation)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
@@ -3312,6 +3891,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  questionRequestId: Schema.optional(ApprovalRequestId),
   stopBackground: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
@@ -3327,6 +3907,11 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  images: Schema.optionalKey(
+    Schema.Array(QuestionImageAttachment).check(
+      Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
+    ),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -3396,6 +3981,28 @@ const EventBaseFields = {
 export const OrchestrationEvent = Schema.Union([
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("project.workflow-saved"),
+    payload: Schema.Struct({
+      projectId: ProjectId,
+      definition: WorkflowVersion,
+      expectedRevision: NonNegativeInt,
+    }),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.workflow-delivery-recorded"),
+    payload: Schema.Struct({
+      projectId: ProjectId,
+      runId: WorkspaceCollaborationRunId,
+      nodeId: Schema.String,
+      executionId: Schema.String,
+      phase: Schema.Literals(["submitting", "accepted", "stopped"]),
+      confirmed: Schema.Boolean,
+      createdAt: IsoDateTime,
+    }),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("project.created"),
     payload: ProjectCreatedPayload,
   }),
@@ -3451,6 +4058,18 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-control-requested"),
+    payload: Schema.Struct({
+      projectId: ProjectId,
+      runId: WorkspaceCollaborationRunId,
+      expectedRevision: NonNegativeInt,
+      action: Schema.Literals(["pause", "resume", "cancel", "retry"]),
+      nodeId: Schema.optionalKey(Schema.String),
+      createdAt: IsoDateTime,
+    }),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("project.collaboration-run-upserted"),
     payload: ProjectCollaborationRunUpsertedPayload,
   }),
@@ -3458,6 +4077,28 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.collaboration-run-answered"),
     payload: ProjectCollaborationRunAnsweredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-run-reviewed"),
+    payload: Schema.Struct({
+      projectId: ProjectId,
+      runId: WorkspaceCollaborationRunId,
+      expectedRevision: NonNegativeInt,
+      edits: Schema.Array(WorkspaceOrchestraPlanEdit),
+      approve: Schema.Boolean,
+      reviewedAt: IsoDateTime,
+    }),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.collaboration-verification-requested"),
+    payload: Schema.Struct({
+      projectId: ProjectId,
+      runId: WorkspaceCollaborationRunId,
+      verificationCommands: Schema.Array(Schema.String),
+      requestedAt: IsoDateTime,
+    }),
   }),
   Schema.Struct({
     ...EventBaseFields,

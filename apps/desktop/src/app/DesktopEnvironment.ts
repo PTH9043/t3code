@@ -5,8 +5,10 @@ import type {
   DesktopRuntimeInfo,
 } from "@t3tools/contracts";
 import * as Config from "effect/Config";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -37,6 +39,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly processArch: string;
     readonly isPackaged: boolean;
     readonly isDevelopment: boolean;
+    readonly startHidden: boolean;
+    readonly startInactive: boolean;
     readonly appVersion: string;
     readonly appPath: string;
     readonly resourcesPath: string;
@@ -44,6 +48,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly appDataDirectory: string;
     readonly baseDir: string;
     readonly stateDir: string;
+    readonly configuredHome: boolean;
     readonly desktopSettingsPath: string;
     readonly clientSettingsPath: string;
     readonly savedEnvironmentRegistryPath: string;
@@ -187,8 +192,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
     "applications",
   );
   const resourcesPath = input.resourcesPath;
+  const fs = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const backgroundRestart =
+    isDevelopment &&
+    Option.isSome(fs) &&
+    (yield* fs.value
+      .exists(path.join(rootDir, ".t3", "desktop-background.flag"))
+      .pipe(Effect.orElseSucceed(() => false)));
 
   return DesktopEnvironment.of({
+    configuredHome: Option.isSome(config.t3Home),
+    startHidden: config.startHidden || (backgroundRestart && !config.startInactive),
+    startInactive: config.startInactive,
     path,
     dirname: input.dirname,
     platform: input.platform,
@@ -275,4 +290,4 @@ const make = Effect.fn("desktop.environment.make")(function* (
 });
 
 export const layer = (input: MakeDesktopEnvironmentInput) =>
-  Layer.effect(DesktopEnvironment, make(input));
+  Layer.effect(DesktopEnvironment, make(input)).pipe(Layer.provide(NodeFileSystem.layer));

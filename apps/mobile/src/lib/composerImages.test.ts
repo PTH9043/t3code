@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
+import {
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+} from "@t3tools/contracts";
 
 const files = new Map<string, { base64: string; deleted: boolean }>();
 
@@ -43,6 +46,21 @@ import {
 } from "./composerImages";
 
 describe("toUploadChatImageAttachments", () => {
+  it("rejects a restored mobile batch over the shared byte budget before sending it", () => {
+    const image = {
+      id: "large",
+      type: "image" as const,
+      name: "photo.png",
+      mimeType: "image/png",
+      sizeBytes: 10 * 1024 * 1024,
+      dataUrl: "data:image/png;base64,AA==",
+      previewUri: "file:///photo.png",
+    };
+    expect(toUploadChatImageAttachments(Array.from({ length: 5 }, () => image))).toHaveLength(5);
+    expect(() => toUploadChatImageAttachments(Array.from({ length: 6 }, () => image))).toThrow(
+      "50 MB combined",
+    );
+  });
   it("strips client draft id and previewUri for the startTurn wire shape", () => {
     expect(
       toUploadChatImageAttachments([
@@ -71,6 +89,18 @@ describe("toUploadChatImageAttachments", () => {
 describe("native pasted image cleanup", () => {
   beforeEach(() => {
     files.clear();
+  });
+
+  it("keeps native paste within the remaining combined budget and releases owned overflow files", async () => {
+    const uri = "file:///private/tmp/t3-composer-paste/overflow.png";
+    files.set(uri, { base64: "aGVsbG8=", deleted: false });
+    const result = await convertPastedImagesToAttachments({
+      uris: [uri],
+      existingCount: 5,
+      existingBytes: PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+    });
+    expect(result).toEqual([]);
+    expect(files.get(uri)?.deleted).toBe(true);
   });
 
   it("recognizes only files created in the native composer paste directory", () => {

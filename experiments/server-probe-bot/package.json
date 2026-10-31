@@ -1,0 +1,10 @@
+{
+  "name": "server-probe-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test job.test.mjs"
+  }
+}

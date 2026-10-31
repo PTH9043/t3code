@@ -5,6 +5,7 @@ import {
   TurnId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderSession,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -69,6 +70,8 @@ function makeReadModel(
       readonly updatedAt: string;
     } | null;
     readonly backgroundLiveness?: "working" | "monitoring" | null;
+    readonly hasPendingApprovals?: boolean;
+    readonly hasPendingUserInput?: boolean;
   }>,
 ) {
   const now = "2026-01-01T00:00:00.000Z";
@@ -104,8 +107,8 @@ function makeReadModel(
       settledOverride: null,
       settledAt: null,
       latestUserMessageAt: null,
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
+      hasPendingApprovals: thread.hasPendingApprovals ?? false,
+      hasPendingUserInput: thread.hasPendingUserInput ?? false,
       hasActionableProposedPlan: false,
       latestTurn: null,
       messages: [],
@@ -147,6 +150,9 @@ describe("ProviderSessionReaper", () => {
 
   async function createHarness(input: {
     readonly readModel: ReturnType<typeof makeReadModel>;
+    readonly liveSessions?: ReadonlyArray<ProviderSession>;
+    readonly inactivityThresholdMs?: number;
+    readonly errorInactivityThresholdMs?: number;
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
@@ -168,7 +174,7 @@ describe("ProviderSessionReaper", () => {
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
       stopSession,
-      listSessions: () => Effect.succeed([]),
+      listSessions: () => Effect.succeed([...(input.liveSessions ?? [])]),
       getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
       getInstanceInfo: (instanceId) => {
         const driverKind = ProviderDriverKind.make(String(instanceId));
@@ -194,7 +200,10 @@ describe("ProviderSessionReaper", () => {
       Layer.provide(runtimeRepositoryLayer),
     );
     const layer = makeProviderSessionReaperLive({
-      inactivityThresholdMs: 1_000,
+      inactivityThresholdMs: input.inactivityThresholdMs ?? 1_000,
+      ...(input.errorInactivityThresholdMs !== undefined
+        ? { errorInactivityThresholdMs: input.errorInactivityThresholdMs }
+        : {}),
       sweepIntervalMs: 60_000,
     }).pipe(
       Layer.provideMerge(providerSessionDirectoryLayer),
@@ -220,6 +229,7 @@ describe("ProviderSessionReaper", () => {
                 ? Option.some(input.readModel.threads.find((thread) => thread.id === threadId)!)
                 : Option.none(),
             ),
+          getThreadRuntimeContext: () => Effect.die("unused runtime context"),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),
           searchThreads: () => Effect.succeed({ matches: [] }),
@@ -231,6 +241,138 @@ describe("ProviderSessionReaper", () => {
     runtime = ManagedRuntime.make(layer);
     return { stopSession, stoppedThreadIds };
   }
+
+  it("reaps failed idle sessions early while preserving active work and pending questions", async () => {
+    const now = DateTime.toEpochMillis(await Effect.runPromise(DateTime.now));
+    const receipt = Promise.withResolvers<void>();
+    const names = [
+      "failed",
+      "approval",
+      "input",
+      "native",
+      "active",
+      "working",
+      "monitoring",
+      "ready",
+      "sentinel",
+    ];
+    const readModel = makeReadModel(
+      names.map((name) => {
+        const threadId = ThreadId.make(name);
+        return {
+          id: threadId,
+          session: {
+            threadId,
+            status: name === "ready" ? "ready" : "error",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: name === "active" ? TurnId.make("active-turn") : null,
+            lastError: null,
+            updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          },
+          hasPendingApprovals: name === "approval",
+          hasPendingUserInput: name === "input",
+          backgroundLiveness:
+            name === "working" ? "working" : name === "monitoring" ? "monitoring" : null,
+        };
+      }),
+    );
+    const harness = await createHarness({
+      readModel,
+      inactivityThresholdMs: 600_000,
+      errorInactivityThresholdMs: 10_000,
+      liveSessions: [
+        {
+          threadId: ThreadId.make("native"),
+          provider: ProviderDriverKind.make("claudeAgent"),
+          status: "running",
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make("native-turn"),
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+        },
+      ],
+      stopSessionImplementation: (request) =>
+        Effect.sync(() => {
+          if (request.threadId === "sentinel") receipt.resolve();
+        }),
+    });
+    await runtime!.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        for (const name of names)
+          yield* repository.upsert({
+            threadId: ThreadId.make(name),
+            providerName: "claudeAgent",
+            providerInstanceId: null,
+            adapterKey: "claudeAgent",
+            runtimeMode: "full-access",
+            status: "running",
+            lastSeenAt: DateTime.formatIso(
+              DateTime.makeUnsafe(now - (name === "sentinel" ? 20_000 : 30_000)),
+            ),
+            resumeCursor: { sessionId: name },
+            runtimePayload: null,
+          });
+      }),
+    );
+    await startReaper();
+    await receipt.promise;
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+      "failed",
+      "sentinel",
+    ]);
+  });
+
+  it("gives a recent error its full grace period", async () => {
+    const now = DateTime.toEpochMillis(await Effect.runPromise(DateTime.now));
+    const failedId = ThreadId.make("recent-error");
+    const sentinel = ThreadId.make("sentinel");
+    const receipt = Promise.withResolvers<void>();
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: failedId,
+          session: {
+            threadId: failedId,
+            status: "error",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: "failed",
+            updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          },
+        },
+      ]),
+      errorInactivityThresholdMs: 60_000,
+      stopSessionImplementation: (request) =>
+        Effect.sync(() => {
+          if (request.threadId === sentinel) receipt.resolve();
+        }),
+    });
+    await runtime!.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        for (const threadId of [failedId, sentinel])
+          yield* repository.upsert({
+            threadId,
+            providerName: "claudeAgent",
+            providerInstanceId: null,
+            adapterKey: "claudeAgent",
+            runtimeMode: "full-access",
+            status: "running",
+            resumeCursor: null,
+            runtimePayload: null,
+            lastSeenAt: DateTime.formatIso(
+              DateTime.makeUnsafe(now - (threadId === failedId ? 5_000 : 3_000)),
+            ),
+          });
+      }),
+    );
+    await startReaper();
+    await receipt.promise;
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([sentinel]);
+  });
 
   it("reaps stale persisted sessions without active turns", async () => {
     const threadId = ThreadId.make("thread-reaper-stale");
@@ -325,6 +467,53 @@ describe("ProviderSessionReaper", () => {
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
+  });
+
+  it("keeps an orchestra execution alive without a conversation row after the idle threshold", async () => {
+    const threadId = ThreadId.make("orchestra:long-run:node:1");
+    const sweepFinished = ThreadId.make("ordinary-stale-session");
+    const receipt = Promise.withResolvers<void>();
+    const harness = await createHarness({
+      readModel: makeReadModel([]),
+      stopSessionImplementation: (request) =>
+        Effect.sync(() => {
+          if (request.threadId === sweepFinished) receipt.resolve();
+        }),
+    });
+    await runtime!.runPromise(
+      Effect.gen(function* () {
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        for (const id of [threadId, sweepFinished]) {
+          yield* repository.upsert({
+            threadId: id,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            adapterKey: "codex",
+            runtimeMode: "full-access",
+            status: "running",
+            lastSeenAt: "2026-01-01T00:00:00.000Z",
+            resumeCursor: null,
+            runtimePayload:
+              id === threadId
+                ? {
+                    execution: {
+                      executionId: threadId,
+                      ownerThreadId: "owner-conversation",
+                      runId: "long-run",
+                      nodeId: "node",
+                      attempt: 1,
+                    },
+                  }
+                : null,
+          });
+        }
+      }),
+    );
+    await startReaper();
+    await receipt.promise;
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+      sweepFinished,
+    ]);
   });
 
   it("skips stale sessions while background work is still live", async () => {

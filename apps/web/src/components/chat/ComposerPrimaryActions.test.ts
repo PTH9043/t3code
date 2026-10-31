@@ -12,7 +12,7 @@ vi.mock("../SidebarStageBackdrop", () => ({
 
 import { ComposerPrimaryActions, formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
 
-function renderPendingActions(isRunning: boolean) {
+function renderPendingActions(isRunning: boolean, isCancelable = false) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
@@ -22,6 +22,7 @@ function renderPendingActions(isRunning: boolean) {
         canAdvance: true,
         isResponding: false,
         isComplete: true,
+        isCancelable,
       },
       isRunning,
       showPlanFollowUpPrompt: false,
@@ -157,6 +158,10 @@ describe("ComposerPrimaryActions", () => {
 
   it("does not offer Stop generation for a pending request without a running turn", () => {
     expect(renderPendingActions(false)).not.toContain('aria-label="생성 중지"');
+  });
+
+  it("offers Stop for an unanswered async question after its turn has ended", () => {
+    expect(renderPendingActions(false, true)).toContain('aria-label="질문 중지"');
   });
 
   it("matches the small pending action size without changing the standalone size", () => {

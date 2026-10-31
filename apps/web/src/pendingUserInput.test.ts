@@ -42,6 +42,28 @@ const multiSelectQuestion = {
 } as const;
 
 describe("resolvePendingUserInputAnswer", () => {
+  it("accepts an image-only answer and preserves the image when editing or choosing an option", () => {
+    const image = {
+      type: "image" as const,
+      id: "image",
+      name: "image.png",
+      mimeType: "image/png",
+      sizeBytes: 1,
+      previewUrl: "blob:image",
+      file: new File(["a"], "image.png", { type: "image/png" }),
+    };
+    expect(resolvePendingUserInputAnswer(singleSelectQuestion, { images: [image] })).toBe(
+      "첨부한 이미지를 참고해 주세요.",
+    );
+    expect(setPendingUserInputCustomAnswer({ images: [image] }, "details").images).toEqual([image]);
+    expect(
+      togglePendingUserInputOptionSelection(
+        singleSelectQuestion,
+        { images: [image] },
+        "Orchestration-first",
+      ).images,
+    ).toEqual([image]);
+  });
   it("prefers a custom answer over selected options", () => {
     expect(
       resolvePendingUserInputAnswer(singleSelectQuestion, {

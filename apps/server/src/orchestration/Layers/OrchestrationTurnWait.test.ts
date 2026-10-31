@@ -143,7 +143,7 @@ const createSystem = (
       latestSequence: Effect.succeed(0),
     } satisfies OrchestrationEngineShape;
     const query = {
-      getThreadDetailById: () =>
+      getThreadRuntimeContext: () =>
         Ref.get(threadRef).pipe(
           Effect.tap(() => Deferred.succeed(firstRead, undefined)),
           Effect.map(Option.some),

@@ -22,6 +22,8 @@ import {
   type ProjectionWorkspaceKnowledgeRepositoryShape,
 } from "../Services/ProjectionWorkspaceKnowledge.ts";
 
+const encodeMessageIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
+
 const ProjectionWorkspaceKnowledgeDbRow = WorkspaceKnowledgeItem.mapFields(
   Struct.assign({
     kind: WorkspaceKnowledgeKind,
@@ -194,11 +196,30 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.listByProjectId:query")),
     );
 
+  const removeAttachmentDocuments: ProjectionWorkspaceKnowledgeRepositoryShape["removeAttachmentDocuments"] =
+    (input) =>
+      Effect.gen(function* () {
+        const retainedIdsJson = yield* encodeMessageIds(input.retainedMessageIds ?? []);
+        yield* sql`DELETE FROM projection_workspace_rag_chunks WHERE project_id = ${input.projectId}
+        AND item_id IN (SELECT item_id FROM projection_workspace_knowledge_items
+          WHERE project_id = ${input.projectId} AND json_extract(research_json, '$.attachment.attachmentId') IS NOT NULL
+          AND (${input.threadId ?? null} IS NULL OR json_extract(research_json, '$.attachment.threadId') = ${input.threadId ?? null})
+          AND (${input.retainedMessageIds ? 1 : 0} = 0 OR json_extract(research_json, '$.attachment.messageId') NOT IN (SELECT value FROM json_each(${retainedIdsJson}))))`;
+        yield* sql`DELETE FROM projection_workspace_knowledge_items WHERE project_id = ${input.projectId}
+        AND json_extract(research_json, '$.attachment.attachmentId') IS NOT NULL
+        AND (${input.threadId ?? null} IS NULL OR json_extract(research_json, '$.attachment.threadId') = ${input.threadId ?? null})
+        AND (${input.retainedMessageIds ? 1 : 0} = 0 OR json_extract(research_json, '$.attachment.messageId') NOT IN (SELECT value FROM json_each(${retainedIdsJson})))`;
+      }).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionWorkspaceKnowledge.removeAttachmentDocuments"),
+        ),
+      );
   return {
     upsert,
     archive,
     recordUsage,
     removeConversationInputs,
+    removeAttachmentDocuments,
     listByProjectId,
   } satisfies ProjectionWorkspaceKnowledgeRepositoryShape;
 });

@@ -9,6 +9,10 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  WorkspaceMemoryError,
+  WorkspaceKnowledgeItemId,
+  type ServerProvider,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -29,8 +33,13 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+const decodeSentText = Schema.decodeUnknownSync(
+  Schema.Struct({ input: Schema.optionalKey(Schema.String) }),
+);
+const decodeQuotedPath = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.String));
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
@@ -43,6 +52,7 @@ import {
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
+import { account } from "../../provider/testUtils/providerAccountFixture.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
@@ -50,6 +60,7 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
 import {
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
@@ -60,6 +71,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -144,15 +156,21 @@ describe("ProviderCommandReactor", () => {
   });
 
   async function createHarness(input?: {
+    readonly providerSnapshots?: ReadonlyArray<ServerProvider>;
+    readonly autoSwitch?: ServerSettings["providerAutoSwitch"];
+    readonly distinctAccountHomes?: boolean;
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly threadRuntimeMode?: "full-access" | "approval-required";
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    readonly memoryContext?: WorkspaceMemory["Service"]["context"];
+    readonly memoryPaths?: WorkspaceMemory["Service"]["contextPaths"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -298,7 +316,7 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
-    const providerSnapshots = [
+    const providerSnapshots = input?.providerSnapshots ?? [
       {
         instanceId: modelSelection.instanceId,
         ...(input?.requiresNewThreadForModelChange === true
@@ -333,7 +351,8 @@ describe("ProviderCommandReactor", () => {
           continuationIdentity: {
             driverKind,
             continuationKey:
-              driverKind === ProviderDriverKind.make("codex")
+              driverKind === ProviderDriverKind.make("codex") &&
+              input?.distinctAccountHomes !== true
                 ? "codex:home:/shared-codex"
                 : `${driverKind}:instance:${instanceId}`,
           },
@@ -412,8 +431,20 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest(
+          input?.autoSwitch ? { providerAutoSwitch: input.autoSwitch } : {},
+        ),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+      Layer.provideMerge(
+        input?.memoryContext || input?.memoryPaths
+          ? Layer.mock(WorkspaceMemory)({
+              context: input.memoryContext ?? (() => Effect.succeed("")),
+              contextPaths: input.memoryPaths ?? (() => Effect.succeed([])),
+            })
+          : Layer.empty,
+      ),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
@@ -443,7 +474,7 @@ describe("ProviderCommandReactor", () => {
         title: "Thread",
         modelSelection: modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: input?.threadRuntimeMode ?? "approval-required",
         branch: null,
         worktreePath: null,
         createdAt: now,
@@ -512,6 +543,676 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
+  const accountSelection: ModelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "selected-model",
+    options: [{ id: "reasoningEffort", value: "high" }],
+  };
+  const accountSnapshots = () => [
+    account("codex"),
+    account("codex_second", {
+      usage: { ...account("base").usage!, secondary: { usedPercent: 20 } },
+    }),
+  ];
+  const startAccountTurn = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    suffix: string,
+    inputOrigin: "user" | "automation" = "user",
+  ) => {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`account-turn-${suffix}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(`account-message-${suffix}`),
+          role: "user",
+          text: `Original request ${suffix}`,
+          attachments: [],
+        },
+        inputOrigin,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso))),
+      }),
+    );
+    await harness.drain();
+  };
+
+  it("automatically routes exhausted Codex to an independent account without changing model or effort", async () => {
+    const harness = await createHarness({
+      threadModelSelection: accountSelection,
+      providerSnapshots: accountSnapshots(),
+      autoSwitch: { codex: true, claudeAgent: false },
+      distinctAccountHomes: true,
+    });
+    await startAccountTurn(harness, "quota");
+    const request = Schema.decodeUnknownSync(Schema.Struct({ modelSelection: ModelSelection }))(
+      harness.sendTurn.mock.calls[0]?.[0],
+    );
+    expect(request.modelSelection).toEqual({
+      ...accountSelection,
+      instanceId: ProviderInstanceId.make("codex_second"),
+    });
+    const snapshot = await harness.readModel();
+    expect(snapshot.threads[0]?.modelSelection).toEqual(request.modelSelection);
+    expect(
+      snapshot.threads[0]?.activities.some(
+        (activity) => activity.kind === "provider.account.auto-switched",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps exhausted Codex on its credits and switches immediately on an observed 429 without replay", async () => {
+    const snapshots = accountSnapshots();
+    snapshots[0] = account("codex", {
+      usage: { ...account("base").usage!, credits: { balance: "62500", hasCredits: true } },
+    });
+    const harness = await createHarness({
+      threadModelSelection: accountSelection,
+      providerSnapshots: snapshots,
+      autoSwitch: { codex: true, claudeAgent: false },
+      distinctAccountHomes: true,
+    });
+    await startAccountTurn(harness, "credits");
+    expect(harness.runtimeSessions[0]?.providerInstanceId).toBe("codex");
+    const now = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("actual-429"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "error",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: "HTTP 429 Too Many Requests",
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]?.modelSelection.instanceId).toBe("codex_second");
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    await startAccountTurn(harness, "continue");
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    expect(harness.stopSession).toHaveBeenCalledTimes(1);
+    expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumeCursor");
+    expect(decodeSentText(harness.sendTurn.mock.calls[1]?.[0]).input).toContain(
+      "Original request credits",
+    );
+    // Starting the new session clears the old session error. Its immutable 429
+    // fact must still exclude that account for the rest of the cooldown.
+    snapshots[0] = account("codex", {
+      usage: { ...account("base").usage!, secondary: { usedPercent: 10 } },
+    });
+    snapshots[1] = account("codex_second");
+    snapshots.push(
+      account("codex_third", {
+        usage: { ...account("base").usage!, secondary: { usedPercent: 60 } },
+      }),
+    );
+    await startAccountTurn(harness, "cooldown");
+    expect((await harness.readModel()).threads[0]?.modelSelection.instanceId).toBe("codex_third");
+  });
+
+  it("does not switch a duplicate account home", async () => {
+    const harness = await createHarness({
+      threadModelSelection: accountSelection,
+      providerSnapshots: accountSnapshots(),
+      autoSwitch: { codex: true, claudeAgent: false },
+    });
+    await startAccountTurn(harness, "same-home");
+    expect(harness.runtimeSessions[0]?.providerInstanceId).toBe("codex");
+  });
+
+  it("does not automatically reroute an automation profile to an independent account", async () => {
+    const harness = await createHarness({
+      threadModelSelection: accountSelection,
+      providerSnapshots: accountSnapshots(),
+      autoSwitch: { codex: true, claudeAgent: false },
+      distinctAccountHomes: true,
+    });
+    await startAccountTurn(harness, "automation", "automation");
+    expect((await harness.readModel()).threads[0]?.modelSelection.instanceId).toBe("codex");
+    expect(harness.runtimeSessions[0]?.providerInstanceId).toBe("codex");
+  });
+
+  it("keeps an active writer on its original account when receiving a follow-up", async () => {
+    const snapshots = accountSnapshots();
+    snapshots[0] = account("codex", { usage: undefined });
+    const harness = await createHarness({
+      threadModelSelection: accountSelection,
+      providerSnapshots: snapshots,
+      autoSwitch: { codex: true, claudeAgent: false },
+      distinctAccountHomes: true,
+    });
+    await startAccountTurn(harness, "active");
+    snapshots[0] = account("codex");
+    harness.runtimeSessions[0] = {
+      ...harness.runtimeSessions[0]!,
+      status: "running",
+      activeTurnId: asTurnId("native-active"),
+    };
+    await startAccountTurn(harness, "followup");
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    expect((await harness.readModel()).threads[0]?.modelSelection.instanceId).toBe("codex");
+  });
+
+  it("connects opt-in project memory to the exact chat input and reports prepared characters", async () => {
+    const harness = await createHarness({ memoryPaths: () => Effect.succeed([]) });
+    const now = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "project.workspace-control.update",
+        commandId: CommandId.make("memory-settings"),
+        projectId: asProjectId("project-1"),
+        longTermMemoryRoot: null,
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: false,
+          autoChatMemory: true,
+        },
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "project.knowledge.item.upsert",
+        commandId: CommandId.make("memory-rule"),
+        projectId: asProjectId("project-1"),
+        itemId: WorkspaceKnowledgeItemId.make("rule"),
+        kind: "directive",
+        title: "Mandatory constraint",
+        content: "Keep the selected model and reasoning unchanged.",
+        status: "active",
+        origin: "user",
+        scope: "project",
+        appliesToFolder: null,
+        relativeFolder: null,
+        tags: [],
+        createdAt: now,
+      }),
+    );
+    const parserEvidence = "Parser implementation details. ".repeat(350) + "ORIGINAL TAIL EVIDENCE";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "project.knowledge.item.upsert",
+        commandId: CommandId.make("parser-memory"),
+        projectId: asProjectId("project-1"),
+        itemId: WorkspaceKnowledgeItemId.make("parser-reference"),
+        kind: "long-term-memory",
+        title: "Parser evidence",
+        content: parserEvidence,
+        status: "active",
+        origin: "agent",
+        scope: "project",
+        appliesToFolder: null,
+        relativeFolder: null,
+        tags: ["parser"],
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("memory-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("memory-user"),
+          role: "user",
+          text: "Fix the parser.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    const sent = decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input;
+    expect(sent).toContain("Keep the selected model and reasoning unchanged.");
+    expect(sent?.split("Fix the parser.")).toHaveLength(2);
+    const sourcePathLiteral = sent?.match(/원문 파일: ("(?:[^"\\]|\\.)*")/u)?.[1];
+    expect(sourcePathLiteral).toBeDefined();
+    const sourcePath = decodeQuotedPath(sourcePathLiteral);
+    expect(NodePath.relative(harness.stateDir, sourcePath).startsWith("..")).toBe(false);
+    expect(NodeFS.readFileSync(sourcePath, "utf8")).toContain(parserEvidence);
+    const state = await harness.readModel();
+    const report = state.threads
+      .find((thread) => thread.id === "thread-1")
+      ?.activities.find((activity) => activity.kind === "input.composition.prepared")?.payload;
+    expect(report).toMatchObject({
+      promptChars: sent?.length,
+      nativeContext: "unknown",
+      estimatedTokens: null,
+      status: "prepared",
+    });
+  });
+
+  it("passes the current folder to automatic chat memory", async () => {
+    const paths = vi.fn<WorkspaceMemory["Service"]["contextPaths"]>(() =>
+      Effect.succeed(["apps/web/src"]),
+    );
+    const harness = await createHarness({ memoryPaths: paths });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.workspace-control.update",
+        commandId: CommandId.make("folder-memory-settings"),
+        projectId: asProjectId("project-1"),
+        longTermMemoryRoot: null,
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: false,
+          autoChatMemory: true,
+        },
+      }),
+    );
+    for (const [id, folder, content] of [
+      ["web-folder", "apps/web", "parser WEB_FOLDER_ONLY"],
+      ["server-folder", "apps/server", "parser SERVER_FOLDER_ONLY"],
+    ] as const) {
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "project.knowledge.item.upsert",
+          commandId: CommandId.make(`cmd-${id}`),
+          projectId: asProjectId("project-1"),
+          itemId: WorkspaceKnowledgeItemId.make(id),
+          kind: "long-term-memory",
+          title: id,
+          content,
+          status: "active",
+          origin: "user",
+          scope: "folder",
+          appliesToFolder: folder,
+          relativeFolder: null,
+          tags: [],
+          createdAt: now,
+        }),
+      );
+    }
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("folder-memory-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("folder-memory-message"),
+          role: "user",
+          text: "parser",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    const sent = decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input;
+    expect(paths).toHaveBeenCalledWith({
+      projectId: asProjectId("project-1"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("folder-memory-message"),
+      cwd: "/tmp/provider-project",
+      recordCurrent: true,
+    });
+    expect(sent).toContain("WEB_FOLDER_ONLY");
+    expect(sent).not.toContain("SERVER_FOLDER_ONLY");
+  });
+
+  it("tells the provider when the current folder cannot be resolved", async () => {
+    const harness = await createHarness({
+      memoryPaths: () => Effect.fail(new WorkspaceMemoryError({ message: "folder unavailable" })),
+      memoryContext: (_projectId, _task, directivesOnly) =>
+        Effect.succeed(directivesOnly ? "REQUIRED_GLOBAL_DIRECTIVE" : "UNEXPECTED_MEMORY"),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.workspace-control.update",
+        commandId: CommandId.make("folder-memory-unavailable-settings"),
+        projectId: asProjectId("project-1"),
+        longTermMemoryRoot: null,
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: false,
+          autoChatMemory: true,
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.knowledge.item.upsert",
+        commandId: CommandId.make("folder-unavailable-root-knowledge"),
+        projectId: asProjectId("project-1"),
+        itemId: WorkspaceKnowledgeItemId.make("folder-unavailable-root-item"),
+        kind: "long-term-memory",
+        title: "unverified root context",
+        content: "ROOT_PRIVATE_CANARY",
+        status: "active",
+        origin: "user",
+        scope: "project",
+        relativeFolder: null,
+        tags: [],
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("folder-memory-unavailable-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("folder-memory-unavailable-message"),
+          role: "user",
+          text: "계속해",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    const sent = decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input;
+    expect(sent).toContain("<t3_folder_memory_unavailable>");
+    expect(sent).toContain("REQUIRED_GLOBAL_DIRECTIVE");
+    expect(sent).not.toContain("UNEXPECTED_MEMORY");
+    expect(sent).not.toContain("ROOT_PRIVATE_CANARY");
+    expect(
+      (await harness.readModel()).threads[0]?.activities.some(
+        (activity) => activity.kind === "workspace.memory.unavailable",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not report a current folder failure for unclassified earlier history", async () => {
+    const harness = await createHarness({
+      memoryPaths: () => Effect.succeed([]),
+      memoryContext: () =>
+        Effect.succeed(
+          "<t3_folder_history_unclassified>Earlier history was excluded.</t3_folder_history_unclassified>",
+        ),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.workspace-control.update",
+        commandId: CommandId.make("unclassified-history-settings"),
+        projectId: asProjectId("project-1"),
+        longTermMemoryRoot: null,
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: false,
+          autoChatMemory: true,
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("unclassified-history-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("unclassified-history-message"),
+          role: "user",
+          text: "계속해",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    const sent = decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input;
+    expect(sent).toContain("<t3_folder_history_unclassified>");
+    expect(sent).not.toContain("<t3_folder_memory_unavailable>");
+    expect(
+      (await harness.readModel()).threads[0]?.activities.some(
+        (activity) => activity.kind === "workspace.memory.unavailable",
+      ),
+    ).toBe(false);
+  });
+
+  it("sends the user request to memory before starting a user turn", async () => {
+    const context = vi.fn<WorkspaceMemory["Service"]["context"]>(() =>
+      Effect.succeed("<t3_memory_v2>PROJECT_MEMORY</t3_memory_v2>"),
+    );
+    const harness = await createHarness({ memoryContext: context });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-recent-memory"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("current-memory-message"),
+          role: "user",
+          text: "계속해",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(context).toHaveBeenCalledWith(asProjectId("project-1"), "계속해", false, {
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("current-memory-message"),
+    });
+    expect(decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input).toContain("PROJECT_MEMORY");
+  });
+
+  it("gives automation turns the same workspace RAG and avoids repeating directives", async () => {
+    const context = vi.fn<WorkspaceMemory["Service"]["context"]>(() =>
+      Effect.succeed("<t3_memory_v2>AUTOMATION_MEMORY</t3_memory_v2>"),
+    );
+    const harness = await createHarness({
+      memoryContext: context,
+      memoryPaths: () => Effect.succeed([]),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.workspace-control.update",
+        commandId: CommandId.make("automation-rag-settings"),
+        projectId: asProjectId("project-1"),
+        longTermMemoryRoot: null,
+        contextOptimization: {
+          memoryMode: "relevant",
+          compactHandoffs: false,
+          autoChatMemory: true,
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.knowledge.item.upsert",
+        commandId: CommandId.make("automation-rag-rule"),
+        projectId: asProjectId("project-1"),
+        itemId: WorkspaceKnowledgeItemId.make("automation-rule"),
+        kind: "directive",
+        title: "Automation rule",
+        content: "AUTOMATION_DIRECTIVE",
+        status: "active",
+        origin: "user",
+        scope: "project",
+        relativeFolder: null,
+        tags: [],
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "project.knowledge.item.upsert",
+        commandId: CommandId.make("automation-rag-note"),
+        projectId: asProjectId("project-1"),
+        itemId: WorkspaceKnowledgeItemId.make("automation-note"),
+        kind: "long-term-memory",
+        title: "Automation note",
+        content: "AUTOMATION_RAG_NOTE",
+        status: "active",
+        origin: "agent",
+        scope: "project",
+        relativeFolder: null,
+        tags: ["automation"],
+        createdAt: now,
+      }),
+    );
+    await startAccountTurn(harness, "automation-rag", "automation");
+    const sent = decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input;
+    expect(sent).toContain("AUTOMATION_RAG_NOTE");
+    expect(sent).toContain("AUTOMATION_DIRECTIVE");
+    // Directives arrive once through the composed prompt, not again via memory.
+    expect(sent?.split("AUTOMATION_DIRECTIVE")).toHaveLength(2);
+    expect(context).toHaveBeenCalledWith(
+      asProjectId("project-1"),
+      "Original request automation-rag",
+      false,
+      expect.objectContaining({ inheritFolder: true, excludeDirectives: true }),
+    );
+  });
+
+  it("requests folder-scoped previous memory for an automation turn", async () => {
+    const context = vi.fn<WorkspaceMemory["Service"]["context"]>(() =>
+      Effect.succeed("<t3_memory_v2>PREVIOUS_FOLDER_MEMORY</t3_memory_v2>"),
+    );
+    const harness = await createHarness({ memoryContext: context });
+    await startAccountTurn(harness, "scoped-automation", "automation");
+    expect(context).toHaveBeenCalledWith(
+      asProjectId("project-1"),
+      "Original request scoped-automation",
+      false,
+      {
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("account-message-scoped-automation"),
+        inheritFolder: true,
+      },
+    );
+    expect(decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input).toContain(
+      "PREVIOUS_FOLDER_MEMORY",
+    );
+  });
+
+  it("reports a memory preparation failure instead of silently pretending memory was supplied", async () => {
+    const context: WorkspaceMemory["Service"]["context"] = () =>
+      Effect.fail(new WorkspaceMemoryError({ message: "test memory failure" }));
+    const harness = await createHarness({ memoryContext: context });
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-memory-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("memory-failure-message"),
+          role: "user",
+          text: "계속해",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(decodeSentText(harness.sendTurn.mock.calls[0]?.[0]).input).toContain(
+      "<t3_memory_unavailable>",
+    );
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.activities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "workspace.memory.unavailable" })]),
+    );
+  });
+
+  it("requires conditions before dispatch and restricts only the approved inspection turn", async () => {
+    const harness = await createHarness({ threadRuntimeMode: "full-access" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const conditions = {
+      version: 1 as const,
+      approvedByUser: true as const,
+      sourceText: "세션 재사용 조건 확인",
+      goal: "세션 조회",
+      scope: "세션만",
+      criteria: "6개월 미사용 여부 확인",
+      approach: "조회·분석",
+      restrictions: "종료·삭제 금지",
+      completion: "결과 보고",
+      output: "보고서",
+      mode: "inspect" as const,
+      additionalActions: [],
+    };
+    const request = {
+      type: "thread.turn.start" as const,
+      commandId: CommandId.make("conditions-missing"),
+      threadId: ThreadId.make("thread-1"),
+      requireTaskConditions: true,
+      message: {
+        messageId: asMessageId("conditions-missing-message"),
+        role: "user" as const,
+        text: conditions.sourceText,
+        attachments: [],
+      },
+      runtimeMode: "full-access" as const,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: now,
+    };
+    await expect(harness.runEffect(harness.engine.dispatch(request))).rejects.toThrow(
+      "작업 조건을 작성",
+    );
+    await harness.drain();
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        ...request,
+        commandId: CommandId.make("conditions-inspect"),
+        taskConditions: conditions,
+        message: { ...request.message, messageId: asMessageId("conditions-inspect-message") },
+      }),
+    );
+    await harness.drain();
+    expect(harness.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
+      runtimeMode: "approval-required",
+    });
+    expect(harness.sendTurn.mock.calls.at(-1)?.[0]).toMatchObject({ interactionMode: "plan" });
+    expect(decodeSentText(harness.sendTurn.mock.calls.at(-1)?.[0]).input).toContain(
+      "6개월 미사용 여부 확인",
+    );
+    let thread = (await harness.readModel()).threads.find((entry) => entry.id === request.threadId);
+    expect(thread?.runtimeMode).toBe("full-access");
+    expect(
+      thread?.messages.find((entry) => entry.id === asMessageId("conditions-inspect-message"))
+        ?.text,
+    ).toContain("## 결과 형식\n보고서");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        ...request,
+        commandId: CommandId.make("conditions-work"),
+        taskConditions: { ...conditions, mode: "work" },
+        message: { ...request.message, messageId: asMessageId("conditions-work-message") },
+      }),
+    );
+    await harness.drain();
+    expect(harness.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
+      runtimeMode: "full-access",
+    });
+    expect(harness.sendTurn.mock.calls.at(-1)?.[0]).toMatchObject({
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    });
+    thread = (await harness.readModel()).threads.find((entry) => entry.id === request.threadId);
+    expect(thread?.runtimeMode).toBe("full-access");
+  });
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -550,6 +1251,66 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("starts and stops a turn without hydrating the historical tool timeline", async () => {
+    const harness = await createHarness();
+    const queries = await runtime!.runPromise(Effect.service(ProjectionSnapshotQuery));
+    const fullRead = vi.spyOn(queries, "getThreadDetailById");
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("old-tool-for-runtime-read"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("old-large-tool"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "old output",
+          payload: { output: "x".repeat(1_000_000) },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("runtime-read-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("runtime-read-message"),
+          role: "user",
+          text: "continue the work",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("runtime-read-stop"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.stopSession).toHaveBeenCalledTimes(1);
+    expect(fullRead).not.toHaveBeenCalled();
+    const state = await harness.readModel();
+    expect(
+      state.threads
+        .find((thread) => thread.id === "thread-1")
+        ?.activities.find((activity) => activity.id === "old-large-tool")?.payload,
+    ).toEqual({ output: "x".repeat(1_000_000) });
+    fullRead.mockRestore();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
@@ -2034,6 +2795,36 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  effectIt.effect(
+    "includes a conversation handoff when native resume falls back to a fresh thread",
+    () =>
+      Effect.gen(function* () {
+        let starts = 0;
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            startSessionEffect: (session) =>
+              Effect.succeed({
+                ...session,
+                continuity: ++starts === 1 ? "new" : "resume-fallback",
+              }),
+          }),
+        );
+        yield* Effect.promise(() => startAccountTurn(harness, "before-native-resume"));
+        yield* harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("native-resume-workspace"),
+          threadId: ThreadId.make("thread-1"),
+          worktreePath: "/tmp/provider-project-worktree",
+        });
+        yield* Effect.promise(() => startAccountTurn(harness, "after-native-resume"));
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        const request = decodeSentText(harness.sendTurn.mock.calls[1]?.[0]);
+        expect(request.input).toContain("<t3_conversation_handoff>");
+        expect(request.input).toContain("Original request before-native-resume");
+        expect(request.input).toContain("Original request after-native-resume");
+      }),
+  );
+
   it("restarts claude sessions when claude effort changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {
@@ -2332,8 +3123,8 @@ describe("ProviderCommandReactor", () => {
         ? request.input
         : undefined;
     };
-    expect(await send("initial", "서버 실행은 보류하고 문서 정리만 진행해.", "codex")).toBe(
-      "서버 실행은 보류하고 문서 정리만 진행해.",
+    expect(await send("initial", "디버 실행은 보류하고 문서 정리를 진행해", "codex")).toBe(
+      "디버 실행은 보류하고 문서 정리를 진행해",
     );
     for (let n = 0; n < 12; n++) {
       const messageId = asMessageId(`progress-${n}`);
@@ -2345,7 +3136,7 @@ describe("ProviderCommandReactor", () => {
           messageId,
           delta:
             n < 10
-              ? `과거 조사 ${n}: ${"상세한 코드 검토 기록 ".repeat(220)}`
+              ? `과거 조사 ${n}: ${"테스트코드 기록 ".repeat(220)}`
               : "문서 정리를 이어가겠습니다.",
           createdAt: now(),
         }),
@@ -2373,32 +3164,32 @@ describe("ProviderCommandReactor", () => {
     expect(
       (await harness.readModel()).threads.find((entry) => entry.id === threadId)?.handoffMode,
     ).toBe("compact");
-    const compact = await send("switch", "계속 정리해.", "claudeAgent");
+    const compact = await send("switch", "계속 정리해", "claudeAgent");
     expect(
       (await harness.readModel()).threads
         .find((entry) => entry.id === threadId)
         ?.activities.find((entry) => entry.kind === "conversation.handoff.prepared")?.payload,
     ).toMatchObject({ status: "compact", reason: "reduced" });
-    expect(compact).toContain("서버 실행은 보류");
+    expect(compact).toContain("디버 실행은 보류");
     expect(compact).toContain("SHA-256:");
     expect(compact).not.toContain("과거 조사 0:");
     const snapshot = await harness.readModel();
     const thread = snapshot.threads.find((entry) => entry.id === threadId)!;
     expect(thread.handoffMode).toBe("compact");
-    expect(thread.messages.find((entry) => entry.id === "switch")?.text).toBe("계속 정리해.");
+    expect(thread.messages.find((entry) => entry.id === "switch")?.text).toBe("계속 정리해");
     expect(
       thread.activities.filter((entry) => entry.kind === "conversation.handoff.prepared"),
     ).toHaveLength(1);
     await setMode("standard");
-    const standard = await send("switch-back", "원래 인계로 이어가.", "codex");
+    const standard = await send("switch-back", "이전 계획을 이어가.", "codex");
     expect(standard).toContain("<t3_conversation_handoff>");
     expect(standard).not.toContain("SHA-256:");
     await setMode("compact");
-    expect(await send("same-provider", "같은 세션의 다음 요청", "codex")).toBe(
-      "같은 세션의 다음 요청",
+    expect(await send("same-provider", "같은 세션이면 계속 이어", "codex")).toBe(
+      "같은 세션이면 계속 이어",
     );
-    expect(await send("automation", "자동화가 준비한 문맥", "claudeAgent", true)).toBe(
-      "자동화가 준비한 문맥",
+    expect(await send("automation", "자동화에 불필요한 문맥", "claudeAgent", true)).toBe(
+      "자동화에 불필요한 문맥",
     );
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
   });
@@ -2469,7 +3260,7 @@ describe("ProviderCommandReactor", () => {
 
   it("starts a fresh session for a cross-driver turn once the previous session has stopped", async () => {
     // Only a LIVE session binds a thread to its provider. A stopped one
-    // releases the binding — this is how a meeting thread hands the same
+    // releases the binding ??this is how a meeting thread hands the same
     // conversation from one seat's provider to the next.
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2566,6 +3357,168 @@ describe("ProviderCommandReactor", () => {
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
     });
+  });
+
+  it("routes an async question stop even when its provider turn is already idle", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const questionRequestId = asApprovalRequestId("async:question-1");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("async-question-idle-session"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("async-question-stop"),
+        threadId: ThreadId.make("thread-1"),
+        questionRequestId,
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.interruptTurn).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      questionRequestId,
+    });
+  });
+
+  it("routes a question stop even when an orchestra run is active", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const questionRequestId = asApprovalRequestId("async:question-with-orchestra");
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("orchestra-block-command"),
+        threadId,
+        createdAt: now,
+        activity: {
+          id: EventId.make("orchestra-block-event"),
+          kind: "orchestra.block",
+          tone: "info",
+          summary: "Running",
+          payload: {
+            executionId: "execution-1",
+            ownerThreadId: threadId,
+            runId: "run-1",
+            nodeId: "node-1",
+            attempt: 1,
+            messageId: "message-1",
+            title: "Task",
+            displayName: "Agent",
+            role: "operator",
+            kind: "implementation",
+            modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+            status: "running",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("orchestra-question-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("orchestra-question-stop"),
+        threadId,
+        questionRequestId,
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.interruptTurn).toHaveBeenCalledWith({ threadId, questionRequestId });
+  });
+
+  it("closes a selected orphaned async question when its provider session has stopped", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const questionRequestId = asApprovalRequestId("async:orphaned-question");
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("orphaned-question-request"),
+        threadId,
+        createdAt: now,
+        activity: {
+          id: EventId.make("orphaned-question-request"),
+          kind: "user-input.requested",
+          tone: "info",
+          summary: "Question",
+          payload: { requestId: questionRequestId, questions: [] },
+          turnId: null,
+          createdAt: now,
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("orphaned-question-session-stopped"),
+        threadId,
+        session: {
+          threadId,
+          status: "stopped",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("orphaned-question-stop"),
+        threadId,
+        questionRequestId,
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.activities).toContainEqual(
+      expect.objectContaining({
+        kind: "user-input.resolved",
+        payload: expect.objectContaining({ requestId: questionRequestId, answers: {} }),
+      }),
+    );
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
   });
 
   it("starts a fresh session when only projected session state exists", async () => {
@@ -2700,7 +3653,7 @@ describe("ProviderCommandReactor", () => {
     for (const executionId of ["worker-a", "worker-b"]) {
       for (const kind of ["approval.requested", "user-input.requested"]) {
         const requestId = `${executionId}:${kind}:same-request`;
-        await Effect.runPromise(
+        await harness.runEffect(
           harness.engine.dispatch({
             type: "thread.activity.append",
             commandId: CommandId.make(requestId),
@@ -2717,7 +3670,7 @@ describe("ProviderCommandReactor", () => {
             },
           }),
         );
-        await Effect.runPromise(
+        await harness.runEffect(
           harness.engine.dispatch(
             kind === "approval.requested"
               ? {
@@ -2756,7 +3709,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-approval"),
@@ -2774,7 +3727,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.approval.respond",
         commandId: CommandId.make("cmd-approval-respond"),
@@ -2793,11 +3746,11 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("reacts to thread.user-input.respond by forwarding structured user input answers", async () => {
+  it("forwards structured question answers and their image attachments", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-user-input"),
@@ -2815,7 +3768,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond"),
@@ -2824,6 +3777,18 @@ describe("ProviderCommandReactor", () => {
         answers: {
           sandbox_mode: "workspace-write",
         },
+        images: [
+          {
+            questionId: "sandbox_mode",
+            image: {
+              type: "image",
+              id: "question-image",
+              name: "photo.png",
+              mimeType: "image/png",
+              sizeBytes: 3,
+            },
+          },
+        ],
         createdAt: now,
       }),
     );
@@ -2835,6 +3800,18 @@ describe("ProviderCommandReactor", () => {
       answers: {
         sandbox_mode: "workspace-write",
       },
+      images: [
+        {
+          questionId: "sandbox_mode",
+          image: {
+            type: "image",
+            id: "question-image",
+            name: "photo.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+          },
+        },
+      ],
     });
   });
 
@@ -2851,7 +3828,7 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-approval-error"),
@@ -2869,7 +3846,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.activity.append",
         commandId: CommandId.make("cmd-approval-requested"),
@@ -2890,7 +3867,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.approval.respond",
         commandId: CommandId.make("cmd-approval-respond-stale"),
@@ -2946,7 +3923,7 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-user-input-error"),

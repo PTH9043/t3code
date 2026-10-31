@@ -305,6 +305,8 @@ export const resolveServerConfig = (
     const desktopBootstrapToken = bootstrap?.desktopBootstrapToken;
     const desktopTelemetryFd = bootstrap?.desktopTelemetryFd;
     const desktopTelemetryControlFd = bootstrap?.desktopTelemetryControlFd;
+    const desktopDirectRpcInputFd = bootstrap?.desktopDirectRpcInputFd;
+    const desktopDirectRpcOutputFd = bootstrap?.desktopDirectRpcOutputFd;
     const resourceMonitorPath = bootstrap?.resourceMonitorPath;
     const autoBootstrapProjectFromCwd = Option.getOrElse(
       resolveOptionPrecedence(
@@ -381,6 +383,8 @@ export const resolveServerConfig = (
       desktopBootstrapToken,
       desktopTelemetryFd,
       desktopTelemetryControlFd,
+      desktopDirectRpcInputFd,
+      desktopDirectRpcOutputFd,
       resourceMonitorPath,
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,

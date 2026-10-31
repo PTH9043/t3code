@@ -58,6 +58,35 @@ const binding = (role: "coordinator" | "researcher" | "implementer") => ({
 });
 
 describe("Workspace task graph", () => {
+  it("repairs only unambiguous JSON wrappers and never invents missing judgments", () => {
+    const receipt = JSON.stringify({
+      verdict: "pass",
+      confidence: "high",
+      summary: "Checks passed",
+      evidence: ["test-receipt-1"],
+      nextAction: "done",
+    });
+    const tagged = `<t3_validation>${receipt}</t3_validation>`;
+    for (const output of [
+      receipt,
+      `\u0060\u0060\u0060json\n${receipt}\n\u0060\u0060\u0060`,
+      `<t3_validation>\u0060\u0060\u0060json\n${receipt}\n\u0060\u0060\u0060</t3_validation>`,
+    ]) {
+      expect(parseWorkspaceValidationDecision(output)).toEqual(
+        parseWorkspaceValidationDecision(tagged),
+      );
+    }
+    expect(() =>
+      parseWorkspaceValidationDecision(JSON.stringify({ summary: "no verdict evidence" })),
+    ).toThrow(/verdict/);
+    expect(() =>
+      parseWorkspaceValidationDecision(`Two proposals: ${receipt}\n${receipt}`),
+    ).toThrow();
+    expect(() => parseWorkspaceValidationDecision(`<t3_validation>${receipt}`)).toThrow(/Missing/);
+    expect(() => parseWorkspaceValidationDecision(receipt.replace('"high"', '"high",'))).toThrow(
+      /JSON/,
+    );
+  });
   it("rejects duplicate, missing, cyclic, and incompatible routes", () => {
     expect(() =>
       parseWorkspaceTaskGraphProposal(taggedPlan([node({ id: "same" }), node({ id: "same" })])),
@@ -74,10 +103,27 @@ describe("Workspace task graph", () => {
       parseWorkspaceTaskGraphProposal(
         taggedPlan([node({ id: "build", kind: "implementation", agent: "grok" })]),
       ),
-    ).toThrow(/codex/);
+    ).toThrow(/implementer/);
   });
 
-  it("inserts Fable validation gates and keeps independent work in one ready wave", () => {
+  it("accepts neutral role names while retaining older saved agent values", () => {
+    const proposal = parseWorkspaceTaskGraphProposal(
+      taggedPlan([
+        node({ id: "plan-more", kind: "orchestration", agent: "coordinator" }),
+        node({ id: "build", kind: "implementation", agent: "implementer" }),
+        node({ id: "research", kind: "research", agent: "researcher" }),
+      ]),
+    );
+    expect(proposal.nodes.map((entry) => entry.agent)).toEqual(["fable", "codex", "grok"]);
+    expect(parseWorkspaceTaskGraphProposal(taggedPlan([node({ id: "old" })])).nodes[0]?.agent).toBe(
+      "grok",
+    );
+    const initial = buildInitialWorkspaceTaskGraph("선택한 모델로 작업");
+    expect(initial.nextAction).not.toMatch(/Fable|페이블/iu);
+    expect(JSON.stringify(initial.nodes[0]?.handoff)).not.toMatch(/Fable|페이블/iu);
+  });
+
+  it("inserts coordinator validation gates and keeps independent work in one ready wave", () => {
     const initial = buildInitialWorkspaceTaskGraph("기능 구현");
     const planned = {
       ...initial,

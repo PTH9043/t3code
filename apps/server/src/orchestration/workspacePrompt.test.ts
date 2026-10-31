@@ -11,6 +11,17 @@ import { composeWorkspacePrompt } from "./workspacePrompt.ts";
 
 const projectId = ProjectId.make("workspace-a");
 
+it("preserves mandatory user rules even in the standard rollback path", () => {
+  const rule = "사용자 원문 ".repeat(500) + "끝의 필수 제약";
+  const result = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00Z"),
+    request: { projectId, task: "수정", maxContextChars: 2000 },
+    items: [item({ id: "mandatory", kind: "directive", origin: "user", content: rule })],
+    ragMatches: [],
+  });
+  expect(result.prompt).toContain(rule);
+});
+
 it("composes applicable shared and folder memory without collapsing source identities", () => {
   const shared = {
     ...item({
@@ -27,7 +38,8 @@ it("composes applicable shared and folder memory without collapsing source ident
     appliesToFolder: "apps/web",
   };
   const result = composeWorkspacePrompt({
-    request: { projectId, task: "Review", contextPaths: ["apps/web/src"] },
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
+    request: { projectId, task: "Review", contextPaths: ["apps/web/src"], includeShared: true },
     items: [shared, local],
     ragMatches: [],
   });
@@ -35,11 +47,40 @@ it("composes applicable shared and folder memory without collapsing source ident
   expect(result.prompt).toContain("Web evidence");
   expect(result.sourceReferences).toHaveLength(2);
   const sibling = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: { projectId, task: "Review", contextPaths: ["apps/web-extra"], includeShared: false },
     items: [shared, local],
     ragMatches: [],
   });
   expect(sibling.sourceReferences).toEqual([]);
+});
+
+it("keeps project-root knowledge out of a selected subfolder while retaining shared instructions", () => {
+  const root = {
+    ...item({ id: "root-only", kind: "prompt", content: "ROOT_ONLY", origin: "user" }),
+    scope: "project" as const,
+  };
+  const web = {
+    ...item({ id: "web-only", kind: "prompt", content: "WEB_ONLY", origin: "user" }),
+    scope: "folder" as const,
+    appliesToFolder: "apps/web",
+  };
+  const shared = {
+    ...item({ id: "shared", kind: "directive", content: "SHARED_RULE", origin: "user" }),
+    scope: "environment" as const,
+  };
+  const makePrompt = (contextPaths: string[]) =>
+    composeWorkspacePrompt({
+      now: Date.parse("2026-09-12T12:00:00.000Z"),
+      request: { projectId, task: "Review", contextPaths },
+      items: [root, web, shared],
+      ragMatches: [],
+    }).prompt;
+  expect(makePrompt([])).toContain("ROOT_ONLY");
+  expect(makePrompt([])).not.toContain("WEB_ONLY");
+  expect(makePrompt(["apps/web"])).toContain("WEB_ONLY");
+  expect(makePrompt(["apps/web"])).not.toContain("ROOT_ONLY");
+  expect(makePrompt(["apps/web"])).toContain("SHARED_RULE");
 });
 
 function item(input: {
@@ -69,8 +110,9 @@ function item(input: {
   };
 }
 
-it("puts the current user task first and filters foreign or archived memory", () => {
+it("puts reusable context before the current task and filters foreign or archived memory", () => {
   const result = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: { projectId, task: "Ship the current user request." },
     items: [
       item({ id: "agent-rule", kind: "directive", content: "Agent suggestion" }),
@@ -102,7 +144,7 @@ it("puts the current user task first and filters foreign or archived memory", ()
     ],
   });
 
-  expect(result.prompt.indexOf("Ship the current user request.")).toBeLessThan(
+  expect(result.prompt.indexOf("Ship the current user request.")).toBeGreaterThan(
     result.prompt.indexOf("User-owned rule"),
   );
   expect(result.prompt.indexOf("User-owned rule")).toBeLessThan(
@@ -117,6 +159,26 @@ it("puts the current user task first and filters foreign or archived memory", ()
     WorkspaceKnowledgeItemId.make("goal"),
   ]);
   expect(result.ragMatches).toEqual([]);
+});
+
+it("preserves the prefix across task changes and timestamp-only instruction updates", () => {
+  const a = item({ id: "a", kind: "directive", origin: "user", content: "Use CMD" });
+  const b = item({ id: "b", kind: "directive", origin: "user", content: "Keep evidence" });
+  const compose = (task: string, items: WorkspaceKnowledgeItem[]) =>
+    composeWorkspacePrompt({
+      now: 0,
+      request: { projectId, task },
+      items,
+      ragMatches: [],
+    }).prompt;
+  const first = compose("First task", [b, a]);
+  const second = compose("Second task", [{ ...a, updatedAt: "2030-01-01T00:00:00Z" }, b]);
+  expect(first.slice(0, first.indexOf("## 현재 사용자 작업"))).toBe(
+    second.slice(0, second.indexOf("## 현재 사용자 작업")),
+  );
+  expect(compose("Second task", [{ ...a, content: "New mandatory rule" }, b])).toContain(
+    "New mandatory rule",
+  );
 });
 
 it("deduplicates retrieved memory and honors memory inclusion flags", () => {
@@ -136,6 +198,7 @@ it("deduplicates retrieved memory and honors memory inclusion flags", () => {
     updatedAt: longTerm.updatedAt,
   };
   const included = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: { projectId, task: "Use memory" },
     items: [longTerm],
     ragMatches: [ragMatch],
@@ -145,6 +208,7 @@ it("deduplicates retrieved memory and honors memory inclusion flags", () => {
   expect(included.sourceItemIds).toEqual([longTerm.id]);
 
   const excluded = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: {
       projectId,
       task: "Do not use memory",
@@ -187,7 +251,8 @@ it("injects the matched chunk, then the shared library after the project's own c
     "밝은 배경에 파란 강조색.\n레퍼런스: https://ref.theseeker.io/r/5494",
   );
   const result = composeWorkspacePrompt({
-    request: { projectId, task: "대시보드 개선" },
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
+    request: { projectId, task: "대시보드 개선", includeSharedLibrary: true },
     items: [],
     ragMatches: [rag],
     libraryMatches: [library],
@@ -202,6 +267,7 @@ it("injects the matched chunk, then the shared library after the project's own c
   expect(result.libraryMatches?.map((match) => match.itemId)).toEqual(["5494"]);
 
   const withoutLibrary = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: { projectId, task: "대시보드 개선", includeSharedLibrary: false },
     items: [],
     ragMatches: [rag],
@@ -213,7 +279,8 @@ it("injects the matched chunk, then the shared library after the project's own c
 
 it("keeps the shared library within its share of the budget", () => {
   const result = composeWorkspacePrompt({
-    request: { projectId, task: "대시보드", maxContextChars: 8_000 },
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
+    request: { projectId, task: "대시보드", includeSharedLibrary: true, maxContextChars: 8_000 },
     items: [],
     ragMatches: [],
     libraryMatches: Array.from({ length: 4 }, (_, index) =>
@@ -225,8 +292,9 @@ it("keeps the shared library within its share of the budget", () => {
   expect(result.truncated).toBe(true);
 });
 
-it("preserves the user task while bounding optional context", () => {
+it("preserves the user task and required directive even when the optional budget is smaller", () => {
   const result = composeWorkspacePrompt({
+    now: Date.parse("2026-09-12T12:00:00.000Z"),
     request: {
       projectId,
       task: "This task must remain intact.",
@@ -243,6 +311,43 @@ it("preserves the user task while bounding optional context", () => {
     ragMatches: [],
   });
   expect(result.prompt).toContain("This task must remain intact.");
-  expect(result.truncated).toBe(true);
+  expect(result.prompt).toContain("x".repeat(4_000));
+  expect(result.truncated).toBe(false);
   expect(result.sourceItemIds).toEqual([WorkspaceKnowledgeItemId.make("large-rule")]);
 });
+
+for (const contextMode of ["standard", "relevant"] as const) {
+  it(`keeps environment memory and shared library out by default in ${contextMode} mode`, () => {
+    const foreign = {
+      ...item({
+        id: "foreign",
+        kind: "long-term-memory",
+        content: "대시보드 개선 foreign secret",
+        workspace: "workspace-b",
+      }),
+      scope: "environment" as const,
+    };
+    const result = composeWorkspacePrompt({
+      now: Date.parse("2026-09-13T00:00:00Z"),
+      request: { projectId, task: "대시보드 개선", contextMode },
+      items: [foreign],
+      ragMatches: [
+        {
+          projectId: foreign.projectId,
+          itemId: foreign.id,
+          scope: "environment",
+          kind: "long-term-memory",
+          title: foreign.title,
+          snippet: foreign.content,
+          score: 5,
+          updatedAt: foreign.updatedAt,
+        },
+      ],
+      libraryMatches: [designReference("private-reference", "foreign library secret")],
+    });
+    expect(result.sourceReferences).toEqual([]);
+    expect(result.ragMatches).toEqual([]);
+    expect(result.libraryMatches).toEqual([]);
+    expect(result.prompt).not.toContain("secret");
+  });
+}

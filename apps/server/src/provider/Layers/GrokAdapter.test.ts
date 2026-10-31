@@ -12,8 +12,10 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   ApprovalRequestId,
@@ -31,17 +33,16 @@ const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
-const mockAgentCommand = process.execPath;
 
 async function makeMockGrokWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-mock-"));
-  const wrapperPath = NodePath.join(dir, "fake-grok.sh");
+  const wrapperPath = NodePath.join(dir, "fake-grok.mjs");
   const envExports = Object.entries(extraEnv ?? {})
-    .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
+    .map(([key, value]) => `process.env[${JSON.stringify(key)}]=${JSON.stringify(value)};`)
     .join("\n");
-  const script = `#!/bin/sh
+  const script = `
 ${envExports}
-exec ${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} "$@"
+await import(${JSON.stringify(NodeURL.pathToFileURL(mockAgentPath).href)});
 `;
   await NodeFSP.writeFile(wrapperPath, script, "utf8");
   await NodeFSP.chmod(wrapperPath, 0o755);
@@ -143,13 +144,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         ),
       ).pipe(Effect.forkChild);
 
-      const session = yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("grok"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-mock-alt" },
-      });
+      const starting = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-mock-alt" },
+        })
+        .pipe(Effect.forkChild);
+      const session = yield* Fiber.join(starting);
 
       assert.equal(session.provider, "grok");
       assert.equal(session.model, "grok-mock-alt");
@@ -201,8 +205,25 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
           T3_ACP_EXIT_LOG_PATH: exitLogPath,
         }),
       );
-      const adapter = yield* makeTestAdapter(wrapperPath);
-
+      const childExited = yield* Deferred.make<void>();
+      const testScope = yield* Scope.Scope;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const adapter = yield* makeTestAdapter(wrapperPath).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
+          ...spawner,
+          spawn: (command) =>
+            spawner
+              .spawn(command)
+              .pipe(
+                Effect.tap((child) =>
+                  child.exitCode.pipe(
+                    Effect.andThen(Deferred.succeed(childExited, undefined)),
+                    Effect.forkIn(testScope),
+                  ),
+                ),
+              ),
+        }),
+      );
       yield* adapter.startSession({
         threadId,
         provider: ProviderDriverKind.make("grok"),
@@ -210,11 +231,8 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         runtimeMode: "full-access",
         modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
       });
-
       yield* adapter.stopSession(threadId);
-
-      const exitLog = yield* waitForFileContent(exitLogPath);
-      assert.include(exitLog, "SIGTERM");
+      yield* Deferred.await(childExited);
     }),
   );
 

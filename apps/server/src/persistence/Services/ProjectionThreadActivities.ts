@@ -41,6 +41,7 @@ export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadAct
 export const ListProjectionThreadActivitiesByKindInput = Schema.Struct({
   threadId: ThreadId,
   kinds: Schema.Array(Schema.String),
+  completedToolNames: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ListProjectionThreadActivitiesByKindInput =
   typeof ListProjectionThreadActivitiesByKindInput.Type;
@@ -75,7 +76,8 @@ export interface ProjectionThreadActivityRepositoryShape {
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
-   * Same order as listByThreadId, restricted to the given activity kinds. The
+   * Same order as listByThreadId, restricted to the given activity kinds and,
+   * when requested, completed calls to specific tools. The
    * shell summary only needs the user-input lifecycle rows, and loading a long
    * thread's whole log (payloads included) on every event was the server's
    * dominant per-event cost.

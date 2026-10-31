@@ -12,6 +12,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -2256,6 +2257,152 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
   });
 
   const threadW = ThreadId.make("thread-w");
+
+  it.effect("serves simultaneous full detail and transactional snapshot reads", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const queries = yield* ProjectionSnapshotQuery;
+      const [detail, snapshot] = yield* Effect.all(
+        [queries.getThreadDetailById(threadW), queries.getThreadDetailSnapshot(threadW)],
+        { concurrency: 2 },
+      );
+      assert.equal(detail._tag, "Some");
+      assert.equal(snapshot._tag, "Some");
+      if (detail._tag === "Some" && snapshot._tag === "Some") {
+        assert.deepStrictEqual(detail.value.messages, snapshot.value.thread.messages);
+        assert.deepStrictEqual(detail.value.activities, snapshot.value.thread.activities);
+      }
+    }),
+  );
+
+  it.effect("reads runtime metadata without hydrating unrelated history bodies", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const queries = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      // Keep this invalid historical payload outside the tool-name expression
+      // index, so the fixture tests selective decoding rather than UPDATE.
+      yield* sql`UPDATE projection_thread_activities
+        SET kind = 'historical.invalid-fixture', payload_json = 'invalid old tool JSON'
+        WHERE activity_id = 'turn-1-activity'`;
+
+      const metadata = yield* queries.getThreadRuntimeContext(threadW);
+      assert.equal(metadata._tag, "Some");
+      if (metadata._tag === "None") return;
+      assert.equal(metadata.value.id, threadW);
+      assert.equal(metadata.value.latestTurn?.turnId, "turn-5");
+      assert.deepStrictEqual(metadata.value.messages, []);
+      assert.deepStrictEqual(metadata.value.activities, []);
+      assert.deepStrictEqual(metadata.value.checkpoints, []);
+      const conversation = yield* queries.getThreadRuntimeContext(threadW, { messages: true });
+      assert.equal(conversation._tag, "Some");
+      if (conversation._tag === "Some") assert.equal(conversation.value.messages.length, 9);
+      const full = yield* Effect.exit(queries.getThreadDetailById(threadW));
+      assert.equal(full._tag, "Failure");
+    }),
+  );
+
+  it.effect("selects worker activities in SQL while leaving full history available", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const queries = yield* ProjectionSnapshotQuery;
+      const runtime = yield* queries.getThreadRuntimeContext(threadW, {
+        messages: true,
+        activityKinds: ["context-window.updated"],
+      });
+      assert.equal(runtime._tag, "Some");
+      if (runtime._tag === "None") return;
+      assert.equal(runtime.value.messages.length, 9);
+      assert.deepStrictEqual(
+        runtime.value.activities.map((activity) => activity.id),
+        ["turnless-activity"],
+      );
+      const full = yield* queries.getThreadDetailById(threadW);
+      assert.equal(full._tag, "Some");
+      if (full._tag === "Some") {
+        assert.equal(full.value.activities.length, 6);
+        assert.deepStrictEqual(full.value.messages, runtime.value.messages);
+      }
+      const missing = yield* queries.getThreadRuntimeContext(ThreadId.make("missing-thread"));
+      assert.equal(missing._tag, "None");
+    }),
+  );
+
+  it.effect("keeps all selected activities in timeline order across kinds and sequence ties", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const queries = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const rows = [
+        {
+          id: "selected-d",
+          kind: "automation.started",
+          sequence: 7,
+          at: "2026-03-01T00:02:00.000Z",
+        },
+        { id: "selected-c", kind: "turn.failed", sequence: 7, at: "2026-03-01T00:02:00.000Z" },
+        {
+          id: "selected-b",
+          kind: "automation.started",
+          sequence: 0,
+          at: "2026-03-01T00:01:00.000Z",
+        },
+        { id: "selected-a", kind: "turn.failed", sequence: null, at: "2026-03-01T00:05:00.000Z" },
+        {
+          id: "other-kind",
+          kind: "context-window.updated",
+          sequence: 1,
+          at: "2026-03-01T00:01:00.000Z",
+        },
+      ];
+      for (const row of rows) {
+        const payload = yield* Schema.encodeEffect(
+          Schema.fromJsonString(Schema.Struct({ original: Schema.String })),
+        )({ original: row.id });
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+          ) VALUES (
+            ${row.id}, 'thread-w', NULL, 'info', ${row.kind}, ${row.id},
+            ${payload}, ${row.sequence}, ${row.at}
+          )
+        `;
+      }
+      const selected = yield* queries.getThreadRuntimeContext(threadW, {
+        activityKinds: ["automation.started", "turn.failed"],
+      });
+      assert.equal(selected._tag, "Some");
+      if (selected._tag === "None") return;
+      assert.deepStrictEqual(
+        selected.value.activities.map((activity) => [activity.id, activity.payload]),
+        ["selected-a", "selected-b", "selected-c", "selected-d"].map((id) => [
+          id,
+          { original: id },
+        ]),
+      );
+      const singleKind = yield* queries.getThreadRuntimeContext(threadW, {
+        activityKinds: ["automation.started"],
+      });
+      assert.equal(singleKind._tag, "Some");
+      if (singleKind._tag === "Some") {
+        assert.deepStrictEqual(
+          singleKind.value.activities.map((activity) => activity.id),
+          ["selected-b", "selected-d"],
+        );
+      }
+      const full = yield* queries.getThreadDetailById(threadW);
+      assert.equal(full._tag, "Some");
+      if (full._tag === "Some") {
+        assert.deepStrictEqual(
+          full.value.activities.filter((activity) =>
+            ["automation.started", "turn.failed"].includes(activity.kind),
+          ),
+          selected.value.activities,
+        );
+        assert.equal(full.value.activities.length, 6 + rows.length);
+      }
+    }),
+  );
   const messageIds = (snapshot: { thread: { messages: ReadonlyArray<{ id: string }> } }) =>
     snapshot.thread.messages.map((message) => message.id).toSorted();
   const activityIds = (snapshot: { thread: { activities: ReadonlyArray<{ id: string }> } }) =>

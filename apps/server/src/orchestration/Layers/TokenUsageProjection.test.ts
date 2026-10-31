@@ -1,6 +1,7 @@
 import {
   OrchestrationEvent,
   ThreadId,
+  ProjectId,
   type TokenUsageObservation,
   type TokenUsageContext,
 } from "@t3tools/contracts";
@@ -10,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { makeTokenUsageProjection } from "./TokenUsageProjection.ts";
+import { emptyTokenCounts } from "../tokenUsage.ts";
 
 const decodeEvent = Schema.decodeUnknownSync(OrchestrationEvent);
 
@@ -98,6 +100,293 @@ const usage = (
   });
 
 it.layer(SqlitePersistenceMemory)("TokenUsageProjection", (it) => {
+  it.effect("does not attribute an omitted field's earlier interval to the next request", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const projection = yield* makeTokenUsageProjection;
+      const apply = (value: OrchestrationEvent) => sql.withTransaction(projection.apply(value));
+      yield* apply(request(1, "field-boundary", "field-boundary-r1"));
+      yield* apply(session(2, "field-boundary", "t1"));
+      yield* apply(usage(3, "field-boundary", "t1", 1000));
+      yield* apply(
+        event(4, "thread.activity-appended", "field-boundary", {
+          threadId: "field-boundary",
+          activity: {
+            id: "field-boundary-partial",
+            createdAt: now,
+            tone: "info",
+            kind: "context-window.updated",
+            summary: "Partial final usage",
+            turnId: "t1",
+            payload: {
+              consumption: [
+                {
+                  sourceId: "native",
+                  mode: "cumulative",
+                  provider: "codex",
+                  model: null,
+                  isFinal: true,
+                  counts: { ...emptyTokenCounts(), total: 1250 },
+                },
+              ],
+            },
+          },
+        }),
+      );
+      yield* apply(session(5, "field-boundary", null, "ready"));
+      const reconstructed = yield* makeTokenUsageProjection;
+      yield* sql.withTransaction(
+        reconstructed.apply(request(6, "field-boundary", "field-boundary-r2")),
+      );
+      yield* sql.withTransaction(reconstructed.apply(session(7, "field-boundary", "t2")));
+      yield* sql.withTransaction(reconstructed.apply(usage(8, "field-boundary", "t2", 1500)));
+      const first = yield* reconstructed.getReport({ threadId: ThreadId.make("field-boundary") });
+      assert.strictEqual(first.counts.total, 250);
+      assert.strictEqual(first.counts.input, null);
+      yield* sql.withTransaction(reconstructed.apply(usage(9, "field-boundary", "t2", 1600)));
+      const final = yield* reconstructed.getReport({ threadId: ThreadId.make("field-boundary") });
+      assert.strictEqual(final.counts.total, 350);
+      assert.strictEqual(final.counts.input, 100);
+    }),
+  );
+  it.effect(
+    "persists omitted field baselines across reconstruction without losing later usage",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const projection = yield* makeTokenUsageProjection;
+        yield* sql.withTransaction(projection.apply(request(1, "omitted-fields", "omitted-r1")));
+        yield* sql.withTransaction(projection.apply(session(2, "omitted-fields", "t1")));
+        yield* sql.withTransaction(
+          projection.apply(usage(3, "omitted-fields", "t1", 1000, "cumulative", "omitted-native")),
+        );
+        yield* sql.withTransaction(
+          projection.apply(
+            event(4, "thread.activity-appended", "omitted-fields", {
+              threadId: "omitted-fields",
+              activity: {
+                id: "partial-usage",
+                createdAt: now,
+                tone: "info",
+                kind: "context-window.updated",
+                summary: "Partial usage snapshot",
+                turnId: "t1",
+                payload: {
+                  consumption: [
+                    {
+                      sourceId: "omitted-native",
+                      mode: "cumulative",
+                      provider: "codex",
+                      model: null,
+                      isFinal: true,
+                      counts: { ...emptyTokenCounts(), total: 1250 },
+                    },
+                  ],
+                },
+              },
+            }),
+          ),
+        );
+        const reconstructed = yield* makeTokenUsageProjection;
+        yield* sql.withTransaction(
+          reconstructed.apply(
+            usage(5, "omitted-fields", "t1", 1450, "cumulative", "omitted-native"),
+          ),
+        );
+        yield* sql.withTransaction(
+          reconstructed.apply(
+            usage(6, "omitted-fields", "t1", 1450, "cumulative", "omitted-native"),
+          ),
+        );
+        const report = yield* reconstructed.getReport({
+          threadId: ThreadId.make("omitted-fields"),
+        });
+        assert.strictEqual(report.counts.total, 450);
+        assert.strictEqual(report.counts.input, 450);
+        assert.strictEqual(report.counts.output, 0);
+      }),
+  );
+  it.effect(
+    "attributes restart recovery input after a stop receipt and excludes replayed old Codex spend",
+    () =>
+      Effect.gen(function* () {
+        const projection = yield* makeTokenUsageProjection;
+        const observation = (sequence: number, turn: string, total: number, epoch: string) => {
+          const result = usage(
+            sequence,
+            "recovery-accounting",
+            turn,
+            total,
+            "cumulative",
+            `codex:native-recovery#${epoch}`,
+          );
+          if (result.type !== "thread.activity-appended") throw new Error("Expected activity");
+          const payload = result.payload.activity.payload as {
+            consumption: readonly TokenUsageObservation[];
+          };
+          return {
+            ...result,
+            payload: {
+              ...result.payload,
+              activity: {
+                ...result.payload.activity,
+                payload: {
+                  ...payload,
+                  consumption: payload.consumption.map((item) => ({ ...item, startsAtZero: true })),
+                },
+              },
+            },
+          };
+        };
+        yield* projection.apply(request(6000, "recovery-accounting", "before-restart"));
+        yield* projection.apply(session(6001, "recovery-accounting", "old-turn"));
+        yield* projection.apply(observation(6002, "old-turn", 100, "original"));
+        yield* projection.apply(request(6003, "recovery-accounting", "after-restart"));
+        yield* projection.apply(session(6004, "recovery-accounting", null, "stopped"));
+        yield* projection.apply(observation(6005, "old-turn", 100, "resumed"));
+        yield* projection.apply(session(6006, "recovery-accounting", "new-turn"));
+        yield* projection.apply(observation(6007, "new-turn", 150, "resumed"));
+        yield* projection.apply(session(6008, "recovery-accounting", null, "ready"));
+        const before = yield* projection.getReport({
+          threadId: ThreadId.make("recovery-accounting"),
+          workId: "request:before-restart",
+        });
+        const after = yield* projection.getReport({
+          threadId: ThreadId.make("recovery-accounting"),
+          workId: "request:after-restart",
+        });
+        assert.strictEqual(before.counts.total, 100);
+        assert.strictEqual(after.counts.total, 50);
+        assert.strictEqual(after.outcome, "completed");
+        yield* projection.apply(request(6009, "recovery-accounting", "reset-counter"));
+        yield* projection.apply(session(6010, "recovery-accounting", "reset-turn"));
+        yield* projection.apply(observation(6011, "reset-turn", 25, "reset"));
+        assert.strictEqual(
+          (yield* projection.getReport({ threadId: ThreadId.make("recovery-accounting") })).counts
+            .total,
+          25,
+        );
+      }),
+  );
+  it.effect(
+    "combines Main, Owners and retries per goal, filters each task and scopes daily project usage",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const projection = yield* makeTokenUsageProjection;
+        for (const [id, project] of [
+          ["goal-main", "goal-project"],
+          ["foreign", "foreign-project"],
+        ]) {
+          yield* sql`INSERT INTO projection_projects (project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES (${project},'Goal','D:/goal','[]',${now},${now})`;
+          yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,created_at,updated_at) VALUES (${id},${project},'Main','{"instanceId":"codex","model":"test"}',${now},${now})`;
+        }
+        yield* projection.apply(request(5000, "goal-main", "goal-manual"));
+        yield* projection.apply(session(5001, "goal-main", "goal-turn"));
+        yield* projection.apply(usage(5002, "goal-main", "goal-turn", 100, "execution-total"));
+        const link = event(5003, "thread.activity-appended", "goal-main", {
+          threadId: "goal-main",
+          activity: {
+            id: "goal-link",
+            kind: "token-usage.work-linked",
+            tone: "info",
+            summary: "Goal",
+            createdAt: now,
+            turnId: null,
+            payload: {
+              requestId: "goal-manual",
+              usageContext: { workId: "goal-total", phase: "planning", nodeId: null, attempt: 1 },
+            },
+          },
+        });
+        yield* projection.apply(link);
+        yield* projection.apply(link);
+        for (const [id, total, attempt] of [
+          ["owner-first", 200, 1],
+          ["owner-retry", 50, 2],
+        ] as const) {
+          yield* projection.apply(
+            event(5004 + attempt, "thread.activity-appended", "goal-main", {
+              threadId: "goal-main",
+              activity: {
+                id,
+                kind: "orchestra.block",
+                tone: "info",
+                summary: "Owner",
+                createdAt: now,
+                turnId: null,
+                payload: {
+                  executionId: id,
+                  ownerThreadId: "goal-main",
+                  runId: `separate-run-${attempt}`,
+                  usageWorkId: "goal-total",
+                  nodeId: "owner-task",
+                  attempt,
+                  messageId: id,
+                  title: "Owner",
+                  displayName: "AI",
+                  role: "implementer",
+                  kind: "implementation",
+                  modelSelection: { instanceId: "codex", model: "test" },
+                  status: "completed",
+                },
+              },
+            }),
+          );
+          const observation = usage(
+            5007 + attempt,
+            "goal-main",
+            "unused",
+            total,
+            "execution-total",
+            id,
+          );
+          if (observation.type !== "thread.activity-appended") throw new Error("Expected activity");
+          yield* projection.apply({
+            ...observation,
+            payload: {
+              ...observation.payload,
+              activity: {
+                ...observation.payload.activity,
+                turnId: null,
+                payload: { ...(observation.payload.activity.payload as object), messageId: id },
+              },
+            },
+          });
+        }
+        yield* projection.apply(session(5010, "goal-main", null, "ready"));
+        yield* projection.apply(request(5011, "foreign", "foreign-request"));
+        yield* projection.apply(session(5012, "foreign", "foreign-turn"));
+        yield* projection.apply(usage(5013, "foreign", "foreign-turn", 999, "execution-total"));
+        const report = yield* projection.getReport({
+          threadId: ThreadId.make("goal-main"),
+          workId: "run:goal-total",
+        });
+        assert.strictEqual(report.counts.total, 350);
+        assert.strictEqual(report.requestCount, 3);
+        assert.strictEqual(report.reportedRequestCount, 3);
+        const owner = yield* projection.getReport({
+          threadId: ThreadId.make("goal-main"),
+          workId: "run:goal-total",
+          nodeId: "owner-task",
+        });
+        assert.strictEqual(owner.counts.total, 250);
+        assert.strictEqual(owner.requestCount, 2);
+        const daily = yield* projection.getProjectReport({
+          projectId: ProjectId.make("goal-project"),
+          since: "2026-09-05T00:00:00Z",
+        });
+        assert.strictEqual(daily.counts.total, 350);
+        assert.strictEqual(daily.requestCount, 3);
+        assert.strictEqual(
+          (yield* projection.getProjectReport({
+            projectId: ProjectId.make("goal-project"),
+            since: "2026-09-06T00:00:00Z",
+          })).requestCount,
+          0,
+        );
+      }),
+  );
   it.effect(
     "keeps simultaneous blocks and retries independent when a provider reuses its usage source id",
     () =>
@@ -131,6 +420,7 @@ it.layer(SqlitePersistenceMemory)("TokenUsageProjection", (it) => {
                   displayName: "AI",
                   role: "implementer",
                   kind: "implementation",
+                  ...(attempt === 2 ? { usagePhase: "format-repair" } : {}),
                   modelSelection: { instanceId: "codex", model: "test" },
                   status: "running",
                 },
@@ -161,13 +451,25 @@ it.layer(SqlitePersistenceMemory)("TokenUsageProjection", (it) => {
         const rows = yield* sql<{
           request_id: string;
           counts_json: string;
-        }>`SELECT request_id, counts_json FROM projection_token_usage_samples ORDER BY request_id`;
+        }>`SELECT request_id, counts_json FROM projection_token_usage_samples WHERE request_id IN (SELECT request_id FROM projection_token_usage_requests WHERE thread_id = 'orchestra-owner') ORDER BY request_id`;
         assert.deepStrictEqual(
           rows.map((row) => [row.request_id, JSON.parse(row.counts_json).total]),
           [
             ["block-a", 100],
             ["block-a-retry", 50],
             ["block-b", 150],
+          ],
+        );
+        const phases = yield* sql<{
+          request_id: string;
+          phase: string;
+        }>`SELECT request_id,phase FROM projection_token_usage_requests WHERE thread_id = 'orchestra-owner' ORDER BY request_id`;
+        assert.deepStrictEqual(
+          phases.map((row) => [row.request_id, row.phase]),
+          [
+            ["block-a", "implementation"],
+            ["block-a-retry", "format-repair"],
+            ["block-b", "implementation"],
           ],
         );
       }),
@@ -285,6 +587,22 @@ it.layer(SqlitePersistenceMemory)("TokenUsageProjection", (it) => {
         assert.strictEqual(report.counts.total, 400);
         assert.strictEqual(report.coverage, "partial");
         assert.strictEqual(report.breakdown.length, 3);
+        const nodeUsage = yield* projection.getReport({
+          threadId: ThreadId.make("impl"),
+          workId: "run:collab",
+          nodeId: "n2",
+        });
+        assert.strictEqual(nodeUsage.counts.total, 200);
+        assert.strictEqual(nodeUsage.breakdown.length, 1);
+        assert.strictEqual(nodeUsage.breakdown[0]?.phase, "verification");
+        assert.strictEqual(nodeUsage.breakdown[0]?.attempt, 2);
+        const unknownNode = yield* projection.getReport({
+          threadId: ThreadId.make("impl"),
+          workId: "run:collab",
+          nodeId: "unknown-node",
+        });
+        assert.strictEqual(unknownNode.counts.total, null);
+        assert.strictEqual(unknownNode.requestCount, 0);
         assert.strictEqual(report.breakdown.find((r) => r.phase === "verification")?.attempt, 2);
         assert.strictEqual(
           report.breakdown.find((r) => r.phase === "finalization")?.counts.total,

@@ -12,49 +12,98 @@ function activeFolderKey(): string {
   return active?.projectKey ?? NO_FOLDER_KEY;
 }
 
-interface AskFirstState {
-  readonly enabledByFolder: Readonly<Record<string, boolean>>;
-  readonly setEnabled: (folderKey: string, enabled: boolean) => void;
+export const COMPOSER_REQUEST_MODES = [
+  { value: "direct", label: "바로 실행", description: "요청을 바로 보내 AI가 진행합니다." },
+  {
+    value: "ask-first",
+    label: "질문하기",
+    description: "AI가 작업 계획과 필요한 조건을 먼저 묻고 답변을 기다립니다.",
+  },
+  {
+    value: "conditions",
+    label: "조건 확인",
+    description: "조건 양식을 직접 수정·확인한 뒤 요청을 보냅니다.",
+  },
+] as const;
+export type ComposerRequestMode = (typeof COMPOSER_REQUEST_MODES)[number]["value"];
+const DEFAULT_REQUEST_MODE: ComposerRequestMode = "direct";
+
+export function isComposerRequestMode(value: unknown): value is ComposerRequestMode {
+  return COMPOSER_REQUEST_MODES.some((mode) => mode.value === value);
 }
 
-/**
- * "질문 먼저" — checked, every send in this FOLDER (a meeting topic or a
- * plain task) instructs the AI to come back with its plan and clarifying
- * questions BEFORE touching anything, and to wait for the person's answer.
- * Scoped per folder like the meeting room, persisted until turned off.
- */
-export const useAskFirstStore = create<AskFirstState>()(
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Preserve the existing form toggle when adding the independent question mode. */
+export function migrateComposerRequestModes(value: unknown) {
+  const modeByFolder: Record<string, ComposerRequestMode> = {};
+  if (!isRecord(value)) return { modeByFolder };
+  if (isRecord(value.enabledByFolder)) {
+    for (const [folder, enabled] of Object.entries(value.enabledByFolder)) {
+      if (typeof enabled === "boolean") modeByFolder[folder] = enabled ? "conditions" : "direct";
+    }
+  }
+  if (isRecord(value.modeByFolder)) {
+    for (const [folder, mode] of Object.entries(value.modeByFolder)) {
+      if (isComposerRequestMode(mode)) modeByFolder[folder] = mode;
+    }
+  }
+  return { modeByFolder };
+}
+
+interface ComposerRequestModeState {
+  readonly modeByFolder: Readonly<Record<string, ComposerRequestMode>>;
+  readonly setMode: (folderKey: string, mode: ComposerRequestMode) => void;
+}
+
+export const useComposerRequestModeStore = create<ComposerRequestModeState>()(
   persist(
     (set) => ({
-      enabledByFolder: {},
-      setEnabled: (folderKey, enabled) =>
+      modeByFolder: {},
+      setMode: (folderKey, mode) =>
         set((state) =>
-          (state.enabledByFolder[folderKey] ?? false) === enabled
+          (state.modeByFolder[folderKey] ?? DEFAULT_REQUEST_MODE) === mode
             ? state
-            : { enabledByFolder: { ...state.enabledByFolder, [folderKey]: enabled } },
+            : { modeByFolder: { ...state.modeByFolder, [folderKey]: mode } },
         ),
     }),
     {
       name: "t3.ask-first.v2",
-      partialize: (state) => ({ enabledByFolder: state.enabledByFolder }),
+      version: 1,
+      migrate: migrateComposerRequestModes,
+      partialize: (state) => ({ modeByFolder: state.modeByFolder }),
     },
   ),
 );
 
-export function useAskFirstEnabled(): boolean {
+export function useComposerRequestMode(): ComposerRequestMode {
   const folderKey = useWorkspaceTabStore((state) => {
     const active = state.tabs.find((tab) => tab.id === state.activeTabId);
     return active?.projectKey ?? NO_FOLDER_KEY;
   });
-  return useAskFirstStore((state) => state.enabledByFolder[folderKey] ?? false);
+  return useComposerRequestModeStore(
+    (state) => state.modeByFolder[folderKey] ?? DEFAULT_REQUEST_MODE,
+  );
 }
 
-export function readAskFirstEnabled(): boolean {
-  return useAskFirstStore.getState().enabledByFolder[activeFolderKey()] ?? false;
+export function readComposerRequestMode(): ComposerRequestMode {
+  return (
+    useComposerRequestModeStore.getState().modeByFolder[activeFolderKey()] ?? DEFAULT_REQUEST_MODE
+  );
 }
 
-export function setAskFirstEnabled(enabled: boolean): void {
-  useAskFirstStore.getState().setEnabled(activeFolderKey(), enabled);
+export function setComposerRequestMode(mode: ComposerRequestMode): void {
+  useComposerRequestModeStore.getState().setMode(activeFolderKey(), mode);
+}
+
+export function toggleComposerRequestMode(mode: Exclude<ComposerRequestMode, "direct">): void {
+  setComposerRequestMode(readComposerRequestMode() === mode ? "direct" : mode);
+}
+
+export function formatComposerRequest(text: string, mode: ComposerRequestMode): string {
+  const stop = /^(stop|cancel|멈춰|멈춰줘|중지|중단|그만)[\s.!?~…]*$/i.test(text.trim());
+  return mode === "ask-first" && !stop ? ASK_FIRST_TASK_PREFIX + text : text;
 }
 
 /**
@@ -81,16 +130,8 @@ export function setAskFirstEnabled(enabled: boolean): void {
 export const ASK_FIRST_TASK_PREFIX =
   "[질문 먼저] 아래 메시지를 읽고 먼저 구분해 줘.\n\n" +
   "- 질문이거나 상태·결과를 묻는 말이면: 되묻지 말고 본문으로 바로 답해 줘. 저장소·로그·환경을 확인하면 알 수 있는 것은 확인해서 사실로 답하고, 답한 뒤에 정말 남는 판단이 있을 때만 질문해 줘.\n" +
-  "- 작업 요청이면: (1) 하려는 작업 계획을 본문에 간단히 요약하고 (2) 진행에 필요한 확인 질문을 모두 물어봐 줘. 내가 답하기 전까지는 파일 수정이나 명령 실행 같은 실제 작업을 시작하지 마.\n\n" +
+  "- 작업 요청이면: (1) 하려는 작업 계획을 본문에 간단히 요약하고 (2) 진행에 필요한 확인 질문을 모두 물어봐 줘. 내가 답하기 전까지는 파일 수정이나 명령 실행 같은 실제 작업을 시작하지 마. 같은 작업에서 이미 내가 답하거나 승인한 조건은 다시 묻지 말고 반영해 줘.\n\n" +
   "어느 쪽이든 이 턴에는 반드시 본문 답변이 있어야 해. 질문 카드만 띄우고 끝내거나, 명령만 돌리고 말없이 끝내지 마. 질문 카드를 띄우기 전에는 본문에 '무엇을 확인했고 왜 묻는지'를 2~3줄로 먼저 써 줘 — 카드 안에서만 언급한 A·B·C 같은 내용은 내가 볼 수 없어.\n\n" +
-  "질문은 반드시 질문 툴(AskUserQuestion 또는 request_user_input)로 해 줘 — 답변 카드로 떠야 내가 클릭해서 답할 수 있어. 채팅 본문에 글로 쓴 질문은 답하기 불편하니 쓰지 마. 각 질문에는 고를 만한 선택지를 2~4개 주고, 네가 권하는 것을 맨 앞에 두고 (권장)이라고 표시해 줘. 여러 개를 함께 고를 수 있는 질문이면 multiSelect로 만들어 줘.\n\n" +
+  "질문은 현재 실행 환경의 기본 질문 툴로 해 줘 — Claude는 AskUserQuestion, Codex는 request_user_input을 사용해 줘. 답변 카드로 떠야 내가 클릭해서 답할 수 있어. 기본 질문 툴을 쓸 수 있으면 본문 질문으로 대체하지 마. 질문 툴이 없는 실행기에서만 본문에 번호와 선택지를 한 번에 묶어 제시해 줘. 각 질문에는 고를 만한 선택지를 2~4개 주고, 네가 권하는 것을 맨 앞에 두고 (권장)이라고 표시해 줘. 여러 개를 함께 고를 수 있는 질문이면 지원되는 경우 multiSelect로 만들어 줘.\n\n" +
   "자동 운영 루프(ScheduleWakeup) 중이어도 이 메시지는 루프 틱이 아니라 내가 직접 보낸 말이야. 다음 깨어남을 예약하더라도 먼저 본문으로 답하고 나서 예약해 줘.\n\n" +
   "이번 턴에서는 '웬만하면 묻지 말고 알아서 진행하라'는 평소 기준보다 이 지시가 우선이야. 다만 저장소나 환경을 찾아보면 알 수 있는 것은 여전히 먼저 확인하고, 그래도 남는 판단만 물어봐 줘.\n\n";
-
-/**
- * Prepended to a meeting topic. The seats' statement prompt already carries
- * the `<t3_question>` protocol, and the server parks the run on it until the
- * person answers — so the instruction rides inside the topic itself.
- */
-export const ASK_FIRST_MEETING_PREFIX =
-  "[질문 먼저] 본격적인 논의를 시작하기 전에, 첫 발언자는 이 주제에 대해 확인이 필요한 사항이 있으면 <t3_question>으로 사용자에게 먼저 질문하고 답을 받은 뒤 논의를 진행하라. 확인할 것이 정말 없을 때만 곧바로 논의를 시작하라.\n\n";

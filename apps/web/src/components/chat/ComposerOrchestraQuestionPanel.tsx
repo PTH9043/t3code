@@ -79,11 +79,11 @@ export const ComposerOrchestraQuestionPanel = memo(function ComposerOrchestraQue
             );
           })}
         </div>
-      ) : (
-        <p className="mt-2 text-secondary-label text-xs">
-          아래 입력창에 답을 적어 보내면 오케스트라가 이어집니다.
-        </p>
-      )}
+      ) : null}
+      <p className="mt-2 text-secondary-label text-xs">
+        아래 입력창에 답을 쓰거나 이미지를 첨부해 보내세요. 선택지를 누를 때도 첨부된 이미지가 함께
+        전달됩니다.
+      </p>
     </div>
   );
 });

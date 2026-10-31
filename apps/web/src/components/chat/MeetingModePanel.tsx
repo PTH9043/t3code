@@ -1,8 +1,7 @@
-import type { ProviderInstanceId, WorkspaceMeetingMode } from "@t3tools/contracts";
+import type { EnvironmentId, ProviderInstanceId, WorkspaceMeetingMode } from "@t3tools/contracts";
 import { memo, useEffect } from "react";
-import { CrownIcon } from "lucide-react";
+import { CrownIcon, PlusIcon, XIcon } from "lucide-react";
 
-import { Checkbox } from "../ui/checkbox";
 import { Switch } from "../ui/switch";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import type { ModelEsque } from "./providerIconUtils";
@@ -14,7 +13,7 @@ import {
 } from "../../providerInstances";
 import {
   MAX_MEETING_SEATS,
-  meetingSeatId,
+  addMeetingComposerSeat,
   setMeetingComposerSeatModel,
   setMeetingComposerSeatOption,
   toggleMeetingComposerSeat,
@@ -23,6 +22,8 @@ import {
 } from "../../meetingComposerStore";
 import { getProviderOptionCurrentValue, getProviderOptionDescriptors } from "@t3tools/shared/model";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { meetingModelDefaultOptions } from "../../meetingModelOptions";
+import { ExecutionProfiles } from "../control-center/ExecutionProfiles";
 
 const MODE_LABELS: ReadonlyArray<{ mode: WorkspaceMeetingMode; label: string; hint: string }> = [
   { mode: "fixed-rounds", label: "고정 라운드", hint: "정해진 횟수만큼 토론 후 계획" },
@@ -39,17 +40,15 @@ function defaultSeatModel(options: ReadonlyArray<ModelEsque> | undefined): strin
 }
 
 /**
- * The 오케스트라 side of the model picker: tick the accounts that take a seat,
- * then set how the run starts (discussion first, or straight to execution) and
- * how execution parallelizes. The topic itself is typed in the composer and
- * sent like any other message.
+ * Add models as independent participants, choose their conductor and effort,
+ * and bound discussion and recovery before sending a topic from the composer.
  */
 export const MeetingModePanel = memo(function MeetingModePanel(props: {
   readonly instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   readonly modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
+  readonly profileTarget?: { environmentId: EnvironmentId; folderKey: string };
 }) {
   const config = useMeetingComposerConfig();
-  const seatById = new Map(config.seats.map((seat) => [seat.id, seat] as const));
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
   // "바로 실행" skips discussion: the chair plans straight away and the seats
   // split the work. The style is its own field, so picking it never touches the
@@ -59,14 +58,19 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
   // Self-heal selections a past bug stored as display LABELS ("Extra High")
   // instead of choice ids ("xhigh"): remap by label once, idempotently.
   useEffect(() => {
-    for (const entry of visibleEntries) {
-      const seatId = meetingSeatId(entry.instanceId);
-      const seat = seatById.get(seatId);
-      if (!seat?.options?.length) continue;
+    for (const seat of config.seats) {
+      const entry = visibleEntries.find((candidate) => candidate.instanceId === seat.instanceId);
+      if (!entry) continue;
+      const seatId = seat.id;
+      for (const option of meetingModelDefaultOptions(entry, seat.model)) {
+        if (!seat.options?.some((stored) => stored.id === option.id)) {
+          setMeetingComposerSeatOption(seatId, option.id, option.value);
+        }
+      }
       const descriptors = getProviderOptionDescriptors({
         caps: getProviderModelCapabilities(entry.models, seat.model, entry.driverKind),
       });
-      for (const stored of seat.options) {
+      for (const stored of seat.options ?? []) {
         if (typeof stored.value !== "string") continue;
         const descriptor = descriptors.find(
           (candidate) => candidate.id === stored.id && candidate.type === "select",
@@ -76,6 +80,11 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         const byLabel = descriptor.options.find((choice) => choice.label === stored.value);
         if (byLabel) {
           setMeetingComposerSeatOption(seatId, stored.id, byLabel.id);
+        } else {
+          const fallback = meetingModelDefaultOptions(entry, seat.model).find(
+            (option) => option.id === stored.id,
+          );
+          if (fallback) setMeetingComposerSeatOption(seatId, stored.id, fallback.value);
         }
       }
     }
@@ -83,6 +92,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2.5 text-sm">
+      {props.profileTarget ? <ExecutionProfiles {...props.profileTarget} /> : null}
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         시작 방식
       </div>
@@ -127,6 +137,35 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         </button>
       </div>
 
+      <label className="mt-3 grid gap-1.5 text-xs font-medium">
+        <span className="flex items-center gap-1">
+          <CrownIcon className="size-3.5" />
+          지휘 AI
+        </span>
+        <select
+          className={SELECT_CLASS}
+          aria-label="지휘 AI"
+          value={config.chairSeatId ?? ""}
+          onChange={(event) => {
+            const chairSeatId = event.currentTarget.value || null;
+            updateMeetingComposerConfig((current) => ({ ...current, chairSeatId }));
+          }}
+        >
+          <option value="">자동 (첫 참가자)</option>
+          {config.seats.map((seat) => (
+            <option key={seat.id} value={seat.id}>
+              {seat.displayName} ·{" "}
+              {props.modelOptionsByInstance
+                .get(seat.instanceId)
+                ?.find((model) => model.slug === seat.model)?.name ?? seat.model}
+            </option>
+          ))}
+        </select>
+        <span className="font-normal text-muted-foreground">
+          선택한 AI가 계획·배정·검증·최종 정리를 맡습니다.
+        </span>
+      </label>
+
       <div className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         참가자 {config.seats.length > 0 ? `· ${config.seats.length}명` : ""}{" "}
         <span className="font-normal normal-case">(2–{MAX_MEETING_SEATS}명)</span>
@@ -134,108 +173,171 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       <div className="mt-1.5 grid gap-1">
         {visibleEntries.map((entry) => {
           const ready = isProviderInstancePickerReady(entry);
-          const seatId = meetingSeatId(entry.instanceId);
-          const seat = seatById.get(seatId);
-          const options = props.modelOptionsByInstance.get(entry.instanceId);
-          const checked = seat !== undefined;
+          const seats = config.seats.filter((seat) => seat.instanceId === entry.instanceId);
+          const options = props.modelOptionsByInstance.get(entry.instanceId) ?? [];
+          const available = options.filter(
+            (option) => !seats.some((seat) => seat.model === option.slug),
+          );
+          const nextModel = defaultSeatModel(available);
           return (
-            <div
-              key={entry.instanceId}
-              className={cn(
-                "flex flex-wrap items-center gap-2 rounded-md px-1.5 py-1",
-                ready ? "hover:bg-muted/50" : "opacity-45",
-              )}
-            >
-              <Checkbox
-                checked={checked}
-                disabled={!ready}
-                aria-label={`${entry.displayName} 참가`}
-                onCheckedChange={() => {
-                  const model = seat?.model ?? defaultSeatModel(options);
-                  if (model === null) return;
-                  toggleMeetingComposerSeat({
-                    id: seatId,
-                    instanceId: entry.instanceId,
-                    model,
-                    displayName: entry.displayName,
-                  });
-                }}
-              />
-              <ProviderInstanceIcon
-                driverKind={entry.driverKind}
-                displayName={entry.displayName}
-                accentColor={entry.accentColor}
-                showBadge={Boolean(entry.accentColor)}
-                className="size-4 shrink-0"
-                iconClassName="size-4"
-              />
-              <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                {entry.displayName}
-                {!ready ? (
-                  <span className="ml-1 font-normal text-muted-foreground">(사용 불가)</span>
-                ) : null}
-              </span>
-              {seat !== undefined && options && options.length > 0 ? (
-                <select
-                  className={cn(SELECT_CLASS, "max-w-36 shrink-0")}
-                  value={seat.model}
-                  aria-label={`${entry.displayName} 모델`}
-                  onChange={(event) =>
-                    setMeetingComposerSeatModel(seatId, event.currentTarget.value)
+            <div key={entry.instanceId} className="rounded-md border border-border/60 px-2 py-2">
+              <div className="flex items-center gap-2">
+                <ProviderInstanceIcon
+                  driverKind={entry.driverKind}
+                  displayName={entry.displayName}
+                  accentColor={entry.accentColor}
+                  showBadge={Boolean(entry.accentColor)}
+                  className="size-4 shrink-0"
+                  iconClassName="size-4"
+                />
+                <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                  {entry.displayName}
+                  {!ready ? (
+                    <span className="ml-1 font-normal text-muted-foreground">(사용 불가)</span>
+                  ) : null}
+                </span>
+                <button
+                  type="button"
+                  className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted disabled:opacity-40"
+                  aria-label={`${entry.displayName} 모델 추가`}
+                  disabled={
+                    !ready || nextModel === null || config.seats.length >= MAX_MEETING_SEATS
                   }
+                  onClick={() => {
+                    if (nextModel === null) return;
+                    addMeetingComposerSeat({
+                      instanceId: entry.instanceId,
+                      model: nextModel,
+                      displayName: entry.displayName,
+                      options: meetingModelDefaultOptions(entry, nextModel),
+                    });
+                  }}
                 >
-                  {options.map((option) => (
-                    <option key={option.slug} value={option.slug}>
-                      {option.shortName ?? option.name}
-                    </option>
-                  ))}
-                </select>
-              ) : null}
-              {seat !== undefined
-                ? // The same option descriptors the composer's effort picker
-                  // reads — so each seat's turns run at the effort chosen
-                  // here, not whatever the composer happens to be set to.
-                  getProviderOptionDescriptors({
-                    caps: getProviderModelCapabilities(entry.models, seat.model, entry.driverKind),
-                    selections: seat.options ?? null,
-                  })
-                    .filter((descriptor) => descriptor.type === "select")
-                    .map((descriptor) => {
-                      // A choice's VALUE is its id ("high"); the label is
-                      // display only. The descriptor already folded the
-                      // seat's stored selection into currentValue.
-                      const currentValue = getProviderOptionCurrentValue(descriptor);
-                      const shownValue =
-                        typeof currentValue === "string" &&
-                        descriptor.options.some((choice) => choice.id === currentValue)
-                          ? currentValue
-                          : (descriptor.options.find((choice) => choice.isDefault)?.id ??
-                            descriptor.options[0]?.id ??
-                            "");
-                      return (
-                        <select
-                          key={descriptor.id}
-                          className={cn(SELECT_CLASS, "max-w-28 shrink-0")}
-                          value={shownValue}
-                          aria-label={`${entry.displayName} ${descriptor.label}`}
-                          title={descriptor.label}
-                          onChange={(event) =>
-                            setMeetingComposerSeatOption(
-                              seatId,
-                              descriptor.id,
-                              event.currentTarget.value,
-                            )
-                          }
-                        >
-                          {descriptor.options.map((choice) => (
-                            <option key={choice.id} value={choice.id}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      );
-                    })
-                : null}
+                  <PlusIcon className="size-3" />
+                  모델 추가
+                </button>
+              </div>
+              {seats.map((seat) => {
+                const seatId = seat.id;
+                const modelLabel =
+                  options.find((option) => option.slug === seat.model)?.name ?? seat.model;
+                const isConductor = (config.chairSeatId ?? config.seats[0]?.id) === seat.id;
+                return (
+                  <div
+                    key={seat.id}
+                    data-meeting-seat={seat.id}
+                    className="mt-2 rounded border border-border/50 p-2"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        aria-label={`${entry.displayName} ${modelLabel} 지휘 AI로 선택`}
+                        aria-pressed={isConductor}
+                        title={isConductor ? "지휘 AI" : "지휘 AI로 선택"}
+                        className={cn(
+                          "shrink-0 rounded p-1 hover:bg-muted",
+                          isConductor ? "text-primary" : "text-muted-foreground",
+                        )}
+                        onClick={() =>
+                          updateMeetingComposerConfig((current) => ({
+                            ...current,
+                            chairSeatId: seat.id,
+                          }))
+                        }
+                      >
+                        <CrownIcon className="size-3.5" />
+                      </button>
+                      <select
+                        className={SELECT_CLASS}
+                        value={seat.model}
+                        aria-label={`${entry.displayName} ${modelLabel} 모델`}
+                        disabled={!ready}
+                        onChange={(event) =>
+                          setMeetingComposerSeatModel(
+                            seatId,
+                            event.currentTarget.value,
+                            meetingModelDefaultOptions(entry, event.currentTarget.value),
+                          )
+                        }
+                      >
+                        {options.map((option) => (
+                          <option
+                            key={option.slug}
+                            value={option.slug}
+                            disabled={seats.some(
+                              (other) => other.id !== seat.id && other.model === option.slug,
+                            )}
+                          >
+                            {option.shortName ?? option.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted"
+                        aria-label={`${entry.displayName} ${modelLabel} 제거`}
+                        onClick={() => toggleMeetingComposerSeat(seat)}
+                      >
+                        <XIcon className="size-3.5" />
+                      </button>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] text-muted-foreground">
+                        {isConductor ? "지휘 AI" : "작업 AI"}
+                      </span>
+                      {
+                        // The same option descriptors the composer's effort picker
+                        // reads — so each seat's turns run at the effort chosen
+                        // here, not whatever the composer happens to be set to.
+                        getProviderOptionDescriptors({
+                          caps: getProviderModelCapabilities(
+                            entry.models,
+                            seat.model,
+                            entry.driverKind,
+                          ),
+                          selections: seat.options ?? null,
+                        })
+                          .filter((descriptor) => descriptor.type === "select")
+                          .map((descriptor) => {
+                            // A choice's VALUE is its id ("high"); the label is
+                            // display only. The descriptor already folded the
+                            // seat's stored selection into currentValue.
+                            const currentValue = getProviderOptionCurrentValue(descriptor);
+                            const shownValue =
+                              typeof currentValue === "string" &&
+                              descriptor.options.some((choice) => choice.id === currentValue)
+                                ? currentValue
+                                : (descriptor.options.find((choice) => choice.isDefault)?.id ??
+                                  descriptor.options[0]?.id ??
+                                  "");
+                            return (
+                              <select
+                                key={descriptor.id}
+                                className={cn(SELECT_CLASS, "max-w-28 shrink-0")}
+                                value={shownValue}
+                                aria-label={`${entry.displayName} ${modelLabel} ${descriptor.label}`}
+                                title={descriptor.label}
+                                onChange={(event) =>
+                                  setMeetingComposerSeatOption(
+                                    seatId,
+                                    descriptor.id,
+                                    event.currentTarget.value,
+                                  )
+                                }
+                              >
+                                {descriptor.options.map((choice) => (
+                                  <option key={choice.id} value={choice.id}>
+                                    {choice.label}
+                                  </option>
+                                ))}
+                              </select>
+                            );
+                          })
+                      }
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -273,29 +375,35 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       ) : null}
 
       <div className="mt-3 grid gap-2">
-        {isDirectCollaboration ? (
-          <label className="flex items-center justify-between gap-2 text-xs font-medium">
-            <span>
-              수정 한도
-              <span className="ml-1 font-normal text-muted-foreground">
-                실패 복구·재계획 총 횟수
-              </span>
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={8}
-              value={config.maxRevisions}
-              onChange={(event) => {
-                const parsed = Number.parseInt(event.currentTarget.value, 10);
-                if (!Number.isInteger(parsed)) return;
-                const maxRevisions = Math.min(8, Math.max(1, parsed));
-                updateMeetingComposerConfig((current) => ({ ...current, maxRevisions }));
-              }}
-              className={cn(SELECT_CLASS, "w-16 text-center")}
-            />
-          </label>
-        ) : null}
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>
+            수정 한도
+            <span className="ml-1 font-normal text-muted-foreground">실패 복구·재계획 총 횟수</span>
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={8}
+            aria-label="실패 복구·재계획 한도"
+            value={config.maxRevisions}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.currentTarget.value, 10);
+              if (!Number.isInteger(parsed)) return;
+              const maxRevisions = Math.min(8, Math.max(1, parsed));
+              updateMeetingComposerConfig((current) => ({ ...current, maxRevisions }));
+            }}
+            className={cn(SELECT_CLASS, "w-16 text-center")}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>선택하지 않은 AI 추가 허용</span>
+          <Switch
+            checked={config.allowAdditionalWorkers}
+            onCheckedChange={(allowAdditionalWorkers) =>
+              updateMeetingComposerConfig((current) => ({ ...current, allowAdditionalWorkers }))
+            }
+          />
+        </label>
         {!isDirectCollaboration ? (
           <>
             <label className="flex items-center justify-between gap-2 text-xs font-medium">
@@ -369,37 +477,84 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             }
           />
         </label>
-        <label className="flex items-center justify-between gap-2 text-xs font-medium">
-          <span className="flex items-center gap-1">
-            <CrownIcon className="size-3.5 text-muted-foreground" />
-            의장
-          </span>
-          <select
-            className={cn(SELECT_CLASS, "max-w-40")}
-            value={config.chairSeatId ?? ""}
-            onChange={(event) => {
-              const chairSeatId = event.currentTarget.value || null;
-              updateMeetingComposerConfig((current) => ({
-                ...current,
-                chairSeatId,
-              }));
-            }}
-          >
-            <option value="">자동 (첫 참가자)</option>
-            {config.seats.map((seat) => (
-              <option key={seat.id} value={seat.id}>
-                {seat.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
 
+      <div className="mt-3 space-y-3 border-t border-border/60 pt-3">
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>
+            실행 전 계획 확인
+            <span className="ml-1 font-normal text-muted-foreground">
+              작업·담당자·선행 작업 수정 후 시작
+            </span>
+          </span>
+          <Switch
+            checked={config.reviewPlan === true}
+            onCheckedChange={(reviewPlan) =>
+              updateMeetingComposerConfig((current) => ({ ...current, reviewPlan }))
+            }
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>
+            사용량 제한 후 자동 재개
+            <span className="block font-normal text-muted-foreground">
+              확인된 리셋 시각에 최대 3회 · 꺼두면 기존 오류 처리
+            </span>
+          </span>
+          <Switch
+            checked={config.resumeAfterLimit === true}
+            onCheckedChange={(resumeAfterLimit) =>
+              updateMeetingComposerConfig((current) => ({ ...current, resumeAfterLimit }))
+            }
+          />
+        </label>
+        <label className="grid gap-1 text-xs font-medium">
+          작업 AI 실행 한도
+          <input
+            type="number"
+            min={1}
+            max={500}
+            placeholder="제한 없음"
+            value={config.maxWorkerTurns ?? ""}
+            className={SELECT_CLASS}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              const maxWorkerTurns =
+                value === "" ? undefined : Math.min(500, Math.max(1, Number.parseInt(value, 10)));
+              if (maxWorkerTurns !== undefined && !Number.isInteger(maxWorkerTurns)) return;
+              updateMeetingComposerConfig((current) => {
+                const { maxWorkerTurns: _previous, ...rest } = current;
+                return maxWorkerTurns === undefined ? rest : { ...rest, maxWorkerTurns };
+              });
+            }}
+          />
+          <span className="font-normal text-muted-foreground">
+            작업·검증·재시도의 AI 호출 합계입니다. 질문 대기는 포함하지 않습니다.
+          </span>
+        </label>
+        <label className="grid gap-1 text-xs font-medium">
+          완료 검증 명령 · 한 줄에 하나
+          <textarea
+            rows={2}
+            maxLength={4000}
+            className="w-full rounded-md border border-input bg-background p-2 text-xs"
+            placeholder="프로젝트에서 실행할 검증 명령"
+            value={(config.verificationCommands ?? []).join("\n")}
+            onChange={(event) => {
+              const verificationCommands = event.currentTarget.value.split(/\r?\n/u);
+              updateMeetingComposerConfig((current) => ({ ...current, verificationCommands }));
+            }}
+          />
+          <span className="font-normal text-muted-foreground">
+            코드 작업은 통합된 폴더에서 이 명령을 통과해야 완료됩니다.
+          </span>
+        </label>
+      </div>
       <p className="mt-3 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
         {config.seats.length < 2
           ? "참가자를 2명 이상 선택하세요."
           : isDirectCollaboration
-            ? `입력창에 작업을 쓰고 보내면 오케스트라가 곧장 계획을 세우고 참가자들이 병렬로 분담 실행합니다. 오케스트라는 끌 때까지 유지됩니다. 실패한 작업은 2회까지만 재시도하고 계획 수정은 ${config.maxRevisions}회에서 멈추므로 무한히 돌지 않습니다.`
+            ? `지휘 AI가 계획을 세우고 필요한 작업을 배정합니다. 실패 복구·재계획은 ${config.maxRevisions}회까지 허용합니다. 각 모델의 추론 수준은 위에서 따로 선택할 수 있습니다.`
             : "입력창에 주제를 쓰고 보내면 이 대화창에서 오케스트라 토론이 시작됩니다. 설정한 라운드가 모두 끝나면 실행으로 넘어갈지, 라운드를 더 할지, 여기서 마칠지 물어봅니다. 오케스트라는 끌 때까지 유지됩니다."}
       </p>
     </div>

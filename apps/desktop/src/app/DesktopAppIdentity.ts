@@ -47,7 +47,7 @@ const normalizeCommitHash = (value: string): Option.Option<string> => {
 
 export const resolveUserDataPath = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  if (environment.platform === "win32" && environment.isPackaged) {
+  if (environment.configuredHome || (environment.platform === "win32" && environment.isPackaged)) {
     return environment.path.join(environment.stateDir, "desktop-profile");
   }
   const fileSystem = yield* FileSystem.FileSystem;

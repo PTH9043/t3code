@@ -1,6 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Electron's protocol handler is a native Promise callback.
 import * as Context from "effect/Context";
+import Mime from "@effect/platform-node/Mime";
+import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -54,6 +59,13 @@ export interface DesktopProtocolRegistrationInput {
   readonly targetOrigin: URL;
   readonly backendOrigin: URL;
   readonly clerkFrontendApiHostname: string | undefined;
+  readonly local?: {
+    readonly staticRoot: string;
+    readonly request: (request: Request, backendId?: string) => Promise<Response>;
+    readonly devRequest?: (request: Request) => Promise<Response>;
+    readonly useDirect?: () => Promise<boolean>;
+    readonly resolveSecondaryBackendId?: (host: string) => Promise<string | undefined>;
+  };
 }
 
 export class ElectronProtocol extends Context.Service<
@@ -81,7 +93,7 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
   // the build-configured Clerk, relay, and OTLP endpoints. Those environment
   // origins are not known when this response policy is created, so restrict
   // connections by the network schemes the client supports instead of by host.
-  const connectSources = ["'self'", "http:", "https:", "ws:", "wss:"];
+  const connectSources = ["'self'", `${input.scheme}:`, "http:", "https:", "ws:", "wss:"];
 
   return [
     "default-src 'self'",
@@ -91,7 +103,8 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
     "style-src 'self' 'unsafe-inline'",
     `font-src 'self' ${input.scheme}: data:`,
     "worker-src 'self' blob:",
-    "frame-src 'self' https://challenges.cloudflare.com",
+    "object-src 'self' blob:",
+    "frame-src 'self' blob: https://challenges.cloudflare.com",
     "form-action 'self'",
   ].join("; ");
 }
@@ -183,6 +196,102 @@ async function proxyRequest(
   return withContentSecurityPolicy(response, contentSecurityPolicy);
 }
 
+async function localRequest(
+  request: Request,
+  local: NonNullable<DesktopProtocolRegistrationInput["local"]>,
+  targetOrigin: URL,
+  contentSecurityPolicy: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.host.startsWith("wsl-")) {
+    if (!isDevProxiedPath(url.pathname)) return new Response(null, { status: 404 });
+    const allowedOrigin = `${url.protocol}//${DESKTOP_HOST}`;
+    const origin = request.headers.get("origin");
+    if (origin !== null && origin !== allowedOrigin) return new Response(null, { status: 403 });
+    // Electron does not populate Origin or referrer for custom-scheme image
+    // and fetch requests. The random host is a per-run capability instead.
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": allowedOrigin,
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers":
+        request.headers.get("access-control-request-headers") ?? "content-type, authorization",
+      "Access-Control-Allow-Credentials": "true",
+      Vary: "Origin",
+    };
+    if (request.method === "OPTIONS")
+      return new Response(null, { status: 204, headers: corsHeaders });
+    try {
+      const backendId = await local.resolveSecondaryBackendId?.(url.host);
+      if (!backendId) return new Response(null, { status: 404 });
+      const response = await local.request(request, backendId);
+      const headers = new Headers(response.headers);
+      for (const [name, value] of Object.entries(corsHeaders)) headers.set(name, value);
+      return withContentSecurityPolicy(
+        new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        }),
+        contentSecurityPolicy,
+      );
+    } catch {
+      return new Response("Local environment unavailable.", { status: 503 });
+    }
+  }
+  if (url.host !== DESKTOP_HOST) return new Response(null, { status: 404 });
+  if (isDevProxiedPath(url.pathname)) {
+    try {
+      if (local.useDirect && !(await local.useDirect())) {
+        return new Response("Local environment unavailable.", { status: 503 });
+      }
+      return withContentSecurityPolicy(await local.request(request), contentSecurityPolicy);
+    } catch {
+      return new Response("Local environment unavailable.", { status: 503 });
+    }
+  }
+  if (local.devRequest) {
+    try {
+      return withContentSecurityPolicy(await local.devRequest(request), contentSecurityPolicy);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      return new Response(`Desktop development files unavailable${code ? ` (${code})` : ""}.`, {
+        status: 503,
+      });
+    }
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(null, { status: 405 });
+  }
+  try {
+    const root = await NodeFSP.realpath(local.staticRoot);
+    const relative = decodeURIComponent(url.pathname).replace(/^[/\\]+/u, "");
+    const candidate = NodePath.resolve(root, relative || "index.html");
+    const withinRoot = (path: string) => path === root || path.startsWith(`${root}${NodePath.sep}`);
+    if (!withinRoot(candidate)) return new Response(null, { status: 400 });
+    let file = candidate;
+    try {
+      const actual = await NodeFSP.realpath(file);
+      if (!withinRoot(actual)) return new Response(null, { status: 400 });
+      if (!(await NodeFSP.stat(actual)).isFile()) throw new Error("Not a file");
+      file = actual;
+    } catch {
+      file = await NodeFSP.realpath(NodePath.join(root, "index.html"));
+      if (!withinRoot(file)) return new Response(null, { status: 400 });
+    }
+    const content = await NodeFSP.readFile(file);
+    const contentType = Mime.getType(file) ?? "application/octet-stream";
+    return withContentSecurityPolicy(
+      new Response(request.method === "HEAD" ? null : content, {
+        status: 200,
+        headers: { "Content-Type": contentType },
+      }),
+      contentSecurityPolicy,
+    );
+  } catch {
+    return new Response("Desktop files unavailable.", { status: 503 });
+  }
+}
+
 const TRANSIENT_FETCH_RETRY_DELAYS_MS = [0, 50, 150] as const;
 
 async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<Response> {
@@ -216,7 +325,9 @@ export const make = Effect.gen(function* () {
         Effect.try({
           try: () => {
             Electron.protocol.handle(input.scheme, (request) =>
-              proxyRequest(request, input.targetOrigin, contentSecurityPolicy),
+              input.local
+                ? localRequest(request, input.local, input.targetOrigin, contentSecurityPolicy)
+                : proxyRequest(request, input.targetOrigin, contentSecurityPolicy),
             );
           },
           catch: (cause) => new ElectronProtocolRegistrationError({ scheme: input.scheme, cause }),

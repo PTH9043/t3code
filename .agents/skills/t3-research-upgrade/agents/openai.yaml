@@ -1,0 +1,3 @@
+interface:
+  display_name: "T3 Research Upgrade"
+  short_description: "Validate T3 research changes with source and test evidence"

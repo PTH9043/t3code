@@ -1,10 +1,18 @@
-import type { ProviderInstanceId, ScopedThreadRef, WorkspaceMeetingMode } from "@t3tools/contracts";
+import {
+  WorkspaceMeetingParticipantId,
+  type ProviderInstanceId,
+  type ScopedThreadRef,
+  type WorkspaceMeetingMode,
+  type WorkspaceExecutionProfile,
+  type WorkspaceMeetingSetup,
+} from "@t3tools/contracts";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import type { DraftId } from "./composerDraftStore";
 import { useWorkspaceTabStore } from "./workspaceTabStore";
+import { randomUUID } from "./lib/utils";
 
 /**
  * The composer surface a meeting send goes out from. The value does not scope
@@ -14,7 +22,7 @@ import { useWorkspaceTabStore } from "./workspaceTabStore";
 export type MeetingComposerTarget = ScopedThreadRef | DraftId;
 
 export interface MeetingComposerSeat {
-  /** Participant id sent to the server; derived from the instance id. */
+  /** Stable participant id, independent of its account and selected model. */
   readonly id: string;
   readonly instanceId: ProviderInstanceId;
   readonly model: string;
@@ -35,8 +43,9 @@ export interface MeetingComposerConfig {
   readonly style: MeetingComposerStyle;
   readonly mode: WorkspaceMeetingMode;
   readonly maxRounds: number;
-  /** "바로 실행"의 횟수 제한: 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
+  /** 실패 복구·재계획을 합친 그래프 수정 한도 (1–8). */
   readonly maxRevisions: number;
+  readonly allowAdditionalWorkers: boolean;
   /**
    * 오케스트라는 이제 상시 모드다: armed면 실행 단계 노드들을 각자의 대화에서
    * 병렬로 돌린다. 이 플래그는 예전 설정 호환용으로만 남아 있고 send 경로는
@@ -50,21 +59,32 @@ export interface MeetingComposerConfig {
    * 병렬 수정을 허용한다. 꺼져 있으면 수정 작업은 한 번에 하나씩 실행된다.
    */
   readonly isolateWorktrees: boolean;
+  readonly reviewPlan?: boolean;
+  readonly resumeAfterLimit?: boolean;
+  readonly verificationCommands?: ReadonlyArray<string>;
+  readonly maxWorkerTurns?: number;
   readonly userInLoop: boolean;
   /** Null elects the first seat, mirroring the server's chair election. */
   readonly chairSeatId: string | null;
   readonly seats: ReadonlyArray<MeetingComposerSeat>;
+  readonly executionProfile?: WorkspaceExecutionProfile;
 }
+
+const EMPTY_VERIFICATION_COMMANDS: ReadonlyArray<string> = [];
 
 export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   enabled: false,
-  style: "meeting",
+  style: "collaboration",
   mode: "fixed-rounds",
   maxRounds: 2,
-  maxRevisions: 8,
+  maxRevisions: 1,
+  allowAdditionalWorkers: false,
   orchestraEnabled: true,
   maxParallel: 3,
   isolateWorktrees: false,
+  reviewPlan: false,
+  resumeAfterLimit: false,
+  verificationCommands: EMPTY_VERIFICATION_COMMANDS,
   userInLoop: false,
   chairSeatId: null,
   seats: [],
@@ -99,6 +119,7 @@ function normalizeMeetingComposerConfig(
   return {
     ...config,
     style,
+    allowAdditionalWorkers: config.allowAdditionalWorkers ?? true,
     maxRounds:
       config.maxRounds === 0 ? DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds : config.maxRounds,
     maxRevisions:
@@ -111,6 +132,9 @@ function normalizeMeetingComposerConfig(
     // Persisted before the orchestra existed: off, at the default width.
     orchestraEnabled: config.orchestraEnabled === true,
     isolateWorktrees: config.isolateWorktrees === true,
+    reviewPlan: config.reviewPlan === true,
+    resumeAfterLimit: config.resumeAfterLimit === true,
+    verificationCommands: config.verificationCommands ?? EMPTY_VERIFICATION_COMMANDS,
     maxParallel:
       typeof config.maxParallel === "number" &&
       Number.isInteger(config.maxParallel) &&
@@ -219,6 +243,10 @@ export function useMeetingComposerConfig(): MeetingComposerConfig {
     const active = state.tabs.find((tab) => tab.id === state.activeTabId);
     return active?.projectKey ?? NO_FOLDER_KEY;
   });
+  return useMeetingComposerConfigForFolder(folderKey);
+}
+
+export function useMeetingComposerConfigForFolder(folderKey: string): MeetingComposerConfig {
   return useMeetingComposerStore(
     useShallow((state) =>
       normalizeMeetingComposerConfig(
@@ -226,6 +254,63 @@ export function useMeetingComposerConfig(): MeetingComposerConfig {
       ),
     ),
   );
+}
+
+export function meetingSetupFromConfig(config: MeetingComposerConfig): WorkspaceMeetingSetup {
+  return {
+    mode: config.mode,
+    allowAdditionalWorkers: config.allowAdditionalWorkers,
+    participants: config.seats.map((seat) => ({
+      id: WorkspaceMeetingParticipantId.make(seat.id),
+      displayName: seat.displayName,
+      modelSelection: {
+        instanceId: seat.instanceId,
+        model: seat.model,
+        ...(seat.options ? { options: seat.options } : {}),
+      },
+    })),
+    chairParticipantId: config.chairSeatId
+      ? WorkspaceMeetingParticipantId.make(config.chairSeatId)
+      : null,
+    maxRounds: config.style === "collaboration" ? 0 : config.maxRounds,
+    maxRevisions: config.maxRevisions,
+    userInLoop: config.userInLoop,
+  };
+}
+
+export function configFromExecutionProfile(
+  config: MeetingComposerConfig,
+  profile: WorkspaceExecutionProfile,
+): MeetingComposerConfig {
+  return {
+    ...config,
+    enabled: true,
+    style: profile.meeting.maxRounds === 0 ? "collaboration" : "meeting",
+    mode: profile.meeting.mode,
+    maxRounds: profile.meeting.maxRounds || DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds,
+    maxRevisions: profile.meeting.maxRevisions ?? 1,
+    allowAdditionalWorkers: profile.meeting.allowAdditionalWorkers ?? false,
+    userInLoop: profile.meeting.userInLoop,
+    chairSeatId: profile.meeting.chairParticipantId,
+    maxParallel: profile.orchestra.maxParallel,
+    isolateWorktrees: profile.orchestra.isolateWorktrees,
+    reviewPlan: profile.orchestra.reviewPlan === true,
+    resumeAfterLimit: profile.orchestra.resumeAfterLimit === true,
+    verificationCommands: profile.verificationCommands,
+    ...(profile.orchestra.maxWorkerTurns === undefined
+      ? {}
+      : { maxWorkerTurns: profile.orchestra.maxWorkerTurns }),
+    seats: profile.meeting.participants.map((participant) => ({
+      id: participant.id,
+      displayName: participant.displayName,
+      instanceId: participant.modelSelection.instanceId,
+      model: participant.modelSelection.model,
+      ...(participant.modelSelection.options
+        ? { options: participant.modelSelection.options }
+        : {}),
+    })),
+    executionProfile: profile,
+  };
 }
 
 export function updateMeetingComposerConfig(
@@ -236,6 +321,20 @@ export function updateMeetingComposerConfig(
 
 /** The server's roster cap; a ninth checkbox is refused here rather than at send. */
 export const MAX_MEETING_SEATS = 8;
+
+/** One account can contribute several models, each with its own role and options. */
+export function addMeetingComposerSeat(seat: Omit<MeetingComposerSeat, "id">): void {
+  updateMeetingComposerConfig((config) => {
+    if (
+      config.seats.length >= MAX_MEETING_SEATS ||
+      config.seats.some(
+        (current) => current.instanceId === seat.instanceId && current.model === seat.model,
+      )
+    )
+      return config;
+    return { ...config, seats: [...config.seats, { ...seat, id: `seat-${randomUUID()}` }] };
+  });
+}
 
 /**
  * Check or uncheck one account's seat. The chair follows the roster: a chair
@@ -258,11 +357,27 @@ export function toggleMeetingComposerSeat(seat: MeetingComposerSeat): void {
   });
 }
 
-export function setMeetingComposerSeatModel(seatId: string, model: string): void {
-  updateMeetingComposerConfig((config) => ({
-    ...config,
-    seats: config.seats.map((seat) => (seat.id === seatId ? { ...seat, model } : seat)),
-  }));
+export function setMeetingComposerSeatModel(
+  seatId: string,
+  model: string,
+  options: NonNullable<MeetingComposerSeat["options"]> = [],
+): void {
+  updateMeetingComposerConfig((config) => {
+    const current = config.seats.find((seat) => seat.id === seatId);
+    if (
+      !current ||
+      current.model === model ||
+      config.seats.some(
+        (seat) =>
+          seat.id !== seatId && seat.instanceId === current.instanceId && seat.model === model,
+      )
+    )
+      return config;
+    return {
+      ...config,
+      seats: config.seats.map((seat) => (seat.id === seatId ? { ...seat, model, options } : seat)),
+    };
+  });
 }
 
 /** Set one provider option (effort above all) on one seat's turns. */

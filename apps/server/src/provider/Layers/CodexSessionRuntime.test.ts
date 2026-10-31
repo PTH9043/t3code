@@ -1,4 +1,5 @@
 import * as NodeAssert from "node:assert/strict";
+import * as Path from "effect/Path";
 
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -19,9 +20,70 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  registerCodexWorkflowSkills,
   shouldReloadConfiguredMcpServerBeforeTurn,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("registerCodexWorkflowSkills", () => {
+  const pinnedPath = "/fixture-cache/digest/source/SKILL.md";
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const client = (enabled: boolean, listedPath = pinnedPath) => ({
+    request: <M extends "skills/extraRoots/set" | "skills/list">(
+      method: M,
+      params: CodexRpc.ClientRequestParamsByMethod[M],
+    ) => {
+      calls.push({ method, params });
+      return Effect.succeed(
+        (method === "skills/list"
+          ? {
+              data: [
+                {
+                  cwd: "/fixture",
+                  errors: [],
+                  skills: [
+                    {
+                      name: "selected",
+                      path: listedPath,
+                      enabled,
+                      description: "fixture",
+                      scope: "user",
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}) as CodexRpc.ClientRequestResponsesByMethod[M],
+      );
+    },
+  });
+  it.effect("registers the pinned root and verifies the exact enabled native path", () =>
+    Effect.gen(function* () {
+      calls.length = 0;
+      yield* registerCodexWorkflowSkills(client(true), "/fixture", [
+        { name: "selected", path: pinnedPath },
+        { name: "selected", path: pinnedPath },
+      ]);
+      NodeAssert.deepStrictEqual(calls, [
+        {
+          method: "skills/extraRoots/set",
+          params: { extraRoots: ["/fixture-cache/digest"] },
+        },
+        { method: "skills/list", params: { cwds: ["/fixture"], forceReload: true } },
+      ]);
+    }).pipe(Effect.provide(Path.layer)),
+  );
+  it.effect("rejects disabled entries and a same-name skill at a different path", () =>
+    Effect.gen(function* () {
+      for (const native of [client(false), client(true, "/original/SKILL.md")]) {
+        const error = yield* registerCodexWorkflowSkills(native, "/fixture", [
+          { name: "selected", path: pinnedPath },
+        ]).pipe(Effect.flip);
+        NodeAssert.equal(error._tag, "CodexSessionRuntimeSkillNotRegisteredError");
+      }
+    }).pipe(Effect.provide(Path.layer)),
+  );
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
@@ -64,6 +126,21 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.effect("keeps native skill items and the selected runtime policy together", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "approval-required",
+        prompt: "$selected review",
+        skills: [{ name: "selected", path: "/pinned/source/SKILL.md" }],
+      });
+      NodeAssert.deepStrictEqual(params.input, [
+        { type: "text", text: "$selected review" },
+        { type: "skill", name: "selected", path: "/pinned/source/SKILL.md" },
+      ]);
+      NodeAssert.equal(params.approvalPolicy, "untrusted");
+    }),
+  );
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(

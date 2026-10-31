@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
+  type ChatAttachment,
   CommandId,
   MessageId,
   type OrchestrationEvent,
@@ -43,6 +44,13 @@ import {
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ServerConfig } from "../../config.ts";
+import {
+  collectGeneratedAttachments,
+  nativeResultSources,
+  type ResultSource,
+} from "../../generatedResults.ts";
+import { extractResultFileLinks } from "@t3tools/shared/generatedResults";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -246,13 +254,13 @@ function assistantSegmentMessageId(baseKey: string, segmentIndex: number): Messa
   );
 }
 function buildContextWindowActivityPayload(event: ProviderRuntimeEvent):
-  | (ThreadTokenUsageSnapshot & {
+  | (Partial<ThreadTokenUsageSnapshot> & {
       consumption?: import("@t3tools/contracts").TokenUsageObservation[];
     })
   | undefined {
   if (
     event.type !== "thread.token-usage.updated" ||
-    (event.payload.usage.usedTokens <= 0 && !event.payload.consumption?.length)
+    ((event.payload.usage?.usedTokens ?? 0) <= 0 && !event.payload.consumption?.length)
   ) {
     return undefined;
   }
@@ -533,10 +541,11 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: "User input submitted",
+          summary: event.payload.reason ? "User input request closed" : "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.reason ? { reason: event.payload.reason } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -883,6 +892,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const serverConfig = yield* ServerConfig;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -938,7 +948,11 @@ const make = Effect.gen(function* () {
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadRuntimeContext(threadId, {
+        messages: true,
+        proposedPlans: true,
+        activityKinds: ["task.started", "task.progress"],
+      })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -1187,6 +1201,45 @@ const make = Effect.gen(function* () {
       return flushedMessageIds;
     });
 
+  const collectMessageResults = Effect.fn("collectMessageResults")(function* (input: {
+    threadId: ThreadId;
+    messageId: MessageId;
+    turnId: string;
+    text?: string;
+    sources?: ReadonlyArray<ResultSource>;
+  }) {
+    if (!input.sources?.length && extractResultFileLinks(input.text ?? "").length === 0)
+      return undefined;
+    const context = yield* projectionSnapshotQuery.getThreadCheckpointContext(input.threadId);
+    if (Option.isNone(context)) return undefined;
+    const collected = yield* Effect.tryPromise(() =>
+      collectGeneratedAttachments({
+        ...input,
+        workspaceRoot: context.value.worktreePath ?? context.value.workspaceRoot,
+        attachmentsDir: serverConfig.attachmentsDir,
+      }),
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not collect generated results", { cause }).pipe(
+          Effect.as({ attachments: [] as ChatAttachment[], failures: [] as string[] }),
+        ),
+      ),
+    );
+    if (collected.failures.length > 0)
+      yield* Effect.logWarning("Some generated results could not be collected", {
+        failures: collected.failures,
+      });
+    if (collected.attachments.length === 0) return undefined;
+    const detail = yield* resolveThreadDetail(input.threadId);
+    const existing =
+      detail?.messages.find((message) => message.id === input.messageId)?.attachments ?? [];
+    const merged = [...existing];
+    for (const attachment of collected.attachments) {
+      if (!merged.some((entry) => entry.id === attachment.id)) merged.push(attachment);
+    }
+    return merged.length > 0 ? merged : undefined;
+  });
+
   const finalizeAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -1196,6 +1249,7 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    previousText?: string | undefined;
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
@@ -1220,12 +1274,19 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (input.hasProjectedMessage || hasRenderableText) {
+      const attachments = yield* collectMessageResults({
+        threadId: input.threadId,
+        messageId: input.messageId,
+        turnId: input.turnId ?? String(input.messageId),
+        text: (input.previousText ?? "") + text,
+      });
+      if (input.hasProjectedMessage || hasRenderableText || attachments?.length) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
           commandId: yield* providerCommandId(input.event, input.commandTag),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...(attachments ? { attachments } : {}),
           ...(input.turnId ? { turnId: input.turnId } : {}),
           createdAt: input.createdAt,
         });
@@ -1252,7 +1313,11 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      const segmentThread = yield* resolveThreadDetail(input.threadId);
       yield* finalizeAssistantMessage({
+        previousText: segmentThread?.messages.find(
+          (message) => message.id === activeMessageId.value,
+        )?.text,
         event: input.event,
         threadId: input.threadId,
         messageId: activeMessageId.value,
@@ -1643,6 +1708,34 @@ const make = Effect.gen(function* () {
         }
       }
 
+      if (event.type === "item.completed" && event.payload.status !== "failed") {
+        const sources = nativeResultSources(event.payload.data);
+        if (sources.length > 0) {
+          const messageId = MessageId.make(
+            "assistant:result:" +
+              (event.turnId ?? event.eventId) +
+              ":" +
+              (event.itemId ?? event.eventId),
+          );
+          const attachments = yield* collectMessageResults({
+            threadId: thread.id,
+            messageId,
+            turnId: String(event.turnId ?? event.eventId),
+            sources,
+          });
+          if (attachments?.length)
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.complete",
+              commandId: yield* providerCommandId(event, "generated-results"),
+              threadId: thread.id,
+              messageId,
+              attachments,
+              ...(eventTurnId ? { turnId: eventTurnId } : {}),
+              createdAt: now,
+            });
+        }
+      }
+
       const assistantDelta =
         event.type === "content.delta" && event.payload.streamKind === "assistant_text"
           ? event.payload.delta
@@ -1796,6 +1889,7 @@ const make = Effect.gen(function* () {
             commandTag: "assistant-complete",
             finalDeltaCommandTag: "assistant-delta-finalize",
             hasProjectedMessage: existingAssistantMessage !== undefined,
+            previousText: existingAssistantMessage?.text,
             ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
               ? { fallbackText: assistantCompletion.fallbackText }
               : {}),
@@ -1843,6 +1937,7 @@ const make = Effect.gen(function* () {
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
                 hasProjectedMessage: findMessageById(messages, assistantMessageId) !== undefined,
+                previousText: findMessageById(messages, assistantMessageId)?.text,
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);

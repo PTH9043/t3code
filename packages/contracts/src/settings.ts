@@ -8,8 +8,9 @@ import {
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
   ProviderOptionSelections,
 } from "./model.ts";
-import { ModelSelection } from "./orchestration.ts";
+import { ModelSelection, WorkspaceExecutionProfile } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { ManagedMcpServerConfig, McpProjectProfile, McpServerName } from "./mcpTools.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -252,13 +253,14 @@ const makeBinaryPathSetting = (fallback: string) =>
     Schema.withDecodingDefault(Effect.succeed(fallback)),
   );
 
-export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch";
+export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch" | "select";
 
 export interface ProviderSettingsFormAnnotation {
   readonly control?: ProviderSettingsFormControl | undefined;
   readonly placeholder?: string | undefined;
   readonly hidden?: boolean | undefined;
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
+  readonly options?: ReadonlyArray<{ readonly value: string; readonly label: string }> | undefined;
 }
 
 export interface ProviderSettingsFormSchemaAnnotation {
@@ -369,6 +371,36 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "~/.claude", clearWhenEmpty: "omit" },
       }),
     ),
+    promptCacheTtl: Schema.optionalKey(Schema.Literals(["inherit", "5m", "1h"])).pipe(
+      Schema.annotateKey({
+        title: "대화 캐시 유지 시간",
+        description:
+          "inherit: Claude 기본 설정 유지, 5m: 5분, 1h: 1시간. 1시간은 캐시 쓰기 비용이 더 높습니다. 환경 변수·관리자 설정이 우선할 수 있으며 새 세션부터 적용됩니다.",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "inherit", label: "Claude 기본 설정" },
+            { value: "5m", label: "5분" },
+            { value: "1h", label: "1시간" },
+          ],
+        },
+      }),
+    ),
+    subagentPromptCacheTtl: Schema.optionalKey(Schema.Literals(["inherit", "5m", "1h"])).pipe(
+      Schema.annotateKey({
+        title: "Claude 내부 에이전트 캐시 유지 시간",
+        description:
+          "inherit, 5m, 1h 중 선택합니다. Claude가 내부에서 생성한 에이전트에 적용됩니다. 오케스트라의 개별 AI 실행은 위 대화 설정을 사용합니다.",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "inherit", label: "Claude 기본 설정" },
+            { value: "5m", label: "5분" },
+            { value: "1h", label: "1시간" },
+          ],
+        },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -386,7 +418,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "launchArgs", "promptCacheTtl", "subagentPromptCacheTtl"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -498,6 +530,17 @@ export const GeminiSettings = makeProviderSettingsSchema(
 );
 export type GeminiSettings = typeof GeminiSettings.Type;
 
+export const OpenCodeApiConnection = Schema.Struct({
+  providerId: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-zA-Z][a-zA-Z0-9_-]*$/)),
+  baseUrl: TrimmedNonEmptyString.check(Schema.isPattern(/^https?:\/\//)),
+  protocol: Schema.Literals(["chat-completions", "responses"]),
+  models: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
+  contextTokens: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  outputTokens: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+});
+export type OpenCodeApiConnection = typeof OpenCodeApiConnection.Type;
+export const OPENCODE_API_KEY_ENV = "T3_OPENCODE_API_KEY";
+
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -536,6 +579,9 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
           clearWhenEmpty: "omit",
         },
       }),
+    ),
+    apiConnection: Schema.optionalKey(OpenCodeApiConnection).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
@@ -614,7 +660,45 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+export const AiSearchSettings = Schema.Struct({
+  semanticEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  embeddingEndpoint: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("http://127.0.0.1:11434")),
+  ),
+  embeddingModel: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("embeddinggemma:300m-qat-q4_0")),
+  ),
+  ocrEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  documentCacheEnabled: Schema.optionalKey(Schema.Boolean),
+  documentCacheEpoch: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  researchModel: TrimmedNonEmptyString.pipe(Schema.withDecodingDefault(Effect.succeed("grok-4.7"))),
+  researchMaxTurns: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 8 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(3)),
+  ),
+  researchDailyUsd: Schema.NullOr(
+    Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0)),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+});
+export type AiSearchSettings = typeof AiSearchSettings.Type;
+
 export const ServerSettings = Schema.Struct({
+  aiSearch: AiSearchSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  customMcpServers: Schema.Record(McpServerName, ManagedMcpServerConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  mcpProjectProfiles: Schema.Record(TrimmedNonEmptyString, McpProjectProfile).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  mcpTools: Schema.Struct({
+    openaiDocs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    context7: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    filesystem: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    sequentialThinking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    claudeTools: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  executionProfiles: Schema.Record(TrimmedNonEmptyString, WorkspaceExecutionProfile).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
   // including prior opt-ins, resets to the buffered default.
@@ -672,6 +756,10 @@ export const ServerSettings = Schema.Struct({
   // schemas live here for the duration of the migration; once each driver
   // owns its config in its own package, this struct shrinks to nothing and
   // is removed entirely.
+  providerAutoSwitch: Schema.Struct({
+    codex: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    claudeAgent: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   providers: Schema.Struct({
     codex: CodexSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     claudeAgent: ClaudeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -792,9 +880,54 @@ const OpenCodeSettingsPatch = Schema.Struct({
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  apiConnection: Schema.optionalKey(OpenCodeApiConnection),
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  aiSearch: Schema.optionalKey(
+    Schema.Struct({
+      semanticEnabled: Schema.optionalKey(Schema.Boolean),
+      embeddingEndpoint: Schema.optionalKey(TrimmedNonEmptyString),
+      embeddingModel: Schema.optionalKey(TrimmedNonEmptyString),
+      ocrEnabled: Schema.optionalKey(Schema.Boolean),
+      documentCacheEnabled: Schema.optionalKey(Schema.Boolean),
+      documentCacheEpoch: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+      researchModel: Schema.optionalKey(TrimmedNonEmptyString),
+      researchMaxTurns: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 8 })),
+      ),
+      researchDailyUsd: Schema.optionalKey(
+        Schema.NullOr(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0))),
+      ),
+    }),
+  ),
+  customMcpServersToUpsert: Schema.optionalKey(
+    Schema.Record(McpServerName, ManagedMcpServerConfig),
+  ),
+  customMcpServerIdsToRemove: Schema.optionalKey(Schema.Array(McpServerName)),
+  mcpProjectProfilesToUpsert: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, McpProjectProfile),
+  ),
+  mcpProjectProfileRootsToRemove: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  mcpTools: Schema.optionalKey(
+    Schema.Struct({
+      openaiDocs: Schema.optionalKey(Schema.Boolean),
+      context7: Schema.optionalKey(Schema.Boolean),
+      filesystem: Schema.optionalKey(Schema.Boolean),
+      sequentialThinking: Schema.optionalKey(Schema.Boolean),
+      claudeTools: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
+  executionProfilesToUpsert: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, WorkspaceExecutionProfile),
+  ),
+  executionProfileIdsToRemove: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  providerAutoSwitch: Schema.optionalKey(
+    Schema.Struct({
+      codex: Schema.optionalKey(Schema.Boolean),
+      claudeAgent: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
@@ -858,6 +991,10 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  // Merge account entries under the settings write lock, preserving concurrent additions.
+  providerInstancesToUpsert: Schema.optionalKey(
+    Schema.Record(ProviderInstanceId, ProviderInstanceConfig),
+  ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

@@ -50,7 +50,7 @@ export function formatLoopbackAuthorizationPrompt(authorizationUrl: string): str
     "Open this URL to authorize T3 Connect:",
     `  ${authorizationUrl}`,
     "",
-    `Press ${boldTerminalText("Enter")} to open it in your browser.`,
+    "Opening it in your browser now.",
     `No browser on this device? Press ${boldTerminalText("H")} to switch to headless mode.`,
   ].join("\n");
 }
@@ -83,15 +83,30 @@ export const waitForLoopbackAuthorization = Effect.fn(
   readonly launchBrowser: (
     url: string,
   ) => Effect.Effect<void, ExternalLauncher.ExternalLauncherError>;
+  readonly launchImmediately?: boolean;
 }) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
+      if (input.launchImmediately) {
+        yield* input
+          .launchBrowser(input.authorizationUrl)
+          .pipe(
+            Effect.catch(() =>
+              Console.warn(
+                `Could not open a browser on this device. Open the URL above manually, or press ${boldTerminalText("H")} to switch to headless mode.`,
+              ),
+            ),
+          );
+      }
       const terminalInput = yield* input.terminal.readInput;
       while (true) {
         const result = yield* Effect.raceFirst(
           input.callback.pipe(
             Effect.map(
-              (code): LoopbackAuthorizationResult => ({ _tag: "AuthorizationCode", code }),
+              (code): LoopbackAuthorizationResult => ({
+                _tag: "AuthorizationCode",
+                code,
+              }),
             ),
           ),
           readLoopbackAuthorizationAction(terminalInput),
@@ -417,6 +432,7 @@ export const make = Effect.gen(function* () {
       ),
       terminal,
       launchBrowser: externalLauncher.launchBrowser,
+      launchImmediately: true,
     });
     if (authorization._tag === "HeadlessRequested") {
       return authorization;

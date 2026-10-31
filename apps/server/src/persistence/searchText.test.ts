@@ -9,6 +9,34 @@ import {
   termCoverage,
 } from "./searchText.ts";
 
+it("keeps section headings on long continuations and respects paragraph and Unicode boundaries", () => {
+  const chunks = chunkSearchableContent(
+    "# Cancellation\n\n" +
+      "😀 first paragraph policy. ".repeat(150) +
+      "\n\n# Shipping\n\n" +
+      "second paragraph delivery. ".repeat(100),
+  );
+  expect(chunks.every((chunk) => chunk.length <= 1200)).toBe(true);
+  expect(
+    chunks
+      .filter((chunk) => chunk.includes("first paragraph"))
+      .every((chunk) => chunk.startsWith("# Cancellation")),
+  ).toBe(true);
+  expect(
+    chunks
+      .filter((chunk) => chunk.includes("second paragraph"))
+      .every((chunk) => chunk.startsWith("# Shipping")),
+  ).toBe(true);
+  expect(
+    chunks.some((chunk) => chunk.includes("first paragraph") && chunk.includes("second paragraph")),
+  ).toBe(false);
+  expect(
+    chunks.every(
+      (chunk) => !/[\uD800-\uDBFF]$/u.test(chunk) && !/[\uDC00-\uDFFF]/u.test(chunk[0] ?? ""),
+    ),
+  ).toBe(true);
+});
+
 describe("analyzeSearchText", () => {
   it("indexes Korean as overlapping bigrams so particles no longer hide a word", () => {
     expect(analyzeSearchText("수익률을 확인")).toBe("수익 익률 률을 확인");

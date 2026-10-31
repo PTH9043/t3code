@@ -7,6 +7,7 @@ import {
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
+  type ApprovalRequestId,
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
@@ -169,16 +170,18 @@ export function resolveVisibleThreadError(input: {
  */
 export function buildThreadTurnInterruptInput(
   thread: Pick<Thread, "id" | "session">,
-  options?: { readonly stopBackground?: boolean },
+  options?: { readonly stopBackground?: boolean; readonly questionRequestId?: ApprovalRequestId },
 ): {
   threadId: ThreadId;
   turnId?: TurnId;
+  questionRequestId?: ApprovalRequestId;
   stopBackground?: boolean;
 } {
   const runningTurnId = thread.session?.status === "running" ? thread.session.activeTurnId : null;
   return {
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
+    ...(options?.questionRequestId ? { questionRequestId: options.questionRequestId } : {}),
     ...(options?.stopBackground === true ? { stopBackground: true } : {}),
   };
 }

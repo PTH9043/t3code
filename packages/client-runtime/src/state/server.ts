@@ -724,6 +724,45 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId }) => environmentId,
       },
     }),
+    getMcpTools: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:mcp-tools",
+      tag: WS_METHODS.serverGetMcpTools,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.workspaceRoot ?? ""}:${input.check === true}`,
+      },
+    }),
+    getExtensions: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:extensions",
+      tag: WS_METHODS.serverGetExtensions,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.workspaceRoot ?? ""}`,
+      },
+    }),
+    manageExtension: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:manage-extension",
+      tag: WS_METHODS.serverManageExtension,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    previewConversation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:conversation:preview",
+      tag: WS_METHODS.conversationPreview,
+    }),
+    importConversation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:conversation:import",
+      tag: WS_METHODS.conversationImport,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    exportConversation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:conversation:export",
+      tag: WS_METHODS.conversationExport,
+    }),
+    uploadDesignImage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:design:image-upload",
+      tag: WS_METHODS.designImageUpload,
+    }),
     updateProvider: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:update-provider",
       tag: WS_METHODS.serverUpdateProvider,
@@ -738,6 +777,22 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
       },
     }),
+    connectDeepSeek: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:deepseek-connect",
+      tag: WS_METHODS.deepSeekConnect,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
+      },
+    }),
+    connectAntseed: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:antseed-connect",
+      tag: WS_METHODS.antseedConnect,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
+      },
+    }),
     completeGeminiAuth: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:gemini-auth-complete",
       tag: WS_METHODS.geminiAuthComplete,
@@ -745,6 +800,14 @@ export function createServerEnvironmentAtoms<R, E>(
     cancelGeminiAuth: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:gemini-auth-cancel",
       tag: WS_METHODS.geminiAuthCancel,
+    }),
+    loginProviderAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:provider-account-login",
+      tag: WS_METHODS.providerAccountLogin,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.driver}`,
+      },
     }),
     updateServer,
     upsertKeybinding: createEnvironmentRpcCommand(runtime, {

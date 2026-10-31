@@ -32,6 +32,7 @@ const DEFAULT_MAX_AGE_MS = 14 * DAY_MS;
 const DEFAULT_RETENTION_CHECK_INTERVAL_MS = 5 * 60 * 1_000;
 const DEFAULT_MAX_BUFFERED_BYTES = MEBIBYTE;
 const DEFAULT_MAX_BUFFERED_RECORDS = 512;
+const DEFAULT_MAX_CACHED_SINKS = 128;
 const GLOBAL_THREAD_SEGMENT = "_global";
 const LOG_SCOPE = "provider-observability";
 const encodeUnknownJsonString = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
@@ -69,6 +70,7 @@ export interface EventNdjsonLogStoreOptions {
   readonly retentionCheckIntervalMs?: number;
   readonly maxBufferedBytes?: number;
   readonly maxBufferedRecords?: number;
+  readonly maxCachedSinks?: number;
   readonly attribution?: ResourceAttribution["Service"];
 }
 
@@ -115,6 +117,7 @@ interface ResolvedOptions {
   readonly retentionCheckIntervalMs: number;
   readonly maxBufferedBytes: number;
   readonly maxBufferedRecords: number;
+  readonly maxCachedSinks: number;
   readonly attribution: ResourceAttribution["Service"] | undefined;
 }
 
@@ -316,6 +319,7 @@ function resolveOptions(
       options.retentionCheckIntervalMs ?? DEFAULT_RETENTION_CHECK_INTERVAL_MS,
     maxBufferedBytes: options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES,
     maxBufferedRecords: options.maxBufferedRecords ?? DEFAULT_MAX_BUFFERED_RECORDS,
+    maxCachedSinks: options.maxCachedSinks ?? DEFAULT_MAX_CACHED_SINKS,
     attribution: options.attribution,
   } satisfies ResolvedOptions;
 
@@ -328,6 +332,7 @@ function resolveOptions(
     ["retentionCheckIntervalMs", resolved.retentionCheckIntervalMs, 1],
     ["maxBufferedBytes", resolved.maxBufferedBytes, 1],
     ["maxBufferedRecords", resolved.maxBufferedRecords, 1],
+    ["maxCachedSinks", resolved.maxCachedSinks, 1],
   ] as const;
 
   for (const [option, value, minimum] of validations) {
@@ -375,11 +380,19 @@ function drainPending(input: {
           maxFiles: input.options.maxFiles,
           throwOnError: true,
         });
-        sinks.set(threadSegment, sink);
       } catch (cause) {
         failures.push({ filePath, cause });
         continue;
       }
+    }
+
+    // Sinks open files only for individual writes. Evicting their metadata is safe.
+    sinks.delete(threadSegment);
+    sinks.set(threadSegment, sink);
+    while (sinks.size > input.options.maxCachedSinks) {
+      const oldest = sinks.keys().next().value;
+      if (oldest === undefined) break;
+      sinks.delete(oldest);
     }
 
     try {
@@ -429,7 +442,7 @@ function drainPending(input: {
     {
       pending: [],
       pendingBytes: 0,
-      sinks,
+      sinks: input.close ? new Map() : sinks,
       flushScheduled: input.timerFired ? false : input.state.flushScheduled,
       closed: input.close,
       lastRetentionAt: retentionDue ? input.now : input.state.lastRetentionAt,

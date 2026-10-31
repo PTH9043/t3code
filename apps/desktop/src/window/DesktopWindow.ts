@@ -10,6 +10,7 @@ import * as Electron from "electron";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopDirectRpcHub from "../backend/DesktopDirectRpcHub.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
@@ -20,6 +21,11 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import { installDesktopFileDrop } from "./DesktopFileDrop.ts";
+import { installDesktopDirectRpcIpc } from "./DesktopDirectRpcIpc.ts";
+import * as DesktopSavedEnvironments from "../settings/DesktopSavedEnvironments.ts";
+import { directHttpRequest } from "../backend/DesktopDirectHttpClient.ts";
+import { selectRestoredGoogleBearerToken } from "../backend/DesktopLocalEnvironmentAuth.ts";
 
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
@@ -64,6 +70,42 @@ export type DesktopWindowError =
   | PreviewManager.PreviewManagerError;
 
 export type MainWindowZoomDirection = "in" | "out" | "reset";
+
+export async function verifyRestoredGoogleToken(input: {
+  readonly token: string;
+  readonly httpBaseUrl: URL;
+  readonly directRpcHub: Option.Option<DesktopDirectRpcHub.DesktopDirectRpcHub["Service"]>;
+  readonly networkFetch?: typeof fetch;
+}): Promise<boolean> {
+  try {
+    let response: Response | undefined;
+    if (Option.isSome(input.directRpcHub)) {
+      response = await directHttpRequest(
+        input.directRpcHub.value,
+        new Request("http://desktop.invalid/api/auth/session"),
+        "primary",
+        input.token,
+      ).catch(() => undefined);
+    }
+    response ??= await (input.networkFetch ?? fetch)(
+      new URL("/api/auth/session", input.httpBaseUrl),
+      {
+        headers: { authorization: `Bearer ${input.token}` },
+        redirect: "error",
+      },
+    );
+    const result: unknown = await response.json();
+    return (
+      response.ok &&
+      typeof result === "object" &&
+      result !== null &&
+      "authenticated" in result &&
+      result.authenticated === true
+    );
+  } catch {
+    return false;
+  }
+}
 
 export class DesktopWindow extends Context.Service<
   DesktopWindow,
@@ -263,7 +305,11 @@ export const make = Effect.gen(function* () {
   const electronTheme = yield* ElectronTheme.ElectronTheme;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const previewManager = yield* PreviewManager.PreviewManager;
+  const directRpcHub = yield* Effect.serviceOption(DesktopDirectRpcHub.DesktopDirectRpcHub);
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const savedEnvironments = yield* Effect.serviceOption(
+    DesktopSavedEnvironments.DesktopSavedEnvironments,
+  );
   // Window-side latch for the primary backend's readiness. Set by
   // handleBackendReady (driven by the pool's onReady callback), cleared
   // by handleBackendNotReady (driven by onShutdown). Only consumed by
@@ -364,6 +410,39 @@ export const make = Effect.gen(function* () {
     if (environment.platform === "darwin") {
       window.setAutoHideCursor(false);
     }
+    if (environment.platform === "win32") {
+      yield* Effect.tryPromise(() =>
+        installDesktopFileDrop(
+          window,
+          environment.isPackaged
+            ? environment.path.join(
+                environment.resourcesPath,
+                "windows-file-drop",
+                "t3-file-drop.dll",
+              )
+            : environment.path.join(
+                environment.appRoot,
+                "native/windows-file-drop/target",
+                environment.processArch,
+                "t3-file-drop.dll",
+              ),
+          (error) => {
+            runFork(logWindowWarning("Native file drop failed", { cause: String(error) }));
+          },
+          (fileCount) => {
+            runFork(logWindowInfo("Native file drop received", { fileCount }));
+          },
+          (status) => {
+            runFork(logWindowInfo("Native file drop display", status));
+          },
+        ),
+      ).pipe(
+        Effect.tap(() => logWindowInfo("Native file drop ready")),
+        Effect.catch((error) =>
+          logWindowWarning("Native file drop unavailable", { cause: String(error) }),
+        ),
+      );
+    }
     let boundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let pendingBoundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let boundsPersistenceEnabled = persistedBounds === null || restoredPersistedBounds;
@@ -452,6 +531,7 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    if (Option.isSome(directRpcHub)) installDesktopDirectRpcIpc(window, directRpcHub.value);
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       if (
         typeof params.partition !== "string" ||
@@ -703,6 +783,17 @@ export const make = Effect.gen(function* () {
       revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
     }
     bindFirstRevealTrigger(revealSubscribers, () => {
+      if (environment.startHidden) {
+        void runPromise(logWindowInfo("main window ready in background", { visible: false }));
+        return;
+      }
+      if (environment.startInactive) {
+        window.showInactive();
+        void runPromise(
+          logWindowInfo("main window shown without activation", { visible: window.isVisible() }),
+        );
+        return;
+      }
       // Reveal the real window, then close the connecting splash (if any) so the
       // two don't overlap and there's no blank gap between them.
       if (persistedSettings.mainWindowMaximized) {
@@ -752,6 +843,7 @@ export const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("desktop.window.createMainIfBackendReady"));
 
   const showConnectingSplash = Effect.gen(function* () {
+    if (environment.startHidden || environment.startInactive) return;
     // Only when nothing is shown yet: no real window, no existing splash.
     const existingSplash = yield* Ref.get(splashWindowRef);
     if (Option.isSome(existingSplash)) return;
@@ -825,6 +917,17 @@ export const make = Effect.gen(function* () {
     createMainIfBackendReady,
     showConnectingSplash,
     handleBackendReady: Effect.fn("desktop.window.handleBackendReady")(function* (httpBaseUrl) {
+      if (Option.isSome(savedEnvironments)) {
+        const stored = yield* savedEnvironments.value.getPrimaryGoogleSecret.pipe(
+          Effect.orElseSucceed(() => Option.none<string>()),
+        );
+        if (Option.isSome(stored)) {
+          const valid = yield* Effect.promise(() =>
+            verifyRestoredGoogleToken({ token: stored.value, httpBaseUrl, directRpcHub }),
+          );
+          selectRestoredGoogleBearerToken(valid ? stored.value : undefined);
+        }
+      }
       yield* Ref.set(backendReadyRef, true);
       yield* logWindowInfo("backend ready", { source: "http", url: httpBaseUrl.href });
       yield* createMainIfBackendReady;

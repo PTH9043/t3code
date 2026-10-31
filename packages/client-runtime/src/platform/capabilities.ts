@@ -3,6 +3,7 @@ import {
   type AuthEnvironmentScope,
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
+  type DesktopDirectRpcBridge,
   EnvironmentId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -49,6 +50,15 @@ export class PrimaryEnvironmentAuth extends Context.Service<
     readonly bearerToken: Effect.Effect<Option.Option<string>, ConnectionAttemptError>;
   }
 >()("@t3tools/client-runtime/platform/capabilities/PrimaryEnvironmentAuth") {}
+
+export class DirectLocalRpc extends Context.Service<
+  DirectLocalRpc,
+  {
+    readonly bridge: DesktopDirectRpcBridge | null;
+    readonly supports: (httpBaseUrl: string) => boolean;
+    readonly backendId?: (httpBaseUrl: string) => string | undefined;
+  }
+>()("@t3tools/client-runtime/platform/capabilities/DirectLocalRpc") {}
 
 export class SshEnvironmentGateway extends Context.Service<
   SshEnvironmentGateway,

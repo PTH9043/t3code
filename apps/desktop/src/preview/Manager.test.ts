@@ -1166,7 +1166,7 @@ describe("PreviewManager", () => {
 
         expect(browserWindowConstructor).toHaveBeenCalledWith(
           expect.objectContaining({
-            alwaysOnTop: true,
+            alwaysOnTop: false,
             show: false,
             skipTaskbar: true,
             webPreferences: expect.objectContaining({
@@ -1176,10 +1176,8 @@ describe("PreviewManager", () => {
           }),
         );
         expect(pictureInPictureWindow.showInactive).toHaveBeenCalledOnce();
-        expect(pictureInPictureWindow.setVisibleOnAllWorkspaces).toHaveBeenCalledWith(true, {
-          visibleOnFullScreen: true,
-          skipTransformProcessType: true,
-        });
+        expect(pictureInPictureWindow.setAlwaysOnTop).not.toHaveBeenCalled();
+        expect(pictureInPictureWindow.setVisibleOnAllWorkspaces).not.toHaveBeenCalled();
         expect(pictureInPictureWindow.setAspectRatio.mock.calls).toEqual([[0], [1280 / 720]]);
         expect(pictureInPictureWindow.setContentSize).toHaveBeenCalledWith(523, 294, false);
         expect(pictureInPictureWindow.setAspectRatio.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1993,6 +1991,111 @@ describe("PreviewManager", () => {
       }),
     ),
   );
+
+  for (const stalledMethod of ["Runtime.evaluate", "Network.enable"]) {
+    effectIt.effect(`recovers from a stalled ${stalledMethod} command`, () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          let resolveStalled: (value: unknown) => void = () => undefined;
+          const stalled = new Promise<unknown>((resolve) => {
+            resolveStalled = resolve;
+          });
+          let stallNext = true;
+          let attached = false;
+          const attach = vi.fn(() => {
+            attached = true;
+          });
+          const detach = vi.fn(() => {
+            attached = false;
+          });
+          const sendCommand = vi.fn((method: string) => {
+            if (method === stalledMethod && stallNext) {
+              stallNext = false;
+              Deferred.doneUnsafe(started, Effect.void);
+              return stalled;
+            }
+            return Promise.resolve(
+              method === "Runtime.evaluate" ? { result: { value: "recovered" } } : undefined,
+            );
+          });
+          const wc = makeTestPreviewWebContents(async () => ({
+            toJPEG: () => Buffer.from("frame"),
+            getSize: () => ({ width: 1280, height: 720 }),
+          })) as Electron.WebContents;
+          Object.assign(wc, {
+            isDevToolsOpened: () => false,
+            debugger: {
+              isAttached: () => attached,
+              attach,
+              detach,
+              sendCommand,
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+          });
+          fromId.mockReturnValue(wc as never);
+          const states: PreviewManager.PreviewTabState[] = [];
+          yield* manager.subscribeStateChanges((_tabId, state) =>
+            Effect.sync(() => {
+              states.push(state);
+            }),
+          );
+          yield* manager.createTab("tab_timeout");
+          yield* manager.registerWebview("tab_timeout", 42);
+
+          yield* Effect.gen(function* () {
+            const finished = yield* Deferred.make<void>();
+            const request = yield* manager
+              .automationEvaluate("tab_timeout", { expression: "stalled" })
+              .pipe(
+                Effect.onExit(() => Deferred.succeed(finished, undefined)),
+                Effect.forkChild({ startImmediately: true }),
+              );
+            yield* Deferred.await(started);
+            yield* TestClock.adjust(9_999);
+            const beforeDeadline = yield* Deferred.poll(finished);
+            expect(Option.isNone(beforeDeadline)).toBe(true);
+            yield* TestClock.adjust(1);
+            const afterDeadline = yield* Deferred.poll(finished);
+            expect(Option.isSome(afterDeadline)).toBe(true);
+            if (Option.isNone(afterDeadline)) return;
+            const completion = yield* Fiber.await(request);
+            if (stalledMethod === "Runtime.evaluate") {
+              expect(Exit.isFailure(completion)).toBe(true);
+              if (Exit.isSuccess(completion)) return;
+              const error = Option.getOrThrow(Cause.findErrorOption(completion.cause));
+              expect(PreviewManager.isPreviewOperationError(error)).toBe(true);
+              if (!PreviewManager.isPreviewOperationError(error)) return;
+              expect(error).toMatchObject({
+                _tag: "PreviewOperationError",
+                operation: "evaluate.Runtime.evaluate",
+                webContentsId: 42,
+              });
+              expect(PreviewManager.PreviewOperationError.toTimelineMessage(error)).toContain(
+                "timed out after 10000ms",
+              );
+              expect(states.at(-1)?.controller).toBe("none");
+            } else {
+              expect(completion).toMatchObject({ _tag: "Success", value: "recovered" });
+              expect(detach).toHaveBeenCalledOnce();
+              expect(attach).toHaveBeenCalledTimes(2);
+            }
+            expect(yield* manager.automationEvaluate("tab_timeout", { expression: "next" })).toBe(
+              "recovered",
+            );
+            expect(sendCommand).toHaveBeenCalledWith(
+              "Runtime.evaluate",
+              expect.objectContaining({ expression: "next", timeout: 10_000 }),
+            );
+            expect(states.at(-1)?.controller).toBe("none");
+          }).pipe(
+            Effect.ensuring(Effect.sync(() => resolveStalled({ result: { value: "late" } }))),
+          );
+        }),
+      ),
+    );
+  }
 
   effectIt.effect("derives evaluation detail kind and length from the same non-empty source", () =>
     withManager((manager) =>

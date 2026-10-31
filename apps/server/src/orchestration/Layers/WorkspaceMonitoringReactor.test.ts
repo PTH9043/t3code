@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   ProjectId,
   ProviderInstanceId,
@@ -67,6 +68,7 @@ const program: WorkspaceProgram = {
   errorPatterns: [],
   enabled: true,
   integrity: DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
+  hubMemory: DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   createdAt: T0,
   updatedAt: T0,
 };

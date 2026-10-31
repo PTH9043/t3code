@@ -1,4 +1,10 @@
-import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
+import {
+  ORCHESTRATION_WS_METHODS,
+  WORKSPACE_DEVELOPMENT_WS_METHODS,
+  WORKSPACE_TASK_INBOX_WS_METHODS,
+  WORKSPACE_AGENT_CONTROL_WS_METHODS,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import type * as Duration from "effect/Duration";
@@ -40,6 +46,10 @@ export type EnvironmentRpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends EnvironmentRpcTag> = WsRpcProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
+  | typeof WORKSPACE_AGENT_CONTROL_WS_METHODS.attention
+  | typeof WORKSPACE_AGENT_CONTROL_WS_METHODS.subscribe
+  | typeof WORKSPACE_TASK_INBOX_WS_METHODS.subscribe
+  | typeof WORKSPACE_DEVELOPMENT_WS_METHODS.subscribe
   | typeof ORCHESTRATION_WS_METHODS.subscribeShell
   | typeof ORCHESTRATION_WS_METHODS.subscribeThread
   | typeof ORCHESTRATION_WS_METHODS.subscribeWorkspaceRuntime

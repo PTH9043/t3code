@@ -58,6 +58,15 @@ it("offers only connected enabled accounts and excludes selected models", () => 
   expect(candidates.map((seat) => seat.modelSelection.instanceId)).toEqual(["ready"]);
 });
 
+it("does not offer unselected models when the user confines the conductor to the roster", () => {
+  expect(
+    orchestraWorkerCandidates([provider("ready")], { ...meeting, allowAdditionalWorkers: false }),
+  ).toEqual([]);
+  expect(
+    orchestraWorkerCandidates([provider("ready")], { ...meeting, allowAdditionalWorkers: true }),
+  ).toHaveLength(1);
+});
+
 it("adds the conductor's chosen worker while retaining the user-selected conductor and initial seats", () => {
   const candidates = orchestraWorkerCandidates([provider("ready"), provider("unused")], meeting);
   const assigned = seatAssignedWorkers(meeting, candidates, [{ participantId: candidates[0]!.id }]);

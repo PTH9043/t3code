@@ -11,6 +11,7 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BotIcon,
+  BookOpenIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
@@ -44,6 +45,7 @@ import {
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useWorkspaceTabStore } from "~/workspaceTabStore";
+import { openAiHelp } from "../help/aiHelpStore";
 
 const SETTINGS_SECTION_ICONS: Readonly<
   Record<SettingsPath, ComponentType<{ className?: string }>>
@@ -307,6 +309,19 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter className="p-[var(--sidebar-content-inset)]">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                openAiHelp();
+              }}
+            >
+              <BookOpenIcon />
+              <span>AI 사용 도움말</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
         <T3ConnectSidebarSignIn />
         <div className="flex items-center gap-1">
           <SidebarMenu className="min-w-0 flex-1">

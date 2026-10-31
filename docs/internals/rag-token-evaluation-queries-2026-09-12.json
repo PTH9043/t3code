@@ -1,0 +1,309 @@
+{
+  "version": 1,
+  "reviewStatus": "agent-curated; user review pending",
+  "corpusSnapshot": ".t3/rag-token-implementation-2026-09-12/corpus-snapshot.json",
+  "sourceAliases": {
+    "hubCurrent": "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+    "hubAudit": "hub-native-audit-2026-09-12",
+    "hubOld": "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+    "hubOldResearch": "knowledge-d62506c3-99cc-4685-808d-42ad52fd752d",
+    "watcher": "repair-desktop-windows-watcher-cpu",
+    "ownership": "repair-desktop-process-ownership",
+    "cursor": "repair-token-cursor-per-execution",
+    "shim": "repair-windows-npm-shim-path",
+    "navigation": "repair-web-project-return-navigation",
+    "scope": "repair-memory-scope-migration",
+    "mobile": "repair-mobile-shared-presentation",
+    "research": "autousage-rag-token-research-2026-09-12",
+    "execution": "repair-server-scoped-execution",
+    "rule": "evaluation-required-user-rule",
+    "claimA": "evaluation-contradiction-a",
+    "claimB": "evaluation-contradiction-b"
+  },
+  "queries": [
+    {
+      "id": "D1",
+      "group": "direct",
+      "query": "허브 현재 행 디코딩 성능 19컬럼 조회 1000회",
+      "expected": ["hubCurrent", "hubAudit"],
+      "requiredText": ["5.897"],
+      "forbidden": ["hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "D2",
+      "group": "direct",
+      "query": "Windows fs.watch rename CPU 100%",
+      "paths": ["apps/desktop"],
+      "expected": ["watcher"],
+      "requiredText": ["711900"]
+    },
+    {
+      "id": "D3",
+      "group": "direct",
+      "query": "orchestra.block messageId 토큰 커서",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["cursor"]
+    },
+    {
+      "id": "D4",
+      "group": "direct",
+      "query": "Windows PATH 15270 npm shim",
+      "paths": ["packages/shared"],
+      "expected": ["shim"]
+    },
+    {
+      "id": "D5",
+      "group": "direct",
+      "query": "제어센터 돌아가기 OnChainBot 복귀",
+      "paths": ["apps/web"],
+      "expected": ["navigation"]
+    },
+    {
+      "id": "D6",
+      "group": "direct",
+      "query": "migration 065 scope environment folder",
+      "paths": ["apps/server/src/persistence"],
+      "expected": ["scope"]
+    },
+    {
+      "id": "D7",
+      "group": "direct",
+      "query": "모바일 오케스트라 빈 스트리밍 블록",
+      "paths": ["apps/mobile"],
+      "expected": ["mobile"]
+    },
+    {
+      "id": "D8",
+      "group": "direct",
+      "query": "Grok CLI XSearch 9 WebSearch 31",
+      "expected": ["research"]
+    },
+    {
+      "id": "K1",
+      "group": "korean-synonym",
+      "query": "파일을 지켜보는 기능 때문에 앱이 버벅이는 원인",
+      "paths": ["apps/desktop"],
+      "expected": ["watcher"]
+    },
+    {
+      "id": "K2",
+      "group": "korean-synonym",
+      "query": "길어진 실행파일 탐색 경로 때문에 인공지능 명령이 안 켜짐",
+      "paths": ["packages/shared"],
+      "expected": ["shim"]
+    },
+    {
+      "id": "K3",
+      "group": "korean-synonym",
+      "query": "여러 인공지능의 소비량이 한 작업으로 섞이는 현상",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["cursor"]
+    },
+    {
+      "id": "K4",
+      "group": "korean-synonym",
+      "query": "뒤로 가면 엉뚱한 프로젝트 대화로 이동한다",
+      "paths": ["apps/web"],
+      "expected": ["navigation"]
+    },
+    {
+      "id": "K5",
+      "group": "korean-synonym",
+      "query": "휴대폰에서 담당 인공지능 발언 표시",
+      "paths": ["apps/mobile"],
+      "expected": ["mobile"]
+    },
+    {
+      "id": "K6",
+      "group": "korean-synonym",
+      "query": "개발 앱을 정리하다 사용 중인 다른 앱까지 죽이는 문제",
+      "paths": ["apps/desktop"],
+      "expected": ["ownership"]
+    },
+    {
+      "id": "K7",
+      "group": "korean-synonym",
+      "query": "다른 작업의 답변과 허락 요청이 뒤섞이지 않게 실행을 나누는 방법",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["execution"]
+    },
+    {
+      "id": "K8",
+      "group": "korean-synonym",
+      "query": "같은 부모 아래 있는 옆 디렉터리의 기억을 보면 안 된다",
+      "paths": ["apps/server/src/persistence"],
+      "expected": ["scope"]
+    },
+    {
+      "id": "T1",
+      "group": "temporal",
+      "query": "허브 메모리 현재 운영 결론",
+      "expected": ["hubCurrent"],
+      "forbidden": ["hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "T2",
+      "group": "temporal",
+      "query": "허브 현재 단건 조회 최적화 성능",
+      "expected": ["hubCurrent", "hubAudit"],
+      "requiredText": ["5.897"],
+      "forbidden": ["hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "T3",
+      "group": "temporal",
+      "query": "허브 초기 가능성 조사와 현재 C++ 운영 비교",
+      "expected": ["hubOld", "hubCurrent"]
+    },
+    {
+      "id": "T4",
+      "group": "temporal",
+      "query": "허브 메모리 과거 공유 방식 설계 이력",
+      "expected": ["hubOldResearch", "hubOld"]
+    },
+    {
+      "id": "T5",
+      "group": "temporal",
+      "query": "허브 초기 단건 조회가 느렸던 결과와 행 디코딩 개선 이후 비교",
+      "expected": ["hubCurrent"],
+      "requiredText": ["1.467", "5.897"]
+    },
+    {
+      "id": "T6",
+      "group": "temporal",
+      "query": "허브 메모리 현재 JSON 사용 범위와 직접 행 디코딩",
+      "expected": ["hubCurrent"],
+      "requiredText": ["JSON", "2,048"]
+    },
+    {
+      "id": "T7",
+      "group": "temporal",
+      "query": "평가용 timeout 상충 근거를 확인해",
+      "synthetic": true,
+      "expected": ["claimA", "claimB"],
+      "requiredText": ["100ms", "250ms"]
+    },
+    {
+      "id": "T8",
+      "group": "temporal",
+      "query": "평가용 timeout 최신 수정 시간만으로 결론을 정할 수 있나",
+      "synthetic": true,
+      "expected": ["claimA", "claimB"]
+    },
+    {
+      "id": "U1",
+      "group": "unrelated",
+      "query": "웹 버튼 간격 수정",
+      "paths": ["apps/web/src"],
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U2",
+      "group": "unrelated",
+      "query": "README 오타를 고쳐",
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U3",
+      "group": "unrelated",
+      "query": "로그인 버튼 색상을 보라색으로",
+      "paths": ["apps/web/src"],
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U4",
+      "group": "unrelated",
+      "query": "오늘 점심 메뉴를 골라",
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U5",
+      "group": "unrelated",
+      "query": "날짜 문자열 형식 함수 이름을 변경",
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U6",
+      "group": "unrelated",
+      "query": "설정 화면 제목 번역 수정",
+      "paths": ["apps/web"],
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U7",
+      "group": "unrelated",
+      "query": "휴대폰 목록 아래 여백 조정",
+      "paths": ["apps/mobile"],
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "U8",
+      "group": "unrelated",
+      "query": "상수 이름 오탈자 정리",
+      "forbidden": ["hubCurrent", "hubAudit", "hubOld", "hubOldResearch"]
+    },
+    {
+      "id": "S1",
+      "group": "scope-constraints",
+      "query": "Windows 감시기 CPU",
+      "paths": ["apps/web"],
+      "forbidden": ["watcher", "ownership"]
+    },
+    {
+      "id": "S2",
+      "group": "scope-constraints",
+      "query": "Windows 감시기 CPU",
+      "paths": ["apps/desktop-extra"],
+      "forbidden": ["watcher", "ownership"]
+    },
+    {
+      "id": "S3",
+      "group": "scope-constraints",
+      "query": "Windows 감시기 CPU",
+      "paths": [],
+      "forbidden": ["watcher", "ownership"]
+    },
+    {
+      "id": "S4",
+      "group": "scope-constraints",
+      "query": "Windows 감시기 CPU",
+      "paths": ["apps/desktop/src"],
+      "expected": ["watcher"]
+    },
+    {
+      "id": "S5",
+      "group": "scope-constraints",
+      "query": "프로젝트 복귀 OnChainBot",
+      "project": "evaluation-foreign-project",
+      "paths": ["apps/web"],
+      "includeShared": false,
+      "forbidden": ["navigation", "watcher", "hubCurrent", "hubAudit"]
+    },
+    {
+      "id": "S6",
+      "group": "scope-constraints",
+      "query": "웹 버튼 간격 수정",
+      "synthetic": true,
+      "expected": ["rule"],
+      "requiredText": ["필수 지침 원문 끝"]
+    },
+    {
+      "id": "S7",
+      "group": "scope-constraints",
+      "query": "웹 버튼 간격 수정",
+      "synthetic": true,
+      "budget": 2000,
+      "expected": ["rule"],
+      "requiredText": ["필수 지침 원문 끝"]
+    },
+    {
+      "id": "S8",
+      "group": "scope-constraints",
+      "query": "허브 현재 C++ 운영",
+      "project": "evaluation-foreign-project",
+      "includeShared": true,
+      "expected": ["hubCurrent"],
+      "forbidden": ["research", "navigation"]
+    }
+  ]
+}

@@ -5,8 +5,8 @@
  * stable line-prefixed field format; this is the only `lsof` flag set we rely
  * on).
  *
- * Windows / lsof missing: checks a curated list of common dev ports through
- * the shared Net service.
+ * Windows: parses native netstat and tasklist output. When a process probe is
+ * unavailable, common development ports are checked through the Net service.
  *
  * Polling is reference-counted via scoped `retain`. A single layer-scoped fiber
  * polls forever, but each tick is a no-op when the retain count is zero.
@@ -138,14 +138,24 @@ const parsePortFromLsofName = (name: string): number | null => {
 
 const parseWindowsListenerOutput = (
   raw: string,
+  processOutput: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
   const seen = new Map<number, DiscoveredLocalServer>();
+  const names = new Map<number, string>();
+  for (const line of processOutput.split(/\r?\n/u)) {
+    const match = /^"((?:[^"]|"")*)","(\d+)"/u.exec(line.trim());
+    if (!match) continue;
+    names.set(Number(match[2]), match[1]!.replaceAll('""', '"').replace(/\.exe$/iu, ""));
+  }
   for (const line of raw.split(/\r?\n/g)) {
-    const [hostRaw, portRaw, pidRaw, processNameRaw] = line.trim().split("|", 4);
-    const host = hostRaw?.trim() ?? "";
+    const [protocol, local, , state, pidRaw] = line.trim().split(/\s+/u);
+    if (protocol !== "TCP" || state !== "LISTENING" || !local) continue;
+    const separator = local.lastIndexOf(":");
+    if (separator < 0) continue;
+    const host = local.slice(0, separator);
     if (!LSOF_LOCAL_HOST_TOKENS.has(host) && host !== "::") continue;
-    const port = Number(portRaw);
+    const port = Number(local.slice(separator + 1));
     const pid = Number(pidRaw);
     if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
     const normalizedPid = Number.isInteger(pid) && pid > 0 ? pid : null;
@@ -154,7 +164,7 @@ const parseWindowsListenerOutput = (
       host: "localhost",
       port,
       url: `http://localhost:${port}`,
-      processName: processNameRaw?.trim() || null,
+      processName: normalizedPid === null ? null : (names.get(normalizedPid) ?? null),
       pid: normalizedPid,
       terminal: normalizedPid === null ? null : (terminalByProcessId.get(normalizedPid) ?? null),
     });
@@ -222,7 +232,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   });
 
   const recoverProcessProbeFailure =
-    (probe: "lsof" | "windows-listeners") => (error: ProcessRunner.ProcessRunError) =>
+    (probe: "lsof" | "windows-listeners" | "windows-processes") =>
+    (error: ProcessRunner.ProcessRunError) =>
       Effect.logDebug("preview port process probe failed; falling back to common-port probes", {
         cause: error,
         probe,
@@ -239,18 +250,17 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     }
     if (hostPlatform === "win32") {
       const recoverWindowsProbeFailure = recoverProcessProbeFailure("windows-listeners");
-      const command =
-        'Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { $processName = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName; Write-Output "$($_.LocalAddress)|$($_.LocalPort)|$($_.OwningProcess)|$processName" }';
       const listeners = yield* processRunner
         .run({
-          command: "powershell.exe",
-          args: ["-NoProfile", "-NonInteractive", "-Command", command],
+          background: true,
+          command: "netstat.exe",
+          args: ["-ano", "-p", "tcp"],
           timeout: Duration.millis(WINDOWS_LISTENER_TIMEOUT_MS),
           maxOutputBytes: 1024 * 1024,
           outputMode: "truncate",
         })
         .pipe(
-          Effect.map((result) => parseWindowsListenerOutput(result.stdout, terminalByProcessId)),
+          Effect.map((result) => (result.code === 0 ? result.stdout : null)),
           Effect.catchTags({
             ProcessSpawnError: recoverWindowsProbeFailure,
             ProcessStdinError: recoverWindowsProbeFailure,
@@ -259,8 +269,28 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             ProcessTimeoutError: recoverWindowsProbeFailure,
           }),
         );
-      if (listeners !== null) return listeners;
-      return yield* probeCommonPorts();
+      if (listeners === null) return yield* probeCommonPorts();
+      const recoverProcessNames = recoverProcessProbeFailure("windows-processes");
+      const processes = yield* processRunner
+        .run({
+          background: true,
+          command: "tasklist.exe",
+          args: ["/FO", "CSV", "/NH"],
+          timeout: Duration.millis(WINDOWS_LISTENER_TIMEOUT_MS),
+          maxOutputBytes: 1024 * 1024,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.map((result) => (result.code === 0 ? result.stdout : "")),
+          Effect.catchTags({
+            ProcessSpawnError: recoverProcessNames,
+            ProcessStdinError: recoverProcessNames,
+            ProcessOutputLimitError: recoverProcessNames,
+            ProcessReadError: recoverProcessNames,
+            ProcessTimeoutError: recoverProcessNames,
+          }),
+        );
+      return parseWindowsListenerOutput(listeners, processes ?? "", terminalByProcessId);
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");
     const lsofResult = yield* processRunner

@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/task-inbox": {
+      "types": "./src/state/taskInbox.ts",
+      "default": "./src/state/taskInbox.ts"
+    },
+    "./state/task-dashboard": {
+      "types": "./src/state/taskDashboard.ts",
+      "default": "./src/state/taskDashboard.ts"
+    },
     "./state/conversation-handoff": {
       "types": "./src/state/conversationHandoff.ts",
       "default": "./src/state/conversationHandoff.ts"

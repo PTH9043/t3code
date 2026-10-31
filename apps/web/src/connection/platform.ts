@@ -1,6 +1,7 @@
 import {
   ClientPresentation,
   CloudSession,
+  DirectLocalRpc,
   EnvironmentOwnedDataCleanup,
   PlatformConnectionSource,
   PrimaryEnvironmentAuth,
@@ -45,6 +46,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
 import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
 import {
+  isDesktopDirectPrimary,
   readPrimaryEnvironmentTarget,
   type PrimaryEnvironmentTarget,
 } from "../environments/primary/target";
@@ -54,6 +56,8 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { acknowledgeRpcRequest, trackRpcRequestSent } from "../rpc/requestLatencyState";
 import {
   desktopLocalConnectionId,
+  desktopLocalHttpBaseUrl,
+  readDesktopSecondaryBootstraps,
   readDesktopSecondaryBootstrapsResult,
   type DesktopSecondaryBootstrapsRead,
 } from "./desktopLocal";
@@ -217,6 +221,27 @@ const capabilitiesLayer = Layer.effectContext(
           }),
       }).pipe(Effect.map(Option.fromNullishOr)),
     });
+    const directBackendId = (httpBaseUrl: string): string | undefined => {
+      try {
+        const url = new URL(httpBaseUrl);
+        if (url.protocol !== window.location.protocol) return undefined;
+        if (url.host === window.location.host && isDesktopDirectPrimary())
+          return PRIMARY_LOCAL_ENVIRONMENT_ID;
+        return readDesktopSecondaryBootstraps().find(
+          (entry) =>
+            entry.directRpc === true &&
+            entry.id.startsWith("wsl:") &&
+            entry.directHost === url.host,
+        )?.id;
+      } catch {
+        return undefined;
+      }
+    };
+    const directLocalRpc = DirectLocalRpc.of({
+      bridge: window.desktopBridge?.directRpc ?? null,
+      supports: (httpBaseUrl) => directBackendId(httpBaseUrl) !== undefined,
+      backendId: directBackendId,
+    });
     const ssh = SshEnvironmentGateway.of({
       provision: Effect.fn("web.connectionPlatform.ssh.provision")(function* (target) {
         const bridge = window.desktopBridge;
@@ -277,6 +302,7 @@ const capabilitiesLayer = Layer.effectContext(
 
     return Context.make(CloudSession, cloudSession).pipe(
       Context.add(PrimaryEnvironmentAuth, primaryAuth),
+      Context.add(DirectLocalRpc, directLocalRpc),
       Context.add(RelayDeviceIdentity, identity),
       Context.add(ClientPresentation, presentation),
       Context.add(SshEnvironmentGateway, ssh),
@@ -309,25 +335,44 @@ const loadSecondaryConnectionRegistration = Effect.fn(
   if (
     entry.httpBaseUrl === null ||
     entry.wsBaseUrl === null ||
-    entry.bootstrapToken === undefined
+    (entry.directRpc !== true && entry.bootstrapToken === undefined)
   ) {
     return yield* new ConnectionTransientError({
       reason: "endpoint-unavailable",
       detail: `Desktop-local backend ${entry.id} is not ready yet.`,
     });
   }
-  const httpBaseUrl = entry.httpBaseUrl;
+  const httpBaseUrl = desktopLocalHttpBaseUrl(entry, window.location.protocol);
+  if (httpBaseUrl === null) {
+    return yield* new ConnectionTransientError({
+      reason: "endpoint-unavailable",
+      detail: `Desktop-local backend ${entry.id} is not ready yet.`,
+    });
+  }
+  const useDirect =
+    entry.directRpc === true &&
+    entry.id.startsWith("wsl:") &&
+    (window.location.protocol === "t3code:" || window.location.protocol === "t3code-dev:") &&
+    window.desktopBridge?.directRpc !== undefined;
+  if (entry.directRpc === true && !useDirect) {
+    return yield* new ConnectionTransientError({
+      reason: "endpoint-unavailable",
+      detail: `Desktop-local backend ${entry.id} has no direct bridge.`,
+    });
+  }
   const wsBaseUrl = entry.wsBaseUrl;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
     Effect.mapError(mapRemoteEnvironmentError),
   );
   const issuedAtEpochMs = yield* Clock.currentTimeMillis;
-  const access = yield* bootstrapRemoteBearerSession({
-    httpBaseUrl,
-    credential: entry.bootstrapToken,
-    scopes: AuthStandardClientScopes,
-    clientMetadata: clientMetadata(),
-  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  const access = useDirect
+    ? undefined
+    : yield* bootstrapRemoteBearerSession({
+        httpBaseUrl,
+        credential: entry.bootstrapToken!,
+        scopes: AuthStandardClientScopes,
+        clientMetadata: clientMetadata(),
+      }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   // Keep the desktop pool's stable backend id in the connection id. The
   // descriptor environment id still scopes projects and RPC state, while the
   // backend id lets desktop-only operations (notably the WSL folder picker)
@@ -351,10 +396,14 @@ const loadSecondaryConnectionRegistration = Effect.fn(
         httpBaseUrl,
         wsBaseUrl,
       }),
-      credential: new BearerConnectionCredential({ token: access.access_token }),
+      credential: new BearerConnectionCredential({ token: access?.access_token ?? "" }),
     }),
-    expiresAtEpochMs: secondaryBearerExpiresAtEpochMs(issuedAtEpochMs, access.expires_in),
-    refreshAtEpochMs: secondaryBearerRefreshAtEpochMs(issuedAtEpochMs, access.expires_in),
+    ...(access === undefined
+      ? {}
+      : {
+          expiresAtEpochMs: secondaryBearerExpiresAtEpochMs(issuedAtEpochMs, access.expires_in),
+          refreshAtEpochMs: secondaryBearerRefreshAtEpochMs(issuedAtEpochMs, access.expires_in),
+        }),
   };
 });
 
@@ -449,7 +498,9 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
   }
   return new Map(
     [...previous].filter(
-      ([, cached]) => cached.expiresAtEpochMs !== undefined && nowEpochMs < cached.expiresAtEpochMs,
+      ([, cached]) =>
+        cached.registration._tag === "BearerConnectionRegistration" &&
+        (cached.expiresAtEpochMs === undefined || nowEpochMs < cached.expiresAtEpochMs),
     ),
   );
 }
@@ -529,7 +580,7 @@ const platformConnectionSourceLayer = Layer.effect(
         });
       } else {
         for (const bootstrap of topologyRead.bootstraps) {
-          const signature = `${bootstrap.httpBaseUrl}|${bootstrap.wsBaseUrl}|${bootstrap.bootstrapToken ?? ""}`;
+          const signature = `${bootstrap.httpBaseUrl}|${bootstrap.wsBaseUrl}|${bootstrap.bootstrapToken ?? ""}|${bootstrap.directRpc === true}`;
           const cached = previous.get(bootstrap.id);
           if (
             cached !== undefined &&

@@ -643,6 +643,7 @@ function AppSettingsSection() {
 
   return (
     <SettingsSection title="앱">
+      <SettingsRow icon="book" label="AI 사용 도움말" fullScreenTarget="SettingsHelp" />
       <SettingsRow icon="internaldrive" label="기기 저장소" target="SettingsClientStorage" />
       <SettingsRow icon="doc.text" label="법적 고지" fullScreenTarget="SettingsLegal" />
       {Updates.isEnabled ? (

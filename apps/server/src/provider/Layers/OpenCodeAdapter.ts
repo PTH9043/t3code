@@ -43,6 +43,7 @@ import {
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   openCodeQuestionId,
+  openCodeInputMessageId,
   openCodeRuntimeErrorDetail,
   parseOpenCodeModelSlug,
   runOpenCodeSdk,
@@ -52,6 +53,7 @@ import {
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
 import * as Option from "effect/Option";
+import { openCodeTokenConsumption } from "../tokenConsumption.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 
@@ -181,6 +183,10 @@ function trimText(value: string | undefined | null): string | undefined {
 }
 
 function openCodeEventSessionId(event: OpenCodeSubscribedEvent): string | undefined {
+  if (event.type === "message.updated" && event.properties.info.sessionID)
+    return event.properties.info.sessionID;
+  if (event.type === "message.part.updated" && event.properties.part.sessionID)
+    return event.properties.part.sessionID;
   const properties = "properties" in event ? event.properties : undefined;
   if (!properties || typeof properties !== "object") {
     return undefined;
@@ -213,10 +219,11 @@ interface OpenCodeSessionContext {
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
+  readonly turnIdByUserMessageId: Map<string, TurnId>;
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
-  readonly turns: Array<OpenCodeTurnSnapshot>;
+  readonly consecutiveEventStreamFailures: Ref.Ref<number>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -273,6 +280,35 @@ const toProcessError = (threadId: ThreadId, cause: unknown): ProviderAdapterProc
     detail: OpenCodeRuntimeError.is(cause) ? cause.detail : openCodeRuntimeErrorDetail(cause),
     cause,
   });
+
+/**
+ * Whether a failure from `event.subscribe` or a model request is worth
+ * retrying. Auth errors, missing sessions, and schema errors are never
+ * retried. Network-level failures (fetch errors, socket resets, upstream
+ * 5xx) are always retried. 429s are retried because the AntSeed gateway
+ * rate-limits upstream peers — the gateway will serve the request
+ * eventually, just not right now.
+ */
+function isRecoverableOpenCodeError(cause: unknown): boolean {
+  const detail = openCodeRuntimeErrorDetail(cause).toLowerCase();
+  if (
+    detail.includes("401") ||
+    detail.includes("403") ||
+    detail.includes("unauthorized") ||
+    detail.includes("forbidden") ||
+    detail.includes("notfound") ||
+    detail.includes("badrequest") ||
+    detail.includes("validation") ||
+    detail.includes("schema")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+const EVENT_PUMP_MAX_RETRIES = 8;
+const EVENT_PUMP_BASE_DELAY_MS = 500;
+const EVENT_PUMP_MAX_DELAY_MS = 30_000;
 
 type EventBaseInput = {
   readonly threadId: ThreadId;
@@ -340,31 +376,6 @@ function mapPermissionDecision(reply: "once" | "always" | "reject"): string {
     default:
       return "decline";
   }
-}
-
-function resolveTurnSnapshot(
-  context: OpenCodeSessionContext,
-  turnId: TurnId,
-): OpenCodeTurnSnapshot {
-  const existing = context.turns.find((turn) => turn.id === turnId);
-  if (existing) {
-    return existing;
-  }
-
-  const created: OpenCodeTurnSnapshot = { id: turnId, items: [] };
-  context.turns.push(created);
-  return created;
-}
-
-function appendTurnItem(
-  context: OpenCodeSessionContext,
-  turnId: TurnId | undefined,
-  item: unknown,
-): void {
-  if (!turnId) {
-    return;
-  }
-  resolveTurnSnapshot(context, turnId).items.push(item);
 }
 
 const ensureSessionContext = Effect.fn("ensureSessionContext")(function* (
@@ -828,6 +839,20 @@ export function makeOpenCodeAdapter(
         case "message.updated": {
           context.messageRoleById.set(event.properties.info.id, event.properties.info.role);
           if (event.properties.info.role === "assistant") {
+            // Bind usage to the submitted native message, including replies arriving after idle.
+            const ownerTurnId = context.turnIdByUserMessageId.get(event.properties.info.parentID);
+            const consumption = openCodeTokenConsumption(event.properties.info);
+            if (ownerTurnId !== undefined && consumption.length > 0) {
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId: ownerTurnId,
+                  raw: event,
+                })),
+                type: "thread.token-usage.updated",
+                payload: { consumption },
+              });
+            }
             for (const part of context.partById.values()) {
               if (part.messageID !== event.properties.info.id) {
                 continue;
@@ -932,7 +957,6 @@ export function makeOpenCodeAdapter(
                     : "item.updated",
               payload,
             };
-            appendTurnItem(context, turnId, part);
             yield* emit(runtimeEvent);
           }
           break;
@@ -1131,9 +1155,7 @@ export function makeOpenCodeAdapter(
         Effect.sync(() => eventsAbortController.abort()),
       );
 
-      // Fibers forked into `context.sessionScope` are interrupted
-      // automatically when the scope closes — no bookkeeping required.
-      yield* Effect.flatMap(
+      const subscribeOnce = Effect.flatMap(
         runOpenCodeSdk("event.subscribe", () =>
           context.client.event.subscribe(undefined, {
             signal: eventsAbortController.signal,
@@ -1149,25 +1171,51 @@ export function makeOpenCodeAdapter(
                 cause,
               }),
           ).pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event))),
-      ).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          Effect.gen(function* () {
-            // Expected paths: caller aborted the fetch or the session
-            // has already been marked stopped. Treat as a clean exit.
-            if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
-              return;
-            }
-            if (Exit.isFailure(exit)) {
-              yield* emitUnexpectedExit(
-                context,
-                openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
-              );
-            }
-          }),
-        ),
-        Effect.forkIn(context.sessionScope),
       );
+
+      // Reconnect loop: on a recoverable failure, back off and resubscribe
+      // instead of giving up. AntSeed gateways restart, peers churn, and
+      // SSE streams get reset — the subscription must survive those.
+      const pumpWithRetry = Effect.gen(function* () {
+        for (let attempt = 0; ; attempt++) {
+          if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
+            return;
+          }
+
+          const exit = yield* Effect.exit(subscribeOnce);
+          if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
+            return;
+          }
+
+          if (Exit.isSuccess(exit)) {
+            // Stream ended cleanly (e.g. server closed the connection).
+            // Resubscribe after a short delay — the session is still alive.
+            yield* Effect.sleep("500 millis");
+            continue;
+          }
+
+          const squashed = Cause.squash(exit.cause);
+          if (!isRecoverableOpenCodeError(squashed)) {
+            yield* emitUnexpectedExit(context, openCodeRuntimeErrorDetail(squashed));
+            return;
+          }
+
+          if (attempt >= EVENT_PUMP_MAX_RETRIES) {
+            yield* emitUnexpectedExit(
+              context,
+              `event stream disconnected after ${EVENT_PUMP_MAX_RETRIES} retries: ${openCodeRuntimeErrorDetail(squashed)}`,
+            );
+            return;
+          }
+
+          const delay = Math.min(EVENT_PUMP_MAX_DELAY_MS, EVENT_PUMP_BASE_DELAY_MS * 2 ** attempt);
+          yield* Effect.sleep(`${delay} millis`);
+        }
+      });
+
+      // Fibers forked into `context.sessionScope` are interrupted
+      // automatically when the scope closes — no bookkeeping required.
+      yield* pumpWithRetry.pipe(Effect.forkIn(context.sessionScope));
 
       if (!context.server.external && context.server.exitCode !== null) {
         yield* context.server.exitCode.pipe(
@@ -1265,7 +1313,11 @@ export function makeOpenCodeAdapter(
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: reusable, created: false };
+                  return {
+                    openCodeSession: reusable,
+                    created: false,
+                    continuity: "resumed" as const,
+                  };
                 }
 
                 // The session lives under a different cwd (e.g. the thread
@@ -1292,7 +1344,7 @@ export function makeOpenCodeAdapter(
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: forked, created: true };
+                  return { openCodeSession: forked, created: true, continuity: "resumed" as const };
                 }
 
                 if (resumeSessionId) {
@@ -1311,7 +1363,11 @@ export function makeOpenCodeAdapter(
                     detail: "OpenCode session.create returned no session payload.",
                   });
                 }
-                return { openCodeSession: createdSession.data, created: true };
+                return {
+                  openCodeSession: createdSession.data,
+                  created: true,
+                  continuity: resumeSessionId ? ("resume-fallback" as const) : ("new" as const),
+                };
               });
 
               return {
@@ -1320,6 +1376,7 @@ export function makeOpenCodeAdapter(
                 client,
                 openCodeSession: resolved.openCodeSession,
                 created: resolved.created,
+                continuity: resolved.continuity,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
@@ -1353,6 +1410,7 @@ export function makeOpenCodeAdapter(
           provider: PROVIDER,
           providerInstanceId: boundInstanceId,
           status: "ready",
+          continuity: started.continuity,
           runtimeMode: input.runtimeMode,
           cwd: directory,
           ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
@@ -1379,11 +1437,12 @@ export function makeOpenCodeAdapter(
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
+          turnIdByUserMessageId: new Map(),
           completedAssistantPartIds: new Set(),
-          turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
+          consecutiveEventStreamFailures: yield* Ref.make(0),
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
@@ -1481,9 +1540,18 @@ export function makeOpenCodeAdapter(
         });
       }
 
+      const nativeMessageId = openCodeInputMessageId(
+        DateTime.toEpochMillis(yield* DateTime.now),
+        yield* randomUUIDv4,
+      );
+      context.turnIdByUserMessageId.set(nativeMessageId, turnId);
+      if (context.turnIdByUserMessageId.size > 256) {
+        context.turnIdByUserMessageId.delete(context.turnIdByUserMessageId.keys().next().value!);
+      }
       yield* runOpenCodeSdk("session.promptAsync", () =>
         context.client.session.promptAsync({
           sessionID: context.openCodeSessionId,
+          messageID: nativeMessageId,
           model: parsedModel,
           ...(context.activeAgent ? { agent: context.activeAgent } : {}),
           ...(context.activeVariant ? { variant: context.activeVariant } : {}),
@@ -1529,6 +1597,7 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        nativeMessageId,
         // Re-surface the durable cursor on every turn so the persisted binding
         // is refreshed alongside last-seen/runtime state (mirrors Grok/Codex).
         ...(context.session.resumeCursor !== undefined

@@ -7,6 +7,7 @@ import type * as Electron from "electron";
 
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
+import { WSL_DIRECT_HOST } from "../../backend/DesktopLocalProtocolHost.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import {
   getLocalEnvironmentBootstraps,
@@ -54,6 +55,33 @@ const defaultWslInstance: DesktopBackendManager.DesktopBackendInstance = {
 };
 
 describe("getLocalEnvironmentBootstraps", () => {
+  it.effect("advertises direct transport only when both native pipe descriptors exist", () => {
+    const config: DesktopBackendManager.DesktopBackendStartConfig = {
+      ...readyWslConfig,
+      bootstrapDelivery: "fd3",
+      bootstrap: {
+        ...readyWslConfig.bootstrap,
+        desktopDirectRpcInputFd: 6,
+        desktopDirectRpcOutputFd: 7,
+      },
+    };
+    const primary = { ...defaultWslInstance, currentConfig: Effect.succeed(Option.some(config)) };
+    return Effect.gen(function* () {
+      const result = yield* getLocalEnvironmentBootstraps.handler();
+      assert.deepEqual(result, [
+        {
+          id: "wsl:default",
+          label: "WSL (Ubuntu)",
+          runningDistro: "Ubuntu",
+          directRpc: true,
+          directHost: WSL_DIRECT_HOST,
+          httpBaseUrl: "http://127.0.0.1:3774/",
+          wsBaseUrl: "ws://127.0.0.1:3774/",
+          bootstrapToken: "bootstrap-token",
+        },
+      ]);
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([primary])));
+  });
   it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
     Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();

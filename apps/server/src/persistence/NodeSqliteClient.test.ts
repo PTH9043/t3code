@@ -2,12 +2,42 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Stream from "effect/Stream";
 
 import * as SqliteClient from "./NodeSqliteClient.ts";
 
 const layer = it.layer(SqliteClient.layerMemory());
 
 layer("NodeSqliteClient", (it) => {
+  it.effect("streams a large query completely and releases a cancelled iterator", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = sql<{
+        n: number;
+        text: string;
+      }>`WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<10000) SELECT n,printf('%04096d',n) AS text FROM numbers`;
+      const totals = yield* query.stream.pipe(
+        Stream.runFold(
+          () => ({ count: 0, chars: 0 }),
+          (acc, row) => ({ count: acc.count + 1, chars: acc.chars + row.text.length }),
+        ),
+      );
+      assert.deepEqual(totals, { count: 10000, chars: 40960000 });
+      const first = yield* query.stream.pipe(Stream.take(3), Stream.runCollect);
+      assert.equal(first.length, 3);
+      const [result] = yield* sql<{ n: number }>`SELECT 42 AS n`;
+      assert.equal(result?.n, 42);
+      const repeated = yield* query.stream.pipe(Stream.take(1), Stream.runCollect);
+      assert.equal(repeated[0]?.n, 1);
+    }),
+  );
+  it.effect("returns a typed failure for invalid streaming SQL", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const error = yield* sql.unsafe("SELECT FROM").stream.pipe(Stream.runDrain, Effect.flip);
+      assert.equal(error._tag, "SqlError");
+    }),
+  );
   it.effect("waits for short cross-process write contention", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

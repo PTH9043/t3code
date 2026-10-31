@@ -353,32 +353,62 @@ export function makeSnippet(content: string, terms: ReadonlyArray<string>, maxCh
 }
 
 export const CHUNK_SIZE = 1_200;
-const CHUNK_OVERLAP = 200;
+export const CHUNK_OVERLAP = 200;
 
-/** Split long content into overlapping, word-aligned pieces of at most CHUNK_SIZE. */
-export function chunkSearchableContent(content: string): ReadonlyArray<string> {
+/** Split a paragraph or oversized section without splitting surrogate pairs. */
+function chunkPlainContent(content: string, size = CHUNK_SIZE): ReadonlyArray<string> {
   const normalized = content.replaceAll("\r\n", "\n").trim();
   if (normalized.length === 0) return [];
-  if (normalized.length <= CHUNK_SIZE) return [normalized];
+  if (normalized.length <= size) return [normalized];
 
   const chunks: string[] = [];
   let start = 0;
   while (start < normalized.length) {
-    const hardEnd = Math.min(normalized.length, start + CHUNK_SIZE);
+    const hardEnd = Math.min(normalized.length, start + size);
     let end = hardEnd;
     if (hardEnd < normalized.length) {
-      const candidate = normalized.slice(start + Math.floor(CHUNK_SIZE / 2), hardEnd);
+      const candidate = normalized.slice(start + Math.floor(size / 2), hardEnd);
+      const paragraph = candidate.lastIndexOf("\n\n");
       const newline = candidate.lastIndexOf("\n");
       const space = candidate.lastIndexOf(" ");
-      const boundary = Math.max(newline, space);
-      if (boundary >= 0) end = start + Math.floor(CHUNK_SIZE / 2) + boundary + 1;
+      const boundary = paragraph >= 0 ? paragraph + 1 : newline >= 0 ? newline : space;
+      if (boundary >= 0) end = start + Math.floor(size / 2) + boundary + 1;
     }
+    if (end < normalized.length && /[\uD800-\uDBFF]/u.test(normalized[end - 1] ?? "")) end--;
     const chunk = normalized.slice(start, end).trim();
     if (chunk.length > 0) chunks.push(chunk);
     if (end >= normalized.length) break;
     start = Math.max(start + 1, end - CHUNK_OVERLAP);
+    if (/[\uDC00-\uDFFF]/u.test(normalized[start] ?? "")) start++;
   }
   return chunks;
+}
+
+/** Keep Markdown sections and conversation role headings together before applying bounded overlap. */
+export function chunkSearchableContent(content: string): ReadonlyArray<string> {
+  const normalized = content.replaceAll("\r\n", "\n").trim();
+  if (normalized.length <= CHUNK_SIZE) return normalized ? [normalized] : [];
+  const sections: { heading: string; text: string }[] = [];
+  let heading = "",
+    lines: string[] = [],
+    fenced = false;
+  for (const line of normalized.split("\n")) {
+    if (/^\s*(```|~~~)/u.test(line)) fenced = !fenced;
+    if (!fenced && /^#{1,6}\s+\S/u.test(line)) {
+      if (lines.length) sections.push({ heading, text: lines.join("\n") });
+      heading = line;
+      lines = [];
+    }
+    lines.push(line);
+  }
+  if (lines.length) sections.push({ heading, text: lines.join("\n") });
+  return sections.flatMap((section) => {
+    const prefix = section.heading.slice(0, 160);
+    // Leave room for the section heading on continuation chunks.
+    if (!prefix) return chunkPlainContent(section.text);
+    const chunks = chunkPlainContent(section.text, CHUNK_SIZE - prefix.length - 1);
+    return chunks.map((chunk, index) => (index === 0 ? chunk : `${prefix}\n${chunk}`));
+  });
 }
 
 /** Bookkeeping tags ("original-chars-812") that would only add noise tokens. */
@@ -399,6 +429,7 @@ export interface AnalyzedChunk {
 
 /** Every row a knowledge item contributes to the RAG index. */
 export function analyzeChunks(input: {
+  readonly chunks?: ReadonlyArray<string>;
   readonly title: string;
   readonly content: string;
   readonly tags: ReadonlyArray<string>;
@@ -407,7 +438,7 @@ export function analyzeChunks(input: {
   const tagsText = tags.join(" ");
   const searchTitle = analyzeSearchText(input.title);
   const searchTags = analyzeSearchText(tagsText);
-  return chunkSearchableContent(input.content).map((content, chunkIndex) => ({
+  return (input.chunks ?? chunkSearchableContent(input.content)).map((content, chunkIndex) => ({
     chunkIndex,
     content,
     tagsText,

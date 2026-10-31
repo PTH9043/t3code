@@ -7,6 +7,7 @@ import {
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Crypto from "effect/Crypto";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -43,6 +44,25 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const GEMINI_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+
+export function geminiAcpStartupFailureMessage(cause: Cause.Cause<unknown>): string {
+  for (const reason of cause.reasons) {
+    const error = Cause.isFailReason(reason)
+      ? reason.error
+      : Cause.isDieReason(reason)
+        ? reason.defect
+        : undefined;
+    if (
+      error instanceof Error &&
+      error.message.includes(
+        "This client is no longer supported for Gemini Code Assist for individuals",
+      )
+    ) {
+      return "Google이 개인 계정(무료·AI Pro·Ultra)의 Gemini CLI 지원을 종료했습니다. Antigravity CLI 또는 지원되는 기업 계정이 필요합니다.";
+    }
+  }
+  return "Gemini CLI is installed but ACP startup failed. Check server logs for details.";
+}
 
 const GEMINI_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -299,7 +319,7 @@ export const checkGeminiProviderStatus = Effect.fn("checkGeminiProviderStatus")(
         version,
         status: "error",
         auth: authenticatedAuth,
-        message: "Gemini CLI is installed but ACP startup failed. Check server logs for details.",
+        message: geminiAcpStartupFailureMessage(discoveryExit.cause),
       },
     });
   }

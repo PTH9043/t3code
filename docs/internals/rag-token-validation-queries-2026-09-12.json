@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "reviewStatus": "agent-curated; human review pending; fixed after 40+16 calibration and before first validation run",
+  "queries": [
+    {
+      "id": "V1",
+      "query": "폴더 감시에서 fs.watch rename 폭주를 어떻게 처리했는지 근거를 찾아",
+      "paths": ["apps/desktop"],
+      "expected": ["repair-desktop-windows-watcher-cpu"]
+    },
+    {
+      "id": "V2",
+      "query": "Windows npm shim이 긴 PATH에서 실행되지 않은 이유와 로컬 해결 방법",
+      "paths": ["packages/shared"],
+      "expected": ["repair-windows-npm-shim-path"]
+    },
+    {
+      "id": "V3",
+      "query": "토큰 집계의 execution마다 cursor를 나누는 처리와 중복값 방지",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["repair-token-cursor-per-execution"]
+    },
+    {
+      "id": "V4",
+      "query": "모바일 담당 AI의 모델과 재시도 상태를 메시지에 표시하는 기존 동작",
+      "paths": ["apps/mobile"],
+      "expected": ["repair-mobile-shared-presentation"]
+    },
+    {
+      "id": "V5",
+      "query": "승인 요청의 실행 소유권이 다른 좌석에 넘어가지 않는 기준",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["repair-server-scoped-execution"]
+    },
+    {
+      "id": "V6",
+      "query": "스마트폰 채팅에서 담당 인공지능 메시지가 도구 로그 뒤에도 유지되는지",
+      "paths": ["apps/mobile"],
+      "expected": ["repair-mobile-shared-presentation"]
+    },
+    {
+      "id": "V7",
+      "query": "모바일 이용 약관의 링크 색상을 바꿔줘",
+      "paths": ["apps/mobile"],
+      "expected": []
+    },
+    {
+      "id": "V8",
+      "query": "AI로 식당의 신메뉴 이름을 만드는 화면의 문구를 수정해",
+      "paths": ["apps/web"],
+      "expected": []
+    },
+    {
+      "id": "V9",
+      "query": "Windows 창 모서리를 둥글게 만드는 디자인 설명",
+      "paths": ["apps/desktop"],
+      "expected": []
+    },
+    {
+      "id": "V10",
+      "query": "월간 가스 사용량을 kWh로 변환하는 계산기",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": []
+    },
+    {
+      "id": "V11",
+      "query": "파일 이름 목록을 가나다순으로 정렬하는 함수를 작성해",
+      "paths": ["packages/shared"],
+      "expected": []
+    },
+    {
+      "id": "V12",
+      "query": "여행 일정에서 경로별 이동 시간을 합산하는 표를 작성해",
+      "paths": ["apps/web"],
+      "expected": []
+    }
+  ]
+}

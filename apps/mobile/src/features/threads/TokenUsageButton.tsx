@@ -1,4 +1,5 @@
 import { HandoffSettings } from "./HandoffSettings";
+import { GrokResearchPanel } from "./GrokResearchPanel";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   formatTokenCount,
@@ -7,6 +8,7 @@ import {
   tokenUsagePhaseLabel,
   tokenUsageSummary,
   tokenUsageOutcomeLabel,
+  tokenUsageDiagnosticRows,
 } from "@t3tools/client-runtime/state/token-usage";
 import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
@@ -75,6 +77,7 @@ export function TokenUsageButton(props: {
           </View>
           <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
             <HandoffSettings {...props} />
+            <GrokResearchPanel {...props} />
             <Pressable
               accessibilityRole="button"
               onPress={query.refresh}
@@ -108,6 +111,14 @@ export function TokenUsageButton(props: {
                       {tokenUsageOutcomeLabel[report.outcome]} ·{" "}
                       {report.finality === "final" ? "보고 종료" : "잠정 집계"} · 품질 판정 별도
                     </Text>
+                    <View className="gap-2 rounded-lg border border-border p-3">
+                      {tokenUsageDiagnosticRows(report).map((row) => (
+                        <View key={row.label} className="flex-row justify-between gap-3">
+                          <Text className="text-xs text-muted-foreground">{row.label}</Text>
+                          <Text className="text-xs">{row.value}</Text>
+                        </View>
+                      ))}
+                    </View>
                     {report.breakdown.length > 0 ? (
                       <View className="gap-3">
                         <Text className="font-t3-bold text-sm">모델·단계·시도별 확인된 사용량</Text>

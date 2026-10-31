@@ -75,6 +75,7 @@ import * as Socket from "effect/unstable/socket/Socket";
 import { vi } from "vite-plus/test";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
+const encodeStreamProbe = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeTransferThreadSnapshot = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationThreadDetailSnapshot),
 );
@@ -810,6 +811,7 @@ const buildAppUnderTest = (options?: {
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
           getProjectShellById: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
+          getThreadRuntimeContext: () => Effect.die("unused runtime context"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
@@ -1278,6 +1280,19 @@ const jsonRequestBody = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+const signGoogleTestToken = (
+  key: NodeCrypto.KeyObject,
+  nonce: string,
+  aud: string,
+  sub: string,
+) => {
+  const encode = (value: unknown) => Buffer.from(jsonRequestBody(value)).toString("base64url");
+  // @effect-diagnostics-next-line globalDate:off -- Google JWT verifier uses the real clock.
+  const now = Math.floor(Date.now() / 1000);
+  const input = `${encode({ alg: "RS256", kid: "test-google-key" })}.${encode({ iss: "https://accounts.google.com", sub, aud, nonce, iat: now, exp: now + 300 })}`;
+  return `${input}.${NodeCrypto.sign("RSA-SHA256", Buffer.from(input), key).toString("base64url")}`;
+};
+
 const responseJsonEffect = <A>(response: HttpClientResponse.HttpClientResponse) =>
   response.json.pipe(
     Effect.map((json) => json as A),
@@ -1567,6 +1582,217 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // Desktop, so port-scoped: instances scan for a free port and share
       // 127.0.0.1, and cookies are not scoped by port.
       assert.isTrue(body.auth.sessionCookieName.startsWith("t3_session_"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "requires an administrative session to enroll a Google login and rejects forged identity",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest();
+        const challengeUrl = yield* getHttpServerUrl("/api/auth/google/enroll/challenge");
+        const enrollmentUrl = yield* getHttpServerUrl("/api/auth/google/enroll");
+        const loginChallengeUrl = yield* getHttpServerUrl("/api/auth/google/challenge");
+        const headers = { "content-type": "application/json" };
+        const denied = yield* fetchEffect(challengeUrl, {
+          method: "POST",
+          headers,
+          body: jsonRequestBody({ clientId: "test.apps.googleusercontent.com" }),
+        });
+        assert.equal(denied.status, 401);
+        const missing = yield* fetchEffect(loginChallengeUrl, { method: "POST" });
+        assert.equal(missing.status, 401);
+        const browser = yield* bootstrapBrowserSession();
+        const cookie = browser.cookie?.split(";")[0] ?? "";
+        const pairingUrl = yield* getHttpServerUrl("/api/auth/pairing-token");
+        const pairing = yield* fetchEffect(pairingUrl, {
+          method: "POST",
+          headers: { ...headers, cookie },
+          body: jsonRequestBody({ scopes: ["orchestration:read"] }),
+        });
+        assert.equal(pairing.status, 200);
+        const pairingBody = yield* responseJsonEffect<{ credential: string }>(pairing);
+        const limited = yield* bootstrapBrowserSession(pairingBody.credential);
+        const limitedCookie = limited.cookie?.split(";")[0] ?? "";
+        const limitedDenied = yield* fetchEffect(challengeUrl, {
+          method: "POST",
+          headers: { ...headers, cookie: limitedCookie },
+          body: jsonRequestBody({ clientId: "test.apps.googleusercontent.com" }),
+        });
+        assert.equal(limitedDenied.status, 403);
+        const allowed = yield* fetchEffect(challengeUrl, {
+          method: "POST",
+          headers: { ...headers, cookie },
+          body: jsonRequestBody({ clientId: "test.apps.googleusercontent.com" }),
+        });
+        assert.equal(allowed.status, 200);
+        const challenge = yield* responseJsonEffect<{ challenge: string }>(allowed);
+        const badToken = yield* fetchEffect(enrollmentUrl, {
+          method: "POST",
+          headers: { ...headers, cookie },
+          body: jsonRequestBody({ challenge: challenge.challenge, idToken: "not-a-google-token" }),
+        });
+        assert.equal(badToken.status, 401);
+        const repeated = yield* fetchEffect(enrollmentUrl, {
+          method: "POST",
+          headers: { ...headers, cookie },
+          body: jsonRequestBody({ challenge: challenge.challenge, idToken: "not-a-google-token" }),
+        });
+        assert.equal(repeated.status, 401);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("enrolls a verified Google account and issues its scoped session", () =>
+    Effect.gen(function* () {
+      const { publicKey, privateKey } = NodeCrypto.generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+      });
+      const key = {
+        ...publicKey.export({ format: "jwk" }),
+        kid: "test-google-key",
+        alg: "RS256",
+        use: "sig",
+      };
+      const originalFetch = globalThis.fetch;
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) =>
+        String(input) === "https://www.googleapis.com/oauth2/v3/certs"
+          ? Promise.resolve(
+              new Response(jsonRequestBody({ keys: [key] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            )
+          : (Reflect.apply(originalFetch, globalThis, [input, init]) as ReturnType<typeof fetch>),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()));
+      yield* buildAppUnderTest();
+      const browser = yield* bootstrapBrowserSession();
+      const cookie = browser.cookie?.split(";")[0] ?? "";
+      const headers = { "content-type": "application/json", cookie };
+      const clientId = "test.apps.googleusercontent.com";
+      const challengeUrl = yield* getHttpServerUrl("/api/auth/google/enroll/challenge");
+      const enrollUrl = yield* getHttpServerUrl("/api/auth/google/enroll");
+      const loginChallengeUrl = yield* getHttpServerUrl("/api/auth/google/challenge");
+      const sessionUrl = yield* getHttpServerUrl("/api/auth/google/session");
+      const tokenUrl = yield* getHttpServerUrl("/api/auth/google/token");
+      const unenrollUrl = yield* getHttpServerUrl("/api/auth/google/unenroll");
+      const statusUrl = yield* getHttpServerUrl("/api/auth/google/enrollment");
+      assert.equal((yield* fetchEffect(statusUrl)).status, 401);
+      const beforeStatus = yield* fetchEffect(statusUrl, { headers });
+      assert.isFalse((yield* responseJsonEffect<{ registered: boolean }>(beforeStatus)).registered);
+      const enrollmentChallenge = yield* fetchEffect(challengeUrl, {
+        method: "POST",
+        headers,
+        body: jsonRequestBody({ clientId }),
+      });
+      assert.equal(enrollmentChallenge.status, 200);
+      const enrollment = yield* responseJsonEffect<{ challenge: string }>(enrollmentChallenge);
+      const enrolled = yield* fetchEffect(enrollUrl, {
+        method: "POST",
+        headers,
+        body: jsonRequestBody({
+          challenge: enrollment.challenge,
+          idToken: signGoogleTestToken(privateKey, enrollment.challenge, clientId, "subject-a"),
+        }),
+      });
+      assert.equal(enrolled.status, 200);
+      const afterStatus = yield* fetchEffect(statusUrl, { headers });
+      assert.isTrue((yield* responseJsonEffect<{ registered: boolean }>(afterStatus)).registered);
+      const replacementChallenge = yield* fetchEffect(challengeUrl, {
+        method: "POST",
+        headers,
+        body: jsonRequestBody({ clientId }),
+      });
+      const replacement = yield* responseJsonEffect<{ challenge: string }>(replacementChallenge);
+      const overwrite = yield* fetchEffect(enrollUrl, {
+        method: "POST",
+        headers,
+        body: jsonRequestBody({
+          challenge: replacement.challenge,
+          idToken: signGoogleTestToken(privateKey, replacement.challenge, clientId, "subject-b"),
+        }),
+      });
+      assert.equal(overwrite.status, 401);
+      const loginChallenge = yield* fetchEffect(loginChallengeUrl, { method: "POST" });
+      assert.equal(loginChallenge.status, 200);
+      const login = yield* responseJsonEffect<{ challenge: string; clientId: string }>(
+        loginChallenge,
+      );
+      assert.equal(login.clientId, clientId);
+      const wrong = yield* fetchEffect(sessionUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody({
+          challenge: login.challenge,
+          idToken: signGoogleTestToken(privateKey, login.challenge, clientId, "subject-b"),
+        }),
+      });
+      assert.equal(wrong.status, 401);
+      const nextChallenge = yield* fetchEffect(loginChallengeUrl, { method: "POST" });
+      const next = yield* responseJsonEffect<{ challenge: string }>(nextChallenge);
+      const success = yield* fetchEffect(sessionUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody({
+          challenge: next.challenge,
+          idToken: signGoogleTestToken(privateKey, next.challenge, clientId, "subject-a"),
+        }),
+      });
+      assert.equal(success.status, 200);
+      const replay = yield* fetchEffect(sessionUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody({
+          challenge: next.challenge,
+          idToken: signGoogleTestToken(privateKey, next.challenge, clientId, "subject-a"),
+        }),
+      });
+      assert.equal(replay.status, 401);
+      const result = yield* responseJsonEffect<{ authenticated: boolean; scopes: string[] }>(
+        success,
+      );
+      assert.isTrue(result.authenticated);
+      assert.deepEqual(result.scopes, (browser.body as { scopes?: string[] }).scopes);
+      const googleCookie = success.headers["set-cookie"]?.split(";")[0];
+      assert.isDefined(googleCookie);
+      const authenticated = yield* fetchEffect(yield* getHttpServerUrl("/api/auth/session"), {
+        headers: { cookie: googleCookie ?? "" },
+      });
+      assert.isTrue(
+        (yield* responseJsonEffect<{ authenticated: boolean }>(authenticated)).authenticated,
+      );
+      const bearerChallenge = yield* fetchEffect(loginChallengeUrl, { method: "POST" });
+      const bearerNonce = yield* responseJsonEffect<{ challenge: string }>(bearerChallenge);
+      const bearerResponse = yield* fetchEffect(tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody({
+          challenge: bearerNonce.challenge,
+          idToken: signGoogleTestToken(privateKey, bearerNonce.challenge, clientId, "subject-a"),
+        }),
+      });
+      assert.equal(bearerResponse.status, 200);
+      const bearer = yield* responseJsonEffect<{
+        access_token: string;
+        token_type: string;
+        scope: string;
+      }>(bearerResponse);
+      assert.equal(bearer.token_type, "Bearer");
+      assert.deepEqual(bearer.scope.split(" "), result.scopes);
+      const bearerSession = yield* fetchEffect(yield* getHttpServerUrl("/api/auth/session"), {
+        headers: { authorization: `Bearer ${bearer.access_token}` },
+      });
+      assert.isTrue(
+        (yield* responseJsonEffect<{ authenticated: boolean }>(bearerSession)).authenticated,
+      );
+      const removed = yield* fetchEffect(unenrollUrl, { method: "POST", headers });
+      assert.equal(removed.status, 200);
+      assert.isTrue((yield* responseJsonEffect<{ removed: boolean }>(removed)).removed);
+      const removedStatus = yield* fetchEffect(statusUrl, { headers });
+      assert.isFalse(
+        (yield* responseJsonEffect<{ registered: boolean }>(removedStatus)).registered,
+      );
+      assert.equal((yield* fetchEffect(loginChallengeUrl, { method: "POST" })).status, 401);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -6188,6 +6414,156 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 2);
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect(
+    "subscribeThread fails an oversized live tail and recovers the event through durable replay",
+    () =>
+      Effect.gen(function* () {
+        const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+        const liveEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+        const subscribed = yield* Deferred.make<void>();
+        const delivered = yield* Deferred.make<void>();
+        const messageEvent = {
+          sequence: 2,
+          eventId: EventId.make("oversized-live-event"),
+          aggregateKind: "thread",
+          aggregateId: defaultThreadId,
+          occurredAt: "2026-01-01T00:00:01.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: defaultThreadId,
+            messageId: MessageId.make("oversized-live-message"),
+            role: "user",
+            text: "x".repeat(3 * 1024 * 1024),
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        } satisfies Extract<OrchestrationEvent, { type: "thread.message-sent" }>;
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: {
+              latestSequence: Effect.succeed(2),
+              streamDomainEvents: Stream.unwrap(
+                Effect.gen(function* () {
+                  const subscription = yield* PubSub.subscribe(liveEvents);
+                  yield* Deferred.succeed(subscribed, undefined);
+                  return Stream.fromSubscription(subscription);
+                }),
+              ).pipe(Stream.ensuring(Deferred.succeed(delivered, undefined))),
+              readEvents: () => Stream.make(messageEvent),
+            },
+            projectionSnapshotQuery: {
+              getThreadDetailSnapshot: () =>
+                Effect.gen(function* () {
+                  yield* Deferred.await(subscribed);
+                  yield* PubSub.publish(liveEvents, messageEvent);
+                  yield* Deferred.await(delivered);
+                  return Option.some({ snapshotSequence: 1, thread });
+                }),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const first = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+              threadId: defaultThreadId,
+              requestCompletionMarker: true,
+            }).pipe(Stream.runCollect, Effect.result),
+          ),
+        );
+        assert.equal(first._tag, "Failure");
+        if (first._tag === "Failure")
+          assert.equal(first.failure._tag, "OrchestrationGetSnapshotError");
+        const resumed = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+              threadId: defaultThreadId,
+              afterSequence: 1,
+              requestCompletionMarker: true,
+            }).pipe(Stream.take(2), Stream.runCollect),
+          ),
+        );
+        assert.equal(resumed[0]?.kind, "event");
+        if (resumed[0]?.kind === "event") {
+          assert.equal(resumed[0].event.sequence, 2);
+          if (resumed[0].event.type === "thread.message-sent")
+            assert.equal(resumed[0].event.payload.text.length, 3 * 1024 * 1024);
+        }
+        assert.equal(resumed[1]?.kind, "synchronized");
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("subscribeShell buffers compact envelopes for large message events", () =>
+    Effect.gen(function* () {
+      const delivered = yield* Deferred.make<void>();
+      const messageEvent = {
+        sequence: 2,
+        eventId: EventId.make("large-shell-event"),
+        aggregateKind: "thread",
+        aggregateId: defaultThreadId,
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.message-sent",
+        payload: {
+          threadId: defaultThreadId,
+          messageId: MessageId.make("large-shell-message"),
+          role: "user",
+          text: "x".repeat(3 * 1024 * 1024),
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.message-sent" }>;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            streamDomainEvents: Stream.make(messageEvent).pipe(
+              Stream.concat(Stream.fromEffectDrain(Deferred.succeed(delivered, undefined))),
+              Stream.concat(Stream.never),
+              Stream.ensuring(Deferred.succeed(delivered, undefined)),
+            ),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Deferred.await(delivered).pipe(
+                Effect.as({
+                  snapshotSequence: 1,
+                  projects: [],
+                  threads: [makeDefaultOrchestrationThreadShell()],
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                }),
+              ),
+            getThreadShellById: () =>
+              Effect.succeed(Option.some(makeDefaultOrchestrationThreadShell())),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ requestCompletionMarker: true }).pipe(
+            Stream.take(3),
+            Stream.runCollect,
+          ),
+        ),
+      );
+      assert.equal(items[0]?.kind, "snapshot");
+      assert.equal(items[1]?.kind, "thread-upserted");
+      assert.equal(items[2]?.kind, "synchronized");
+      assert.isBelow(encodeStreamProbe(items).length, 10_000);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("subscribeThread sends a fresh snapshot instead of replaying a large gap", () =>

@@ -131,6 +131,13 @@ export function applyServerSettingsPatch(
     providerHealthRefreshInterval,
     backgroundActivityProfile,
     backgroundActivity,
+    providerInstancesToUpsert,
+    executionProfilesToUpsert,
+    executionProfileIdsToRemove,
+    customMcpServersToUpsert,
+    customMcpServerIdsToRemove,
+    mcpProjectProfilesToUpsert,
+    mcpProjectProfileRootsToRemove,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -169,8 +176,30 @@ export function applyServerSettingsPatch(
           }
         : undefined;
   const next = deepMerge(current, patchForMerge);
+  const customMcpServers = { ...current.customMcpServers };
+  for (const id of customMcpServerIdsToRemove ?? []) delete customMcpServers[id];
+  for (const [id, server] of Object.entries(customMcpServersToUpsert ?? {}))
+    customMcpServers[id] = { ...server, name: id };
+  const mcpProjectProfiles = { ...current.mcpProjectProfiles };
+  for (const root of mcpProjectProfileRootsToRemove ?? []) delete mcpProjectProfiles[root];
+  for (const [root, profile] of Object.entries(mcpProjectProfilesToUpsert ?? {}))
+    mcpProjectProfiles[root] = { ...profile, workspaceRoot: root };
+  const executionProfiles = { ...current.executionProfiles };
+  for (const id of executionProfileIdsToRemove ?? []) delete executionProfiles[id];
+  for (const [id, profile] of Object.entries(executionProfilesToUpsert ?? {})) {
+    const { threadId: _threadId, ...meeting } = profile.meeting;
+    executionProfiles[id] = {
+      ...profile,
+      id,
+      revision: (current.executionProfiles[id]?.revision ?? 0) + 1,
+      meeting,
+    };
+  }
   const nextWithReplacementsBase = {
     ...next,
+    customMcpServers,
+    mcpProjectProfiles,
+    executionProfiles,
     ...(backgroundActivity !== undefined
       ? {
           backgroundActivity: {
@@ -186,6 +215,14 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
+      : {}),
+    ...(providerInstancesToUpsert !== undefined
+      ? {
+          providerInstances: {
+            ...(patch.providerInstances ?? current.providerInstances),
+            ...providerInstancesToUpsert,
+          },
+        }
       : {}),
     ...(patch.sourceControlWriterModelSelection !== undefined
       ? { sourceControlWriterModelSelection: patch.sourceControlWriterModelSelection }

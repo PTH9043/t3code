@@ -27,6 +27,30 @@ import {
 
 let nextActivityId = 0;
 
+it("shows a free-text question card and clears only its matching response", () => {
+  const question = makeActivity({
+    kind: "user-input.requested",
+    payload: {
+      requestId: "free-text",
+      questions: [
+        {
+          id: "target",
+          header: "Target",
+          question: "Which directory?",
+          options: [],
+          multiSelect: false,
+        },
+      ],
+    },
+  });
+  expect(derivePendingUserInputs([question])[0]?.questions[0]?.options).toEqual([]);
+  const resolved = makeActivity({
+    kind: "user-input.resolved",
+    payload: { requestId: "free-text", answers: { target: "src" } },
+  });
+  expect(derivePendingUserInputs([question, resolved])).toEqual([]);
+});
+
 function makeActivity(overrides: {
   id?: string;
   createdAt?: string;
@@ -821,6 +845,26 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities);
     expect(entries[0]?.label).toBe("Failed to deploy changes");
     expect(entries[0]?.tone).toBe("error");
+  });
+
+  it("keeps identical provider tool IDs separate across orchestra tasks", () => {
+    const entries = deriveWorkLogEntries(
+      ["task-a", "task-b"].map((messageId, index) =>
+        makeActivity({
+          id: `orchestra-tool-${index}`,
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read file",
+          payload: {
+            executionId: `execution-${index}`,
+            messageId,
+            data: { toolCallId: "call-1", output: `evidence-${index}` },
+          },
+        }),
+      ),
+    );
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.orchestraMessageId)).toEqual(["task-a", "task-b"]);
   });
 
   it("keeps tool entries from every turn and tags each with its turn id", () => {

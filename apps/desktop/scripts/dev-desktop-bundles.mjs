@@ -1,13 +1,14 @@
 // Runs the two bundle watchers and one Electron launcher, side by side:
 //
 //   - apps/server  `vp pack --watch --no-clean`  → apps/server/dist/bin.mjs
-//   - apps/desktop `vp pack --watch`             → dist-electron/*.cjs
+//   - apps/desktop `vp pack --watch --no-clean`  → dist-electron/*.cjs
 //   - apps/desktop `node scripts/dev-electron.mjs`
 //
 // The launcher waits for its resources, then watches both outputs itself.
 // Spawning it from pack's onSuccess leaks launchers across rebuilds on Windows.
 // `--no-clean` keeps service-launcher.mjs, which the one-shot `t3#build`
-// produced and the server watcher never rebuilds.
+// produced and the server watcher never rebuilds. The desktop watcher must
+// also preserve its existing bundles so Electron cannot launch during a clean.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
@@ -28,6 +29,18 @@ const vpBin = NodePath.join(
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
 
+if (hostPlatform === "win32") {
+  const nativeBuild = NodeChildProcess.spawnSync(
+    process.execPath,
+    [NodePath.resolve(desktopDir, "../../native/windows-file-drop/build.mjs")],
+    { cwd: desktopDir, stdio: "inherit", windowsHide: true },
+  );
+  if (nativeBuild.error) throw nativeBuild.error;
+  if (nativeBuild.status !== 0) throw new Error("Windows file-drop receiver build failed.");
+}
+
+let shuttingDown = false;
+const watcherRetryMs = 5_000;
 const children = [
   {
     name: "server-bundle",
@@ -37,36 +50,64 @@ const children = [
   {
     name: "desktop-bundle",
     cwd: desktopDir,
-    args: [vpBin, "pack", "--watch"],
+    args: [vpBin, "pack", "--watch", "--no-clean"],
   },
   {
     name: "electron-launcher",
     cwd: desktopDir,
     args: [NodePath.join(scriptsDir, "dev-electron.mjs")],
   },
-].map((spec) => {
+].map((spec) => ({ ...spec, child: null, retryTimer: null }));
+
+function startChild(spec) {
+  if (shuttingDown) return;
   const child = NodeChildProcess.spawn(process.execPath, spec.args, {
     cwd: spec.cwd,
     env: process.env,
     stdio: "inherit",
     windowsHide: true,
   });
+  spec.child = child;
+  let failureHandled = false;
+  const onFailure = (detail, code) => {
+    if (shuttingDown || failureHandled) return;
+    failureHandled = true;
+    if (spec.name === "electron-launcher") {
+      console.error(`[dev-desktop-bundles] ${spec.name} ${detail}; shutting down watchers`);
+      void shutdown(code);
+      return;
+    }
+    spec.child = null;
+    console.error(
+      `[dev-desktop-bundles] ${spec.name} ${detail}; preserving the app and retrying the watcher`,
+    );
+    spec.retryTimer = setTimeout(() => {
+      spec.retryTimer = null;
+      startChild(spec);
+    }, watcherRetryMs);
+  };
   child.once("error", (error) => {
-    console.error(`[dev-desktop-bundles] ${spec.name} failed to start: ${error.message}`);
-    void shutdown(1);
+    if (typeof child.pid === "number") {
+      console.error(`[dev-desktop-bundles] ${spec.name} error: ${error.message}`);
+      return;
+    }
+    onFailure(`failed to start: ${error.message}`, 1);
   });
   child.once("exit", (code, signal) => {
-    if (shuttingDown) return;
-    console.error(`[dev-desktop-bundles] ${spec.name} exited (${signal ?? code}); shutting down`);
-    void shutdown(spec.name === "electron-launcher" ? (code ?? 1) : code || 1);
+    onFailure(`exited (${signal ?? code})`, code ?? 1);
   });
-  return { ...spec, child };
-});
+}
 
-let shuttingDown = false;
+for (const child of children) startChild(child);
 
 function killTree(child) {
-  if (typeof child.pid !== "number" || child.exitCode !== null || child.signalCode !== null) return;
+  if (
+    !child ||
+    typeof child.pid !== "number" ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return;
   if (hostPlatform === "win32") {
     NodeChildProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
@@ -80,7 +121,10 @@ function killTree(child) {
 async function shutdown(exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
-  for (const { child } of children) killTree(child);
+  for (const { child, retryTimer } of children) {
+    if (retryTimer) clearTimeout(retryTimer);
+    killTree(child);
+  }
   await new Promise((resolve) => setTimeout(resolve, 500));
   process.exit(exitCode);
 }

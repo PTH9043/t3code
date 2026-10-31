@@ -7,6 +7,7 @@ import {
   resolveDevProtocolClient,
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
+import { inspectAutomaticRestart } from "./dev-restart-guard.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 import { watchDesktopBundles } from "./watch-desktop-bundles.mjs";
 
@@ -32,6 +33,7 @@ const forcedShutdownTimeoutMs = 1_500;
 // kills the backend — and any in-app agent turn running on it — so restarting
 // once per burst matters.
 const restartDebounceMs = 1_000;
+const activeWorkRetryMs = 5_000;
 // A main process that dies (or fails to load) this soon after launch is a
 // broken bundle, not a transient. After `rapidCrashLimit` such launches the
 // loop waits for the next bundle change instead of respawning forever.
@@ -65,6 +67,8 @@ if (devProtocolClient) {
 
 let shuttingDown = false;
 let restartTimer = null;
+let activeWorkRetryTimer = null;
+let activeWorkReason = null;
 let currentApp = null;
 let currentAppStartedAt = 0;
 let rapidCrashCount = 0;
@@ -99,6 +103,46 @@ function killChildTreeByPid(pid, signal) {
 function holdForBundleChange(reason) {
   heldForBundleChange = true;
   console.error(`[dev-electron] ${reason}; waiting for the next bundle change before relaunching`);
+}
+
+function delayAutomaticStop(reason, retry) {
+  if (activeWorkReason !== reason) {
+    console.error(
+      `[dev-electron] delaying automatic restart while work is active or cannot be checked (${reason})`,
+    );
+    activeWorkReason = reason;
+  }
+  if (!activeWorkRetryTimer) {
+    activeWorkRetryTimer = setTimeout(() => {
+      activeWorkRetryTimer = null;
+      retry();
+    }, activeWorkRetryMs);
+  }
+}
+
+function clearAutomaticStopDelay() {
+  activeWorkReason = null;
+  if (activeWorkRetryTimer) {
+    clearTimeout(activeWorkRetryTimer);
+    activeWorkRetryTimer = null;
+  }
+}
+
+function stopFailedAppWhenSafe(app) {
+  restartQueue = restartQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (shuttingDown || !heldForBundleChange || currentApp !== app) return;
+      if (hostPlatform === "win32") {
+        const inspection = inspectAutomaticRestart(app.pid);
+        if (!inspection.safe) {
+          delayAutomaticStop(inspection.reason, () => stopFailedAppWhenSafe(app));
+          return;
+        }
+      }
+      clearAutomaticStopDelay();
+      await stopApp();
+    });
 }
 
 function startApp() {
@@ -136,7 +180,7 @@ function startApp() {
       return;
     }
     holdForBundleChange("main process failed to load the bundle");
-    restartQueue = restartQueue.catch(() => undefined).then(() => stopApp());
+    stopFailedAppWhenSafe(app);
   });
 
   app.once("error", () => {
@@ -251,6 +295,14 @@ function scheduleRestart({ bundleChanged = false } = {}) {
     restartQueue = restartQueue
       .catch(() => undefined)
       .then(async () => {
+        if (currentApp && hostPlatform === "win32") {
+          const inspection = inspectAutomaticRestart(currentApp.pid);
+          if (!inspection.safe) {
+            delayAutomaticStop(inspection.reason, () => scheduleRestart());
+            return;
+          }
+        }
+        clearAutomaticStopDelay();
         await stopApp();
         if (!shuttingDown) {
           startApp();
@@ -285,6 +337,11 @@ async function shutdown(exitCode) {
   if (restartTimer) {
     clearTimeout(restartTimer);
     restartTimer = null;
+  }
+
+  if (activeWorkRetryTimer) {
+    clearTimeout(activeWorkRetryTimer);
+    activeWorkRetryTimer = null;
   }
 
   stopWatchingBundles?.();

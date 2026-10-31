@@ -1,10 +1,20 @@
+import * as WorkspaceAgentControl from "./orchestration/WorkspaceAgentControl.ts";
+import * as WorkspaceTaskInbox from "./orchestration/WorkspaceTaskInbox.ts";
+import * as WorkspaceTaskInboxStore from "./persistence/WorkspaceTaskInboxStore.ts";
 import { EnvironmentHttpApi } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
+import * as Scope from "effect/Scope";
+import {
+  FetchHttpClient,
+  HttpEffect,
+  HttpRouter,
+  HttpServer,
+  HttpServerRequest,
+} from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
@@ -20,12 +30,17 @@ import {
 } from "./http.ts";
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
+import * as DirectRpcServer from "./direct/DirectRpcServer.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
 import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts";
+import * as WorkspaceDevelopment from "./orchestration/WorkspaceDevelopment.ts";
+import { GrokResearchLive } from "./research/GrokResearch.ts";
+import * as WorkspaceDevelopmentStore from "./persistence/WorkspaceDevelopmentStore.ts";
+import * as WorkspaceDevelopmentGit from "./orchestration/WorkspaceDevelopmentGit.ts";
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
@@ -54,11 +69,13 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { WorkspaceAutomationRunnerLive } from "./orchestration/Layers/WorkspaceAutomationRunner.ts";
 import { SessionRecoveryReactorLive } from "./orchestration/Layers/SessionRecoveryReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
 import { WorkspaceAgentExecutorLive } from "./orchestration/Layers/WorkspaceAgentExecutor.ts";
+import { ReadOnlyResultCache } from "./documents/ReadOnlyResultCache.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
 import { SharedLibrarySyncLive } from "./library/SharedLibrarySync.ts";
 import { SharedLibraryRepositoryLive } from "./persistence/Layers/SharedLibrary.ts";
@@ -67,6 +84,7 @@ import { WorkspaceMonitoringReactorLive } from "./orchestration/Layers/Workspace
 import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceSchedulerReactor.ts";
 import { WorkspaceProgramSupervisorLive } from "./orchestration/Layers/WorkspaceProgramSupervisor.ts";
 import { WorkspaceKnowledgeFileStoreLive } from "./orchestration/Layers/WorkspaceKnowledgeFileStore.ts";
+import { WorkspaceMemory } from "./orchestration/WorkspaceMemory.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -274,23 +292,52 @@ const OrchestrationReactorWithProgramsLive = OrchestrationReactorLive.pipe(
   Layer.provideMerge(WorkspaceProgramSupervisorLayerLive),
 );
 
-const ReactorLayerLive = Layer.empty.pipe(
-  Layer.provideMerge(OrchestrationReactorWithProgramsLive),
-  Layer.provideMerge(ProviderRuntimeIngestionLive),
-  Layer.provideMerge(ProviderCommandReactorLive),
-  Layer.provideMerge(CheckpointReactorLive),
-  Layer.provideMerge(SessionRecoveryReactorLive),
-  Layer.provideMerge(ThreadDeletionReactorLive),
-  Layer.provideMerge(WorkspaceKnowledgeReactorLive),
-  Layer.provideMerge(WorkspaceCollaborationReactorLive),
-  Layer.provideMerge(WorkspaceAgentExecutorLive),
-  Layer.provideMerge(WorkspaceSchedulerReactorLive),
-  Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
-  Layer.provideMerge(WorkspaceWorktreeCleanup.layer),
-  Layer.provideMerge(SharedLibrarySyncLayerLive),
-  Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
-  Layer.provideMerge(RuntimeReceiptBusLive),
+const DevelopmentLayerLive = WorkspaceDevelopment.layer.pipe(
+  Layer.provide(WorkspaceDevelopmentStore.layer),
+  Layer.provide(ProviderSessionRuntime.layer),
+  Layer.provide(WorkspaceDevelopmentGit.layer.pipe(Layer.provide(ProcessRunner.layer))),
 );
+const TaskInboxLayerLive = WorkspaceTaskInbox.layer.pipe(
+  Layer.provide(WorkspaceTaskInboxStore.layer),
+  Layer.provide(ProcessRunner.layer),
+);
+const ReactorLayerLive = Layer.empty
+  .pipe(
+    Layer.provideMerge(
+      GrokResearchLive.pipe(
+        Layer.provide(FetchHttpClient.layer),
+        Layer.provide(ServerSecretStore.layer),
+      ),
+    ),
+    Layer.provideMerge(OrchestrationReactorWithProgramsLive),
+    Layer.provideMerge(ProviderRuntimeIngestionLive),
+    Layer.provideMerge(ProviderCommandReactorLive),
+    Layer.provideMerge(
+      CheckpointReactorLive.pipe(Layer.provideMerge(WorkspaceAutomationRunnerLive)),
+    ),
+    Layer.provideMerge(SessionRecoveryReactorLive),
+    Layer.provideMerge(ThreadDeletionReactorLive),
+    Layer.provideMerge(WorkspaceKnowledgeReactorLive),
+    Layer.provideMerge(
+      WorkspaceCollaborationReactorLive.pipe(
+        Layer.provide(WorkspaceDevelopmentGit.layer.pipe(Layer.provide(ProcessRunner.layer))),
+      ),
+    ),
+    Layer.provideMerge(DevelopmentLayerLive),
+    Layer.provideMerge(WorkspaceAgentExecutorLive),
+    Layer.provideMerge(WorkspaceAgentControl.layer),
+  )
+  .pipe(
+    Layer.provideMerge(WorkspaceSchedulerReactorLive),
+    Layer.provideMerge(TaskInboxLayerLive),
+    Layer.provideMerge(WorkspaceKnowledgeFileStoreLive),
+    Layer.provideMerge(WorkspaceMemory.layer),
+    Layer.provideMerge(WorkspaceWorktreeCleanup.layer),
+    Layer.provideMerge(SharedLibrarySyncLayerLive),
+    Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+    Layer.provideMerge(RuntimeReceiptBusLive),
+    Layer.provideMerge(ReadOnlyResultCache.layer),
+  );
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
   Layer.provide(ProviderSessionRuntime.layer),
@@ -700,11 +747,49 @@ export const makeServerLayer = Layer.unwrap(
       ).pipe(Effect.asVoid),
     }).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
 
-    const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
+    const routedApplication = makeRoutesLayer.pipe(Layer.provide(launcherLayer));
+    const describedHttpEffect = HttpRouter.toHttpEffect(routedApplication);
+    type RoutedHttpEffect = Effect.Success<typeof describedHttpEffect>;
+    type HttpRequirements = Exclude<
+      Effect.Services<RoutedHttpEffect>,
+      Scope.Scope | HttpServerRequest.HttpServerRequest
+    >;
+    const directHttpHandlerLayer = Layer.effect(
+      DirectRpcServer.DirectHttpHandler,
+      Effect.gen(function* () {
+        const router = yield* HttpRouter.HttpRouter;
+        const context = yield* Effect.context<HttpRequirements>();
+        // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- The shared router erases route-specific errors, which become HTTP failures.
+        const httpEffect = router.asHttpEffect().pipe(Effect.orDie);
+        return DirectRpcServer.DirectHttpHandler.of({
+          handle: HttpEffect.toWebHandlerWith<
+            HttpRequirements,
+            Scope.Scope | HttpServerRequest.HttpServerRequest
+          >(context)(httpEffect),
+        });
+      }),
+    );
+    const routesLayer = HttpRouter.serve(
+      Layer.mergeAll(routedApplication, directHttpHandlerLayer),
+      {
+        disableLogger: !config.logWebSocketEvents,
+      },
+    ).pipe(Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)));
+    const remoteRoutesLayer = HttpRouter.serve(routedApplication, {
       disableLogger: !config.logWebSocketEvents,
     }).pipe(Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)));
+    const routesAndDirectLayer =
+      config.desktopDirectRpcInputFd !== undefined || config.desktopDirectRpcOutputFd !== undefined
+        ? DirectRpcServer.layer.pipe(
+            Layer.provideMerge(routesLayer),
+            Layer.provide(GeminiAuthLayerLive),
+            Layer.provide(PreviewAutomationBroker.layer),
+            Layer.provide(ServerSelfUpdate.layer),
+            Layer.provide(launcherLayer),
+          )
+        : remoteRoutesLayer;
     const serverApplicationLayer = Layer.mergeAll(
-      routesLayer,
+      routesAndDirectLayer,
       httpListeningLayer,
       runtimeStateLayer,
       tailscaleServeLayer,

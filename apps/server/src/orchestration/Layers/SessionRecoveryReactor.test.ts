@@ -154,7 +154,7 @@ function makeHarness(input: {
       listResumable: () => Effect.succeed(input.resumableRuns ?? []),
     } as unknown as ProjectionWorkspaceCollaborationRunRepository["Service"];
     const activityRepository = {
-      listByThreadId: ({ threadId }: { readonly threadId: ThreadId }) =>
+      listByThreadIdAndKinds: ({ threadId }: { readonly threadId: ThreadId }) =>
         Effect.succeed((input.activities ?? []).filter((row) => row.threadId === threadId)),
     } as unknown as ProjectionThreadActivityRepository["Service"];
 

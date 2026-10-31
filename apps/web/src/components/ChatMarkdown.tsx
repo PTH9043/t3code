@@ -1,14 +1,18 @@
 import { useAtomValue } from "@effect/atom-react";
+import { resultPathKey } from "@t3tools/shared/generatedResults";
+import { MarkdownResultImage } from "./chat/MarkdownResultImage";
+import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
+  DownloadIcon,
   GlobeIcon,
   Maximize2Icon,
   Minimize2Icon,
   WrapTextIcon,
 } from "lucide-react";
-import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import type { ChatAttachment, ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
 import { formatMeetingProtocolText } from "../meetingProtocolText";
 import {
   isAtomCommandInterrupted,
@@ -70,12 +74,15 @@ import {
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
 import {
   normalizeMarkdownLinkDestination,
+  remarkNormalizeWindowsFileLinks,
   resolveInlineCodeFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
   type MarkdownFileLinkMeta,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
+import { resolveAssetUrl } from "../assets/assetUrls";
+import { downloadFile, isDownloadableDocument } from "../browser/downloadFile";
 import { cn } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
 import { useActiveEnvironmentId } from "../state/entities";
@@ -99,6 +106,8 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  resultAttachments?: ReadonlyArray<ChatAttachment> | undefined;
+  onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -150,11 +159,13 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   protocols: {
     ...defaultSchema.protocols,
     href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    src: [...(defaultSchema.protocols?.src ?? []), "file"],
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
 
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
+  remarkNormalizeWindowsFileLinks,
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
@@ -162,6 +173,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
+  remarkNormalizeWindowsFileLinks,
   remarkNormalizeListItemIndentation,
   remarkBreaks,
   remarkPreserveCodeMeta,
@@ -746,6 +758,8 @@ interface MarkdownFileLinkProps {
   threadRef?: ScopedThreadRef | undefined;
   onOpen: (targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  onDownload?: (() => Promise<void>) | undefined;
+  downloadOnClick?: boolean | undefined;
   className?: string | undefined;
 }
 
@@ -1029,8 +1043,27 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   threadRef,
   onOpen,
   onOpenInBrowser,
+  onDownload,
+  downloadOnClick = false,
   className,
 }: MarkdownFileLinkProps) {
+  const [downloading, setDownloading] = useState(false);
+  const handleDownload = useCallback(() => {
+    if (!onDownload || downloading) return;
+    setDownloading(true);
+    void onDownload()
+      .catch((cause) => {
+        reportMarkdownActionFailure({ operation: "download-file", target: targetPath }, cause);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "파일 다운로드 실패",
+            description: cause instanceof Error ? cause.message : "파일을 다운로드하지 못했습니다.",
+          }),
+        );
+      })
+      .finally(() => setDownloading(false));
+  }, [downloading, onDownload, targetPath]);
   const handleOpenInEditor = useCallback(() => {
     void (async () => {
       try {
@@ -1160,6 +1193,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       try {
         const clicked = await api.contextMenu.show(
           [
+            ...(onDownload ? ([{ id: "download", label: "파일 다운로드" }] as const) : []),
             { id: "open", label: "편집기에서 열기" },
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "내장 브라우저에서 열기" }] as const)
@@ -1170,6 +1204,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { x: event.clientX, y: event.clientY },
         );
 
+        if (clicked === "download") {
+          handleDownload();
+          return;
+        }
         if (clicked === "open") {
           handleOpenInEditor();
           return;
@@ -1192,41 +1230,83 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         );
       }
     },
-    [displayPath, handleCopy, handleOpenInBrowser, handleOpenInEditor, onOpenInBrowser, targetPath],
+    [
+      displayPath,
+      handleCopy,
+      handleDownload,
+      handleOpenInBrowser,
+      handleOpenInEditor,
+      onDownload,
+      onOpenInBrowser,
+      targetPath,
+    ],
   );
 
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <a
-            href={href}
-            className={cn(CHAT_FILE_TAG_CHIP_CLASS_NAME, MARKDOWN_FILE_LINK_CLASS_NAME, className)}
-            data-markdown-copy={copyMarkdown}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (onOpenInBrowser) {
-                handleOpenInBrowser();
-                return;
-              }
-              handleOpenInFilePreview();
-            }}
-            onContextMenu={handleContextMenu}
+    <span className="inline-flex max-w-full items-center gap-0.5 align-middle">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <a
+              href={href}
+              className={cn(
+                CHAT_FILE_TAG_CHIP_CLASS_NAME,
+                MARKDOWN_FILE_LINK_CLASS_NAME,
+                className,
+              )}
+              data-markdown-copy={copyMarkdown}
+              aria-busy={downloading}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (downloadOnClick && onDownload) {
+                  handleDownload();
+                  return;
+                }
+                if (onOpenInBrowser) {
+                  handleOpenInBrowser();
+                  return;
+                }
+                handleOpenInFilePreview();
+              }}
+              onContextMenu={handleContextMenu}
+            >
+              <FileTagChipContent path={iconPath} label={label} theme={theme} selectable />
+            </a>
+          }
+        />
+        <TooltipPopup
+          side="top"
+          className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
+        >
+          <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
+            {displayPath}
+          </div>
+        </TooltipPopup>
+      </Tooltip>
+      {onDownload && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+                aria-label={`${label} 다운로드`}
+                disabled={downloading}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  handleDownload();
+                }}
+              />
+            }
           >
-            <FileTagChipContent path={iconPath} label={label} theme={theme} selectable />
-          </a>
-        }
-      />
-      <TooltipPopup
-        side="top"
-        className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
-      >
-        <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
-          {displayPath}
-        </div>
-      </TooltipPopup>
-    </Tooltip>
+            <DownloadIcon className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipPopup side="top">{downloading ? "다운로드 중…" : "파일 다운로드"}</TooltipPopup>
+        </Tooltip>
+      )}
+    </span>
   );
 }, areMarkdownFileLinkPropsEqual);
 
@@ -1247,6 +1327,8 @@ function areMarkdownFileLinkPropsEqual(
     previous.threadRef === next.threadRef &&
     previous.onOpen === next.onOpen &&
     previous.onOpenInBrowser === next.onOpenInBrowser &&
+    previous.onDownload === next.onDownload &&
+    previous.downloadOnClick === next.downloadOnClick &&
     previous.className === next.className
   );
 }
@@ -1256,6 +1338,8 @@ function ChatMarkdown({
   cwd,
   threadRef,
   onTaskListChange,
+  resultAttachments,
+  onImageExpand,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
@@ -1374,6 +1458,36 @@ function ChatMarkdown({
     },
     [createAssetUrl, openPreview, preparedConnection, threadRef],
   );
+  const downloadMarkdownFile = useCallback(
+    async (filePath: string, fileName: string) => {
+      if (!threadRef || preparedConnection._tag === "None") {
+        throw new Error("실행 환경이 연결되어 있지 않습니다.");
+      }
+      const snapshot = resultAttachments?.find(
+        (attachment) =>
+          attachment.result?.sourcePath &&
+          resultPathKey(attachment.result.sourcePath) === resultPathKey(filePath),
+      );
+      const result = await createAssetUrl({
+        environmentId: threadRef.environmentId,
+        input: {
+          resource: snapshot
+            ? { _tag: "attachment", attachmentId: snapshot.id, downloadName: fileName }
+            : {
+                _tag: "workspace-file",
+                threadId: threadRef.threadId,
+                path: filePath,
+                download: true,
+              },
+        },
+      });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+      const url = resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl);
+      if (!url) throw new Error("파일 다운로드 주소를 만들 수 없습니다.");
+      await downloadFile(url, fileName);
+    },
+    [createAssetUrl, preparedConnection, resultAttachments, threadRef],
+  );
   /* eslint-disable react/no-unstable-nested-components -- ReactMarkdown requires component
    * renderers that close over this message's metadata. useMemo keeps them stable until that
    * metadata changes. */
@@ -1382,6 +1496,7 @@ function ChatMarkdown({
       fileLinkMeta: MarkdownFileLinkMeta,
       copyMarkdown: string,
       className?: string,
+      downloadOnClick = false,
     ) => {
       const parentSuffix = fileLinkParentSuffixByPath.get(fileLinkMeta.filePath);
       const labelParts = [fileLinkMeta.basename];
@@ -1407,6 +1522,12 @@ function ChatMarkdown({
           theme={resolvedTheme}
           threadRef={threadRef}
           onOpen={openInPreferredEditor}
+          onDownload={
+            threadRef
+              ? () => downloadMarkdownFile(fileLinkMeta.filePath, fileLinkMeta.basename)
+              : undefined
+          }
+          downloadOnClick={downloadOnClick}
           onOpenInBrowser={
             threadRef &&
             isPreviewSupportedInRuntime() &&
@@ -1420,6 +1541,38 @@ function ChatMarkdown({
     };
 
     return {
+      img({ node: _node, src, alt, ...props }) {
+        const href = typeof src === "string" ? src : undefined;
+        const file = resolveMarkdownFileLinkMeta(href, cwd);
+        if (
+          file &&
+          resultAttachments?.some(
+            (attachment) =>
+              attachment.result?.sourcePath &&
+              resultPathKey(attachment.result.sourcePath) === resultPathKey(file.filePath),
+          )
+        )
+          return null;
+        if (file && threadRef)
+          return (
+            <MarkdownResultImage
+              threadRef={threadRef}
+              filePath={file.filePath}
+              alt={alt}
+              onImageExpand={onImageExpand}
+            />
+          );
+        return (
+          <img
+            {...props}
+            src={src}
+            alt={alt}
+            loading="lazy"
+            decoding="async"
+            className="my-2 h-auto max-h-[520px] max-w-full object-contain"
+          />
+        );
+      },
       p({ node: _node, children, ...props }) {
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
@@ -1464,7 +1617,10 @@ function ChatMarkdown({
       },
       a({ node, href, children, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        const fileLinkMeta = normalizedHref
+          ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
+            (!isStreaming ? resolveMarkdownFileLinkMeta(normalizedHref, cwd) : null))
+          : null;
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
           const isSameDocumentLink = href?.startsWith("#") ?? false;
@@ -1538,6 +1694,7 @@ function ChatMarkdown({
           fileLinkMeta,
           `[${fileLinkMeta.basename}](${normalizedHref})`,
           props.className,
+          !fileLinkMeta.line && isDownloadableDocument(fileLinkMeta.filePath),
         );
       },
       code({ node, children, className, ...props }) {
@@ -1594,11 +1751,14 @@ function ChatMarkdown({
   }, [
     cwd,
     diffThemeName,
+    downloadMarkdownFile,
     fileLinkParentSuffixByPath,
     inlineCodeFileLinkMetaByText,
     isStreaming,
     markdownFileLinkMetaByHref,
     onTaskListChange,
+    resultAttachments,
+    onImageExpand,
     openInPreferredEditor,
     openExternalLinkInPreview,
     openMarkdownFileInPreview,

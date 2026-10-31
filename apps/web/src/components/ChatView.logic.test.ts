@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   EnvironmentId,
   MessageId,
   ProjectId,
@@ -219,6 +220,13 @@ describe("buildThreadTurnInterruptInput", () => {
     expect(buildThreadTurnInterruptInput(makeThread({ session: readySession }))).toEqual({
       threadId,
     });
+  });
+
+  it("keeps the selected asynchronous question on the stop command", () => {
+    const questionRequestId = ApprovalRequestId.make("async:question-1");
+    expect(
+      buildThreadTurnInterruptInput(makeThread({ session: readySession }), { questionRequestId }),
+    ).toEqual({ threadId, questionRequestId });
   });
 
   it("only the explicit background stop asks the server to take watch loops down", () => {

@@ -9,10 +9,27 @@ import {
   createDesktopSecondaryBootstrapsReader,
   desktopLocalBackendId,
   desktopLocalConnectionId,
+  desktopLocalHttpBaseUrl,
   isDesktopLocalConnectionTarget,
 } from "./desktopLocal";
 
 describe("desktop local connection identity", () => {
+  it("uses the private desktop protocol for a direct WSL backend", () => {
+    const entry = {
+      id: "wsl:Ubuntu",
+      label: "WSL",
+      directRpc: true,
+      directHost: `wsl-${"a".repeat(48)}`,
+      httpBaseUrl: "http://127.0.0.1:4000/",
+      wsBaseUrl: "ws://127.0.0.1:4000/",
+    };
+    expect(desktopLocalHttpBaseUrl(entry, "t3code-dev:")).toBe(`t3code-dev://${entry.directHost}/`);
+    expect(desktopLocalHttpBaseUrl({ ...entry, directHost: "wsl" }, "t3code-dev:")).toBeNull();
+    expect(desktopLocalHttpBaseUrl({ ...entry, directRpc: false }, "t3code-dev:")).toBe(
+      entry.httpBaseUrl,
+    );
+    expect(desktopLocalHttpBaseUrl({ ...entry, httpBaseUrl: null }, "t3code-dev:")).toBeNull();
+  });
   it("preserves the desktop backend instance id", () => {
     const target = new BearerConnectionTarget({
       connectionId: desktopLocalConnectionId("wsl:Ubuntu"),

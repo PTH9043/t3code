@@ -70,7 +70,10 @@ import {
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
 } from "@t3tools/contracts/settings";
-import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
+import {
+  desktopLocalHttpBaseUrl,
+  isDesktopLocalConnectionTarget,
+} from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { isElectron } from "../env";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
@@ -2239,6 +2242,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     <>
       <div className="group/project-header relative">
         <SidebarMenuButton
+          data-file-drop-project={project.id}
+          data-file-drop-group="true"
+          data-file-drop-environment={project.environmentId}
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
           className={`pr-8 group-hover/project-header:bg-sidebar-row-hover group-hover/project-header:text-sidebar-foreground max-sm:pr-14 ${
             isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : ""
@@ -2538,8 +2544,8 @@ function LocalSecondaryStatus() {
   const connecting: string[] = [];
   const failed: Array<{ label: string; error: string | null }> = [];
   for (const bootstrap of secondaries) {
-    const env =
-      bootstrap.httpBaseUrl !== null ? localEnvByUrl.get(bootstrap.httpBaseUrl) : undefined;
+    const httpBaseUrl = desktopLocalHttpBaseUrl(bootstrap, window.location.protocol);
+    const env = httpBaseUrl !== null ? localEnvByUrl.get(httpBaseUrl) : undefined;
     if (env?.phase === "connected") {
       continue;
     }

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeftIcon, BrainCircuitIcon, SettingsIcon } from "lucide-react";
+import { ArrowLeftIcon, BookOpenIcon, BrainCircuitIcon, SettingsIcon } from "lucide-react";
 import { scopeProjectRef, scopedProjectKey } from "@t3tools/client-runtime/environment";
 
 import { useEnvironments } from "~/state/environments";
@@ -12,6 +12,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { navigateToTabView } from "../tabs/navigateToTabView";
 import { toastManager } from "../ui/toast";
 import { resolveControlCenterChatView } from "./controlCenterNavigation";
+import { openAiHelp } from "../help/aiHelpStore";
 import {
   SidebarContent,
   SidebarFooter,
@@ -122,6 +123,8 @@ export function ControlCenterSidebarNav() {
                 <SidebarMenuItem key={`${project.environmentId}:${project.id}`}>
                   <SidebarMenuButton
                     isActive={pathname === targetPath}
+                    data-file-drop-project={project.id}
+                    data-file-drop-environment={project.environmentId}
                     onClick={() =>
                       go("/control-center", {
                         environmentId: project.environmentId,
@@ -155,6 +158,17 @@ export function ControlCenterSidebarNav() {
 
       <SidebarFooter className="p-[var(--sidebar-content-inset)]">
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                openAiHelp();
+              }}
+            >
+              <BookOpenIcon />
+              <span>AI 사용 도움말</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => void goBackToChat()}

@@ -44,9 +44,9 @@ import { seatLookupFrom, summarizeTaskGraphNodes, type SeatLookup } from "./task
 type BadgeVariant = "success" | "warning" | "error" | "outline" | "info";
 
 const AGENT_LABELS: Readonly<Record<WorkspaceOrchestrationAgent, string>> = {
-  fable: "페이블 · 총괄",
-  codex: "코덱스 · 구현",
-  grok: "그록 · 조사",
+  fable: "총괄",
+  codex: "구현",
+  grok: "조사",
 };
 
 const ROLE_LABELS: Readonly<Record<WorkspaceAgentRole, string>> = {

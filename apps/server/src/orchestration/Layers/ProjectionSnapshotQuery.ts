@@ -14,6 +14,7 @@ import {
   OrchestrationThreadDetailSnapshot,
   ProjectScript,
   WorkspaceControlSettings,
+  type WorkspacePromptComposeInput,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -36,10 +37,22 @@ import {
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { ServerConfig } from "../../config.ts";
+import {
+  renderContextArtifact,
+  saveWorkspaceContextArtifact,
+} from "../workspaceContextArtifacts.ts";
+import { knowledgeAppliesToContext } from "../workspaceKnowledgeScope.ts";
+import { excludedRagSourceKeys } from "../workspaceKnowledgeSelection.ts";
+import { workspaceRetrievalQuery } from "../workspaceSearchVocabulary.ts";
+import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeTokenUsageProjection } from "./TokenUsageProjection.ts";
@@ -80,6 +93,7 @@ import {
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { composeWorkspacePrompt as composeWorkspacePromptContext } from "../workspacePrompt.ts";
+import { loadWorkspaceTokenCounter } from "../workspacePromptTokens.ts";
 import { deriveWorkspaceRuntimeSnapshot } from "../workspaceRuntime.ts";
 import {
   ProjectionSnapshotQuery,
@@ -87,6 +101,7 @@ import {
   type ProjectionSnapshotCounts,
   type ProjectionThreadCheckpointContext,
   type ProjectionSnapshotQueryShape,
+  type ProjectionThreadRuntimeRead,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
@@ -380,8 +395,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
+  const fullThreadReadLock = yield* Semaphore.make(1);
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const projectionWorkspaceRagRepository = yield* ProjectionWorkspaceRagRepository;
+  const artifactConfig = yield* Effect.serviceOption(ServerConfig);
+  const artifactFs = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const artifactPath = yield* Effect.serviceOption(Path.Path);
   const sharedLibraryRepository = yield* SharedLibraryRepository;
   const projectionWorkspaceAgentRoleRepository = yield* ProjectionWorkspaceAgentRoleRepository;
   const projectionWorkspaceCollaborationRunRepository =
@@ -1208,9 +1227,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const listThreadActivityRowsByThread = SqlSchema.findAll({
-    Request: ThreadIdLookupInput,
+    Request: Schema.Struct({
+      ...ThreadIdLookupInput.fields,
+      kinds: Schema.optional(Schema.Array(Schema.String)),
+    }),
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId }) =>
+    // Runtime consumers request a few activity kinds from long conversations.
+    // Keep their lookup selective: the ordering index otherwise makes SQLite
+    // visit every activity in the thread before applying the kind filter.
+    execute: ({ threadId, kinds }) =>
       sql`
         SELECT
           activity_id AS "activityId",
@@ -1223,7 +1248,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sequence,
           created_at AS "createdAt"
         FROM projection_thread_activities
+          ${kinds === undefined ? sql`` : sql`INDEXED BY idx_projection_recovery_activity_kind`}
         WHERE thread_id = ${threadId}
+          ${kinds === undefined ? sql`` : sql`AND kind IN ${sql.in([...kinds])}`}
         ORDER BY
           sequence ASC,
           created_at ASC,
@@ -2405,30 +2432,60 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // keeps unrelated tasks at zero.
   const SHARED_LIBRARY_PROMPT_LIMIT = 4;
 
-  const composeWorkspacePrompt: NonNullable<
-    ProjectionSnapshotQueryShape["composeWorkspacePrompt"]
-  > = (input) =>
+  const composeWorkspacePromptWithSources = (request: WorkspacePromptComposeInput) =>
     Effect.gen(function* () {
-      const knowledge = yield* listWorkspaceKnowledge!({
-        projectId: input.projectId,
-        includeShared: input.includeShared !== false,
-        statuses: ["active"],
-      });
+      const { input, now, knowledge } = yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const project = yield* getActiveProjectRowById({ projectId: request.projectId }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "composeWorkspacePrompt:project",
+                "composeWorkspacePrompt:project:decode",
+              ),
+            ),
+          );
+          const contextMode =
+            request.contextMode ??
+            (Option.isSome(project)
+              ? project.value.workspaceControl.contextOptimization?.memoryMode
+              : undefined) ??
+            "standard";
+          const maxContextTokens =
+            request.maxContextTokens !== undefined
+              ? request.maxContextTokens
+              : Option.isSome(project)
+                ? (project.value.workspaceControl.contextOptimization?.maxContextTokens ?? null)
+                : null;
+          const input = { ...request, contextMode, maxContextTokens };
+          const now = yield* Clock.currentTimeMillis;
+          const knowledge = yield* listWorkspaceKnowledge!({
+            projectId: input.projectId,
+            includeShared: input.includeShared === true,
+            statuses: ["active"],
+          });
+          return { input, now, knowledge };
+        }),
+      );
+      // Embedding I/O must not hold the database transaction or delay other turns.
       const rag =
         input.includeRag === false
           ? { matches: [] }
           : yield* projectionWorkspaceRagRepository.search({
+              excludedSourceKeys: excludedRagSourceKeys(knowledge.items, input, now),
               projectId: input.projectId,
-              includeShared: input.includeShared !== false,
+              includeShared: input.includeShared === true,
               ...(input.contextPaths === undefined ? {} : { contextPaths: input.contextPaths }),
-              query: input.task,
+              query:
+                input.contextMode === "relevant" ? workspaceRetrievalQuery(input.task) : input.task,
+              maxChunksPerItem:
+                input.maxChunksPerItem ?? (input.contextMode === "relevant" ? 3 : 1),
               ...(input.ragLimit !== undefined ? { limit: input.ragLimit } : {}),
               ...(input.includeLongTermMemory !== undefined
                 ? { includeLongTermMemory: input.includeLongTermMemory }
                 : {}),
             });
       const libraryMatches: ReadonlyArray<SharedLibraryMatch> =
-        input.includeRag === false || input.includeSharedLibrary === false
+        input.includeRag === false || input.includeSharedLibrary !== true
           ? []
           : yield* sharedLibraryRepository
               .search({
@@ -2445,13 +2502,127 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ),
                 ),
               );
-      return composeWorkspacePromptContext({
+      const tokenCounter = yield* Effect.tryPromise(() => loadWorkspaceTokenCounter()).pipe(
+        Effect.catch((cause) =>
+          input.maxContextTokens !== null
+            ? Effect.fail(cause)
+            : Effect.logWarning("workspace prompt token estimate unavailable", { cause }).pipe(
+                Effect.as(undefined),
+              ),
+        ),
+      );
+      const composition = {
+        now,
         request: input,
-        items: knowledge.items,
-        ragMatches: rag.matches,
+        items:
+          input.includeAttachmentDocuments === false
+            ? knowledge.items.filter((item) => !item.research?.attachment)
+            : knowledge.items,
+        ragMatches:
+          input.includeAttachmentDocuments === false
+            ? rag.matches.filter((match) => !match.research?.attachment)
+            : rag.matches,
         libraryMatches,
-      });
+        ...(tokenCounter === undefined ? {} : { tokenCounter }),
+      };
+      const result = composeWorkspacePromptContext(composition);
+      return {
+        result,
+        withRequiredSuffix: (requiredSuffix: string) =>
+          composeWorkspacePromptContext({
+            ...composition,
+            requiredSuffix,
+            // The saved artifact covers precisely these sources. Do not introduce unsaved
+            // sources if adding its reference changes which optional evidence fits.
+            items: composition.items.filter((item) =>
+              result.sourceReferences?.some(
+                (source) => source.itemId === item.id && source.projectId === item.projectId,
+              ),
+            ),
+            ragMatches: composition.ragMatches.filter((match) =>
+              result.sourceReferences?.some(
+                (source) => source.itemId === match.itemId && source.projectId === match.projectId,
+              ),
+            ),
+            libraryMatches: result.libraryMatches ?? [],
+          }),
+        items: knowledge.items.filter(
+          (item) =>
+            knowledgeAppliesToContext(item, input) &&
+            result.sourceReferences?.some(
+              (source) => source.itemId === item.id && source.projectId === item.projectId,
+            ),
+        ),
+      };
+    }).pipe(
+      Effect.mapError((cause) =>
+        isPersistenceError(cause)
+          ? cause
+          : toPersistenceSqlError("composeWorkspacePrompt:transaction")(cause),
+      ),
+    );
+
+  const composeWorkspacePrompt: NonNullable<
+    ProjectionSnapshotQueryShape["composeWorkspacePrompt"]
+  > = (request) =>
+    composeWorkspacePromptWithSources(request).pipe(Effect.map(({ result }) => result));
+  const composeWorkspacePromptForExecution: NonNullable<
+    ProjectionSnapshotQueryShape["composeWorkspacePromptForExecution"]
+  > = (request) =>
+    Effect.gen(function* () {
+      const { result, items, withRequiredSuffix } =
+        yield* composeWorkspacePromptWithSources(request);
+      if (!items.length || result.diagnostics?.mode !== "relevant") return result;
+      const hasPartialSource = items.some((item) =>
+        result.diagnostics?.decisions.some(
+          (decision) =>
+            decision.selected &&
+            decision.projectId === item.projectId &&
+            decision.itemId === item.id &&
+            decision.sourceChars < item.content.length,
+        ),
+      );
+      if (!hasPartialSource) return result;
+      const original = items
+        .map(
+          (item) =>
+            `## [${item.projectId}/${item.id}] ${item.title}\nupdatedAt=${item.updatedAt}; revision=${item.research?.lineage?.revision ?? "unknown"}\n${item.content}`,
+        )
+        .join("\n\n");
+      const source =
+        Option.isSome(artifactConfig) && Option.isSome(artifactFs) && Option.isSome(artifactPath)
+          ? yield* saveWorkspaceContextArtifact({
+              stateDir: artifactConfig.value.stateDir,
+              projectId: request.projectId,
+              runId: "rag-sources",
+              content: original,
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, artifactFs.value),
+              Effect.provideService(Path.Path, artifactPath.value),
+            )
+          : null;
+      const requiredSuffix =
+        "\n\n## 선택된 기억의 전체 원문\n" +
+        (source === null
+          ? "원문 파일을 확인하지 못하여 전체 선택 자료를 보존합니다.\n" + original
+          : renderContextArtifact(source));
+      return withRequiredSuffix(requiredSuffix);
     });
+
+  const getWorkspaceContextSettings: NonNullable<
+    ProjectionSnapshotQueryShape["getWorkspaceContextSettings"]
+  > = (projectId) =>
+    getActiveProjectRowById({ projectId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "workspaceContextSettings:query",
+          "workspaceContextSettings:decode",
+        ),
+      ),
+      Effect.map((project) =>
+        Option.isSome(project) ? project.value.workspaceControl.contextOptimization : undefined,
+      ),
+    );
 
   const listWorkspaceAgentRoles: NonNullable<
     ProjectionSnapshotQueryShape["listWorkspaceAgentRoles"]
@@ -2756,7 +2927,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     readonly beforeTurnKey: string;
   }
 
-  const getThreadDetailByIdBounded = (threadId: ThreadId, bounds: ThreadDetailBounds | undefined) =>
+  const getThreadDetailByIdBounded = (
+    threadId: ThreadId,
+    bounds: ThreadDetailBounds | undefined,
+    read?: ProjectionThreadRuntimeRead,
+  ) =>
     Effect.gen(function* () {
       const [
         threadRow,
@@ -2775,9 +2950,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        (bounds === undefined
-          ? listThreadMessageRowsByThread({ threadId })
-          : listThreadMessageRowsByThreadWindow({ threadId, ...bounds })
+        (read !== undefined && !read.messages
+          ? Effect.succeed([])
+          : bounds === undefined
+            ? listThreadMessageRowsByThread({ threadId })
+            : listThreadMessageRowsByThreadWindow({ threadId, ...bounds })
         ).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
@@ -2786,7 +2963,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        listThreadProposedPlanRowsByThread({ threadId }).pipe(
+        (read !== undefined && !read.proposedPlans
+          ? Effect.succeed([])
+          : listThreadProposedPlanRowsByThread({ threadId })
+        ).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadDetailById:listPlans:query",
@@ -2794,9 +2974,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        (bounds === undefined
-          ? listThreadActivityRowsByThread({ threadId })
-          : listThreadActivityRowsByThreadWindow({ threadId, ...bounds })
+        (read !== undefined && (read.activityKinds?.length ?? 0) === 0
+          ? Effect.succeed([])
+          : bounds === undefined
+            ? listThreadActivityRowsByThread({
+                threadId,
+                ...(read?.activityKinds !== undefined ? { kinds: read.activityKinds } : {}),
+              })
+            : listThreadActivityRowsByThreadWindow({ threadId, ...bounds })
         ).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
@@ -2805,7 +2990,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        listCheckpointRowsByThread({ threadId }).pipe(
+        (read !== undefined && !read.checkpoints
+          ? Effect.succeed([])
+          : listCheckpointRowsByThread({ threadId })
+        ).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints:query",
@@ -2911,7 +3099,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     });
 
   const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
-    getThreadDetailByIdBounded(threadId, undefined);
+    fullThreadReadLock.withPermits(1)(getThreadDetailByIdBounded(threadId, undefined));
+
+  const getThreadRuntimeContext: ProjectionSnapshotQueryShape["getThreadRuntimeContext"] = (
+    threadId,
+    read = {},
+  ) => getThreadDetailByIdBounded(threadId, undefined, read);
 
   // Bounds pathological fan-out: one user turn that spawned hundreds of
   // subagent turns still pages in bounded chunks, at the cost of splitting the
@@ -2921,139 +3114,145 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // Sentinels for unbounded keyset ends; "~" sorts after any ISO timestamp.
   const ANCHOR_UNBOUNDED = "~";
 
-  const getThreadDetailSnapshot: ProjectionSnapshotQueryShape["getThreadDetailSnapshot"] = (
-    threadId,
-    window,
-  ) =>
-    // Read the thread detail and the snapshot sequence within a single
-    // transaction so the sequence is consistent with the returned state; a
-    // projector update landing between two separate reads could otherwise return
-    // a sequence ahead of the thread detail, causing the client to resume from
-    // too far and drop events. Window resolution runs inside the same
-    // transaction so the page boundary is consistent with the returned rows.
-    sql
-      .withTransaction(
-        Effect.gen(function* () {
-          if (window?.turnLimit === undefined) {
-            const thread = yield* getThreadDetailById(threadId);
-            if (Option.isNone(thread)) {
-              return Option.none<OrchestrationThreadDetailSnapshot>();
+  const getThreadDetailSnapshotUnserialized: ProjectionSnapshotQueryShape["getThreadDetailSnapshot"] =
+    (threadId, window) =>
+      // Read the thread detail and the snapshot sequence within a single
+      // transaction so the sequence is consistent with the returned state; a
+      // projector update landing between two separate reads could otherwise return
+      // a sequence ahead of the thread detail, causing the client to resume from
+      // too far and drop events. Window resolution runs inside the same
+      // transaction so the page boundary is consistent with the returned rows.
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            if (window?.turnLimit === undefined) {
+              const thread = yield* getThreadDetailByIdBounded(threadId, undefined);
+              if (Option.isNone(thread)) {
+                return Option.none<OrchestrationThreadDetailSnapshot>();
+              }
+              const { snapshotSequence } = yield* getSnapshotSequence();
+              return Option.some({ snapshotSequence, thread: thread.value });
             }
-            const { snapshotSequence } = yield* getSnapshotSequence();
-            return Option.some({ snapshotSequence, thread: thread.value });
-          }
 
-          // A malformed or foreign-thread cursor falls back to the first page
-          // rather than failing: the client's stale cursor after a revert or
-          // reconnect should degrade to "reload recent history", not error.
-          const decodedCursor =
-            window.beforeCursor === undefined
-              ? null
-              : decodeThreadDetailPageCursor(window.beforeCursor);
-          const cursor = decodedCursor?.threadId === threadId ? decodedCursor : null;
+            // A malformed or foreign-thread cursor falls back to the first page
+            // rather than failing: the client's stale cursor after a revert or
+            // reconnect should degrade to "reload recent history", not error.
+            const decodedCursor =
+              window.beforeCursor === undefined
+                ? null
+                : decodeThreadDetailPageCursor(window.beforeCursor);
+            const cursor = decodedCursor?.threadId === threadId ? decodedCursor : null;
 
-          const windowRows = yield* listTurnWindowRows({
-            threadId,
-            beforeAnchorAt: cursor?.beforeAnchorAt ?? ANCHOR_UNBOUNDED,
-            beforeTurnKey: cursor?.beforeTurnId ?? "",
-            userTurnLimit: window.turnLimit,
-            maxRawTurns: THREAD_DETAIL_MAX_RAW_TURNS_PER_PAGE,
-          }).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getThreadDetailSnapshot:listTurnWindow:query",
-                "ProjectionSnapshotQuery.getThreadDetailSnapshot:listTurnWindow:decodeRows",
-              ),
-            ),
-          );
-
-          const oldest = windowRows[0];
-          // An empty window (no turns before the cursor, or a thread with no
-          // turns at all) still returns thread metadata with empty collections
-          // for turn-linked rows; turnless rows are bounded to the same empty
-          // range. The first page of a turnless thread stays unwindowed so
-          // pre-turn content (e.g. a just-created thread) is not hidden.
-          const bounds: ThreadDetailBounds | undefined =
-            oldest === undefined && cursor === null
-              ? undefined
-              : {
-                  minAnchorAt: oldest?.anchorAt ?? "",
-                  minTurnKey: oldest?.turnKey ?? "",
-                  beforeAnchorAt: cursor?.beforeAnchorAt ?? ANCHOR_UNBOUNDED,
-                  beforeTurnKey: cursor?.beforeTurnId ?? "",
-                };
-          // Empty window behind a cursor: nothing older remains.
-          const emptyBounds =
-            oldest === undefined && cursor !== null
-              ? { minAnchorAt: "", minTurnKey: "", beforeAnchorAt: "", beforeTurnKey: "" }
-              : undefined;
-
-          const thread = yield* getThreadDetailByIdBounded(threadId, emptyBounds ?? bounds);
-          if (Option.isNone(thread)) {
-            return Option.none<OrchestrationThreadDetailSnapshot>();
-          }
-
-          const hasMore =
-            oldest !== undefined &&
-            (yield* listTurnWindowRows({
+            const windowRows = yield* listTurnWindowRows({
               threadId,
-              beforeAnchorAt: oldest.anchorAt,
-              beforeTurnKey: oldest.turnKey,
-              userTurnLimit: 1,
-              maxRawTurns: 1,
+              beforeAnchorAt: cursor?.beforeAnchorAt ?? ANCHOR_UNBOUNDED,
+              beforeTurnKey: cursor?.beforeTurnId ?? "",
+              userTurnLimit: window.turnLimit,
+              maxRawTurns: THREAD_DETAIL_MAX_RAW_TURNS_PER_PAGE,
             }).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:probeOlder:query",
-                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:probeOlder:decodeRows",
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:listTurnWindow:query",
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:listTurnWindow:decodeRows",
                 ),
               ),
-            )).length > 0;
+            );
 
-          const { snapshotSequence } = yield* getSnapshotSequence();
-          const watermarkRow = yield* getThreadEventWatermarkRow({
-            threadId,
-            maxSequence: snapshotSequence,
-          }).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getThreadDetailSnapshot:threadWatermark:query",
-                "ProjectionSnapshotQuery.getThreadDetailSnapshot:threadWatermark:decodeRow",
+            const oldest = windowRows[0];
+            // An empty window (no turns before the cursor, or a thread with no
+            // turns at all) still returns thread metadata with empty collections
+            // for turn-linked rows; turnless rows are bounded to the same empty
+            // range. The first page of a turnless thread stays unwindowed so
+            // pre-turn content (e.g. a just-created thread) is not hidden.
+            const bounds: ThreadDetailBounds | undefined =
+              oldest === undefined && cursor === null
+                ? undefined
+                : {
+                    minAnchorAt: oldest?.anchorAt ?? "",
+                    minTurnKey: oldest?.turnKey ?? "",
+                    beforeAnchorAt: cursor?.beforeAnchorAt ?? ANCHOR_UNBOUNDED,
+                    beforeTurnKey: cursor?.beforeTurnId ?? "",
+                  };
+            // Empty window behind a cursor: nothing older remains.
+            const emptyBounds =
+              oldest === undefined && cursor !== null
+                ? { minAnchorAt: "", minTurnKey: "", beforeAnchorAt: "", beforeTurnKey: "" }
+                : undefined;
+
+            const thread = yield* getThreadDetailByIdBounded(threadId, emptyBounds ?? bounds);
+            if (Option.isNone(thread)) {
+              return Option.none<OrchestrationThreadDetailSnapshot>();
+            }
+
+            const hasMore =
+              oldest !== undefined &&
+              (yield* listTurnWindowRows({
+                threadId,
+                beforeAnchorAt: oldest.anchorAt,
+                beforeTurnKey: oldest.turnKey,
+                userTurnLimit: 1,
+                maxRawTurns: 1,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadDetailSnapshot:probeOlder:query",
+                    "ProjectionSnapshotQuery.getThreadDetailSnapshot:probeOlder:decodeRows",
+                  ),
+                ),
+              )).length > 0;
+
+            const { snapshotSequence } = yield* getSnapshotSequence();
+            const watermarkRow = yield* getThreadEventWatermarkRow({
+              threadId,
+              maxSequence: snapshotSequence,
+            }).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:threadWatermark:query",
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:threadWatermark:decodeRow",
+                ),
               ),
-            ),
-          );
-          const threadSequence = Option.match(watermarkRow, {
-            onNone: () => 0,
-            onSome: (row) => row.threadSequence ?? 0,
-          });
-          return Option.some({
-            snapshotSequence,
-            thread: thread.value,
-            page: {
-              beforeCursor:
-                hasMore && oldest !== undefined
-                  ? encodeThreadDetailPageCursor({
-                      threadId,
-                      beforeAnchorAt: oldest.anchorAt,
-                      beforeTurnId: oldest.turnKey,
-                    })
-                  : null,
-              hasMore,
+            );
+            const threadSequence = Option.match(watermarkRow, {
+              onNone: () => 0,
+              onSome: (row) => row.threadSequence ?? 0,
+            });
+            return Option.some({
               snapshotSequence,
-              threadSequence,
-            },
-          });
-        }),
-      )
-      .pipe(
-        Effect.mapError((error) =>
-          isPersistenceError(error)
-            ? error
-            : toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailSnapshot:transaction")(
-                error,
-              ),
-        ),
-      );
+              thread: thread.value,
+              page: {
+                beforeCursor:
+                  hasMore && oldest !== undefined
+                    ? encodeThreadDetailPageCursor({
+                        threadId,
+                        beforeAnchorAt: oldest.anchorAt,
+                        beforeTurnId: oldest.turnKey,
+                      })
+                    : null,
+                hasMore,
+                snapshotSequence,
+                threadSequence,
+              },
+            });
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            isPersistenceError(error)
+              ? error
+              : toPersistenceSqlError(
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshot:transaction",
+                )(error),
+          ),
+        );
+
+  const getThreadDetailSnapshot: ProjectionSnapshotQueryShape["getThreadDetailSnapshot"] = (
+    threadId,
+    window,
+  ) => {
+    const read = getThreadDetailSnapshotUnserialized(threadId, window);
+    return window === undefined ? fullThreadReadLock.withPermits(1)(read) : read;
+  };
 
   const readHandoffDecisions = SqlSchema.findAll({
     Request: Schema.Struct({ threadId: ThreadId, beforeSequence: NonNegativeInt }),
@@ -3070,7 +3269,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     `,
   });
 
+  const readRateLimitedAccounts = SqlSchema.findAll({
+    Request: Schema.Struct({ since: IsoDateTime }),
+    Result: Schema.Struct({ instanceId: TrimmedNonEmptyString }),
+    execute: ({ since }) => sql`
+      SELECT DISTINCT json_extract(payload_json, '$.instanceId') AS "instanceId"
+      FROM projection_thread_activities
+      WHERE kind = 'provider.account.rate-limited' AND created_at >= ${since}
+        AND json_type(payload_json, '$.instanceId') = 'text'
+    `,
+  });
+
   return {
+    getRateLimitedAccountIds: (since) =>
+      readRateLimitedAccounts({ since }).pipe(
+        Effect.map((rows) => rows.map((row) => row.instanceId)),
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getRateLimitedAccountIds")),
+      ),
     getThreadHandoffDecisions: (input) =>
       readHandoffDecisions(input).pipe(
         Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getThreadHandoffDecisions")),
@@ -3084,6 +3299,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getCounts,
     listWorkspaceKnowledge,
     getThreadTokenUsage: tokenUsage.getReport,
+    getProjectTokenUsage: tokenUsage.getProjectReport,
     searchWorkspaceRag,
     composeWorkspacePrompt,
     listWorkspaceAgentRoles,
@@ -3095,11 +3311,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getWorkspaceRuntime,
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
+    getWorkspaceContextSettings,
+    composeWorkspacePromptForExecution,
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,
     getThreadDetailById,
+    getThreadRuntimeContext,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;
 });

@@ -13,7 +13,8 @@ export default defineConfig({
   run: {
     tasks: {
       build: {
-        command: "node scripts/build-preview-annotation-css.mjs && vp pack",
+        command:
+          "node ../../native/windows-file-drop/build.mjs --optional && node scripts/build-preview-annotation-css.mjs && vp pack",
         dependsOn: ["t3#build"],
         cache: false,
       },
@@ -46,7 +47,8 @@ export default defineConfig({
       entry: ["src/main.ts"],
       clean: true,
       deps: {
-        alwaysBundle: (id) => id.startsWith("@t3tools/"),
+        alwaysBundle: (id) =>
+          id.startsWith("@t3tools/") || id === "@effect/platform-node/Mime" || id === "mime",
       },
     },
     {

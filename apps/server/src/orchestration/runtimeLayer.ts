@@ -1,4 +1,5 @@
 import * as Layer from "effect/Layer";
+import { layer as WorkflowStoreLayer } from "../persistence/WorkspaceWorkflowStore.ts";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
@@ -19,6 +20,7 @@ export const OrchestrationProjectionPipelineLayerLive = OrchestrationProjectionP
 );
 
 export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
+  WorkflowStoreLayer,
   OrchestrationProjectionSnapshotQueryLive,
   OrchestrationEventInfrastructureLayerLive,
   OrchestrationProjectionPipelineLayerLive,

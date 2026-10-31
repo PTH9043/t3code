@@ -15,7 +15,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { normalizeCustomModelSlug } from "@t3tools/shared/model";
-import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  isWindowsCommandNotFound,
+  ProcessSpawnError,
+  runHiddenWindowsProcess,
+} from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
@@ -44,6 +49,7 @@ export class ProviderCommandNotFoundError extends Schema.TaggedErrorClass<Provid
 }
 
 const isProviderCommandNotFoundError = Schema.is(ProviderCommandNotFoundError);
+const isProcessSpawnError = Schema.is(ProcessSpawnError);
 
 export interface ProviderProbeResult {
   readonly installed: boolean;
@@ -70,21 +76,57 @@ export function nonEmptyTrimmed(value: string | undefined): string | undefined {
 
 export function isCommandMissingCause(error: unknown): boolean {
   if (isProviderCommandNotFoundError(error)) return true;
+  if (
+    isProcessSpawnError(error) &&
+    typeof error.cause === "object" &&
+    error.cause !== null &&
+    "code" in error.cause &&
+    error.cause.code === "ENOENT"
+  ) {
+    return true;
+  }
   return error instanceof PlatformError.PlatformError && error.reason._tag === "NotFound";
 }
 
-export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Command) =>
+export const spawnAndCollect = (
+  binaryPath: string,
+  command: ChildProcess.Command,
+  runHidden = runHiddenWindowsProcess,
+) =>
   Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const child = yield* spawner.spawn(command);
-    const [stdout, stderr, exitCode] = yield* Effect.all(
-      [
-        collectStreamAsString(child.stdout),
-        collectStreamAsString(child.stderr),
-        child.exitCode.pipe(Effect.map(Number)),
-      ],
-      { concurrency: "unbounded" },
-    );
+    const platform = yield* HostProcessPlatform;
+    let stdout: string;
+    let stderr: string;
+    let exitCode: number;
+    if (
+      platform === "win32" &&
+      ChildProcess.isStandardCommand(command) &&
+      (command.options.shell === undefined || typeof command.options.shell === "boolean")
+    ) {
+      const output = yield* runHidden({
+        command: command.command,
+        args: command.args,
+        cwd: command.options.cwd,
+        env: command.options.env,
+        replaceEnv: command.options.extendEnv !== true && command.options.env !== undefined,
+        ...(command.options.shell === undefined ? {} : { shell: command.options.shell }),
+        maxOutputBytes: Number.POSITIVE_INFINITY,
+      });
+      stdout = output.stdout;
+      stderr = output.stderr;
+      exitCode = output.code ?? 0;
+    } else {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const child = yield* spawner.spawn(command);
+      [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          collectStreamAsString(child.stdout),
+          collectStreamAsString(child.stderr),
+          child.exitCode.pipe(Effect.map(Number)),
+        ],
+        { concurrency: "unbounded" },
+      );
+    }
 
     const result: CommandResult = { stdout, stderr, code: exitCode };
     if (yield* isWindowsCommandNotFound(exitCode, stderr)) {

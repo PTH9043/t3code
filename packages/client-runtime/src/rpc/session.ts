@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
@@ -10,6 +11,8 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import { makeWsRpcProtocolClient, type WsRpcProtocolClient } from "./protocol.ts";
+import { DirectRpcConnection } from "./directConnection.ts";
+import * as ClientCapabilities from "../platform/capabilities.ts";
 import type {
   ConnectionAttemptError,
   ConnectionTransientError,
@@ -67,6 +70,7 @@ function mapSessionRpcError(error: InitialConfigError | ProbeError): ConnectionA
 
 export const make = Effect.gen(function* () {
   const webSocketConstructor = yield* Socket.WebSocketConstructor;
+  const direct = yield* Effect.serviceOption(ClientCapabilities.DirectLocalRpc);
 
   const connect = Effect.fnUntraced(function* (connection: PreparedConnection) {
     yield* Effect.annotateCurrentSpan({
@@ -92,9 +96,26 @@ export const make = Effect.gen(function* () {
         Effect.asVoid,
       ),
     });
+    if (
+      connection.transport === "desktop-direct" &&
+      (Option.isNone(direct) || !direct.value.bridge)
+    ) {
+      return yield* new ConnectionBlockedError({
+        reason: "unsupported",
+        detail: "로컬 직접 연결을 사용할 수 없습니다.",
+      });
+    }
+    const constructor =
+      connection.transport === "desktop-direct" && Option.isSome(direct) && direct.value.bridge
+        ? () =>
+            new DirectRpcConnection(
+              direct.value.bridge!,
+              connection.directBackendId,
+            ) as unknown as WebSocket
+        : webSocketConstructor;
     const socketLayer = Socket.layerWebSocket(connection.socketUrl, {
       openTimeout: SOCKET_OPEN_TIMEOUT,
-    }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, webSocketConstructor)));
+    }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, constructor)));
     const protocolLayer = Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({

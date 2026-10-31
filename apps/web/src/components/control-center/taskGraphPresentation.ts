@@ -1,4 +1,8 @@
-import type { WorkspaceMeetingParticipant, WorkspaceTaskNode } from "@t3tools/contracts";
+import type {
+  WorkspaceMeetingParticipant,
+  WorkspaceTaskNode,
+  WorkspaceTaskGraph,
+} from "@t3tools/contracts";
 
 /**
  * Seat id → the name the person gave that seat. On a meeting or orchestra run
@@ -90,7 +94,7 @@ interface AttentionRunInput {
   readonly status: string;
   readonly task: string;
   readonly meeting: { readonly pendingQuestion: { readonly question: string } | null } | null;
-  readonly graph: { readonly nodes: ReadonlyArray<WorkspaceTaskNode> } | null;
+  readonly graph: Pick<WorkspaceTaskGraph, "nodes" | "planReview" | "delivery"> | null;
 }
 
 /**
@@ -117,7 +121,13 @@ export const runsAwaitingPerson = (
         : nodes.filter(
             (node) => node.threadId !== null && blockedThreadIds.has(String(node.threadId)),
           ).length;
-    const liveQuestion = run.meeting?.pendingQuestion?.question ?? null;
+    const liveQuestion =
+      run.meeting?.pendingQuestion?.question ??
+      (run.graph?.planReview?.status === "pending"
+        ? "실행 계획 확인 필요"
+        : run.graph?.delivery && !["passed", "verifying"].includes(run.graph.delivery.status)
+          ? run.graph.delivery.detail
+          : null);
     if (liveQuestion === null && awaitingUser === 0 && blockedNodeThreads === 0) continue;
     items.push({
       runId: run.id,

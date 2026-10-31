@@ -266,24 +266,20 @@ const buildAvailableEditors = Effect.fn("externalLauncher.buildAvailableEditors"
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
 ): Effect.fn.Return<ReadonlyArray<EditorId>, never, FileSystem.FileSystem | Path.Path> {
-  const available: EditorId[] = [];
-
-  for (const editor of EDITORS) {
-    if (editor.commands === null) {
-      const command = fileManagerCommandForPlatform(platform);
-      if (yield* isCommandAvailable(command, { env })) {
-        available.push(editor.id);
-      }
-      continue;
-    }
-
-    const command = yield* resolveAvailableCommand(editor.commands, env);
-    if (Option.isSome(command)) {
-      available.push(editor.id);
-    }
-  }
-
-  return available;
+  const candidates = yield* Effect.forEach(
+    EDITORS,
+    (editor) =>
+      Effect.gen(function* () {
+        if (editor.commands === null) {
+          const command = fileManagerCommandForPlatform(platform);
+          return (yield* isCommandAvailable(command, { env })) ? editor.id : null;
+        }
+        const command = yield* resolveAvailableCommand(editor.commands, env);
+        return Option.isSome(command) ? editor.id : null;
+      }),
+    { concurrency: "unbounded" },
+  );
+  return candidates.filter((editor) => editor !== null);
 });
 
 const resolveBrowserLaunch = Effect.fn("externalLauncher.resolveBrowserLaunch")(function* (

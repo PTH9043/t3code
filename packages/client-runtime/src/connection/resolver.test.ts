@@ -23,6 +23,7 @@ import {
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import {
   BearerConnectionTarget,
+  ConnectionBlockedError,
   ConnectionTransientError,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
@@ -201,6 +202,39 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
 });
 
 describe("ConnectionResolver", () => {
+  it.effect("blocks desktop direct targets instead of falling back to a socket", () =>
+    Effect.gen(function* () {
+      const brokerLayer = yield* makeDependencies({
+        authorizeBearer: () => Effect.die("A local connection must not use remote authorization"),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
+      const primary = new PrimaryConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "Primary",
+        httpBaseUrl: "t3code-dev://app/",
+        wsBaseUrl: "ws://127.0.0.1:3777",
+      });
+      const wsl = new BearerConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "WSL",
+        connectionId: "wsl-1",
+      });
+      const profile = new BearerConnectionProfile({
+        connectionId: "wsl-1",
+        environmentId: ENVIRONMENT_ID,
+        label: "WSL",
+        httpBaseUrl: "t3code-dev://wsl/",
+        wsBaseUrl: "ws://127.0.0.1:3778",
+      });
+      expect(yield* Effect.flip(broker.prepare(catalogEntry(primary)))).toBeInstanceOf(
+        ConnectionBlockedError,
+      );
+      expect(
+        yield* Effect.flip(broker.prepare(catalogEntry(wsl, Option.some(profile)))),
+      ).toBeInstanceOf(ConnectionBlockedError);
+    }),
+  );
+
   it.effect("prepares a primary environment without remote capabilities", () =>
     Effect.gen(function* () {
       const brokerLayer = yield* makeDependencies();

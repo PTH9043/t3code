@@ -25,6 +25,7 @@ import type {
   WorkspaceKnowledgeListResult,
   WorkspacePromptComposeInput,
   WorkspacePromptComposeResult,
+  WorkspaceControlSettings,
   WorkspaceRagSearchInput,
   WorkspaceRagSearchResult,
   WorkspaceAgentRoleListInput,
@@ -74,10 +75,22 @@ export interface ProjectionFullThreadDiffContext {
   readonly toCheckpointRef: CheckpointRef | null;
 }
 
+/** Bodies requested by a server worker; omitted collections are not hydrated. */
+export interface ProjectionThreadRuntimeRead {
+  readonly messages?: boolean;
+  readonly activityKinds?: ReadonlyArray<string>;
+  readonly proposedPlans?: boolean;
+  readonly checkpoints?: boolean;
+}
+
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Recent immutable account failures, retained when a thread changes native sessions. */
+  readonly getRateLimitedAccountIds?: (
+    since: string,
+  ) => Effect.Effect<ReadonlyArray<string>, ProjectionRepositoryError>;
   /** Explicit user choices before a handoff, even when the provider emitted no acknowledgement. */
   readonly getThreadHandoffDecisions?: (input: {
     readonly threadId: ThreadId;
@@ -92,6 +105,10 @@ export interface ProjectionSnapshotQueryShape {
     import("@t3tools/contracts").ThreadTokenUsageReport,
     ProjectionRepositoryError
   >;
+  readonly getProjectTokenUsage?: (input: {
+    readonly projectId: ProjectId;
+    readonly since: string;
+  }) => Effect.Effect<import("@t3tools/contracts").TokenUsageSummary, ProjectionRepositoryError>;
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.
@@ -167,6 +184,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly composeWorkspacePrompt?: (
     input: WorkspacePromptComposeInput,
   ) => Effect.Effect<WorkspacePromptComposeResult, ProjectionRepositoryError>;
+  /** Actual execution additionally saves selected source originals for native file/range lookup. */
+  readonly composeWorkspacePromptForExecution?: (
+    input: WorkspacePromptComposeInput,
+  ) => Effect.Effect<WorkspacePromptComposeResult, ProjectionRepositoryError>;
+  /** Read only one project's input policy, without threads or repository identity discovery. */
+  readonly getWorkspaceContextSettings?: (
+    projectId: ProjectId,
+  ) => Effect.Effect<WorkspaceControlSettings["contextOptimization"], ProjectionRepositoryError>;
 
   /** List role-to-provider-instance bindings for one Workspace. */
   readonly listWorkspaceAgentRoles?: (
@@ -249,6 +274,16 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getThreadDetailById: (
     threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read current thread metadata and only the body collections a worker needs.
+   * Other collections are empty. Full history remains available through the
+   * detail APIs; this method never changes or prunes persisted history.
+   */
+  readonly getThreadRuntimeContext: (
+    threadId: ThreadId,
+    read?: ProjectionThreadRuntimeRead,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
 
   /**

@@ -70,9 +70,15 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "project.knowledge.usage.record":
     case "project.agent-role.upsert":
     case "project.agent-role.remove":
+    case "project.workflow.save":
+    case "project.workflow.run.request":
+    case "project.workflow.delivery":
+    case "project.collaboration.run.control":
     case "project.collaboration.run.request":
     case "project.collaboration.run.cancel":
     case "project.collaboration.run.answer":
+    case "project.collaboration.run.review":
+    case "project.collaboration.run.verify":
     case "project.collaboration.run.interject":
     case "project.collaboration.run.schedule":
     case "project.schedule.upsert":

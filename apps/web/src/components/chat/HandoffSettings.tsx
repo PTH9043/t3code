@@ -7,6 +7,10 @@ import {
   latestHandoffReport,
 } from "@t3tools/client-runtime/state/conversation-handoff";
 import { useMemo, useState } from "react";
+import {
+  latestInputComposition,
+  inputCompositionText,
+} from "@t3tools/client-runtime/state/token-usage";
 import { useThreadActivities, useThreadShell } from "~/state/entities";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -23,6 +27,7 @@ export function HandoffSettings(props: {
   const thread = useThreadShell(ref);
   const activities = useThreadActivities(ref);
   const latest = useMemo(() => latestHandoffReport(activities), [activities]);
+  const latestInput = useMemo(() => latestInputComposition(activities), [activities]);
   const update = useAtomCommand(threadEnvironment.updateMetadata, { reportFailure: false });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(false);
@@ -67,6 +72,9 @@ export function HandoffSettings(props: {
         <p>현재 불러온 기록에 인계 비교가 없습니다.</p>
       )}
       <p className="text-muted-foreground">{handoffMeasurementNote}</p>
+      {latestInput ? (
+        <p className="border-t pt-2">{inputCompositionText(latestInput.report)}</p>
+      ) : null}
     </section>
   );
 }

@@ -16,6 +16,7 @@ import type { ConnectionCatalogEntry } from "./catalog.ts";
 import * as Connectivity from "./connectivity.ts";
 import * as ConnectionDriver from "./driver.ts";
 import {
+  BearerConnectionTarget,
   ConnectionBlockedError,
   ConnectionTransientError,
   PrimaryConnectionTarget,
@@ -44,6 +45,16 @@ const RELAY_TARGET = new RelayConnectionTarget({
 
 const TARGET_ENTRY: ConnectionCatalogEntry = {
   target: TARGET,
+  profile: Option.none(),
+};
+
+const LOCAL_ENTRY: ConnectionCatalogEntry = {
+  target: new PrimaryConnectionTarget({
+    environmentId: EnvironmentId.make("local-environment"),
+    label: "Local environment",
+    httpBaseUrl: "http://127.0.0.1:13773",
+    wsBaseUrl: "ws://localhost:13773",
+  }),
   profile: Option.none(),
 };
 
@@ -216,6 +227,79 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
 });
 
 describe("EnvironmentSupervisor", () => {
+  it.effect("keeps direct desktop connections available without network connectivity", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ networkStatus: "offline" });
+      const supervisor = yield* EnvironmentSupervisor.make(
+        {
+          target: new PrimaryConnectionTarget({
+            environmentId: EnvironmentId.make("direct-local"),
+            label: "Local desktop",
+            httpBaseUrl: "t3code-dev://app/",
+            wsBaseUrl: "ws://127.0.0.1:13773/",
+          }),
+          profile: Option.none(),
+        },
+        { initiallyDesired: true },
+      ).pipe(Effect.provide(harness.dependencies));
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+    }),
+  );
+  it.effect("connects the local backend while offline and keeps it when connectivity changes", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ networkStatus: "offline" });
+      const supervisor = yield* EnvironmentSupervisor.make(LOCAL_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+      yield* harness.setNetworkStatus("online");
+      yield* Effect.yieldNow;
+      yield* harness.setNetworkStatus("offline");
+      yield* Effect.yieldNow;
+      const state = yield* SubscriptionRef.get(supervisor.state);
+      expect(state.phase).toBe("connected");
+      expect(state.generation).toBe(1);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+    }),
+  );
+
+  it.effect(
+    "recognizes a desktop-managed local backend without treating a remote socket as local",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ networkStatus: "offline" });
+        const local = yield* EnvironmentSupervisor.make(
+          {
+            target: new BearerConnectionTarget({
+              environmentId: EnvironmentId.make("wsl-local"),
+              label: "Local WSL",
+              connectionId: "local:wsl:ubuntu",
+            }),
+            profile: Option.none(),
+          },
+          { initiallyDesired: true },
+        ).pipe(Effect.provide(harness.dependencies));
+        yield* awaitState(local.state, (state) => state.phase === "connected");
+
+        const remote = yield* EnvironmentSupervisor.make(
+          {
+            target: new PrimaryConnectionTarget({
+              environmentId: EnvironmentId.make("remote"),
+              label: "Remote",
+              httpBaseUrl: "http://127.0.0.1:13773",
+              wsBaseUrl: "wss://remote.example.test",
+            }),
+            profile: Option.none(),
+          },
+          { initiallyDesired: true },
+        ).pipe(Effect.provide(harness.dependencies));
+        yield* awaitState(remote.state, (state) => state.phase === "offline");
+        expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+      }),
+  );
   it.effect("exports each relay setup as a standalone linked trace that ends at readiness", () =>
     Effect.gen(function* () {
       const spans: Array<Tracer.NativeSpan> = [];

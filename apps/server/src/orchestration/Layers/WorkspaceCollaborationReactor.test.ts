@@ -40,6 +40,7 @@ import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReact
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
 import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts";
 import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
+import { WorkspaceDevelopment } from "../WorkspaceDevelopment.ts";
 
 /** Non-isolating harness runs never provision; terminal cleanup is a no-op. */
 const orchestraWorktreeStubs = Layer.mergeAll(
@@ -210,379 +211,404 @@ function responseForGraphPrompt(prompt: string): string {
     : "구현과 집중 테스트를 완료했다.";
 }
 
-it.effect("preempts work, reroutes tools, revises failures and conflicts, and completes", () =>
-  Effect.gen(function* () {
-    const projectId = ProjectId.make("workspace-a");
-    const runId = WorkspaceCollaborationRunId.make("run-a");
-    const initialRun: WorkspaceCollaborationRun = {
-      id: runId,
-      projectId,
-      source: "user",
-      scheduleId: null,
-      incidentId: null,
-      task: "Build the requested control center",
-      status: "queued",
-      steps: [],
-      graph: null,
-      meeting: null,
-      orchestra: null,
-      finalOutput: null,
-      error: null,
-      createdAt: "2026-08-08T00:00:00.000Z",
-      updatedAt: "2026-08-08T00:00:00.000Z",
-    };
-    const scheduledRun: WorkspaceCollaborationRun = {
-      id: WorkspaceCollaborationRunId.make("scheduled-run-a"),
-      projectId,
-      source: "schedule",
-      scheduleId: WorkspaceScheduleId.make("schedule-a"),
-      incidentId: null,
-      task: "Lower-priority scheduled task",
-      status: "queued",
-      steps: [],
-      graph: null,
-      meeting: null,
-      orchestra: null,
-      finalOutput: null,
-      error: null,
-      createdAt: "2026-08-07T00:00:00.000Z",
-      updatedAt: "2026-08-07T00:00:00.000Z",
-    };
-    const runRef = yield* Ref.make(initialRun);
-    const scheduledRunRef = yield* Ref.make(scheduledRun);
-    const threadsRef = yield* Ref.make(new Map<string, OrchestrationThread>());
-    const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
-    const capturedMemoryRef = yield* Ref.make<ReadonlyArray<string>>([]);
-    const dispatchedTypesRef = yield* Ref.make<ReadonlyArray<string>>([]);
-    let sequence = 0;
+it.effect.each(["schedule", "automation"] as const)(
+  "preempts %s work, retries the selected model, revises failures and conflicts, and completes",
+  (source) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("workspace-a");
+      const runId = WorkspaceCollaborationRunId.make("run-a");
+      const ownerThreadId = ThreadId.make("persistent-main");
+      const initialRun: WorkspaceCollaborationRun = {
+        id: runId,
+        projectId,
+        source: "user",
+        scheduleId: null,
+        incidentId: null,
+        task: "Build the requested control center",
+        status: "queued",
+        steps: [],
+        graph: null,
+        meeting: null,
+        orchestra: null,
+        runContext: { requestDigest: "request", threadId: ownerThreadId },
+        finalOutput: null,
+        error: null,
+        createdAt: "2026-08-08T00:00:00.000Z",
+        updatedAt: "2026-08-08T00:00:00.000Z",
+      };
+      const scheduledRun: WorkspaceCollaborationRun = {
+        id: WorkspaceCollaborationRunId.make("scheduled-run-a"),
+        projectId,
+        source,
+        scheduleId: source === "schedule" ? WorkspaceScheduleId.make("schedule-a") : null,
+        incidentId: null,
+        task: "Lower-priority scheduled task",
+        status: "queued",
+        steps: [],
+        graph: null,
+        meeting: null,
+        orchestra: null,
+        finalOutput: null,
+        error: null,
+        createdAt: "2026-08-07T00:00:00.000Z",
+        updatedAt: "2026-08-07T00:00:00.000Z",
+      };
+      const runRef = yield* Ref.make(initialRun);
+      const scheduledRunRef = yield* Ref.make(scheduledRun);
+      const threadsRef = yield* Ref.make(new Map<string, OrchestrationThread>());
+      const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      const composedTasksRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      const capturedMemoryRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      const dispatchedTypesRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      let sequence = 0;
+      let buildFailed = false;
 
-    const dispatch: OrchestrationEngineShape["dispatch"] = (command: OrchestrationCommand) =>
-      Effect.gen(function* () {
-        sequence += 1;
-        yield* Ref.update(dispatchedTypesRef, (types) => [...types, command.type]);
-        switch (command.type) {
-          case "project.collaboration.run.update":
-            if (command.run.id === scheduledRun.id) {
-              yield* Ref.set(scheduledRunRef, command.run);
-            } else {
-              yield* Ref.set(runRef, command.run);
-            }
-            break;
-          case "project.collaboration.run.cancel":
-            if (command.runId === scheduledRun.id) {
-              yield* Ref.update(
-                scheduledRunRef,
-                (run): WorkspaceCollaborationRun => ({
-                  ...run,
-                  status: run.status === "queued" ? "cancelled" : "cancel-requested",
+      const dispatch: OrchestrationEngineShape["dispatch"] = (command: OrchestrationCommand) =>
+        Effect.gen(function* () {
+          sequence += 1;
+          yield* Ref.update(dispatchedTypesRef, (types) => [...types, command.type]);
+          switch (command.type) {
+            case "project.collaboration.run.update":
+              if (command.run.id === scheduledRun.id) {
+                yield* Ref.set(scheduledRunRef, command.run);
+              } else {
+                yield* Ref.set(runRef, command.run);
+              }
+              break;
+            case "project.collaboration.run.cancel":
+              if (command.runId === scheduledRun.id) {
+                yield* Ref.update(
+                  scheduledRunRef,
+                  (run): WorkspaceCollaborationRun => ({
+                    ...run,
+                    status: run.status === "queued" ? "cancelled" : "cancel-requested",
+                    updatedAt: command.createdAt,
+                  }),
+                );
+              }
+              break;
+            case "thread.create":
+              yield* Ref.update(threadsRef, (current) => {
+                const next = new Map(current);
+                next.set(command.threadId, {
+                  id: command.threadId,
+                  projectId: command.projectId,
+                  title: command.title,
+                  modelSelection: command.modelSelection,
+                  runtimeMode: command.runtimeMode,
+                  interactionMode: command.interactionMode,
+                  branch: null,
+                  worktreePath: null,
+                  latestTurn: null,
+                  createdAt: command.createdAt,
                   updatedAt: command.createdAt,
-                }),
-              );
+                  archivedAt: null,
+                  settledOverride: null,
+                  settledAt: null,
+                  deletedAt: null,
+                  messages: [],
+                  proposedPlans: [],
+                  activities: [],
+                  checkpoints: [],
+                  session: null,
+                });
+                return next;
+              });
+              break;
+            case "thread.turn.start": {
+              const simulatedToolFailure =
+                command.modelSelection?.instanceId === "codex-work" &&
+                command.message.text.includes("Node: build\n");
+              yield* Ref.update(promptsRef, (current) => [...current, command.message.text]);
+              yield* Ref.update(threadsRef, (current) => {
+                const existing = current.get(command.threadId)!;
+                const next = new Map(current);
+                const turnId = TurnId.make(`turn-${command.threadId}`);
+                const assistantMessageId = MessageId.make(`assistant-${command.threadId}`);
+                next.set(command.threadId, {
+                  ...existing,
+                  latestTurn: {
+                    turnId,
+                    state: simulatedToolFailure ? "error" : "completed",
+                    requestedAt: command.createdAt,
+                    startedAt: command.createdAt,
+                    completedAt: command.createdAt,
+                    assistantMessageId,
+                  },
+                  updatedAt: command.createdAt,
+                  messages: [
+                    {
+                      id: command.message.messageId,
+                      role: "user",
+                      text: command.message.text,
+                      attachments: [],
+                      turnId,
+                      streaming: false,
+                      createdAt: command.createdAt,
+                      updatedAt: command.createdAt,
+                    },
+                    {
+                      id: assistantMessageId,
+                      role: "assistant",
+                      text: simulatedToolFailure
+                        ? "Primary Codex tool failed."
+                        : responseForGraphPrompt(command.message.text),
+                      attachments: [],
+                      turnId,
+                      streaming: false,
+                      createdAt: command.createdAt,
+                      updatedAt: command.createdAt,
+                    },
+                  ],
+                });
+                return next;
+              });
+              break;
             }
-            break;
-          case "thread.create":
-            yield* Ref.update(threadsRef, (current) => {
-              const next = new Map(current);
-              next.set(command.threadId, {
-                id: command.threadId,
-                projectId: command.projectId,
-                title: command.title,
-                modelSelection: command.modelSelection,
-                runtimeMode: command.runtimeMode,
-                interactionMode: command.interactionMode,
-                branch: null,
-                worktreePath: null,
-                latestTurn: null,
-                createdAt: command.createdAt,
-                updatedAt: command.createdAt,
-                archivedAt: null,
-                settledOverride: null,
-                settledAt: null,
-                deletedAt: null,
-                messages: [],
-                proposedPlans: [],
-                activities: [],
-                checkpoints: [],
-                session: null,
-              });
-              return next;
-            });
-            break;
-          case "thread.turn.start": {
-            const simulatedToolFailure =
-              command.modelSelection?.instanceId === "codex-work" &&
-              command.message.text.includes("Node: build\n");
-            yield* Ref.update(promptsRef, (current) => [...current, command.message.text]);
-            yield* Ref.update(threadsRef, (current) => {
-              const existing = current.get(command.threadId)!;
-              const next = new Map(current);
-              const turnId = TurnId.make(`turn-${command.threadId}`);
-              const assistantMessageId = MessageId.make(`assistant-${command.threadId}`);
-              next.set(command.threadId, {
-                ...existing,
-                latestTurn: {
-                  turnId,
-                  state: simulatedToolFailure ? "error" : "completed",
-                  requestedAt: command.createdAt,
-                  startedAt: command.createdAt,
-                  completedAt: command.createdAt,
-                  assistantMessageId,
-                },
-                updatedAt: command.createdAt,
-                messages: [
-                  {
-                    id: command.message.messageId,
-                    role: "user",
-                    text: command.message.text,
-                    attachments: [],
-                    turnId,
-                    streaming: false,
-                    createdAt: command.createdAt,
-                    updatedAt: command.createdAt,
-                  },
-                  {
-                    id: assistantMessageId,
-                    role: "assistant",
-                    text: simulatedToolFailure
-                      ? "Primary Codex tool failed."
-                      : responseForGraphPrompt(command.message.text),
-                    attachments: [],
-                    turnId,
-                    streaming: false,
-                    createdAt: command.createdAt,
-                    updatedAt: command.createdAt,
-                  },
-                ],
-              });
-              return next;
-            });
-            break;
+            case "project.knowledge.item.upsert":
+              expect(command.projectId).toBe(projectId);
+              expect(command.kind).toBe("long-term-memory");
+              expect(command.content).toContain("병렬 조사와 구현 결과");
+              yield* Ref.update(capturedMemoryRef, (titles) => [...titles, command.title]);
+              break;
+            default:
+              break;
           }
-          case "project.knowledge.item.upsert":
-            expect(command.projectId).toBe(projectId);
-            expect(command.kind).toBe("long-term-memory");
-            expect(command.content).toContain("병렬 조사와 구현 결과");
-            yield* Ref.update(capturedMemoryRef, (titles) => [...titles, command.title]);
-            break;
-          default:
-            break;
-        }
-        return { sequence };
-      });
+          return { sequence };
+        });
 
-    const engine: OrchestrationEngineShape = {
-      dispatch,
-      readEvents: () => Stream.empty,
-      streamDomainEvents: Stream.empty,
-      latestSequence: Effect.succeed(0),
-    };
-    const repository = {
-      upsert: (run: WorkspaceCollaborationRun) =>
-        run.id === scheduledRun.id ? Ref.set(scheduledRunRef, run) : Ref.set(runRef, run),
-      requestCancel: () => Effect.void,
-      recordAnswer: () => Effect.void,
-      recordInterjection: () => Effect.void,
-      getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
-        Effect.all([Ref.get(runRef), Ref.get(scheduledRunRef)]).pipe(
-          Effect.map(([userRun, scheduleRun]) => {
-            const run = [userRun, scheduleRun].find(
-              (candidate) =>
-                candidate.projectId === requestedProjectId && candidate.id === requestedRunId,
-            );
-            return run === undefined ? Option.none() : Option.some(run);
-          }),
-        ),
-      list: (input) =>
-        Effect.all([Ref.get(runRef), Ref.get(scheduledRunRef)]).pipe(
-          Effect.map(([userRun, scheduleRun]) =>
-            [userRun, scheduleRun].filter(
-              (run) =>
-                run.projectId === input.projectId &&
-                (input.statuses === undefined || input.statuses.includes(run.status)),
+      const engine: OrchestrationEngineShape = {
+        dispatch,
+        readEvents: () => Stream.empty,
+        streamDomainEvents: Stream.empty,
+        latestSequence: Effect.succeed(0),
+      };
+      const repository = {
+        upsert: (run: WorkspaceCollaborationRun) =>
+          run.id === scheduledRun.id ? Ref.set(scheduledRunRef, run) : Ref.set(runRef, run),
+        requestCancel: () => Effect.void,
+        recordAnswer: () => Effect.void,
+        recordInterjection: () => Effect.void,
+        recordControl: () => Effect.void,
+        recordReview: () => Effect.void,
+        requestVerification: () => Effect.void,
+        getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
+          Effect.all([Ref.get(runRef), Ref.get(scheduledRunRef)]).pipe(
+            Effect.map(([userRun, scheduleRun]) => {
+              const run = [userRun, scheduleRun].find(
+                (candidate) =>
+                  candidate.projectId === requestedProjectId && candidate.id === requestedRunId,
+              );
+              return run === undefined ? Option.none() : Option.some(run);
+            }),
+          ),
+        list: (input) =>
+          Effect.all([Ref.get(runRef), Ref.get(scheduledRunRef)]).pipe(
+            Effect.map(([userRun, scheduleRun]) =>
+              [userRun, scheduleRun].filter(
+                (run) =>
+                  run.projectId === input.projectId &&
+                  (input.statuses === undefined || input.statuses.includes(run.status)),
+              ),
             ),
           ),
-        ),
-      listResumable: () => Effect.all([Ref.get(scheduledRunRef), Ref.get(runRef)]),
-    } satisfies ProjectionWorkspaceCollaborationRunRepository["Service"];
-    const query = {
-      listWorkspaceAgentRoles: () =>
-        Effect.succeed({
-          roles: [
-            {
-              projectId,
-              role: "coordinator" as const,
-              displayName: "Fable",
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("fable-work"),
-                model: "claude-sonnet",
+        listResumable: () => Effect.all([Ref.get(scheduledRunRef), Ref.get(runRef)]),
+      } satisfies ProjectionWorkspaceCollaborationRunRepository["Service"];
+      const query = {
+        getWorkspaceContextSettings: () => Effect.void,
+        listWorkspaceAgentRoles: () =>
+          Effect.succeed({
+            roles: [
+              {
+                projectId,
+                role: "coordinator" as const,
+                displayName: "Fable",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("fable-work"),
+                  model: "claude-sonnet",
+                },
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+                instructions: "Coordinate this Workspace only.",
+                enabled: true,
+                updatedAt: "2026-08-08T00:00:00.000Z",
               },
-              runtimeMode: "full-access" as const,
-              interactionMode: "default" as const,
-              instructions: "Coordinate this Workspace only.",
-              enabled: true,
-              updatedAt: "2026-08-08T00:00:00.000Z",
-            },
-            {
-              projectId,
-              role: "researcher" as const,
-              displayName: "Grok",
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("grok-work"),
-                model: "grok-current",
+              {
+                projectId,
+                role: "researcher" as const,
+                displayName: "Grok",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("grok-work"),
+                  model: "grok-current",
+                },
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+                instructions: "Research current evidence.",
+                enabled: true,
+                updatedAt: "2026-08-08T00:00:00.000Z",
               },
-              runtimeMode: "full-access" as const,
-              interactionMode: "default" as const,
-              instructions: "Research current evidence.",
-              enabled: true,
-              updatedAt: "2026-08-08T00:00:00.000Z",
-            },
-            {
-              projectId,
-              role: "implementer" as const,
-              displayName: "Codex",
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("codex-work"),
-                model: "gpt-5",
+              {
+                projectId,
+                role: "implementer" as const,
+                displayName: "Codex",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("codex-work"),
+                  model: "gpt-5",
+                },
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+                instructions: "Implement and test in this Workspace.",
+                enabled: true,
+                updatedAt: "2026-08-08T00:00:00.000Z",
               },
-              runtimeMode: "full-access" as const,
-              interactionMode: "default" as const,
-              instructions: "Implement and test in this Workspace.",
-              enabled: true,
-              updatedAt: "2026-08-08T00:00:00.000Z",
-            },
-          ],
-        }),
-      composeWorkspacePrompt: () =>
-        Effect.succeed({
-          prompt: "Workspace ID: workspace-a\nCurrent user task: build it",
-          sourceItemIds: [],
-          ragMatches: [],
-          truncated: false,
-        }),
-      getThreadDetailById: (threadId: ThreadId) =>
-        Ref.get(threadsRef).pipe(
-          Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
-        ),
-      getProjectShellById: () =>
-        Effect.succeed(
-          Option.some({ id: projectId, workspaceRoot: "D:/repo", scripts: [] } as never),
-        ),
-    } as unknown as ProjectionSnapshotQueryShape;
-    const providerInstances = [
-      {
-        instanceId: ProviderInstanceId.make("fable-work"),
-        driverKind: "claude",
-        enabled: true,
-      },
-      {
-        instanceId: ProviderInstanceId.make("grok-work"),
-        driverKind: "grok",
-        enabled: true,
-      },
-      {
-        instanceId: ProviderInstanceId.make("codex-work"),
-        driverKind: "codex",
-        enabled: true,
-      },
-      {
-        instanceId: ProviderInstanceId.make("codex-backup"),
-        driverKind: "codex",
-        enabled: true,
-      },
-    ] as unknown as ReadonlyArray<ProviderInstance>;
-    const providerRegistry = {
-      getInstance: (instanceId: ProviderInstanceId) =>
-        Effect.succeed(providerInstances.find((instance) => instance.instanceId === instanceId)),
-      listInstances: Effect.succeed(providerInstances),
-    } as unknown as ProviderInstanceRegistry["Service"];
-    const layer = WorkspaceCollaborationReactorLive.pipe(
-      Layer.provideMerge(
-        Layer.succeed(WorkspaceAgentExecutor, {
-          execute: (execution) =>
-            Effect.gen(function* () {
-              yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
-              if (
-                execution.modelSelection.instanceId === "codex-work" &&
-                execution.prompt.includes("Node: build\n")
-              ) {
-                return yield* new WorkspaceAgentExecutionError({
-                  message: "Primary Codex tool failed.",
-                });
-              }
-              return responseForGraphPrompt(execution.prompt);
+            ],
+          }),
+        composeWorkspacePrompt: (input: { task: string }) =>
+          Ref.update(composedTasksRef, (tasks) => [...tasks, input.task]).pipe(
+            Effect.as({
+              prompt: "Workspace ID: workspace-a\nCurrent user task: build it",
+              sourceItemIds: [],
+              ragMatches: [],
+              truncated: false,
             }),
-        }),
-      ),
-      Layer.provideMerge(OrchestrationTurnWaitLive),
-      Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
-      Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
-      Layer.provideMerge(Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, repository)),
-      Layer.provideMerge(
-        Layer.succeed(ProjectionTurnRepository, {
-          getByTurnId: () => Effect.succeed(Option.none()),
-        } as unknown as ProjectionTurnRepository["Service"]),
-      ),
-      Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
-      Layer.provideMerge(orchestraWorktreeStubs),
-      Layer.provideMerge(NodeServices.layer),
-    );
-
-    yield* Effect.gen(function* () {
-      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
-      yield* reactor.start();
-      yield* reactor.drain;
-
-      const run = yield* Ref.get(runRef);
-      expect(run.status, run.error ?? undefined).toBe("completed");
-      expect(run.graph?.status).toBe("completed");
-      expect(run.graph?.overallConfidence).toBe("high");
-      expect(run.graph?.nodes.filter((node) => node.kind === "validation")).toHaveLength(4);
-      expect(
-        run.graph?.nodes
-          .filter((node) => node.id === "research" || node.id === "build")
-          .map((node) => node.dependsOn),
-      ).toEqual([["plan"], ["plan"]]);
-      expect(run.graph?.nodes.find((node) => node.id === "build")).toMatchObject({
-        status: "failed",
-        failureClassification: "implementation",
-      });
-      expect(run.graph?.nodes.find((node) => node.id === "build")?.attempts).toMatchObject([
+          ),
+        getThreadRuntimeContext: (threadId: ThreadId) =>
+          Ref.get(threadsRef).pipe(
+            Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
+          ),
+        getProjectShellById: () =>
+          Effect.succeed(
+            Option.some({ id: projectId, workspaceRoot: "D:/repo", scripts: [] } as never),
+          ),
+      } as unknown as ProjectionSnapshotQueryShape;
+      const providerInstances = [
         {
-          modelSelection: { instanceId: "codex-work" },
+          instanceId: ProviderInstanceId.make("fable-work"),
+          driverKind: "claude",
+          enabled: true,
+        },
+        {
+          instanceId: ProviderInstanceId.make("grok-work"),
+          driverKind: "grok",
+          enabled: true,
+        },
+        {
+          instanceId: ProviderInstanceId.make("codex-work"),
+          driverKind: "codex",
+          enabled: true,
+        },
+        {
+          instanceId: ProviderInstanceId.make("codex-backup"),
+          driverKind: "codex",
+          enabled: true,
+        },
+      ] as unknown as ReadonlyArray<ProviderInstance>;
+      const providerRegistry = {
+        getInstance: (instanceId: ProviderInstanceId) =>
+          Effect.succeed(providerInstances.find((instance) => instance.instanceId === instanceId)),
+        listInstances: Effect.succeed(providerInstances),
+      } as unknown as ProviderInstanceRegistry["Service"];
+      const layer = WorkspaceCollaborationReactorLive.pipe(
+        Layer.provideMerge(
+          Layer.succeed(WorkspaceAgentExecutor, {
+            execute: (execution) =>
+              Effect.gen(function* () {
+                yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
+                if (
+                  execution.modelSelection.instanceId === "codex-work" &&
+                  execution.prompt.includes("Node: build\n") &&
+                  !buildFailed
+                ) {
+                  buildFailed = true;
+                  return yield* new WorkspaceAgentExecutionError({
+                    message: "Primary Codex tool failed.",
+                  });
+                }
+                return responseForGraphPrompt(execution.prompt);
+              }),
+          }),
+        ),
+        Layer.provideMerge(OrchestrationTurnWaitLive),
+        Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
+        Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
+        Layer.provideMerge(
+          Layer.mock(WorkspaceDevelopment)({
+            workflowContext: (project, thread) =>
+              Effect.succeed(
+                project === projectId && thread === ownerThreadId ? "진행 중인 지속 목표" : "",
+              ),
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ProjectionWorkspaceCollaborationRunRepository, repository),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ProjectionTurnRepository, {
+            getByTurnId: () => Effect.succeed(Option.none()),
+          } as unknown as ProjectionTurnRepository["Service"]),
+        ),
+        Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
+        Layer.provideMerge(orchestraWorktreeStubs),
+        Layer.provideMerge(NodeServices.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+        yield* reactor.start();
+        yield* reactor.drain;
+
+        const run = yield* Ref.get(runRef);
+        expect(run.status, run.error ?? undefined).toBe("completed");
+        expect(run.graph?.status).toBe("completed");
+        expect(run.graph?.overallConfidence).toBe("high");
+        expect(run.graph?.nodes.filter((node) => node.kind === "validation")).toHaveLength(4);
+        expect(
+          run.graph?.nodes
+            .filter((node) => node.id === "research" || node.id === "build")
+            .map((node) => node.dependsOn),
+        ).toEqual([["plan"], ["plan"]]);
+        expect(run.graph?.nodes.find((node) => node.id === "build")).toMatchObject({
           status: "failed",
-          failureClassification: "tool",
-        },
-        {
-          modelSelection: { instanceId: "codex-backup" },
+          failureClassification: "implementation",
+        });
+        expect(run.graph?.nodes.find((node) => node.id === "build")?.attempts).toMatchObject([
+          {
+            modelSelection: { instanceId: "codex-work" },
+            status: "failed",
+            failureClassification: "tool",
+          },
+          {
+            modelSelection: { instanceId: "codex-work" },
+            status: "completed",
+          },
+        ]);
+        expect(run.graph?.nodes.find((node) => node.id === "fix-build")).toMatchObject({
           status: "completed",
-        },
-      ]);
-      expect(run.graph?.nodes.find((node) => node.id === "fix-build")).toMatchObject({
-        status: "completed",
-        confidence: "high",
-      });
-      expect(run.graph?.nodes.find((node) => node.id === "conflict-check")).toMatchObject({
-        status: "completed",
-        confidence: "high",
-      });
-      expect(run.graph?.changes.some((change) => change.reason === "implementation-failure")).toBe(
-        true,
-      );
-      expect(run.graph?.changes.some((change) => change.reason === "result-conflict")).toBe(true);
-      expect(run.finalOutput).toBe("검증된 제어 센터 구현 완료");
-      expect((yield* Ref.get(scheduledRunRef)).status).toBe("cancelled");
-      const dispatchedTypes = yield* Ref.get(dispatchedTypesRef);
-      expect(dispatchedTypes[0]).toBe("project.collaboration.run.cancel");
-      expect(yield* Ref.get(capturedMemoryRef)).toEqual(["제어 센터 검증 절차"]);
-      const prompts = yield* Ref.get(promptsRef);
-      expect(prompts).toHaveLength(13);
-      expect(prompts[0]).toContain("current user goal is the absolute priority");
-      expect(prompts[1]).toContain("TASK:\n현재 자료를 조사한다.");
-      expect(prompts.find((prompt) => prompt.includes("Node: build\n"))).toContain(
-        "TASK:\n제어 센터를 구현한다.",
-      );
-      expect(prompts.some((prompt) => prompt.includes("Node: replan-"))).toBe(true);
-      expect(prompts.every((prompt) => prompt.includes("SUCCESS CRITERIA:"))).toBe(true);
-    }).pipe(Effect.provide(layer), Effect.scoped);
-  }),
+          confidence: "high",
+        });
+        expect(run.graph?.nodes.find((node) => node.id === "conflict-check")).toMatchObject({
+          status: "completed",
+          confidence: "high",
+        });
+        expect(
+          run.graph?.changes.some((change) => change.reason === "implementation-failure"),
+        ).toBe(true);
+        expect(run.graph?.changes.some((change) => change.reason === "result-conflict")).toBe(true);
+        expect(run.finalOutput).toBe("검증된 제어 센터 구현 완료");
+        expect((yield* Ref.get(scheduledRunRef)).status).toBe("cancelled");
+        const dispatchedTypes = yield* Ref.get(dispatchedTypesRef);
+        expect(dispatchedTypes[0]).toBe("project.collaboration.run.cancel");
+        expect(yield* Ref.get(capturedMemoryRef)).toEqual(["제어 센터 검증 절차"]);
+        const prompts = yield* Ref.get(promptsRef);
+        expect((yield* Ref.get(composedTasksRef))[0]).toContain("진행 중인 지속 목표");
+        expect(prompts).toHaveLength(13);
+        expect(prompts[0]).toContain("current user goal is the absolute priority");
+        expect(prompts[1]).toContain("TASK:\n현재 자료를 조사한다.");
+        expect(prompts.find((prompt) => prompt.includes("Node: build\n"))).toContain(
+          "TASK:\n제어 센터를 구현한다.",
+        );
+        expect(prompts.some((prompt) => prompt.includes("Node: replan-"))).toBe(true);
+        expect(prompts.every((prompt) => prompt.includes("SUCCESS CRITERIA:"))).toBe(true);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
 );

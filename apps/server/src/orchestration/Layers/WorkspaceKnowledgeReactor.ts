@@ -1,5 +1,5 @@
 import type { OrchestrationEvent, ProjectId, WorkspaceKnowledgeItemId } from "@t3tools/contracts";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -10,6 +10,7 @@ import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceKnowledgeFileStore } from "../Services/WorkspaceKnowledgeFileStore.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
 import {
   WorkspaceKnowledgeReactor,
   type WorkspaceKnowledgeReactorShape,
@@ -18,19 +19,21 @@ import {
 type ReactorInput = {
   readonly projectId: ProjectId;
   readonly itemId?: WorkspaceKnowledgeItemId;
-  readonly reason: "startup" | "item-upserted" | "item-archived" | "root-updated";
+  readonly reason: "startup" | "item-upserted" | "item-archived" | "root-updated" | "turn-settled";
 };
 
 export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const fileStore = yield* WorkspaceKnowledgeFileStore;
+  const memory = yield* Effect.serviceOption(WorkspaceMemory);
 
   const reconcile = Effect.fn("WorkspaceKnowledgeReactor.reconcile")(function* (
     input: ReactorInput,
   ) {
     const project = yield* projectionSnapshotQuery.getProjectShellById(input.projectId);
     if (Option.isNone(project)) return;
+    if (Option.isSome(memory)) yield* memory.value.reconcile(input.projectId);
     const root = project.value.workspaceControl?.longTermMemoryRoot ?? null;
     if (root === null) return;
 
@@ -46,10 +49,7 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
       projectId: input.projectId,
       kinds: ["long-term-memory"],
     });
-    const items =
-      input.itemId === undefined
-        ? result.items
-        : result.items.filter((item) => item.id === input.itemId);
+    const items = result.items;
     yield* Effect.forEach(items, (item) => fileStore.syncItem({ root, item }), {
       concurrency: 1,
       discard: true,
@@ -69,17 +69,40 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(reconcileSafely);
+  const coalescingWorker = yield* makeKeyedCoalescingWorker({
+    merge: (_current: ReactorInput, next: ReactorInput) => next,
+    process: (_projectId: ProjectId, input: ReactorInput) => reconcileSafely(input),
+  });
+  const worker = {
+    enqueue: (input: ReactorInput) => coalescingWorker.enqueue(input.projectId, input),
+    drain: coalescingWorker.drain,
+  };
+  const enqueueThread = (threadId: import("@t3tools/contracts").ThreadId) =>
+    projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+      Effect.flatMap((thread) =>
+        Option.isSome(thread)
+          ? worker.enqueue({ projectId: thread.value.projectId, reason: "turn-settled" })
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not queue completed-turn memory", { cause: Cause.pretty(cause) }),
+      ),
+    );
 
   const enqueueEvent = (event: OrchestrationEvent) => {
     switch (event.type) {
       case "project.knowledge-item-upserted":
-        return event.payload.kind === "long-term-memory"
-          ? worker.enqueue({
-              projectId: event.payload.projectId,
-              itemId: event.payload.itemId,
-              reason: "item-upserted",
-            })
+        return worker.enqueue({
+          projectId: event.payload.projectId,
+          itemId: event.payload.itemId,
+          reason: "item-upserted",
+        });
+      case "thread.turn-diff-completed":
+        return Option.isSome(memory) ? enqueueThread(event.payload.threadId) : Effect.void;
+      case "thread.session-set":
+        return Option.isSome(memory) &&
+          ["ready", "interrupted", "stopped", "error"].includes(event.payload.session.status)
+          ? enqueueThread(event.payload.threadId)
           : Effect.void;
       case "project.knowledge-item-archived":
         return worker.enqueue({

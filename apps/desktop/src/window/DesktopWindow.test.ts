@@ -47,6 +47,22 @@ import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 
+it("restores a saved Google token only after the backend accepts it", async () => {
+  const fetcher = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json({ authenticated: true }))
+    .mockResolvedValueOnce(Response.json({ authenticated: false }, { status: 401 }));
+  const input = {
+    token: "saved-google",
+    httpBaseUrl: new URL("http://127.0.0.1:3773"),
+    directRpcHub: Option.none(),
+    networkFetch: fetcher,
+  };
+  assert.isTrue(await DesktopWindow.verifyRestoredGoogleToken(input));
+  assert.isFalse(await DesktopWindow.verifyRestoredGoogleToken(input));
+  assert.equal(fetcher.mock.calls[0]?.[1]?.headers.authorization, "Bearer saved-google");
+});
+
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
   homeDirectory: "/Users/alice",
@@ -101,6 +117,7 @@ function makeFakeBrowserWindow() {
     setTitle: vi.fn(),
     setTitleBarOverlay: vi.fn(),
     show: vi.fn(),
+    showInactive: vi.fn(),
     webContents,
   };
 
@@ -114,6 +131,9 @@ function makeFakeBrowserWindow() {
     isMinimized: window.isMinimized,
     loadURL: window.loadURL,
     maximize: window.maximize,
+    show: window.show,
+    showInactive: window.showInactive,
+    focus: window.focus,
     openDevTools: webContents.openDevTools,
     reload: webContents.reload,
     send: webContents.send,
@@ -159,23 +179,31 @@ const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronTheme["Service"]);
 
-const desktopEnvironmentLayer = DesktopEnvironment.layer(environmentInput).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      NodeServices.layer,
-      DesktopConfig.layerTest({
-        T3CODE_PORT: "3773",
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
-      }),
+const makeDesktopEnvironmentLayer = (startHidden = false, startInactive = false) =>
+  DesktopEnvironment.layer(environmentInput).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          T3CODE_PORT: "3773",
+          T3CODE_DESKTOP_START_HIDDEN: String(startHidden),
+          T3CODE_DESKTOP_START_INACTIVE: String(startInactive),
+          VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+        }),
+      ),
     ),
-  ),
-);
+  );
+
+const desktopEnvironmentLayer = makeDesktopEnvironmentLayer();
 
 const desktopWindowBoundsEquivalence = Schema.toEquivalence(
   DesktopAppSettings.DesktopWindowBoundsSchema,
 );
 
 function makeTestLayer(input: {
+  readonly startHidden?: boolean;
+  readonly startInactive?: boolean;
+  readonly revealCalls?: Electron.BrowserWindow[];
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
@@ -238,7 +266,10 @@ function makeTestLayer(input: {
     focusedMainOrFirst: Ref.get(input.mainWindow),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
-    reveal: () => Effect.void,
+    reveal: (window) =>
+      Effect.sync(() => {
+        input.revealCalls?.push(window);
+      }),
     sendAll: () => Effect.void,
     destroyAll: Effect.void,
     syncAllAppearance: (sync) => sync(input.window),
@@ -248,7 +279,7 @@ function makeTestLayer(input: {
     Layer.provide(
       Layer.mergeAll(
         desktopAssetsLayer,
-        desktopEnvironmentLayer,
+        makeDesktopEnvironmentLayer(input.startHidden, input.startInactive),
         desktopAppSettingsLayer,
         desktopServerExposureLayer,
         DesktopState.layer,
@@ -521,6 +552,72 @@ describe("DesktopWindow", () => {
         assert.equal(createdWindowOptions[0]?.height, 880);
         assert.equal(createdWindowOptions[0]?.x, 120);
         assert.equal(createdWindowOptions[0]?.y, 80);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("starts in the background without maximizing, showing, or focusing any window", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealCalls: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        startHidden: true,
+        startInactive: true,
+        revealCalls,
+        desktopSettings: {
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          mainWindowMaximized: true,
+        },
+      });
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.showConnectingSplash;
+        assert.equal(yield* Ref.get(createCount), 0);
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        fakeWindow.windowListeners.get("ready-to-show")?.();
+        assert.equal(yield* Ref.get(createCount), 1);
+        assert.equal(fakeWindow.maximize.mock.calls.length, 0);
+        assert.equal(fakeWindow.show.mock.calls.length, 0);
+        assert.equal(fakeWindow.showInactive.mock.calls.length, 0);
+        assert.equal(fakeWindow.focus.mock.calls.length, 0);
+        assert.equal(revealCalls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("shows the renderer through Electron without focusing or maximizing the window", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealCalls: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        startInactive: true,
+        revealCalls,
+        desktopSettings: {
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          mainWindowMaximized: true,
+        },
+      });
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.showConnectingSplash;
+        assert.equal(yield* Ref.get(createCount), 0);
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        fakeWindow.windowListeners.get("ready-to-show")?.();
+        assert.equal(fakeWindow.showInactive.mock.calls.length, 1);
+        assert.equal(fakeWindow.show.mock.calls.length, 0);
+        assert.equal(fakeWindow.focus.mock.calls.length, 0);
+        assert.equal(fakeWindow.maximize.mock.calls.length, 0);
+        assert.equal(revealCalls.length, 0);
       }).pipe(Effect.provide(layer));
     }),
   );

@@ -15,6 +15,8 @@ export const TokenCounts = Schema.Struct({
   output: Schema.NullOr(Count),
   cacheRead: Schema.NullOr(Count),
   cacheWrite: Schema.NullOr(Count),
+  cacheWrite5m: Schema.optional(Count),
+  cacheWrite1h: Schema.optional(Count),
   reasoning: Schema.NullOr(Count),
 });
 export type TokenCounts = typeof TokenCounts.Type;
@@ -38,6 +40,7 @@ export const TokenUsagePhase = Schema.Literals([
   "implementation",
   "verification",
   "finalization",
+  "format-repair",
 ]);
 export type TokenUsagePhase = typeof TokenUsagePhase.Type;
 
@@ -75,6 +78,16 @@ export const TokenUsageBreakdown = Schema.Struct({
   issues: Schema.Array(TokenUsageIssue),
 });
 export type TokenUsageBreakdown = typeof TokenUsageBreakdown.Type;
+export const TokenUsageSummary = Schema.Struct({
+  counts: TokenCounts,
+  breakdown: Schema.Array(TokenUsageBreakdown),
+  issues: Schema.Array(TokenUsageIssue),
+  coverage: TokenUsageCoverage,
+  inProgress: Schema.Boolean,
+  requestCount: NonNegativeInt,
+  reportedRequestCount: NonNegativeInt,
+});
+export type TokenUsageSummary = typeof TokenUsageSummary.Type;
 export const TokenUsageWork = Schema.Struct({
   workId: Schema.String,
   requestedAt: IsoDateTime,
@@ -82,12 +95,15 @@ export const TokenUsageWork = Schema.Struct({
 });
 export type TokenUsageWork = typeof TokenUsageWork.Type;
 export const GetThreadTokenUsageInput = Schema.Struct({
+  nodeId: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,
   workId: Schema.optional(TrimmedNonEmptyString),
   beforeSequence: Schema.optional(NonNegativeInt),
 });
 export type GetThreadTokenUsageInput = typeof GetThreadTokenUsageInput.Type;
 export const ThreadTokenUsageReport = Schema.Struct({
+  requestCount: Schema.optional(NonNegativeInt),
+  reportedRequestCount: Schema.optional(NonNegativeInt),
   finality: Schema.Literals(["provisional", "final"]),
   outcome: Schema.Literals(["running", "completed", "failed", "interrupted", "unknown"]),
   verificationStatus: Schema.Literal("not-evaluated"),

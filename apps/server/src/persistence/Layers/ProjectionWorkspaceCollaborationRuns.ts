@@ -2,11 +2,15 @@ import {
   ProjectId,
   WorkspaceCollaborationRun,
   WorkspaceCollaborationRunId,
+  WorkspaceCollaborationRunListInput,
   WorkspaceCollaborationStep,
   WorkspaceMeeting,
   WorkspaceMeetingInterjection,
   WorkspaceOrchestraSettings,
+  WorkspaceRunControl,
+  WorkspaceRunContext,
   WorkspaceTaskGraph,
+  WorkspaceWorkflowContext,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -16,12 +20,23 @@ import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
+import {
+  PersistenceDecodeError,
+  toPersistenceDecodeError,
+  toPersistenceSqlError,
+} from "../Errors.ts";
+import { reviewWorkspaceOrchestraPlan } from "../../orchestration/workspaceOrchestraReview.ts";
 import {
   ProjectionWorkspaceCollaborationRunRepository,
   type ProjectionWorkspaceCollaborationRunRepositoryShape,
 } from "../Services/ProjectionWorkspaceCollaborationRuns.ts";
 
+import { controlWorkflowRun } from "../../orchestration/workspaceWorkflow.ts";
+import { make as makeWorkflowStore } from "../WorkspaceWorkflowStore.ts";
+
+const WorkflowColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceWorkflowContext));
+const RunControlColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceRunControl));
+const RunContextColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceRunContext));
 const MeetingColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceMeeting));
 // NULL is both "recorded before the orchestra" and "never opted in".
 const OrchestraColumn = Schema.NullOr(Schema.fromJsonString(WorkspaceOrchestraSettings));
@@ -31,22 +46,29 @@ const DbRow = WorkspaceCollaborationRun.mapFields(
     graph: Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
     meeting: MeetingColumn,
     orchestra: OrchestraColumn,
+    workflow: WorkflowColumn,
+    runControl: RunControlColumn,
+    runContext: RunContextColumn,
   }),
 );
 const RunLookup = Schema.Struct({ projectId: ProjectId, runId: WorkspaceCollaborationRunId });
-const ProjectLookup = Schema.Struct({ projectId: ProjectId });
 const encodeSteps = Schema.encodeUnknownSync(
   Schema.fromJsonString(Schema.Array(WorkspaceCollaborationStep)),
 );
 const encodeGraph = Schema.encodeUnknownSync(
   Schema.NullOr(Schema.fromJsonString(WorkspaceTaskGraph)),
 );
+const encodeWorkflow = Schema.encodeUnknownSync(WorkflowColumn);
+const encodeRunControl = Schema.encodeUnknownSync(RunControlColumn);
+const encodeRunContext = Schema.encodeUnknownSync(RunContextColumn);
 const encodeMeeting = Schema.encodeUnknownSync(MeetingColumn);
 const encodeOrchestra = Schema.encodeUnknownSync(OrchestraColumn);
 const decodeMeeting = Schema.decodeUnknownSync(MeetingColumn);
+const decodeWorkflow = Schema.decodeUnknownEffect(WorkflowColumn);
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const workflowStore = yield* makeWorkflowStore;
   const selectColumns = sql`
     run_id AS "id",
     project_id AS "projectId",
@@ -59,6 +81,9 @@ const make = Effect.gen(function* () {
     graph_json AS graph,
     meeting_json AS meeting,
     orchestra_json AS orchestra,
+    workflow_json AS workflow,
+    run_control_json AS "runControl",
+    run_context_json AS "runContext",
     final_output AS "finalOutput",
     error,
     created_at AS "createdAt",
@@ -72,11 +97,13 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId} AND run_id = ${runId} LIMIT 1`,
   });
   const listRows = SqlSchema.findAll({
-    Request: ProjectLookup,
+    Request: WorkspaceCollaborationRunListInput,
     Result: DbRow,
-    execute: ({ projectId }) =>
+    execute: ({ projectId, workflowOnly, runId }) =>
       sql`SELECT ${selectColumns} FROM projection_workspace_collaboration_runs
           WHERE project_id = ${projectId}
+            AND ${workflowOnly ? sql`workflow_json IS NOT NULL` : sql`1=1`}
+            AND ${runId ? sql`run_id=${runId}` : sql`1=1`}
           ORDER BY created_at DESC, run_id DESC`,
   });
   // Interjections live in their own table (see migration 055): the reactor
@@ -125,14 +152,14 @@ const make = Effect.gen(function* () {
   });
 
   const upsert: ProjectionWorkspaceCollaborationRunRepositoryShape["upsert"] = (run) =>
-    sql`
+    sql<{ workflow: string | null }>`
       INSERT INTO projection_workspace_collaboration_runs (
         run_id, project_id, source, schedule_id, incident_id, task, status, steps_json, graph_json,
-        meeting_json, orchestra_json, final_output, error, created_at, updated_at
+        meeting_json, orchestra_json, workflow_json, run_control_json, run_context_json, final_output, error, created_at, updated_at
       ) VALUES (
         ${run.id}, ${run.projectId}, ${run.source}, ${run.scheduleId}, ${run.incidentId},
         ${run.task}, ${run.status}, ${encodeSteps(run.steps)}, ${encodeGraph(run.graph)},
-        ${encodeMeeting(run.meeting)}, ${encodeOrchestra(run.orchestra)},
+        ${encodeMeeting(run.meeting)}, ${encodeOrchestra(run.orchestra)}, ${encodeWorkflow(run.workflow ?? null)}, ${encodeRunControl(run.runControl ?? null)}, ${encodeRunContext(run.runContext ?? null)},
         ${run.finalOutput}, ${run.error}, ${run.createdAt}, ${run.updatedAt}
       )
       ON CONFLICT(run_id) DO UPDATE SET
@@ -145,10 +172,14 @@ const make = Effect.gen(function* () {
         graph_json = excluded.graph_json,
         meeting_json = excluded.meeting_json,
         orchestra_json = excluded.orchestra_json,
+        workflow_json = CASE WHEN excluded.workflow_json IS NULL OR COALESCE(json_extract(projection_workspace_collaboration_runs.workflow_json,'$.controlRevision'),0) > COALESCE(json_extract(excluded.workflow_json,'$.controlRevision'),0) THEN projection_workspace_collaboration_runs.workflow_json ELSE excluded.workflow_json END,
+        run_control_json = CASE WHEN excluded.run_control_json IS NULL OR COALESCE(json_extract(projection_workspace_collaboration_runs.run_control_json,'$.controlRevision'),json_extract(projection_workspace_collaboration_runs.workflow_json,'$.controlRevision'),0) > COALESCE(json_extract(excluded.run_control_json,'$.controlRevision'),json_extract(excluded.workflow_json,'$.controlRevision'),0) THEN projection_workspace_collaboration_runs.run_control_json ELSE excluded.run_control_json END,
+        run_context_json = COALESCE(projection_workspace_collaboration_runs.run_context_json, excluded.run_context_json),
         final_output = excluded.final_output,
         error = excluded.error,
         updated_at = excluded.updated_at
       WHERE projection_workspace_collaboration_runs.project_id = excluded.project_id
+        AND COALESCE(json_extract(projection_workspace_collaboration_runs.run_control_json,'$.executionRevision'),json_extract(projection_workspace_collaboration_runs.workflow_json,'$.executionRevision'),0) = COALESCE(json_extract(excluded.run_control_json,'$.executionRevision'),json_extract(excluded.workflow_json,'$.executionRevision'),0)
         AND (
           projection_workspace_collaboration_runs.status = excluded.status
           OR (
@@ -166,8 +197,15 @@ const make = Effect.gen(function* () {
             AND excluded.status = 'cancelled'
           )
         )
+      RETURNING workflow_json AS workflow
     `.pipe(
-      Effect.asVoid,
+      Effect.flatMap((rows) =>
+        rows[0]?.workflow
+          ? decodeWorkflow(rows[0].workflow).pipe(
+              Effect.flatMap((workflow) => workflowStore.projectRunSummary({ ...run, workflow })),
+            )
+          : Effect.void,
+      ),
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.upsert")),
     );
 
@@ -186,6 +224,13 @@ const make = Effect.gen(function* () {
           AND status IN ('queued', 'running', 'cancel-requested')
       `.pipe(
       Effect.asVoid,
+      Effect.andThen(
+        Effect.gen(function* () {
+          const current = yield* getRow(input);
+          if (Option.isSome(current) && current.value.workflow)
+            yield* workflowStore.projectRunSummary(current.value);
+        }),
+      ),
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.requestCancel")),
     );
 
@@ -239,6 +284,7 @@ const make = Effect.gen(function* () {
           {
             question: input.question,
             answer: input.answer,
+            ...(input.imageReferences ? { imageReferences: input.imageReferences } : {}),
             answeredAt: input.answeredAt,
             nodeId: pending.nodeId,
           },
@@ -314,7 +360,7 @@ const make = Effect.gen(function* () {
     );
 
   const list: ProjectionWorkspaceCollaborationRunRepositoryShape["list"] = (input) =>
-    listRows({ projectId: input.projectId }).pipe(
+    listRows(input).pipe(
       Effect.map((runs) => {
         if (input.statuses === undefined) return runs;
         const statuses = new Set(input.statuses);
@@ -330,7 +376,116 @@ const make = Effect.gen(function* () {
       Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.listResumable")),
     );
 
+  const recordControl: ProjectionWorkspaceCollaborationRunRepositoryShape["recordControl"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const current = yield* getById(input);
+      if (Option.isNone(current))
+        return yield* new PersistenceDecodeError({
+          operation: "workflow.control",
+          issue: "실행을 찾을 수 없습니다.",
+        });
+      if (
+        input.action === "retry" &&
+        input.nodeId &&
+        !(yield* workflowStore.retrySafe(input.runId, input.nodeId, !current.value.workflow).pipe(
+          Effect.mapError(
+            (cause) =>
+              new PersistenceDecodeError({
+                operation: "workflow.control",
+                issue: cause.message,
+                cause,
+              }),
+          ),
+        ))
+      )
+        return yield* new PersistenceDecodeError({
+          operation: "workflow.control",
+          issue: "이전 입력의 전달·종료가 미확인입니다. 원래 실행 상태를 먼저 대조하세요.",
+        });
+      const next = yield* Effect.try({
+        try: () => controlWorkflowRun(current.value, input, input.createdAt),
+        catch: (cause) =>
+          new PersistenceDecodeError({
+            operation: "workflow.control",
+            issue: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+      });
+      yield* sql`UPDATE projection_workspace_collaboration_runs SET status=${next.status}, graph_json=${encodeGraph(next.graph)}, workflow_json=${encodeWorkflow(next.workflow ?? null)}, run_control_json=${encodeRunControl(next.runControl ?? null)}, error=${next.error},updated_at=${next.updatedAt} WHERE project_id=${input.projectId} AND run_id=${input.runId}`.pipe(
+        Effect.mapError(toPersistenceSqlError("workflow.control")),
+      );
+      yield* workflowStore
+        .projectRunSummary(next)
+        .pipe(Effect.mapError(toPersistenceSqlError("workflow.control-summary")));
+    });
+  const recordReview: NonNullable<
+    ProjectionWorkspaceCollaborationRunRepositoryShape["recordReview"]
+  > = (input) =>
+    Effect.gen(function* () {
+      const current = yield* getRow(input).pipe(
+        Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.recordReview")),
+      );
+      if (Option.isNone(current))
+        return yield* new PersistenceDecodeError({
+          operation: "recordReview",
+          issue: "실행을 찾을 수 없습니다.",
+        });
+      const graph = yield* Effect.try({
+        try: () => reviewWorkspaceOrchestraPlan(current.value, input),
+        catch: (cause) =>
+          new PersistenceDecodeError({
+            operation: "ProjectionWorkspaceCollaborationRuns.recordReview",
+            issue: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+      });
+      if (graph === null)
+        return yield* new PersistenceDecodeError({
+          operation: "recordReview",
+          issue: "실행 계획이 변경되었거나 이미 시작되었습니다. 최신 계획을 확인하세요.",
+        });
+      yield* upsert({ ...current.value, graph, updatedAt: input.reviewedAt });
+    });
+  const requestVerification: NonNullable<
+    ProjectionWorkspaceCollaborationRunRepositoryShape["requestVerification"]
+  > = (input) =>
+    Effect.gen(function* () {
+      const current = yield* getRow(input);
+      if (Option.isNone(current)) return;
+      const run = current.value;
+      if (
+        run.status !== "running" ||
+        run.graph?.status !== "completed" ||
+        run.graph.delivery?.status === "verifying" ||
+        run.orchestra === null
+      )
+        return;
+      yield* upsert({
+        ...run,
+        orchestra: { ...run.orchestra, verificationCommands: input.verificationCommands },
+        graph: {
+          ...run.graph,
+          delivery: {
+            status: "verifying",
+            detail: "검증을 다시 실행합니다.",
+            checkedAt: null,
+            fingerprint: null,
+            worktrees: [],
+            commands: [],
+          },
+        },
+        updatedAt: input.requestedAt,
+      });
+    }).pipe(
+      Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.requestVerification")),
+    );
+
   return ProjectionWorkspaceCollaborationRunRepository.of({
+    recordControl,
+    recordReview,
+    requestVerification,
     upsert,
     requestCancel,
     recordAnswer,

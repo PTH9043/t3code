@@ -8,6 +8,33 @@ import type { ResolvedSharePayload, SharePayload } from "expo-sharing";
 import { buildIncomingShareDraft, hasIncomingShareContent } from "./incoming-share-model";
 
 describe("incoming native shares", () => {
+  it("bounds a native share by the combined budget and releases overflow temporary files", async () => {
+    const payloads = Array.from({ length: 6 }, (_, index) => ({
+      shareType: "image" as const,
+      value: `file:///shared/large-${index}.png`,
+      mimeType: "image/png",
+    }));
+    const removeOwnedFile = vi.fn(async () => {});
+    const result = await buildIncomingShareDraft({
+      id: "large-share",
+      createdAt: "2026-10-24T00:00:00.000Z",
+      payloads,
+      resolvedPayloads: payloads.map((payload) => ({
+        ...payload,
+        contentUri: payload.value,
+        contentType: "image" as const,
+        contentMimeType: "image/png",
+        contentSize: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+        originalName: "large.png",
+      })),
+      fileReader: { readBase64: async () => "YWJj", removeOwnedFile },
+    });
+    expect(result.attachments).toHaveLength(5);
+    expect(result.warnings).toEqual([
+      "Shared images exceed the 50 MB combined limit. Send them in separate messages.",
+    ]);
+    expect(removeOwnedFile).toHaveBeenCalledTimes(6);
+  });
   it("converts shared text, URLs, and images into a durable composer draft", async () => {
     const image: SharePayload = {
       shareType: "image",

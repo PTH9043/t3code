@@ -1,5 +1,6 @@
 import type {
   DesktopBridge,
+  DesktopFileDrop,
   DesktopPreviewPointerEvent,
   DesktopPreviewRecordingFrame,
   DesktopPreviewTabState,
@@ -10,6 +11,34 @@ import { contextBridge, ipcRenderer } from "electron";
 import * as IpcChannels from "./ipc/channels.ts";
 
 exposeClerkBridge({ passkeys: true });
+
+let internalDragHandoffInstalled = false;
+function installInternalDragHandoff() {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Electron sandbox preload has no Effect/Node host services.
+  if (process.platform !== "win32" || internalDragHandoffInstalled) return;
+  internalDragHandoffInstalled = true;
+  let active = false;
+  const finish = () => {
+    if (!active) return;
+    active = false;
+    ipcRenderer.sendSync(IpcChannels.INTERNAL_DRAG_CHANNEL, false);
+  };
+  // Only an actual drag originating in this renderer needs Chromium's OLE target.
+  // Synchronous acknowledgement happens before Chromium enters its native drag loop.
+  document.addEventListener(
+    "dragstart",
+    (event) => {
+      if (!event.isTrusted || event.defaultPrevented) return;
+      active = ipcRenderer.sendSync(IpcChannels.INTERNAL_DRAG_CHANNEL, true) === true;
+      queueMicrotask(() => {
+        if (event.defaultPrevented) finish();
+      });
+    },
+    true,
+  );
+  document.addEventListener("dragend", finish, true);
+  window.addEventListener("pagehide", finish);
+}
 
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
   if (
@@ -28,6 +57,47 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
+  googleSignIn: {
+    start: (clientId) => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_CHANNEL, clientId),
+    enrollT3: (clientId) => ipcRenderer.invoke(IpcChannels.GOOGLE_ENROLL_T3_CHANNEL, clientId),
+    loginT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGIN_T3_CHANNEL),
+    unenrollT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_UNENROLL_T3_CHANNEL),
+    enrollmentStatusT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_ENROLLMENT_STATUS_T3_CHANNEL),
+    logoutT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGOUT_T3_CHANNEL),
+    cancel: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_CANCEL_CHANNEL),
+    status: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_STATUS_CHANNEL),
+    signOut: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_OUT_CHANNEL),
+  },
+  directRpc: {
+    open: (backendId) => ipcRenderer.invoke(IpcChannels.DIRECT_RPC_OPEN_CHANNEL, backendId),
+    send: (clientId, data) =>
+      ipcRenderer.invoke(IpcChannels.DIRECT_RPC_SEND_CHANNEL, { clientId, data }),
+    close: (clientId) => ipcRenderer.invoke(IpcChannels.DIRECT_RPC_CLOSE_CHANNEL, { clientId }),
+    onFrame: (listener) => {
+      const wrapped = (
+        _event: Electron.IpcRendererEvent,
+        frame: import("@t3tools/contracts").DesktopDirectRpcOutput,
+      ) => listener(frame);
+      ipcRenderer.on(IpcChannels.DIRECT_RPC_FRAME_CHANNEL, wrapped);
+      return () => ipcRenderer.removeListener(IpcChannels.DIRECT_RPC_FRAME_CHANNEL, wrapped);
+    },
+  },
+  jasna: {
+    snapshot: () => ipcRenderer.invoke(IpcChannels.JASNA_SNAPSHOT_CHANNEL),
+    pickExecutable: () => ipcRenderer.invoke(IpcChannels.JASNA_PICK_EXECUTABLE_CHANNEL),
+    clearExecutable: () => ipcRenderer.invoke(IpcChannels.JASNA_CLEAR_EXECUTABLE_CHANNEL),
+    pickInput: () => ipcRenderer.invoke(IpcChannels.JASNA_PICK_INPUT_CHANNEL),
+    pickOutput: () => ipcRenderer.invoke(IpcChannels.JASNA_PICK_OUTPUT_CHANNEL),
+    start: (selection) => ipcRenderer.invoke(IpcChannels.JASNA_START_CHANNEL, selection),
+    cancel: (id) => ipcRenderer.invoke(IpcChannels.JASNA_CANCEL_CHANNEL, id),
+  },
+  reportFileDropStatus: (status) => ipcRenderer.send(IpcChannels.FILE_DROP_STATUS_CHANNEL, status),
+  onFilesDropped: (listener) => {
+    installInternalDragHandoff();
+    const wrapped = (_event: Electron.IpcRendererEvent, drop: DesktopFileDrop) => listener(drop);
+    ipcRenderer.on(IpcChannels.FILE_DROP_CHANNEL, wrapped);
+    return () => ipcRenderer.removeListener(IpcChannels.FILE_DROP_CHANNEL, wrapped);
+  },
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
     if (typeof result !== "object" || result === null) {

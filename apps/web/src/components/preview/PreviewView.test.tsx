@@ -178,6 +178,7 @@ vi.mock("./PreviewChromeRow", () => ({
     onPickElement?: () => void;
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
+    onNativePreview?: () => void;
     trailingActions?: {
       props: { onNativePictureInPicture?: () => void };
     };
@@ -185,8 +186,7 @@ vi.mock("./PreviewChromeRow", () => ({
     mocks.submittedUrl = props.onSubmit;
     mocks.toggleAnnotation = props.onPickElement ?? null;
     mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
-    mocks.toggleNativePictureInPicture =
-      props.trailingActions?.props.onNativePictureInPicture ?? null;
+    mocks.toggleNativePictureInPicture = props.onNativePreview ?? null;
     mocks.pictureInPicturePressed = props.pictureInPicture ?? false;
     return null;
   },
@@ -360,7 +360,7 @@ describe("PreviewView navigation", () => {
     expect(mocks.closeMiniPlayer).toHaveBeenCalledWith(props.threadRef);
   });
 
-  it("keeps the native preview window as a secondary action", async () => {
+  it("opens and closes the native preview window from the toolbar", async () => {
     const props = {
       threadRef: {
         environmentId: EnvironmentId.make("environment-1"),

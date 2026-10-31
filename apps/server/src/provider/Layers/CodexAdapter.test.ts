@@ -23,6 +23,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -35,6 +36,7 @@ import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -59,7 +61,7 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
-  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
+  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent, Cause.Done>());
   private readonly now = "2026-01-01T00:00:00.000Z";
 
   public readonly startImpl = vi.fn(() =>
@@ -84,7 +86,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly interruptTurnImpl = vi.fn(
-    (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
+    (_turnId?: TurnId, _questionRequestId?: ApprovalRequestId): Promise<void> =>
+      Promise.resolve(undefined),
   );
 
   public readonly readThreadImpl = vi.fn(
@@ -109,8 +112,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly respondToUserInputImpl = vi.fn(
-    (_requestId: ApprovalRequestId, _answers: ProviderUserInputAnswers): Promise<void> =>
-      Promise.resolve(undefined),
+    (
+      _requestId: ApprovalRequestId,
+      _answers: ProviderUserInputAnswers,
+      _images?: ReadonlyArray<{ readonly type: "image"; readonly url: string }>,
+    ): Promise<void> => Promise.resolve(undefined),
   );
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
@@ -131,8 +137,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.sendTurnImpl(input));
   }
 
-  interruptTurn(turnId?: TurnId) {
-    return Effect.promise(() => this.interruptTurnImpl(turnId));
+  interruptTurn(turnId?: TurnId, questionRequestId?: ApprovalRequestId) {
+    return Effect.promise(() => this.interruptTurnImpl(turnId, questionRequestId));
   }
 
   readThread = Effect.promise(() => this.readThreadImpl());
@@ -145,8 +151,16 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.respondToRequestImpl(requestId, decision));
   }
 
-  respondToUserInput(requestId: ApprovalRequestId, answers: ProviderUserInputAnswers) {
-    return Effect.promise(() => this.respondToUserInputImpl(requestId, answers));
+  respondToUserInput(
+    requestId: ApprovalRequestId,
+    answers: ProviderUserInputAnswers,
+    images?: ReadonlyArray<{ readonly type: "image"; readonly url: string }>,
+  ) {
+    return Effect.promise(() =>
+      images
+        ? this.respondToUserInputImpl(requestId, answers, images)
+        : this.respondToUserInputImpl(requestId, answers),
+    );
   }
 
   get events() {
@@ -157,6 +171,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
+  }
+
+  endEvents() {
+    return Queue.end(this.eventQueue);
   }
 }
 
@@ -218,6 +236,65 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   getBinding: () => Effect.succeed(Option.none()),
   listThreadIds: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
+});
+
+const questionImageRuntimeFactory = makeRuntimeFactory();
+const questionImageLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      return yield* makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: questionImageRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-question-image-" })),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+questionImageLayer("Codex question images", (it) => {
+  it.effect("passes stored question images as native image inputs to the selected session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
+      const threadId = asThreadId("question-image-thread");
+      const image = {
+        type: "image" as const,
+        id: "question-image",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 3,
+      };
+      const path = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment: image,
+      });
+      if (!path) throw new Error("Missing test attachment path");
+      NodeFS.writeFileSync(path, Buffer.from("abc"));
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.respondToUserInput(
+        threadId,
+        ApprovalRequestId.make("question"),
+        { q: "see image" },
+        [{ questionId: "q", image }],
+      );
+      NodeAssert.deepStrictEqual(
+        questionImageRuntimeFactory.lastRuntime?.respondToUserInputImpl.mock.calls.at(-1),
+        [
+          ApprovalRequestId.make("question"),
+          { q: "see image" },
+          [{ type: "image", url: "data:image/png;base64,YWJj" }],
+        ],
+      );
+    }),
+  );
 });
 
 const validationRuntimeFactory = makeRuntimeFactory();
@@ -512,6 +589,100 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("passes the selected question to the runtime when stopping", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const questionRequestId = ApprovalRequestId.make("async:question-1");
+      yield* adapter.interruptTurn(asThreadId("thread-1"), undefined, { questionRequestId });
+      NodeAssert.deepStrictEqual(runtime.interruptTurnImpl.mock.calls.at(-1), [
+        undefined,
+        questionRequestId,
+      ]);
+    }),
+  );
+  it.effect("clears a question closed by Codex without reporting a user answer", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("evt-question-closed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-10-26T00:00:00.000Z",
+        method: "serverRequest/resolved",
+        requestId: ApprovalRequestId.make("question-closed"),
+        payload: { threadId: "native-thread", requestId: 0, t3UserInputResolved: "closed" },
+      } satisfies ProviderEvent);
+      const event = yield* Fiber.join(eventFiber);
+      NodeAssert.ok(Option.isSome(event));
+      NodeAssert.equal(event.value.type, "user-input.resolved");
+      if (event.value.type === "user-input.resolved")
+        NodeAssert.equal(event.value.payload.reason, "provider-resolved");
+    }),
+  );
+  it.effect("keeps a native free-text question with no options so the user can answer it", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("evt-free-text-question"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-10-26T00:00:00.000Z",
+        method: "item/tool/requestUserInput",
+        requestId: ApprovalRequestId.make("free-text-question"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          isBlocking: false,
+          autoResolutionMs: null,
+          questions: [
+            {
+              id: "target",
+              header: "Target",
+              question: "Which directory should be used?",
+              isOther: true,
+              isSecret: false,
+              options: null,
+            },
+          ],
+        },
+      } satisfies ProviderEvent);
+      const event = yield* Fiber.join(eventFiber);
+      NodeAssert.ok(Option.isSome(event));
+      NodeAssert.equal(event.value.type, "user-input.requested");
+      if (event.value.type === "user-input.requested")
+        NodeAssert.deepEqual(event.value.payload.questions, [
+          {
+            id: "target",
+            header: "Target",
+            question: "Which directory should be used?",
+            options: [],
+            multiSelect: false,
+          },
+        ]);
+    }),
+  );
+  it.effect(
+    "emits a terminal receipt when the native event stream ends without a session exit",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        yield* runtime.endEvents();
+        const event = yield* Stream.runHead(adapter.streamEvents);
+        NodeAssert.ok(Option.isSome(event));
+        NodeAssert.equal(event.value.type, "session.exited");
+        NodeAssert.equal(event.value.threadId, "thread-1");
+        NodeAssert.deepStrictEqual(event.value.payload, {
+          exitKind: "error",
+          recoverable: true,
+          reason: "Codex 실행 이벤트 연결이 종료되어 결과를 기다릴 수 없습니다.",
+        });
+      }),
+  );
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1248,9 +1419,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
   it.effect("scopes the Codex usage counter to the session that owns it", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
-      // A resumed thread gets a fresh app-server session, and codex restarts the
-      // cumulative counter with it. Sharing one source id across sessions makes the
-      // stored high-water mark reject every later session as a regression.
+      // A resumed app-server can reset or carry its native cumulative counter.
+      // Use a distinct epoch and do not assume its first balance is new spend.
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("codex"),
         threadId: asThreadId("thread-1"),
@@ -1300,9 +1470,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.ok(observation);
       NodeAssert.notEqual(observation.sourceId, "codex:native-thread-1");
       NodeAssert.ok(observation.sourceId.startsWith("codex:native-thread-1#"));
-      // Resumed or not, this session counted from zero, so its first notification is
-      // spend to record rather than a carried balance to subtract.
-      NodeAssert.equal(observation.startsAtZero, true);
+      NodeAssert.equal(observation.startsAtZero, false);
     }),
   );
 });

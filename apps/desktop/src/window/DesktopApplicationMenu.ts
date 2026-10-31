@@ -134,6 +134,9 @@ export const make = Effect.gen(function* () {
     const settingsClick = () => {
       runMenuEffect("open-settings", dispatchMenuAction("open-settings"));
     };
+    const helpClick = () => {
+      runMenuEffect("open-ai-help", dispatchMenuAction("open-ai-help"));
+    };
     const zoomClick = (direction: DesktopWindow.MainWindowZoomDirection) => () => {
       runMenuEffect(`zoom-${direction}`, zoomMainWindow(direction));
     };
@@ -218,6 +221,12 @@ export const make = Effect.gen(function* () {
         role: "help",
         label: "도움말",
         submenu: [
+          {
+            label: "AI 사용 도움말",
+            accelerator: "F1",
+            click: helpClick,
+          },
+          { type: "separator" },
           {
             label: "업데이트 확인...",
             click: checkForUpdatesClick,

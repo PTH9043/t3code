@@ -5,4 +5,4 @@ export type SettingsSheetTarget =
   | "SettingsProjectGrouping"
   | "SettingsClientStorage";
 
-export type SettingsLegalDocumentTarget = "SettingsLegal";
+export type SettingsFullScreenTarget = "SettingsLegal" | "SettingsHelp";

@@ -201,6 +201,11 @@ export function useThreadComposerState() {
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
     const result = await pickComposerImages({
       existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
+      existingBytes:
+        composerDrafts[threadKey]?.attachments.reduce(
+          (total, attachment) => total + attachment.sizeBytes,
+          0,
+        ) ?? 0,
     });
     if (result.images.length > 0) {
       appendComposerDraftAttachments(threadKey, result.images);
@@ -218,6 +223,11 @@ export function useThreadComposerState() {
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
     const result = await pasteComposerClipboard({
       existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
+      existingBytes:
+        composerDrafts[threadKey]?.attachments.reduce(
+          (total, attachment) => total + attachment.sizeBytes,
+          0,
+        ) ?? 0,
     });
     if (result.images.length > 0) {
       appendComposerDraftAttachments(threadKey, result.images);
@@ -241,6 +251,11 @@ export function useThreadComposerState() {
         const images = await convertPastedImagesToAttachments({
           uris,
           existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
+          existingBytes:
+            composerDrafts[threadKey]?.attachments.reduce(
+              (total, attachment) => total + attachment.sizeBytes,
+              0,
+            ) ?? 0,
         });
         if (images.length > 0) {
           appendComposerDraftAttachments(threadKey, images);

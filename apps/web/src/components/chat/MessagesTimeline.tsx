@@ -7,6 +7,9 @@ import {
   type WorkspaceOrchestraBlock,
 } from "@t3tools/contracts";
 import {
+  deriveOrchestraTaskLists,
+  type OrchestraRunSnapshot,
+  type OrchestraTaskAttemptView,
   orchestraKindLabels,
   orchestraStatusLabels,
 } from "@t3tools/client-runtime/state/presentation";
@@ -50,6 +53,7 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { ChatGeneratedResults } from "./ChatGeneratedResults";
 import {
   BotIcon,
   CheckIcon,
@@ -76,6 +80,13 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
+import {
+  OrchestraTaskListPanel,
+  DEFAULT_ORCHESTRA_LIST_STATE,
+  type OrchestraListState,
+} from "./OrchestraTaskListPanel";
+import { OrchestraNodeUsage } from "./OrchestraNodeUsage";
+import { OrchestraRunControls } from "./OrchestraRunControls";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
@@ -135,7 +146,13 @@ import {
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  resultAttachments: ReadonlyMap<MessageId, NonNullable<TimelineMessage["attachments"]>>;
+  resultOwners: ReadonlyMap<string, MessageId>;
   orchestraBlocks: ReadonlyMap<MessageId, WorkspaceOrchestraBlock>;
+  orchestraListStates: Readonly<Record<string, OrchestraListState>>;
+  onChangeOrchestraList: (runId: string, next: OrchestraListState) => void;
+  orchestraMessageDiffs: ReadonlyMap<MessageId, TurnDiffSummary>;
+  orchestraWorkLogs: ReadonlyMap<string, ReadonlyArray<TimelineWorkEntry>>;
   timestampFormat: TimestampFormat;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
@@ -196,6 +213,7 @@ function TimelineLoadEarlierHeader({
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const EMPTY_ORCHESTRA_BLOCKS = new Map<MessageId, WorkspaceOrchestraBlock>();
+const EMPTY_ORCHESTRA_RUNS: ReadonlyArray<OrchestraRunSnapshot> = [];
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -211,6 +229,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
 
 interface MessagesTimelineProps {
   orchestraBlocks?: ReadonlyMap<MessageId, WorkspaceOrchestraBlock>;
+  orchestraRuns?: ReadonlyArray<OrchestraRunSnapshot> | undefined;
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
   isWorking: boolean;
@@ -258,6 +277,7 @@ interface MessagesTimelineProps {
 
 export const MessagesTimeline = memo(function MessagesTimeline({
   orchestraBlocks = EMPTY_ORCHESTRA_BLOCKS,
+  orchestraRuns = EMPTY_ORCHESTRA_RUNS,
   isWorking,
   workingStepLabel = null,
   activeTurnInProgress,
@@ -291,6 +311,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   topFadeEnabled = false,
   loadEarlier = null,
 }: MessagesTimelineProps) {
+  const [orchestraListStates, setOrchestraListStates] = useState<
+    Readonly<Record<string, OrchestraListState>>
+  >({});
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
@@ -333,6 +356,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const disclosureAnchorKey = disclosureAnchorKeyRef.current;
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   }, []);
+
+  const onChangeOrchestraList = useCallback(
+    (runId: string, next: OrchestraListState) => {
+      onManualNavigation();
+      suspendEndScrollMaintenanceForDisclosure(`orchestra:${runId}`);
+      setOrchestraListStates((current) => ({ ...current, [`${routeThreadKey}:${runId}`]: next }));
+    },
+    [onManualNavigation, routeThreadKey, suspendEndScrollMaintenanceForDisclosure],
+  );
 
   const maintainVisibleContentPosition = useMemo(
     () => ({
@@ -403,10 +435,38 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     });
   }, [latestTurn]);
 
+  const orchestraWorkLogs = useMemo(() => {
+    const grouped = new Map<string, TimelineWorkEntry[]>();
+    for (const entry of timelineEntries) {
+      if (entry.kind !== "work" || !entry.entry.orchestraMessageId) continue;
+      const logs = grouped.get(entry.entry.orchestraMessageId) ?? [];
+      logs.push(entry.entry);
+      grouped.set(entry.entry.orchestraMessageId, logs);
+    }
+    return grouped;
+  }, [timelineEntries]);
+
+  const orchestraLists = useMemo(
+    () =>
+      deriveOrchestraTaskLists({
+        ownerThreadId: parseScopedThreadKey(routeThreadKey)?.threadId ?? null,
+        runs: orchestraRuns,
+        blocks: orchestraBlocks,
+        messages: timelineEntries.flatMap((entry) =>
+          entry.kind === "message" ? [entry.message] : [],
+        ),
+        workEntries: timelineEntries.flatMap((entry) =>
+          entry.kind === "work" ? [entry.entry] : [],
+        ),
+      }),
+    [routeThreadKey, orchestraRuns, orchestraBlocks, timelineEntries],
+  );
+
   const rawRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
         timelineEntries,
+        orchestraLists,
         latestTurn,
         runningTurnId,
         expandedTurnIds,
@@ -418,6 +478,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }),
     [
       timelineEntries,
+      orchestraLists,
       latestTurn,
       runningTurnId,
       expandedTurnIds,
@@ -510,9 +571,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [timelineViewportElement, rows.length]);
 
+  const resultAttachments = useMemo(
+    () =>
+      new Map(
+        timelineEntries.flatMap((entry) =>
+          entry.kind === "message" &&
+          entry.message.role === "assistant" &&
+          entry.message.attachments?.length
+            ? [[entry.message.id, entry.message.attachments] as const]
+            : [],
+        ),
+      ),
+    [timelineEntries],
+  );
+  const resultOwners = useMemo(() => {
+    const owners = new Map<string, MessageId>();
+    for (const [messageId, attachments] of resultAttachments)
+      for (const attachment of attachments)
+        if (attachment.result) owners.set(attachment.id, messageId);
+    return owners;
+  }, [resultAttachments]);
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       orchestraBlocks,
+      orchestraListStates,
+      onChangeOrchestraList,
+      resultAttachments,
+      resultOwners,
+      orchestraMessageDiffs: turnDiffSummaryByAssistantMessageId,
+      orchestraWorkLogs,
       timestampFormat,
       routeThreadKey,
       threadRef: parseScopedThreadKey(routeThreadKey),
@@ -531,6 +618,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }),
     [
       orchestraBlocks,
+      orchestraListStates,
+      onChangeOrchestraList,
+      turnDiffSummaryByAssistantMessageId,
+      resultAttachments,
+      resultOwners,
+      orchestraWorkLogs,
       timestampFormat,
       routeThreadKey,
       markdownCwd,
@@ -970,6 +1063,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
+      {row.kind === "orchestra" ? <OrchestraTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
@@ -983,7 +1077,12 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const userImages = row.message.attachments ?? [];
+  const userImages = (row.message.attachments ?? []).filter(
+    (attachment) => attachment.type === "image",
+  );
+  const userFiles = (row.message.attachments ?? []).filter(
+    (attachment) => attachment.type === "file",
+  );
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
   const previewAnnotations: ParsedPreviewAnnotation[] = [];
@@ -1006,6 +1105,23 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   return (
     <div className="group flex flex-col items-end gap-1">
       <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
+        {userFiles.length > 0 && (
+          <div className="mb-2 flex flex-col gap-2">
+            {userFiles.map((file) => (
+              <a
+                key={file.id}
+                href={file.previewUrl}
+                download={file.name}
+                className="flex min-w-0 flex-col rounded-lg border border-border/80 bg-background/70 px-3 py-2 text-xs text-foreground"
+              >
+                <span className="truncate font-medium">{file.name}</span>
+                <span className="text-secondary-label">
+                  {(file.sizeBytes / 1024).toFixed(1)} KB
+                </span>
+              </a>
+            ))}
+          </div>
+        )}
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
@@ -1130,11 +1246,118 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
   );
 }
 
+function OrchestraAttemptBody({ attempt }: { attempt: OrchestraTaskAttemptView }) {
+  const ctx = use(TimelineRowCtx);
+  const logs =
+    attempt.messageId === null ? [] : (ctx.orchestraWorkLogs.get(attempt.messageId) ?? []);
+  const attachments =
+    attempt.messageId === null ? [] : (ctx.resultAttachments.get(attempt.messageId) ?? []);
+  return (
+    <div className="min-w-0" data-message-id={attempt.messageId ?? undefined}>
+      {attempt.isSummary && (
+        <p className="mb-2 text-xs text-muted-foreground">
+          {attempt.text ? "저장된 결과 요약입니다. " : ""}전체 기록은 이전 작업을 불러오면
+          표시됩니다.
+        </p>
+      )}
+      <ChatMarkdown
+        text={
+          attempt.text ||
+          (attachments.length
+            ? ""
+            : attempt.streaming
+              ? "출력을 기다리는 중…"
+              : attempt.isSummary
+                ? "결과를 불러오기 전입니다."
+                : "(빈 응답)")
+        }
+        cwd={ctx.markdownCwd}
+        threadRef={ctx.threadRef ?? undefined}
+        isStreaming={attempt.streaming}
+        skills={ctx.skills}
+        resultAttachments={attachments}
+        onImageExpand={ctx.onImageExpand}
+      />
+      {ctx.threadRef && attachments.length ? (
+        <ChatGeneratedResults
+          attachments={attachments.filter(
+            (attachment) => ctx.resultOwners.get(attachment.id) === attempt.messageId,
+          )}
+          threadRef={ctx.threadRef}
+          cwd={ctx.markdownCwd}
+          onImageExpand={ctx.onImageExpand}
+        />
+      ) : null}
+      {logs.length > 0 && (
+        <details className="mt-3 rounded-md border border-border p-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            도구 실행 기록 {logs.length}개
+          </summary>
+          <div className="mt-2 space-y-2">
+            {logs.map((entry) => (
+              <WorkGroupSection key={entry.id} groupedEntries={[entry]} />
+            ))}
+          </div>
+        </details>
+      )}
+      <AssistantChangedFilesSection
+        turnSummary={
+          attempt.messageId === null ? undefined : ctx.orchestraMessageDiffs.get(attempt.messageId)
+        }
+        routeThreadKey={ctx.routeThreadKey}
+        resolvedTheme={ctx.resolvedTheme}
+        onOpenTurnDiff={ctx.onOpenTurnDiff}
+      />
+      {!attempt.streaming && attempt.text && (
+        <div className="mt-2">
+          <MessageCopyButton text={attempt.text} size="icon-xs" variant="ghost" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OrchestraTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "orchestra" }> }) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <OrchestraTaskListPanel
+      list={row.list}
+      controls={
+        ctx.threadRef && row.list.run ? (
+          <OrchestraRunControls environmentId={ctx.threadRef.environmentId} run={row.list.run} />
+        ) : null
+      }
+      state={
+        ctx.orchestraListStates[`${ctx.routeThreadKey}:${row.list.id}`] ??
+        DEFAULT_ORCHESTRA_LIST_STATE
+      }
+      onChange={(next) => ctx.onChangeOrchestraList(row.list.id, next)}
+      renderAttempt={(attempt) => <OrchestraAttemptBody attempt={attempt} />}
+      renderUsage={(task) =>
+        ctx.threadRef ? (
+          <OrchestraNodeUsage
+            environmentId={ctx.threadRef.environmentId}
+            threadId={ctx.threadRef.threadId}
+            runId={row.list.id}
+            nodeId={task.id}
+            busy={task.status === "running"}
+          />
+        ) : null
+      }
+    />
+  );
+}
+
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const block = ctx.orchestraBlocks.get(row.message.id);
   const messageText =
-    row.message.text || (row.message.streaming ? "출력을 기다리는 중…" : "(빈 응답)");
+    row.message.text ||
+    (row.message.attachments?.length
+      ? ""
+      : row.message.streaming
+        ? "출력을 기다리는 중…"
+        : "(빈 응답)");
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -1195,7 +1418,19 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             threadRef={ctx.threadRef ?? undefined}
             isStreaming={Boolean(row.message.streaming)}
             skills={ctx.skills}
+            resultAttachments={row.message.attachments}
+            onImageExpand={ctx.onImageExpand}
           />
+          {ctx.threadRef && row.message.attachments?.length ? (
+            <ChatGeneratedResults
+              attachments={row.message.attachments.filter(
+                (attachment) => ctx.resultOwners.get(attachment.id) === row.message.id,
+              )}
+              threadRef={ctx.threadRef}
+              cwd={ctx.markdownCwd}
+              onImageExpand={ctx.onImageExpand}
+            />
+          ) : null}
           <AssistantChangedFilesSection
             turnSummary={row.assistantTurnDiffSummary}
             routeThreadKey={ctx.routeThreadKey}
@@ -2192,6 +2427,7 @@ const WORK_ENTRY_LABELS_KO: Readonly<Record<string, string>> = {
   "Tool call": "도구 호출",
   "Web search": "웹 검색",
   "Image view": "이미지 보기",
+  "Generated image": "이미지 생성",
   "Subagent task": "하위 에이전트 작업",
   "Context compacted": "문맥 압축 완료",
   Error: "오류",

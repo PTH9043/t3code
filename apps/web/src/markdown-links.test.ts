@@ -1,11 +1,44 @@
 import { describe, expect, it } from "vite-plus/test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 
 import {
   resolveInlineCodeFileLinkMeta,
+  remarkNormalizeWindowsFileLinks,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
 } from "./markdown-links";
+
+it("preserves Windows file links through Markdown sanitization without allowing script URLs", () => {
+  const html = renderToStaticMarkup(
+    createElement(
+      ReactMarkdown,
+      {
+        remarkPlugins: [remarkNormalizeWindowsFileLinks],
+        rehypePlugins: [
+          [
+            rehypeSanitize,
+            {
+              ...defaultSchema,
+              protocols: {
+                ...defaultSchema.protocols,
+                href: [...(defaultSchema.protocols?.href ?? []), "file"],
+              },
+            },
+          ],
+        ],
+        urlTransform: (href) => rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href),
+      },
+      "[자료](D:/reports/archive.zip)\n\n[한글 자료][report]\n\n[report]: E:/reports/한글%20자료.txt\n\n[차단](javascript:alert)",
+    ),
+  );
+  expect(html).toContain('href="D:/reports/archive.zip"');
+  expect(html).toContain('href="E:/reports/%ED%95%9C%EA%B8%80%20%EC%9E%90%EB%A3%8C.txt"');
+  expect(html).not.toContain("javascript:");
+});
 
 describe("rewriteMarkdownFileUriHref", () => {
   it("rewrites file uri hrefs into direct path hrefs", () => {

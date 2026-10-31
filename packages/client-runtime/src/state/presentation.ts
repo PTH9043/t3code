@@ -1,3 +1,9 @@
+export {
+  agentControlStatusLabels,
+  attentionKindLabels,
+  threadAttentionItems,
+  type AttentionKind,
+} from "./agentControl.ts";
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -14,6 +20,17 @@ export {
   orchestraStatusLabels,
 } from "./orchestra.ts";
 export { formatMeetingProtocolText } from "./meetingProtocolText.ts";
+export {
+  deriveOrchestraTaskLists,
+  orchestraTaskMatchesFilter,
+  orchestraTaskIsExpanded,
+  orchestraTaskStatusLabels,
+  type OrchestraTaskFilter,
+  type OrchestraRunSnapshot,
+  type OrchestraTaskList,
+  type OrchestraTaskView,
+  type OrchestraTaskAttemptView,
+} from "./orchestraTaskList.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {

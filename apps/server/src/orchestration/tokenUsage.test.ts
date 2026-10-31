@@ -53,4 +53,51 @@ describe("token counter accounting", () => {
       }).delta.total,
     ).toBe(0);
   });
+
+  it("keeps known field baselines when an intermediate snapshot omits them", () => {
+    const initial = {
+      ...observation(100),
+      startsAtZero: true,
+      counts: { total: 100, input: 80, output: 20, cacheRead: 30, cacheWrite: 5, reasoning: 10 },
+    } satisfies TokenUsageObservation;
+    const first = advanceTokenUsage(null, initial);
+    const partial = advanceTokenUsage(first.cursor, {
+      ...initial,
+      counts: { ...emptyTokenCounts(), total: 120 },
+    });
+    expect(partial.delta).toEqual({ ...emptyTokenCounts(), total: 20 });
+    expect(partial.cursor).toEqual({ ...initial.counts, total: 120 });
+    const final = advanceTokenUsage(partial.cursor, {
+      ...initial,
+      counts: { total: 150, input: 120, output: 30, cacheRead: 40, cacheWrite: 8, reasoning: 15 },
+    });
+    expect(addTokenCounts(addTokenCounts(first.delta, partial.delta), final.delta)).toEqual({
+      total: 150,
+      input: 120,
+      output: 30,
+      cacheRead: 40,
+      cacheWrite: 8,
+      reasoning: 15,
+    });
+    expect(final.issue).toBeNull();
+    expect(advanceTokenUsage(final.cursor, { ...initial, counts: final.cursor }).delta.total).toBe(
+      0,
+    );
+  });
+
+  it("detects a counter regression after an omitted field without charging it again", () => {
+    const partial = advanceTokenUsage(observation(100).counts, {
+      ...observation(120),
+      counts: { ...emptyTokenCounts(), total: 120 },
+    });
+    const stale = advanceTokenUsage(partial.cursor, {
+      ...observation(130),
+      counts: { ...observation(130).counts, input: 80 },
+    });
+    expect(stale.issue).toBe("counter-regressed");
+    expect(stale.cursor).toEqual(partial.cursor);
+    expect(stale.delta.total).toBeNull();
+    const recovered = advanceTokenUsage(stale.cursor, observation(140));
+    expect(recovered.delta).toMatchObject({ total: 20, input: 40 });
+  });
 });

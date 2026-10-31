@@ -53,6 +53,11 @@ export interface ProjectionWorkspaceKnowledgeRepositoryShape {
   readonly listByProjectId: (
     input: ListProjectionWorkspaceKnowledgeInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionWorkspaceKnowledgeItem>, ProjectionRepositoryError>;
+  readonly removeAttachmentDocuments: (input: {
+    readonly projectId: ProjectId;
+    readonly threadId?: string;
+    readonly retainedMessageIds?: readonly string[];
+  }) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 
 export class ProjectionWorkspaceKnowledgeRepository extends Context.Service<

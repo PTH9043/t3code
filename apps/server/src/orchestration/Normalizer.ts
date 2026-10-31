@@ -7,6 +7,8 @@ import {
   type IsoDateTime,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 
@@ -14,6 +16,11 @@ import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { taskConditionsError } from "./taskConditions.ts";
+
+function formatQuestionImageReference(name: string, file: string): string {
+  return `사용자가 첨부한 이미지: ${JSON.stringify(name)}; 서버 파일: ${JSON.stringify(file.replaceAll("\\", "/"))}. 이미지를 열어 답변에 참고하세요.`;
+}
 
 export const canonicalizeClientCommandTimestamps = (
   command: ClientOrchestrationCommand,
@@ -47,6 +54,11 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
     const receivedAt = DateTime.formatIso(yield* DateTime.now);
     const canonicalCommand = canonicalizeClientCommandTimestamps(command, receivedAt);
+    if (canonicalCommand.type === "thread.turn.start") {
+      const conditionsError = taskConditionsError(canonicalCommand);
+      if (conditionsError !== null)
+        return yield* new OrchestrationDispatchCommandError({ message: conditionsError });
+    }
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
@@ -150,28 +162,233 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       } satisfies OrchestrationCommand;
     }
 
+    if (
+      canonicalCommand.type === "project.collaboration.run.answer" &&
+      canonicalCommand.images?.length
+    ) {
+      let totalBytes = 0;
+      const validated = yield* Effect.forEach(
+        canonicalCommand.images,
+        (image) =>
+          Effect.gen(function* () {
+            const parsed = parseBase64DataUrl(image.dataUrl);
+            const sizeBytes = parsed ? Buffer.byteLength(parsed.base64, "base64") : 0;
+            if (
+              !parsed ||
+              !parsed.mimeType.startsWith("image/") ||
+              sizeBytes === 0 ||
+              sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+            )
+              return yield* new OrchestrationDispatchCommandError({
+                message: `이미지 '${image.name}'을 읽을 수 없거나 크기 제한을 초과했습니다.`,
+              });
+            totalBytes += sizeBytes;
+            if (totalBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "첨부 이미지의 합계는 50MB까지입니다.",
+              });
+            return { image, parsed, sizeBytes };
+          }),
+        { concurrency: 1 },
+      );
+      const imageReferences = yield* Effect.forEach(
+        validated,
+        ({ image, parsed, sizeBytes }) =>
+          Effect.gen(function* () {
+            const id = createAttachmentId(canonicalCommand.runId);
+            if (!id)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지 보관 ID를 만들지 못했습니다.",
+              });
+            const file = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment: {
+                type: "image",
+                id,
+                name: image.name,
+                mimeType: parsed.mimeType.toLowerCase(),
+                sizeBytes,
+              },
+            });
+            if (!file || file.length > 4096)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지 보관 경로를 만들지 못했습니다.",
+              });
+            yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true }).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationDispatchCommandError({
+                    message: "이미지 폴더를 만들지 못했습니다.",
+                  }),
+              ),
+            );
+            yield* fileSystem.writeFile(file, Buffer.from(parsed.base64, "base64")).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationDispatchCommandError({
+                    message: "질문 이미지를 저장하지 못했습니다.",
+                  }),
+              ),
+            );
+            return { name: image.name, path: file.replaceAll("\\", "/") };
+          }),
+        { concurrency: 1 },
+      );
+      const { images: _uploads, ...answer } = canonicalCommand;
+      return { ...answer, imageReferences } satisfies OrchestrationCommand;
+    }
+
+    if (canonicalCommand.type === "thread.user-input.respond" && canonicalCommand.images?.length) {
+      let totalBytes = 0;
+      const validated = yield* Effect.forEach(
+        canonicalCommand.images,
+        ({ questionId, image }) =>
+          Effect.gen(function* () {
+            if (!Object.hasOwn(canonicalCommand.answers, questionId))
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지에 연결된 질문을 찾을 수 없습니다.",
+              });
+            const answer = canonicalCommand.answers[questionId];
+            const validAnswer =
+              typeof answer === "string" ||
+              (Array.isArray(answer) && answer.every((entry) => typeof entry === "string")) ||
+              (!!answer &&
+                typeof answer === "object" &&
+                "answers" in answer &&
+                Array.isArray(answer.answers) &&
+                answer.answers.every((entry) => typeof entry === "string"));
+            if (!validAnswer)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지를 연결할 질문 답변 형식이 올바르지 않습니다.",
+              });
+            const parsed = parseBase64DataUrl(image.dataUrl);
+            const sizeBytes = parsed ? Buffer.byteLength(parsed.base64, "base64") : 0;
+            if (
+              !parsed ||
+              !parsed.mimeType.startsWith("image/") ||
+              sizeBytes === 0 ||
+              sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+            )
+              return yield* new OrchestrationDispatchCommandError({
+                message: `이미지 '${image.name}'을 읽을 수 없거나 크기 제한을 초과했습니다.`,
+              });
+            totalBytes += sizeBytes;
+            if (totalBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "첨부 이미지의 합계는 50MB까지입니다.",
+              });
+            return { questionId, image, parsed, sizeBytes };
+          }),
+        { concurrency: 1 },
+      );
+      const answers = { ...canonicalCommand.answers };
+      const images = yield* Effect.forEach(
+        validated,
+        ({ questionId, image, parsed, sizeBytes }) =>
+          Effect.gen(function* () {
+            const id = createAttachmentId(canonicalCommand.threadId);
+            if (!id)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지 보관 ID를 만들지 못했습니다.",
+              });
+            const persisted = {
+              type: "image" as const,
+              id,
+              name: image.name,
+              mimeType: parsed.mimeType.toLowerCase(),
+              sizeBytes,
+            };
+            const file = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment: persisted,
+            });
+            if (!file)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지 보관 경로를 만들지 못했습니다.",
+              });
+            yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true }).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationDispatchCommandError({
+                    message: "이미지 보관 폴더를 만들지 못했습니다.",
+                  }),
+              ),
+            );
+            yield* fileSystem.writeFile(file, Buffer.from(parsed.base64, "base64")).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationDispatchCommandError({
+                    message: "질문 이미지를 저장하지 못했습니다.",
+                  }),
+              ),
+            );
+            const reference = formatQuestionImageReference(image.name, file);
+            const answer = answers[questionId];
+            if (typeof answer === "string") answers[questionId] = `${answer}\n${reference}`;
+            else if (Array.isArray(answer) && answer.every((entry) => typeof entry === "string"))
+              answers[questionId] = [...answer, reference];
+            else if (
+              answer &&
+              typeof answer === "object" &&
+              "answers" in answer &&
+              Array.isArray(answer.answers) &&
+              answer.answers.every((entry) => typeof entry === "string")
+            )
+              answers[questionId] = { ...answer, answers: [...answer.answers, reference] };
+            else
+              return yield* new OrchestrationDispatchCommandError({
+                message: "이미지를 연결할 질문 답변 형식이 올바르지 않습니다.",
+              });
+            return { questionId, image: persisted };
+          }),
+        { concurrency: 1 },
+      );
+      return { ...canonicalCommand, answers, images } satisfies OrchestrationCommand;
+    }
+
     if (canonicalCommand.type !== "thread.turn.start") {
       return canonicalCommand as OrchestrationCommand;
     }
 
-    const normalizedAttachments = yield* Effect.forEach(
+    // Validate the whole batch before allocating decoded buffers or writing files.
+    let totalBytes = 0;
+    const validatedAttachments = yield* Effect.forEach(
       canonicalCommand.message.attachments,
       (attachment) =>
         Effect.gen(function* () {
           const parsed = parseBase64DataUrl(attachment.dataUrl);
-          if (!parsed || !parsed.mimeType.startsWith("image/")) {
+          if (!parsed || (attachment.type === "image" && !parsed.mimeType.startsWith("image/"))) {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Invalid image attachment payload for '${attachment.name}'.`,
+              message: `Invalid ${attachment.type} attachment payload for '${attachment.name}'.`,
             });
           }
 
-          const bytes = Buffer.from(parsed.base64, "base64");
-          if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          const sizeBytes = Buffer.byteLength(parsed.base64, "base64");
+          const byteLimit =
+            attachment.type === "image"
+              ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+              : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
+          if (sizeBytes === 0 || sizeBytes > byteLimit) {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Image attachment '${attachment.name}' is empty or too large.`,
+              message: `Attachment '${attachment.name}' is empty or too large.`,
             });
           }
 
+          totalBytes += sizeBytes;
+          if (totalBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+            return yield* new OrchestrationDispatchCommandError({
+              message: "첨부 파일의 합계는 메시지당 50MB까지입니다. 나누어 보내세요.",
+            });
+          }
+          return { attachment, parsed, sizeBytes };
+        }),
+      { concurrency: 1 },
+    );
+
+    const normalizedAttachments = yield* Effect.forEach(
+      validatedAttachments,
+      ({ attachment, parsed, sizeBytes }) =>
+        Effect.gen(function* () {
           const attachmentId = createAttachmentId(canonicalCommand.threadId);
           if (!attachmentId) {
             return yield* new OrchestrationDispatchCommandError({
@@ -180,11 +397,11 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           }
 
           const persistedAttachment = {
-            type: "image" as const,
+            type: attachment.type,
             id: attachmentId,
             name: attachment.name,
             mimeType: parsed.mimeType.toLowerCase(),
-            sizeBytes: bytes.byteLength,
+            sizeBytes,
           };
 
           const attachmentPath = resolveAttachmentPath({
@@ -205,7 +422,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
                 }),
             ),
           );
-          yield* fileSystem.writeFile(attachmentPath, bytes).pipe(
+          yield* fileSystem.writeFile(attachmentPath, Buffer.from(parsed.base64, "base64")).pipe(
             Effect.mapError(
               () =>
                 new OrchestrationDispatchCommandError({

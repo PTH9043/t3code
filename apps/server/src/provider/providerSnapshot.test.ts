@@ -5,9 +5,10 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
-import * as Sink from "effect/Sink";
-import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { vi } from "vite-plus/test";
+
+import { ProcessSpawnError, runHiddenWindowsProcess } from "../processRunner.ts";
 
 import {
   isCommandMissingCause,
@@ -85,33 +86,41 @@ describe("ProviderCommandNotFoundError", () => {
       ),
     ).toBe(true);
     expect(isCommandMissingCause(new Error("spawn provider ENOENT"))).toBe(false);
+    expect(
+      isCommandMissingCause(
+        new ProcessSpawnError({
+          command: "provider",
+          argumentCount: 1,
+          cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+        }),
+      ),
+    ).toBe(true);
   });
 
   it.effect("retains safe failed-command diagnostics without process output", () => {
     const stderr = "'codex' is not recognized: secret-token-value";
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(1),
-          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(9009)),
-          isRunning: Effect.succeed(false),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.drain,
-          stdout: Stream.empty,
-          stderr: Stream.encodeText(Stream.make(stderr)),
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        }),
-      ),
-    );
+    const hidden = vi.fn(() =>
+      Effect.succeed({
+        stdout: "",
+        stderr,
+        code: ChildProcessSpawner.ExitCode(9009),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    ) as unknown as typeof runHiddenWindowsProcess;
     return Effect.gen(function* () {
       const error = yield* spawnAndCollect(
         "C:\\tools\\codex.cmd",
         ChildProcess.make("codex", ["--version"]),
+        hidden,
       ).pipe(
-        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.provide(
+          Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => Effect.die("unexpected spawn")),
+          ),
+        ),
         Effect.provideService(HostProcessPlatform, "win32"),
         Effect.flip,
       );
@@ -133,4 +142,47 @@ describe("ProviderCommandNotFoundError", () => {
       expect(error.message).not.toContain("secret-token-value");
     });
   });
+
+  it.effect(
+    "uses hidden Windows execution for provider status commands with the original options",
+    () => {
+      const hidden = vi.fn(() =>
+        Effect.succeed({
+          stdout: "1.2.3",
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(0),
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      ) as unknown as typeof runHiddenWindowsProcess;
+      const env = { PATH: "C:\\provider", PROVIDER: "value" };
+      return Effect.gen(function* () {
+        const result = yield* spawnAndCollect(
+          "gemini",
+          ChildProcess.make("gemini.cmd", ["--version"], { shell: true, env }),
+          hidden,
+        ).pipe(
+          Effect.provide(
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() => Effect.die("unexpected spawn")),
+            ),
+          ),
+          Effect.provideService(HostProcessPlatform, "win32"),
+        );
+        expect(result).toEqual({ stdout: "1.2.3", stderr: "", code: 0 });
+        expect(hidden).toHaveBeenCalledWith(
+          expect.objectContaining({
+            command: "gemini.cmd",
+            args: ["--version"],
+            shell: true,
+            env,
+            replaceEnv: true,
+            maxOutputBytes: Number.POSITIVE_INFINITY,
+          }),
+        );
+      });
+    },
+  );
 });

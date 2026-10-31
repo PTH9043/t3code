@@ -46,6 +46,22 @@ const isBearerProfile = Schema.is(BearerConnectionProfile);
 const isSshProfile = Schema.is(SshConnectionProfile);
 const isBearerCredential = Schema.is(BearerConnectionCredential);
 
+function requiresDesktopDirect(httpBaseUrl: string): boolean {
+  try {
+    const protocol = new URL(httpBaseUrl).protocol;
+    return protocol === "t3code:" || protocol === "t3code-dev:";
+  } catch {
+    return false;
+  }
+}
+
+function directUnavailableError() {
+  return new ConnectionBlockedError({
+    reason: "configuration",
+    detail: "The local desktop connection is unavailable.",
+  });
+}
+
 function primarySocketUrl(target: PrimaryConnectionTarget): string {
   const url = new URL(target.wsBaseUrl);
   if (url.pathname === "" || url.pathname === "/") {
@@ -57,10 +73,25 @@ function primarySocketUrl(target: PrimaryConnectionTarget): string {
 const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary")(function* () {
   const auth = yield* ClientCapabilities.PrimaryEnvironmentAuth;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+  const direct = yield* Effect.serviceOption(ClientCapabilities.DirectLocalRpc);
 
   return Effect.fn("clientRuntime.connection.broker.primary")(function* (
     target: PrimaryConnectionTarget,
   ) {
+    if (Option.isSome(direct) && direct.value.bridge && direct.value.supports(target.httpBaseUrl)) {
+      const backendId = direct.value.backendId?.(target.httpBaseUrl);
+      return {
+        environmentId: target.environmentId,
+        label: target.label,
+        httpBaseUrl: target.httpBaseUrl,
+        socketUrl: primarySocketUrl(target),
+        httpAuthorization: null,
+        transport: "desktop-direct",
+        ...(backendId === undefined ? {} : { directBackendId: backendId }),
+        target,
+      } satisfies PreparedConnection;
+    }
+    if (requiresDesktopDirect(target.httpBaseUrl)) return yield* directUnavailableError();
     const bearerToken = yield* auth.bearerToken;
     if (Option.isNone(bearerToken)) {
       return {
@@ -89,6 +120,7 @@ const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary
 const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")(function* () {
   const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+  const direct = yield* Effect.serviceOption(ClientCapabilities.DirectLocalRpc);
 
   return Effect.fn("clientRuntime.connection.broker.bearer")(function* (
     entry: ConnectionCatalogEntry & { readonly target: BearerConnectionTarget },
@@ -110,6 +142,24 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
         actual: profile.environmentId,
       });
     }
+    if (
+      Option.isSome(direct) &&
+      direct.value.bridge &&
+      direct.value.supports(profile.httpBaseUrl)
+    ) {
+      const backendId = direct.value.backendId?.(profile.httpBaseUrl);
+      return {
+        environmentId: target.environmentId,
+        label: target.label,
+        httpBaseUrl: profile.httpBaseUrl,
+        socketUrl: profile.wsBaseUrl,
+        httpAuthorization: null,
+        transport: "desktop-direct",
+        ...(backendId === undefined ? {} : { directBackendId: backendId }),
+        target,
+      } satisfies PreparedConnection;
+    }
+    if (requiresDesktopDirect(profile.httpBaseUrl)) return yield* directUnavailableError();
     const credential = yield* credentials.get(target.connectionId).pipe(
       Effect.flatMap(
         Option.match({

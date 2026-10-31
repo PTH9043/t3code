@@ -141,6 +141,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { AiSearchSettingsSection } from "./AiSearchSettings";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "배경 그림",
@@ -2208,6 +2209,7 @@ export function GeneralSettingsPanel() {
         />
       </SettingsSection>
 
+      <AiSearchSettingsSection />
       <SettingsSection title="정보">
         {isElectron || HOSTED_APP_CHANNEL ? (
           <AboutVersionSection />

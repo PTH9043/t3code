@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   ArrowRight,
+  AppWindow,
   Camera,
   ExternalLink,
   MousePointerClick,
@@ -43,6 +44,9 @@ interface Props {
   onPictureInPicture?: (() => void) | undefined;
   pictureInPicture?: boolean | undefined;
   pictureInPictureDisabled?: boolean | undefined;
+  onNativePreview?: (() => void) | undefined;
+  nativePreviewOpen?: boolean | undefined;
+  nativePreviewDisabled?: boolean | undefined;
   /**
    * When provided, renders an annotation-mode toggle button to the right of
    * the URL input. Pressed while annotation mode is active (button shows in `pressed`
@@ -82,6 +86,9 @@ export function PreviewChromeRow({
   onPictureInPicture,
   pictureInPicture,
   pictureInPictureDisabled,
+  onNativePreview,
+  nativePreviewOpen,
+  nativePreviewDisabled,
   onPickElement,
   pickActive,
   pickDisabled,
@@ -299,6 +306,30 @@ export function PreviewChromeRow({
             </TooltipTrigger>
             <TooltipPopup>
               {pictureInPicture ? "플로팅 미리보기 닫기" : "대화 위에 미리보기 띄우기"}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
+        {onNativePreview ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant={nativePreviewOpen ? "secondary" : "ghost"}
+                  size="icon-xs"
+                  onClick={onNativePreview}
+                  aria-label={nativePreviewOpen ? "별도 미리보기 닫기" : "별도 미리보기 열기"}
+                  aria-pressed={nativePreviewOpen ? "true" : "false"}
+                  type="button"
+                  disabled={nativePreviewDisabled}
+                />
+              }
+            >
+              <AppWindow className={cn(nativePreviewOpen && "text-primary")} />
+            </TooltipTrigger>
+            <TooltipPopup>
+              {nativePreviewOpen
+                ? "별도 미리보기 닫기"
+                : "별도 창에서 보기 · 조작은 브라우저 패널에서"}
             </TooltipPopup>
           </Tooltip>
         ) : null}

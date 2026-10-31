@@ -33,6 +33,22 @@ export interface PendingUserInput {
 export interface PendingUserInputDraftAnswer {
   readonly selectedOptionLabel?: string;
   readonly customAnswer?: string;
+  readonly images?: ReadonlyArray<import("./composerImages").DraftComposerImageAttachment>;
+}
+
+export function buildPendingUserInputImages(drafts: Record<string, PendingUserInputDraftAnswer>) {
+  return Object.entries(drafts).flatMap(([questionId, draft]) =>
+    (draft.images ?? []).map((image) => ({
+      questionId,
+      image: {
+        type: image.type,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        dataUrl: image.dataUrl,
+      },
+    })),
+  );
 }
 
 export interface ThreadFeedActivity {
@@ -209,9 +225,6 @@ function parseUserInputQuestions(
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
-        return null;
-      }
       return {
         id: question.id,
         header: question.header,
@@ -240,7 +253,10 @@ function resolvePendingUserInputAnswer(
   if (customAnswer) {
     return customAnswer;
   }
-  return normalizeDraftAnswer(draft?.selectedOptionLabel);
+  return (
+    normalizeDraftAnswer(draft?.selectedOptionLabel) ??
+    (draft?.images?.length ? "첨부한 이미지를 참고해 주세요." : null)
+  );
 }
 
 /** Codex children settle via task.updated (idle/failed/interrupted), never
@@ -1437,6 +1453,7 @@ export function setPendingUserInputCustomAnswer(
     customAnswer.trim().length > 0 ? undefined : draft?.selectedOptionLabel;
   return {
     customAnswer,
+    ...(draft?.images?.length ? { images: draft.images } : {}),
     ...(selectedOptionLabel ? { selectedOptionLabel } : {}),
   };
 }

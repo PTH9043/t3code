@@ -26,6 +26,7 @@ import type * as Stream from "effect/Stream";
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
 export interface ProviderInterruptTurnOptions {
+  readonly questionRequestId?: ApprovalRequestId;
   /**
    * True stops every live background task before the interrupt (the
    * stop-everything button). False, the default, ends the turn and the agent
@@ -98,6 +99,7 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
+    images?: ReadonlyArray<import("@t3tools/contracts").QuestionImageAttachment>,
   ) => Effect.Effect<void, TError>;
 
   /**

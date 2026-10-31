@@ -33,6 +33,7 @@ import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
+import { WorkspaceAutomationRunner } from "../Services/WorkspaceAutomationRunner.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -86,6 +87,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
+  const completionAutomation = yield* Effect.serviceOption(WorkspaceAutomationRunner);
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
 
@@ -164,7 +166,11 @@ const make = Effect.gen(function* () {
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadRuntimeContext(threadId, {
+        messages: true,
+        checkpoints: true,
+        activityKinds: ["automation.started"],
+      })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -222,6 +228,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly thread: {
+      readonly projectId: ProjectId;
       readonly messages: ReadonlyArray<{
         readonly id: MessageId;
         readonly role: string;
@@ -235,6 +242,10 @@ const make = Effect.gen(function* () {
     readonly createdAt: string;
   }) {
     const fromTurnCount = Math.max(0, input.turnCount - 1);
+    const automationPlan =
+      input.status === "ready" && Option.isSome(completionAutomation)
+        ? yield* completionAutomation.value.prepare({ ...input, projectId: input.thread.projectId })
+        : null;
     const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
     const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
 
@@ -323,6 +334,8 @@ const make = Effect.gen(function* () {
       status: input.status,
       createdAt: input.createdAt,
     });
+    if (automationPlan && Option.isSome(completionAutomation))
+      yield* completionAutomation.value.enqueue(automationPlan);
     yield* receiptBus.publish({
       type: "turn.processing.quiesced",
       threadId: input.threadId,
@@ -818,6 +831,54 @@ const make = Effect.gen(function* () {
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
+    if (
+      Option.isSome(completionAutomation) &&
+      ((event.type === "thread.session-set" &&
+        event.payload.session.status === "ready" &&
+        event.payload.session.activeTurnId === null) ||
+        (event.type === "thread.turn-diff-completed" && event.payload.status === "ready"))
+    ) {
+      const shell = Option.getOrNull(
+        yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId),
+      );
+      const projects = shell ? yield* resolveThreadProjects(shell.projectId) : [];
+      const thread = projects[0]?.workspaceControl?.completionAutomation?.enabled
+        ? yield* resolveThreadDetail(event.payload.threadId)
+        : null;
+      const turn = thread?.latestTurn;
+      if (
+        thread &&
+        turn?.state === "completed" &&
+        !thread.session?.activeTurnId &&
+        !thread.activities.some(
+          (item) => item.turnId === turn.turnId && item.kind === "automation.started",
+        )
+      ) {
+        const checkpoint = thread.checkpoints.find(
+          (item) => item.turnId === turn.turnId && item.status === "ready",
+        );
+        const cwd =
+          projects[0]?.workspaceControl?.completionAutomation?.enabled && checkpoint
+            ? yield* resolveCheckpointCwd({
+                threadId: thread.id,
+                thread,
+                projects,
+                preferSessionRuntime: true,
+              })
+            : null;
+        if (cwd && checkpoint)
+          yield* captureAndDispatchCheckpoint({
+            threadId: thread.id,
+            turnId: turn.turnId,
+            thread,
+            cwd,
+            turnCount: checkpoint.checkpointTurnCount,
+            status: "ready",
+            assistantMessageId: checkpoint.assistantMessageId ?? undefined,
+            createdAt: event.occurredAt,
+          });
+      }
+    }
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
       return;
@@ -921,6 +982,7 @@ const make = Effect.gen(function* () {
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
           event.type !== "thread.checkpoint-revert-requested" &&
+          event.type !== "thread.session-set" &&
           event.type !== "thread.turn-diff-completed"
         ) {
           return Effect.void;

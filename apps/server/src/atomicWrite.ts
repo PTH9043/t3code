@@ -39,7 +39,8 @@ export const writeFileStringAtomically = (input: {
       yield* fs.makeDirectory(targetDirectory, { recursive: true });
       const tempDirectory = yield* fs.makeTempDirectoryScoped({
         directory: targetDirectory,
-        prefix: `${path.basename(input.filePath)}.`,
+        // Hash-named artifacts already consume most of the Windows path budget.
+        prefix: ".t3-write-",
       });
       const tempPath = path.join(tempDirectory, "contents.tmp");
 

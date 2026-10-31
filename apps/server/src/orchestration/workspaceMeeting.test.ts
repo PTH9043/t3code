@@ -8,6 +8,8 @@ import {
   type WorkspaceMeetingStatement,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import { contextArtifactHash } from "./workspaceContextArtifacts.ts";
+import { renderCompactMeetingContext } from "./workspaceMeetingContext.ts";
 
 import {
   buildMeetingChairClosePrompt,
@@ -536,6 +538,33 @@ describe("parseChairVerdict", () => {
 });
 
 describe("resolveNodeAssignmentRoute", () => {
+  it("routes two models of the same account by participant id with independent effort", () => {
+    const participants = ["low", "high"].map((effort, index) => ({
+      id: seat(`worker-${index}`),
+      displayName: "Codex",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: `model-${index}`,
+        options: [{ id: "reasoningEffort", value: effort }],
+      },
+    }));
+    const configured = meeting({
+      participants,
+      chairParticipantId: participants[1]!.id,
+      allowAdditionalWorkers: false,
+    });
+    for (const selected of participants) {
+      expect(
+        resolveNodeAssignmentRoute({
+          node: { participantId: selected.id, role: "implementer" },
+          meeting: configured,
+          bindings: [],
+        })?.modelSelection,
+      ).toEqual(selected.modelSelection);
+    }
+    expect(resolveChairParticipantId(configured)).toBe(participants[1]!.id);
+  });
+
   const binding = {
     projectId: ProjectId.make("workspace-a"),
     role: "implementer" as const,
@@ -640,6 +669,20 @@ describe("renderMeetingTranscript", () => {
     expect(transcript).not.toContain("p1");
   });
 
+  it("includes attached image references in the model transcript while keeping the decision text separate", () => {
+    const answer = {
+      question: "계속할까요?",
+      answer: "건너뛰기",
+      answeredAt: at,
+      nodeId: null,
+      imageReferences: [{ name: "stop.png", path: "D:/attachments/stop.png" }],
+    };
+    const transcript = renderMeetingTranscript(meeting({ answers: [answer] }));
+    expect(transcript).toContain("답변: 건너뛰기");
+    expect(transcript).toContain("D:/attachments/stop.png");
+    expect(parseNodeInterventionDecision(answer.answer)).toEqual({ kind: "skip" });
+  });
+
   it("weaves the person's interjections into the order they arrived", () => {
     const transcript = renderMeetingTranscript(
       meeting({
@@ -725,6 +768,62 @@ describe("parseStatementRespondsTo", () => {
 });
 
 describe("meeting prompts", () => {
+  it("never clips an old user interjection or a current-round tail when context exceeds its target", () => {
+    const longMeeting = meeting({
+      rounds: [
+        {
+          ...round({ index: 0, spoke: ["p1"] }),
+          statements: [statement("p1", "evidence ".repeat(9000) + "TAIL")],
+        },
+      ],
+      interjections: [
+        { roundIndex: 0, afterStatements: 0, text: "OLD MANDATORY RULE", saidAt: at },
+      ],
+    });
+    const prompt = buildMeetingStatementPrompt({
+      workspacePrompt: null,
+      task: "topic",
+      meeting: longMeeting,
+      participantId: seat("p2"),
+      roundIndex: 0,
+    });
+    expect(prompt).toContain("OLD MANDATORY RULE");
+    expect(prompt).toContain("TAIL");
+  });
+  it("uses exact covered text from a closed summary and keeps dissent and current statements", () => {
+    const covered = "agreed implementation evidence ".repeat(100);
+    const input = meeting({
+      rounds: [
+        {
+          index: 0,
+          chairSummary: covered,
+          consensusReached: true,
+          statements: [
+            statement("p1", covered),
+            { ...statement("p2", "아직 반대하며 검증은 미완료"), respondsTo: [seat("p1")] },
+          ],
+        },
+        {
+          index: 1,
+          chairSummary: null,
+          consensusReached: null,
+          statements: [statement("p1", "현재 라운드의 전체 원문")],
+        },
+      ],
+    });
+    const original = renderMeetingTranscript(input);
+    const source = {
+      path: "D:/isolated/meeting.txt",
+      sha256: contextArtifactHash(original),
+      chars: original.length,
+    };
+    const compact = renderCompactMeetingContext(input, source);
+    expect(compact.length).toBeLessThan(original.length);
+    expect(compact.split(covered)).toHaveLength(2);
+    expect(compact).toContain("아직 반대하며 검증은 미완료");
+    expect(compact).toContain("현재 라운드의 전체 원문");
+    expect(renderCompactMeetingContext(input, { ...source, sha256: "stale" })).toBe(original);
+  });
   const spoken = meeting({
     rounds: [round({ index: 0, spoke: ["p1", "p2"], chairSummary: "1라운드 정리" })],
   });
@@ -785,4 +884,65 @@ describe("meeting prompts", () => {
     expect(prompt).toContain("Do not add validation or synthesis nodes.");
     expect(prompt).toContain("<t3_question>");
   });
+});
+
+it("prioritizes conductor clarification and its pending question even with zero rounds", () => {
+  expect(nextMeetingStep(meeting({ phase: "clarifying", maxRounds: 0 }))).toEqual({
+    kind: "clarify",
+  });
+  expect(
+    nextMeetingStep(
+      meeting({
+        phase: "clarifying",
+        maxRounds: 0,
+        pendingQuestion: {
+          question: "범위?",
+          options: [],
+          context: "",
+          askedAt: at,
+          nodeId: null,
+          askedByParticipantId: seat("p2"),
+        },
+      }),
+    ),
+  ).toEqual({ kind: "awaiting-user" });
+});
+
+for (const runtimeMode of [
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+] as const) {
+  it(`keeps the app-selected ${runtimeMode} policy for seated orchestra work`, () => {
+    const selected = { ...meeting(), runtimeMode, interactionMode: "plan" as const };
+    const route = resolveNodeAssignmentRoute({
+      node: { participantId: seat("p2"), role: "researcher" },
+      meeting: selected,
+      bindings: [],
+    });
+    expect(route?.runtimeMode).toBe(runtimeMode);
+    expect(route?.interactionMode).toBe("plan");
+  });
+}
+
+it("keeps app-selected policies for an additional worker assigned by role", () => {
+  const route = resolveNodeAssignmentRoute({
+    node: { participantId: null, role: "researcher" },
+    meeting: meeting({ runtimeMode: "full-access", interactionMode: "plan" }),
+    bindings: [
+      {
+        projectId: ProjectId.make("workspace-a"),
+        role: "researcher",
+        displayName: "Grok",
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-test" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        instructions: "research",
+        enabled: true,
+        updatedAt: at,
+      },
+    ],
+  });
+  expect(route).toMatchObject({ runtimeMode: "full-access", interactionMode: "plan" });
 });

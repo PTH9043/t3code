@@ -5,7 +5,6 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { writeFileStringAtomically } from "../../atomicWrite.ts";
 import {
   WorkspaceKnowledgeFileStore,
   WorkspaceKnowledgeFileStoreError,
@@ -97,10 +96,6 @@ function normalizeManifestPath(relativePath: string): ReadonlyArray<string> {
   return segments;
 }
 
-function historyFileName(updatedAt: string): string {
-  return `${updatedAt.replaceAll(":", "-")}.md`;
-}
-
 export function renderWorkspaceKnowledgeMarkdown(item: WorkspaceKnowledgeItem): string {
   const metadata = encodeUnknownJsonString({
     version: MANIFEST_VERSION,
@@ -147,13 +142,10 @@ export const makeWorkspaceKnowledgeFileStore = Effect.gen(function* () {
           cause,
         }),
     });
-    const targetRelativeSegments = ["entries", ...logicalFolder, `${item.id}.md`];
-    const targetRelativePath = targetRelativeSegments.join("/");
-    const manifestDirectory = path.join(rootPath, STORE_DIRECTORY);
-    const manifestPath = path.join(manifestDirectory, "index.json");
-
     yield* fileSystem.makeDirectory(rootPath, { recursive: true });
     const realRoot = yield* fileSystem.realPath(rootPath);
+    const manifestDirectory = path.join(realRoot, STORE_DIRECTORY);
+    const manifestPath = path.join(manifestDirectory, "index.json");
 
     const assertContained = (candidate: string) =>
       Effect.gen(function* () {
@@ -167,6 +159,18 @@ export const makeWorkspaceKnowledgeFileStore = Effect.gen(function* () {
 
     const ensureContainedDirectory = (directory: string) =>
       Effect.gen(function* () {
+        let existingAncestor = directory;
+        while (!(yield* fileSystem.exists(existingAncestor))) {
+          const parent = path.dirname(existingAncestor);
+          if (parent === existingAncestor) {
+            return yield* new WorkspaceKnowledgeFileStoreError({
+              message: "Cannot locate a safe long-term-memory parent directory.",
+            });
+          }
+          existingAncestor = parent;
+        }
+        const realAncestor = yield* fileSystem.realPath(existingAncestor);
+        if (realAncestor !== realRoot) yield* assertContained(realAncestor);
         yield* fileSystem.makeDirectory(directory, { recursive: true });
         const realDirectory = yield* fileSystem.realPath(directory);
         yield* assertContained(realDirectory);
@@ -197,43 +201,52 @@ export const makeWorkspaceKnowledgeFileStore = Effect.gen(function* () {
       });
     });
 
-    const targetPath = path.join(rootPath, ...targetRelativeSegments);
-    yield* ensureContainedDirectory(path.dirname(targetPath));
-    const nextContents = renderWorkspaceKnowledgeMarkdown(item);
     const previousEntry = manifest.entries[item.id];
-
-    if (previousEntry !== undefined) {
-      const oldSegments = yield* Effect.try({
-        try: () => normalizeManifestPath(previousEntry.path),
-        catch: (cause) =>
-          new WorkspaceKnowledgeFileStoreError({
-            message: "Cannot move an unsafe Workspace long-term-memory record.",
-            cause,
-          }),
+    const targetRelativePath =
+      previousEntry?.path ?? ["entries", ...logicalFolder, `${item.id}.md`].join("/");
+    const targetRelativeSegments = yield* Effect.try({
+      try: () => normalizeManifestPath(targetRelativePath),
+      catch: (cause) =>
+        new WorkspaceKnowledgeFileStoreError({
+          message: "Cannot write an unsafe Workspace long-term-memory record.",
+          cause,
+        }),
+    });
+    if (
+      targetRelativeSegments[0] !== "entries" ||
+      targetRelativeSegments[targetRelativeSegments.length - 1] !== `${item.id}.md`
+    ) {
+      return yield* new WorkspaceKnowledgeFileStoreError({
+        message: "Cannot write a Workspace long-term-memory record outside its entries path.",
       });
-      const previousPath = path.join(rootPath, ...oldSegments);
-      yield* assertContained(previousPath);
-      if (yield* fileSystem.exists(previousPath)) {
-        const realPreviousPath = yield* fileSystem.realPath(previousPath);
-        yield* assertContained(realPreviousPath);
-        const previousContents = yield* fileSystem.readFileString(previousPath);
-        if (previousContents !== nextContents) {
-          const historyPath = path.join(
-            manifestDirectory,
-            "history",
-            item.id,
-            historyFileName(previousEntry.updatedAt),
-          );
-          yield* ensureContainedDirectory(path.dirname(historyPath));
-          yield* writeFileStringAtomically({ filePath: historyPath, contents: previousContents });
-        }
-        if (previousPath !== targetPath) {
-          yield* fileSystem.remove(previousPath, { force: true });
-        }
-      }
     }
-
-    yield* writeFileStringAtomically({ filePath: targetPath, contents: nextContents });
+    const targetPath = path.join(realRoot, ...targetRelativeSegments);
+    yield* assertContained(targetPath);
+    if (previousEntry !== undefined && !(yield* fileSystem.exists(path.dirname(targetPath)))) {
+      return yield* new WorkspaceKnowledgeFileStoreError({
+        message: "Cannot update a Workspace long-term-memory file in a missing directory.",
+      });
+    }
+    yield* ensureContainedDirectory(path.dirname(targetPath));
+    const targetExists = yield* fileSystem.exists(targetPath);
+    if (targetExists) {
+      const realTargetPath = yield* fileSystem.realPath(targetPath);
+      yield* assertContained(realTargetPath);
+      if (previousEntry === undefined) {
+        return yield* new WorkspaceKnowledgeFileStoreError({
+          message: "Cannot overwrite an untracked Workspace long-term-memory file.",
+        });
+      }
+    } else if (previousEntry !== undefined) {
+      return yield* new WorkspaceKnowledgeFileStoreError({
+        message: "Cannot update a missing Workspace long-term-memory file.",
+      });
+    }
+    const nextContents = renderWorkspaceKnowledgeMarkdown(item);
+    const previousContents = targetExists ? yield* fileSystem.readFileString(targetPath) : null;
+    if (previousContents !== nextContents) {
+      yield* fileSystem.writeFileString(targetPath, nextContents);
+    }
     const nextManifest: WorkspaceKnowledgeManifest = {
       ...manifest,
       entries: {
@@ -245,10 +258,14 @@ export const makeWorkspaceKnowledgeFileStore = Effect.gen(function* () {
         },
       },
     };
-    yield* writeFileStringAtomically({
-      filePath: manifestPath,
-      contents: `${encodeUnknownJsonString(nextManifest)}\n`,
-    });
+    if (
+      previousEntry === undefined ||
+      previousEntry.path !== targetRelativePath ||
+      previousEntry.updatedAt !== item.updatedAt ||
+      previousEntry.status !== item.status
+    ) {
+      yield* fileSystem.writeFileString(manifestPath, `${encodeUnknownJsonString(nextManifest)}\n`);
+    }
   });
 
   const syncItem: WorkspaceKnowledgeFileStoreShape["syncItem"] = (input) =>

@@ -35,6 +35,10 @@ import {
   type RequestWorkspaceIncidentRepairInput,
   type ResolveWorkspaceIncidentInput,
   answerWorkspaceCollaborationRun,
+  verifyWorkspaceCollaborationRun,
+  type VerifyWorkspaceCollaborationRunInput,
+  reviewWorkspaceCollaborationRun,
+  type ReviewWorkspaceCollaborationRunInput,
   archiveWorkspaceKnowledgeItem,
   interjectWorkspaceCollaborationRun,
   type InterjectWorkspaceCollaborationRunInput,
@@ -79,6 +83,8 @@ export type {
   RequestWorkspaceCollaborationRunInput,
   CancelWorkspaceCollaborationRunInput,
   AnswerWorkspaceCollaborationRunInput,
+  ReviewWorkspaceCollaborationRunInput,
+  VerifyWorkspaceCollaborationRunInput,
   InterjectWorkspaceCollaborationRunInput,
   UpsertWorkspaceScheduleInput,
   RemoveWorkspaceScheduleInput,
@@ -222,6 +228,20 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:commands:project:answer-workspace-collaboration-run",
       execute: (input: AnswerWorkspaceCollaborationRunInput) =>
         answerWorkspaceCollaborationRun(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    reviewWorkspaceCollaborationRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:review-workspace-collaboration-run",
+      execute: (input: ReviewWorkspaceCollaborationRunInput) =>
+        reviewWorkspaceCollaborationRun(input),
+      scheduler: projectScheduler,
+      concurrency: projectConcurrency,
+    }),
+    verifyWorkspaceCollaborationRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:project:verify-workspace-collaboration-run",
+      execute: (input: VerifyWorkspaceCollaborationRunInput) =>
+        verifyWorkspaceCollaborationRun(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),

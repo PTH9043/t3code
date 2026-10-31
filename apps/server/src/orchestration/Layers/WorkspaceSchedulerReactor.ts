@@ -1,5 +1,7 @@
+import { WorkspaceTaskInbox } from "../WorkspaceTaskInbox.ts";
 import {
   CommandId,
+  WorkspaceTaskInboxError,
   WorkspaceCollaborationRunId,
   type OrchestrationEvent,
   type ProjectId,
@@ -46,6 +48,7 @@ function scheduledRunId(schedule: WorkspaceSchedule, triggerAt: string) {
 
 export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const taskInbox = yield* Effect.serviceOption(WorkspaceTaskInbox);
   const scheduleRepository = yield* ProjectionWorkspaceScheduleRepository;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
   const crypto = yield* Crypto.Crypto;
@@ -86,10 +89,47 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
     const schedule = current.value;
     if (!schedule.enabled) return;
     const now = yield* nowIso;
+    const predecessor =
+      schedule.timing.kind === "after-run"
+        ? Option.getOrNull(
+            yield* runRepository.getById({
+              projectId: schedule.projectId,
+              runId: schedule.timing.runId,
+            }),
+          )
+        : null;
+    if (
+      schedule.lastTriggeredAt === null &&
+      schedule.timing.kind === "after-run" &&
+      schedule.timing.onFailure === "cancel" &&
+      (predecessor?.status === "failed" || predecessor?.status === "cancelled")
+    ) {
+      yield* orchestrationEngine.dispatch({
+        type: "project.schedule.upsert",
+        commandId: CommandId.make(yield* randomUUID),
+        scheduleId: schedule.id,
+        projectId: schedule.projectId,
+        title: schedule.title,
+        task: schedule.task,
+        timing: schedule.timing,
+        enabled: false,
+        createdAt: now,
+      });
+      yield* updateRuntime({
+        schedule,
+        nextTriggerAt: null,
+        lastTriggeredAt: null,
+        lastRunId: schedule.lastRunId,
+        lastError: `Follow-up cancelled because the preceding run ${predecessor.status}.`,
+        updatedAt: now,
+      });
+      return;
+    }
     const resolution = resolveWorkspaceScheduleNextTrigger({
       timing: schedule.timing,
       now,
       lastTriggeredAt: schedule.lastTriggeredAt,
+      predecessor,
     });
     yield* updateRuntime({
       schedule,
@@ -118,7 +158,7 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
     function* (input: {
       readonly schedule: WorkspaceSchedule;
       readonly triggerAt: string;
-      readonly runId: WorkspaceCollaborationRunId;
+      readonly runId: WorkspaceCollaborationRunId | null;
       readonly now: string;
     }) {
       const resolution = resolveWorkspaceScheduleNextTrigger({
@@ -132,7 +172,9 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
         lastTriggeredAt: input.triggerAt,
         lastRunId: input.runId,
         lastError: resolution.error,
-        commandId: CommandId.make(`scheduler-advance-${input.runId}`),
+        commandId: CommandId.make(
+          `scheduler-advance-${scheduledRunId(input.schedule, input.triggerAt)}`,
+        ),
         updatedAt: input.now,
       });
       failureBackoffUntil.delete(scheduleKey(input.schedule.projectId, input.schedule.id));
@@ -177,6 +219,25 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
     const schedule = current.value;
     const triggerAt = schedule.nextTriggerAt;
     if (!schedule.enabled || triggerAt === null || triggerAt > now) return;
+    // A completion may have been invalidated/cancelled since reconciliation.
+    if (schedule.timing.kind === "after-run") {
+      const predecessor = Option.getOrNull(
+        yield* runRepository.getById({
+          projectId: schedule.projectId,
+          runId: schedule.timing.runId,
+        }),
+      );
+      const resolution = resolveWorkspaceScheduleNextTrigger({
+        timing: schedule.timing,
+        now,
+        lastTriggeredAt: schedule.lastTriggeredAt,
+        predecessor,
+      });
+      if (resolution.nextTriggerAt !== triggerAt) {
+        yield* reconcile({ projectId: schedule.projectId, scheduleId: schedule.id });
+        return;
+      }
+    }
     const runId = scheduledRunId(schedule, triggerAt);
 
     const expectedRun = yield* runRepository.getById({
@@ -204,6 +265,40 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
       return;
     }
 
+    if (schedule.timing.taskRecipe) {
+      if (Option.isNone(taskInbox))
+        return yield* new WorkspaceTaskInboxError({
+          message: "자동 업무 접수 서비스를 사용할 수 없습니다.",
+        });
+      const source = `schedule:${schedule.id}`;
+      if (yield* taskInbox.value.hasPendingSource(schedule.projectId, source, triggerAt)) {
+        const resolution = resolveWorkspaceScheduleNextTrigger({
+          timing: schedule.timing,
+          now,
+          lastTriggeredAt: triggerAt,
+        });
+        yield* updateRuntime({
+          schedule,
+          nextTriggerAt: resolution.nextTriggerAt,
+          lastTriggeredAt: triggerAt,
+          lastRunId: schedule.lastRunId,
+          lastError:
+            "Previous recipe task is still active or needs reconciliation; this occurrence was skipped.",
+          updatedAt: now,
+        });
+        return;
+      }
+      const task = yield* taskInbox.value.submit({
+        projectId: schedule.projectId,
+        source,
+        externalId: triggerAt,
+        recipeId: schedule.timing.taskRecipe.recipeId,
+        recipeRevision: schedule.timing.taskRecipe.revision,
+        inputs: schedule.timing.taskRecipe.inputs,
+      });
+      yield* advanceAfterTrigger({ schedule, triggerAt, runId: task.runId, now });
+      return;
+    }
     yield* orchestrationEngine.dispatch({
       type: "project.collaboration.run.schedule",
       commandId: CommandId.make(`scheduler-trigger-${runId}`),
@@ -211,6 +306,9 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
       scheduleId: schedule.id,
       projectId: schedule.projectId,
       task: schedule.task,
+      ...(schedule.timing.executionProfile
+        ? { executionProfile: schedule.timing.executionProfile }
+        : {}),
       createdAt: triggerAt,
     });
     yield* advanceAfterTrigger({ schedule, triggerAt, runId, now });
@@ -259,13 +357,32 @@ export const makeWorkspaceSchedulerReactor = Effect.gen(function* () {
     ),
   );
 
-  const enqueueEvent = (event: OrchestrationEvent) =>
-    event.type === "project.schedule-upserted"
-      ? reconciliationWorker.enqueue({
-          projectId: event.payload.projectId,
-          scheduleId: event.payload.scheduleId,
-        })
-      : Effect.void;
+  const enqueueEvent = Effect.fn("WorkspaceSchedulerReactor.enqueueEvent")(function* (
+    event: OrchestrationEvent,
+  ) {
+    if (event.type === "project.schedule-upserted") {
+      yield* reconciliationWorker.enqueue({
+        projectId: event.payload.projectId,
+        scheduleId: event.payload.scheduleId,
+      });
+    } else if (event.type === "project.collaboration-run-upserted") {
+      const run = event.payload.run;
+      const schedules = yield* scheduleRepository.listByProjectId(run.projectId);
+      for (const schedule of schedules) {
+        if (
+          schedule.enabled &&
+          schedule.lastTriggeredAt === null &&
+          schedule.timing.kind === "after-run" &&
+          schedule.timing.runId === run.id
+        ) {
+          yield* reconciliationWorker.enqueue({
+            projectId: run.projectId,
+            scheduleId: schedule.id,
+          });
+        }
+      }
+    }
+  });
 
   const enqueueStartupReconciliation = scheduleRepository.listPendingReconciliation().pipe(
     Effect.flatMap((schedules) =>

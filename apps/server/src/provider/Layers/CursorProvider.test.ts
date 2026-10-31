@@ -6,10 +6,14 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { describe, expect, it } from "vite-plus/test";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type { CursorSettings } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { spawnAndCollect } from "../providerSnapshot.ts";
+
+vi.mock("../providerSnapshot.ts", { spy: true });
 
 import {
   buildCursorProviderSnapshot,
@@ -428,6 +432,31 @@ describe("buildCursorCapabilitiesFromConfigOptions", () => {
 });
 
 describe("checkCursorProviderStatus", () => {
+  it("runs the Cursor status check through the shared background command path", async () => {
+    const commandSpy = vi.mocked(spawnAndCollect).mockImplementationOnce(() =>
+      Effect.succeed({
+        stdout: '{ "cliVersion": "2026.04.09", "userEmail": "Not logged in" }',
+        stderr: "",
+        code: 0,
+      }),
+    );
+    const environment = { ...process.env, T3_CURSOR_TEST: "present" };
+    const provider = await runNode(
+      checkCursorProviderStatus(
+        { ...baseCursorSettings, binaryPath: process.execPath },
+        environment,
+      ),
+    );
+    expect(commandSpy).toHaveBeenCalledOnce();
+    const [binaryPath, command] = commandSpy.mock.calls[0]!;
+    expect(binaryPath).toBe(process.execPath);
+    expect(ChildProcess.isStandardCommand(command)).toBe(true);
+    if (!ChildProcess.isStandardCommand(command)) throw new Error("Expected a standard command");
+    expect(command.args).toEqual(["about", "--format", "json"]);
+    expect(command.options.env).toEqual(environment);
+    expect(provider.auth.status).toBe("unauthenticated");
+  });
+
   it("reports the install docs when the Cursor CLI command is missing", async () => {
     const provider = await runNode(
       checkCursorProviderStatus({

@@ -46,6 +46,18 @@ import {
   toggleWindowMaximized,
 } from "./methods/window.ts";
 import * as PreviewIpc from "./methods/preview.ts";
+import * as JasnaIpc from "./methods/jasna.ts";
+import {
+  cancelGoogleSignIn,
+  enrollGoogleToT3,
+  getGoogleSignInStatus,
+  googleT3EnrollmentStatus,
+  loginGoogleToT3,
+  logoutGoogleFromT3,
+  unenrollGoogleFromT3,
+  signOutGoogle,
+  startGoogleSignIn,
+} from "./methods/googleSignIn.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
@@ -83,12 +95,28 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setWslOnly);
 
   yield* ipc.handle(pickFolder);
+  yield* ipc.handle(JasnaIpc.snapshot);
+  yield* ipc.handle(JasnaIpc.pickExecutable);
+  yield* ipc.handle(JasnaIpc.clearExecutable);
+  yield* ipc.handle(JasnaIpc.pickInput);
+  yield* ipc.handle(JasnaIpc.pickOutput);
+  yield* ipc.handle(JasnaIpc.start);
+  yield* ipc.handle(JasnaIpc.cancel);
   yield* ipc.handle(pickThemeFiles);
   yield* ipc.handle(confirm);
   yield* ipc.handle(setTheme);
   yield* ipc.handle(toggleWindowMaximized);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
+  yield* ipc.handle(startGoogleSignIn);
+  yield* ipc.handle(enrollGoogleToT3);
+  yield* ipc.handle(loginGoogleToT3);
+  yield* ipc.handle(logoutGoogleFromT3);
+  yield* ipc.handle(unenrollGoogleFromT3);
+  yield* ipc.handle(googleT3EnrollmentStatus);
+  yield* ipc.handle(cancelGoogleSignIn);
+  yield* ipc.handle(getGoogleSignInStatus);
+  yield* ipc.handle(signOutGoogle);
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);
   yield* ipc.handle(getUpdateAutomationPermissions);

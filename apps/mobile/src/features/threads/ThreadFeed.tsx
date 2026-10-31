@@ -100,6 +100,7 @@ import {
 } from "./thread-work-log";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { useAssetUrl } from "../../state/assets";
+import { GeneratedResult } from "./GeneratedResult";
 import { resolveWorkspaceRelativeFilePath } from "../files/filePath";
 
 const MESSAGE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
@@ -182,6 +183,35 @@ function MessageAttachmentImage(props: {
   return (
     <TouchableOpacity activeOpacity={0.7} onPress={() => props.onPressImage(uri)}>
       <Image source={{ uri }} className={props.className} resizeMode="cover" />
+    </TouchableOpacity>
+  );
+}
+
+function MessageAttachmentFile(props: {
+  environmentId: EnvironmentId;
+  attachmentId: string;
+  name: string;
+  sizeBytes: number;
+}) {
+  const uri = useAssetUrl(props.environmentId, {
+    _tag: "attachment",
+    attachmentId: props.attachmentId,
+  });
+  return (
+    <TouchableOpacity
+      disabled={uri === null}
+      accessibilityLabel={`첨부 파일 ${props.name}`}
+      onPress={() => {
+        if (uri) void Linking.openURL(uri);
+      }}
+      className="mt-2 rounded-lg border border-neutral-300 bg-neutral-100 p-3 dark:border-neutral-700 dark:bg-neutral-800"
+    >
+      <Text numberOfLines={1} className="text-sm text-neutral-900 dark:text-neutral-100">
+        {props.name}
+      </Text>
+      <Text className="text-xs text-neutral-600 dark:text-neutral-400">
+        {(props.sizeBytes / 1024).toFixed(1)} KB
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -817,6 +847,7 @@ function renderFeedEntry(
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
+    readonly resultOwners: ReadonlyMap<string, string>;
     readonly unsettledTurnId: TurnId | null;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string) => void;
@@ -915,6 +946,17 @@ function renderFeedEntry(
               />
             ) : null}
             {attachments.map((attachment) => {
+              if (attachment.type === "file") {
+                return (
+                  <MessageAttachmentFile
+                    key={attachment.id}
+                    environmentId={props.environmentId}
+                    attachmentId={attachment.id}
+                    name={attachment.name}
+                    sizeBytes={attachment.sizeBytes}
+                  />
+                );
+              }
               return (
                 <MessageAttachmentImage
                   key={attachment.id}
@@ -1001,6 +1043,28 @@ function renderFeedEntry(
           )
         ) : null}
         {attachments.map((attachment) => {
+          if (attachment.result && props.resultOwners.get(attachment.id) !== message.id)
+            return null;
+          if (attachment.result)
+            return (
+              <GeneratedResult
+                key={attachment.id}
+                attachment={attachment}
+                environmentId={props.environmentId}
+                onPressImage={props.onPressImage}
+              />
+            );
+          if (attachment.type === "file") {
+            return (
+              <MessageAttachmentFile
+                key={attachment.id}
+                environmentId={props.environmentId}
+                attachmentId={attachment.id}
+                name={attachment.name}
+                sizeBytes={attachment.sizeBytes}
+              />
+            );
+          }
           return (
             <MessageAttachmentImage
               key={attachment.id}
@@ -1590,6 +1654,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       ),
     [presentedFeed, props.anchorMessageId, anchorTopInset],
   );
+  const resultOwners = useMemo(() => {
+    const owners = new Map<string, string>();
+    for (const entry of props.feed)
+      if (entry.type === "message" && entry.message.role === "assistant")
+        for (const attachment of entry.message.attachments ?? [])
+          if (attachment.result) owners.set(attachment.id, entry.message.id);
+    return owners;
+  }, [props.feed]);
   const terminalAssistantMessageIds = useMemo(() => {
     const terminalIdsByTurn = new Map<TurnId, string>();
     for (const entry of props.feed) {
@@ -1782,6 +1854,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         copiedRowId,
         expandedWorkRows,
         terminalAssistantMessageIds,
+        resultOwners,
         unsettledTurnId,
         onCopyWorkRow,
         onToggleWorkGroup,
@@ -1801,6 +1874,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       copiedRowId,
       expandedWorkRows,
       terminalAssistantMessageIds,
+      resultOwners,
       unsettledTurnId,
       iconSubtleColor,
       userBubbleColor,

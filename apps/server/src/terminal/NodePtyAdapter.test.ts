@@ -35,8 +35,8 @@ it.effect("spawns through the public adapter with the provided host references",
   Effect.gen(function* () {
     const adapter = yield* PtyAdapter.PtyAdapter;
     const process = yield* adapter.spawn({
-      shell: "powershell.exe",
-      args: ["-NoLogo"],
+      shell: "cmd.exe",
+      args: ["/d", "/q"],
       cwd: "C:\\workspace",
       cols: 120,
       rows: 40,
@@ -46,8 +46,8 @@ it.effect("spawns through the public adapter with the provided host references",
     assert.equal(process.pid, 42);
     assert.equal(spawn.mock.calls.length, 1);
     assert.deepEqual(spawn.mock.calls[0], [
-      "powershell.exe",
-      ["-NoLogo"],
+      "cmd.exe",
+      ["/d", "/q"],
       {
         cwd: "C:\\workspace",
         cols: 120,
@@ -56,6 +56,9 @@ it.effect("spawns through the public adapter with the provided host references",
         name: "xterm-color",
       },
     ]);
+    process.kill("SIGTERM");
+    process.kill("SIGKILL");
+    assert.deepEqual(spawn.mock.results[0]?.value.kill.mock.calls, [[undefined], [undefined]]);
   }).pipe(Effect.provide(testLayer)),
 );
 
@@ -85,4 +88,49 @@ it.effect("reports native module load failures as structured startup defects", (
       ),
     ),
   ),
+);
+
+it.effect("reads the current native pid after ConPTY becomes ready", () =>
+  Effect.gen(function* () {
+    const adapter = yield* PtyAdapter.PtyAdapter;
+    const process = yield* adapter.spawn({
+      shell: "cmd.exe",
+      args: ["/d", "/q"],
+      cwd: "C:\\workspace",
+      cols: 80,
+      rows: 24,
+      env: {},
+    });
+    const native = spawn.mock.results.at(-1)!.value;
+    native.pid = 0;
+    assert.equal(process.pid, 0);
+    native.pid = 1234;
+    assert.equal(process.pid, 1234);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("preserves CMD arguments and Unicode working directories for native quoting", () =>
+  Effect.gen(function* () {
+    const adapter = yield* PtyAdapter.PtyAdapter;
+    const args = ["/d", "/s", "/c", 'node.exe "C:\\작업 폴더\\worker.mjs" "a b" ""'];
+    yield* adapter.spawn({
+      shell: "cmd.exe",
+      args,
+      cwd: "C:\\작업 폴더",
+      cols: 80,
+      rows: 24,
+      env: { T3_TEST_VALUE: "한글 value" },
+    });
+    assert.deepEqual(spawn.mock.lastCall, [
+      "cmd.exe",
+      args,
+      {
+        cwd: "C:\\작업 폴더",
+        cols: 80,
+        rows: 24,
+        env: { T3_TEST_VALUE: "한글 value" },
+        name: "xterm-color",
+      },
+    ]);
+  }).pipe(Effect.provide(testLayer)),
 );

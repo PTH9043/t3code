@@ -445,3 +445,20 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 });
+
+it.effect("delivers a large resumed history fragmented across UTF-8 boundaries", () =>
+  Effect.gen(function* () {
+    const { stdio, input, output } = yield* makeInMemoryStdio();
+    const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({ stdio });
+    const response = yield* transport
+      .request("thread/resume", { threadId: "existing" })
+      .pipe(Effect.forkScoped);
+    yield* Queue.take(output);
+    const expected = { history: "한글🙂".repeat(128 * 1024) };
+    const bytes = encodeJsonl({ id: 1, result: expected });
+    for (let offset = 0; offset < bytes.length; offset += 4093) {
+      yield* Queue.offer(input, bytes.slice(offset, offset + 4093));
+    }
+    assert.deepEqual(yield* Fiber.join(response), expected);
+  }).pipe(Effect.scoped),
+);

@@ -51,6 +51,7 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
+        reuseExistingDraft?: boolean;
       },
     ): Promise<void> => {
       const {
@@ -105,9 +106,12 @@ export function useNewThreadHandler() {
           candidate.id === projectRef.projectId &&
           candidate.environmentId === projectRef.environmentId,
       );
-      const logicalProjectKey = project
-        ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
-        : scopedProjectKey(projectRef);
+      // Explicit independent drafts retain a physical-project mapping, so creating one
+      // cannot retire another folder's unsent files through repository grouping.
+      const logicalProjectKey =
+        options?.reuseExistingDraft === false || !project
+          ? scopedProjectKey(projectRef)
+          : deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings);
       const hasBranchOption = options?.branch !== undefined;
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
@@ -116,11 +120,11 @@ export function useNewThreadHandler() {
       const storedDraftThreadRef = storedDraftThread
         ? scopeThreadRef(storedDraftThread.environmentId, storedDraftThread.threadId)
         : null;
+      const storedWasPromoted =
+        storedDraftThreadRef !== null && readThreadShell(storedDraftThreadRef) !== null;
       const reusableStoredDraftThread =
-        storedDraftThreadRef && readThreadShell(storedDraftThreadRef) !== null
-          ? null
-          : storedDraftThread;
-      if (storedDraftThreadRef && reusableStoredDraftThread === null) {
+        options?.reuseExistingDraft === false || storedWasPromoted ? null : storedDraftThread;
+      if (storedDraftThreadRef && storedWasPromoted) {
         markPromotedDraftThreadByRef(storedDraftThreadRef);
       }
       const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
@@ -210,6 +214,7 @@ export function useNewThreadHandler() {
       }
 
       if (
+        options?.reuseExistingDraft !== false &&
         latestActiveDraftThread &&
         currentRouteTarget?.kind === "draft" &&
         latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&

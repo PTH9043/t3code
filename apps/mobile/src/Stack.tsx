@@ -3,6 +3,7 @@ import {
   getPathFromState,
   NavigationState,
   StackActions,
+  type StaticParamList,
   useNavigation,
 } from "@react-navigation/native";
 import {
@@ -48,6 +49,10 @@ import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsCl
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
+import {
+  SettingsHelpCloseHeaderButton,
+  SettingsHelpRouteScreen,
+} from "./features/settings/SettingsHelpRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { ShowcaseCaptureCoordinator } from "./features/showcase/ShowcaseCaptureCoordinator";
@@ -277,6 +282,7 @@ const WORKSPACE_OVERLAY_ROUTES = new Set([
   "GitOverview",
   "NewTaskSheet",
   "SettingsLegal",
+  "SettingsHelp",
   "SettingsSheet",
   "ThreadReviewComment",
 ]);
@@ -521,6 +527,17 @@ export const RootStack = createNativeStackNavigator({
         title: "법적 고지",
       },
     }),
+    SettingsHelp: createNativeStackScreen({
+      screen: SettingsHelpRouteScreen,
+      linking: "settings/help",
+      options: {
+        ...SHEET_SOLID_HEADER_OPTIONS,
+        headerBackVisible: false,
+        headerLeft: SettingsHelpCloseHeaderButton,
+        presentation: "fullScreenModal",
+        title: "AI 사용 도움말",
+      },
+    }),
     ConnectOnboarding: createNativeStackScreen({
       screen: ConnectOnboardingRouteScreen,
       linking: "connect-onboarding",
@@ -587,12 +604,14 @@ export const RootStack = createNativeStackNavigator({
     }),
   },
 });
-type RootStackType = typeof RootStack;
+type RootStackParamList = StaticParamList<typeof RootStack>;
 
 const navigationPathConfig = {
   screens: createPathConfigForStaticNavigation(RootStack) ?? {},
 };
 
-declare module "@react-navigation/native" {
-  interface RootNavigator extends RootStackType {}
+declare global {
+  namespace ReactNavigation {
+    interface RootParamList extends RootStackParamList {}
+  }
 }

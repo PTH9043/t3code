@@ -97,6 +97,15 @@ function getDesktopLocalEnvironmentBootstrap(): DesktopEnvironmentBootstrap | nu
   return bootstraps.find((entry) => entry.id === PRIMARY_LOCAL_ENVIRONMENT_ID) ?? null;
 }
 
+export function isDesktopDirectPrimary(): boolean {
+  if (typeof window === "undefined" || !window.desktopBridge?.directRpc) return false;
+  const primary = getDesktopLocalEnvironmentBootstrap();
+  return (
+    primary?.directRpc === true &&
+    (window.location.protocol === "t3code:" || window.location.protocol === "t3code-dev:")
+  );
+}
+
 function parseTargetUrl(input: {
   readonly rawValue: string;
   readonly baseUrl?: string;
@@ -104,9 +113,12 @@ function parseTargetUrl(input: {
   readonly urlKind: PrimaryEnvironmentUrlKind;
 }): URL {
   try {
-    return input.baseUrl === undefined
-      ? new URL(input.rawValue)
-      : new URL(input.rawValue, input.baseUrl);
+    try {
+      return new URL(input.rawValue);
+    } catch {
+      const base = input.baseUrl === "null" ? window.location.href : input.baseUrl;
+      return base === undefined ? new URL(input.rawValue) : new URL(input.rawValue, base);
+    }
   } catch (cause) {
     throw new PrimaryEnvironmentUrlInvalidError({
       source: input.source,
@@ -267,11 +279,9 @@ function resolveDesktopPrimaryTarget(): PrimaryEnvironmentTarget | null {
   return {
     source: "desktop-managed",
     target: {
-      httpBaseUrl: normalizeBaseUrl(
-        desktopBootstrap.httpBaseUrl,
-        "desktop-managed",
-        "http-base-url",
-      ),
+      httpBaseUrl: isDesktopDirectPrimary()
+        ? `${window.location.protocol}//${window.location.host}/`
+        : normalizeBaseUrl(desktopBootstrap.httpBaseUrl, "desktop-managed", "http-base-url"),
       wsBaseUrl: normalizeBaseUrl(
         desktopBootstrap.wsBaseUrl,
         "desktop-managed",

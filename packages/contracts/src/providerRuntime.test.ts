@@ -175,8 +175,8 @@ describe("ProviderRuntimeEvent", () => {
     });
 
     expect(parsed.type).toBe("thread.token-usage.updated");
-    if (parsed.type !== "thread.token-usage.updated") {
-      throw new Error("expected thread.token-usage.updated");
+    if (parsed.type !== "thread.token-usage.updated" || parsed.payload.usage === undefined) {
+      throw new Error("expected thread.token-usage.updated with context usage");
     }
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);

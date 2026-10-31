@@ -1,10 +1,16 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
+import { shallow } from "zustand/shallow";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   DEFAULT_MEETING_COMPOSER_CONFIG,
+  addMeetingComposerSeat,
   meetingSeatId,
+  configFromExecutionProfile,
+  meetingSetupFromConfig,
   readMeetingComposerConfig,
+  setMeetingComposerSeatModel,
+  setMeetingComposerSeatOption,
   toggleMeetingComposerSeat,
   updateMeetingComposerConfig,
   useMeetingComposerStore,
@@ -45,6 +51,108 @@ beforeEach(() => {
 });
 
 describe("meetingComposerStore", () => {
+  it("keeps a restored legacy room snapshot shallow-stable before new settings are saved", () => {
+    const { verificationCommands: _oldCommands, ...legacy } = DEFAULT_MEETING_COMPOSER_CONFIG;
+    useMeetingComposerStore.setState({ configsByFolder: { "env-1:folder-a": legacy } });
+    const first = readMeetingComposerConfig();
+    const second = readMeetingComposerConfig();
+    expect(first.verificationCommands).toBe(second.verificationCommands);
+    expect(shallow(first, second)).toBe(true);
+  });
+  it("reuses a profile's roster and effort without leaking into another folder", () => {
+    const config = {
+      ...DEFAULT_MEETING_COMPOSER_CONFIG,
+      seats: [
+        seat("codex", "Implementer"),
+        { ...seat("claude", "Reviewer"), options: [{ id: "reasoningEffort", value: "high" }] },
+      ],
+      maxParallel: 2,
+      isolateWorktrees: true,
+    };
+    const profile = {
+      id: "focused",
+      name: "Focused fix",
+      revision: 2,
+      instructions: "Keep scope small",
+      verificationCommands: ["vp test run"],
+      meeting: meetingSetupFromConfig(config),
+      orchestra: { maxParallel: 2, isolateWorktrees: true },
+    };
+    useMeetingComposerStore
+      .getState()
+      .updateConfig("env-1:folder-a", (current) => configFromExecutionProfile(current, profile));
+    expect(readMeetingComposerConfig()).toMatchObject({
+      enabled: true,
+      maxParallel: 2,
+      isolateWorktrees: true,
+      executionProfile: profile,
+    });
+    expect(readMeetingComposerConfig().seats[1]?.options).toEqual([
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    showFolder("tab-2", "env-1:folder-b");
+    expect(readMeetingComposerConfig().seats).toEqual([]);
+    expect(readMeetingComposerConfig().executionProfile).toBeUndefined();
+  });
+  it("keeps multiple models on one account independent while preserving the chosen conductor", () => {
+    addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-a" });
+    addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-b" });
+    addMeetingComposerSeat({ ...seat("claude", "Claude"), model: "model-c" });
+    const [first, second, chair] = readMeetingComposerConfig().seats;
+    expect(new Set([first!.id, second!.id, chair!.id]).size).toBe(3);
+    updateMeetingComposerConfig((config) => ({ ...config, chairSeatId: chair!.id }));
+    setMeetingComposerSeatOption(first!.id, "reasoningEffort", "low");
+    setMeetingComposerSeatOption(second!.id, "reasoningEffort", "high");
+    expect(readMeetingComposerConfig().seats[0]!.options).toEqual([
+      { id: "reasoningEffort", value: "low" },
+    ]);
+    expect(readMeetingComposerConfig().seats[1]!.options).toEqual([
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    toggleMeetingComposerSeat(first!);
+    expect(readMeetingComposerConfig().seats.map((entry) => entry.model)).toEqual([
+      "model-b",
+      "model-c",
+    ]);
+    expect(readMeetingComposerConfig().chairSeatId).toBe(chair!.id);
+  });
+
+  it("rejects duplicate account-model pairs and clears old model options when replacing a model", () => {
+    addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-a" });
+    addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-b" });
+    addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-a" });
+    const first = readMeetingComposerConfig().seats[0]!;
+    setMeetingComposerSeatOption(first.id, "reasoningEffort", "high");
+    setMeetingComposerSeatModel(first.id, "model-b");
+    expect(readMeetingComposerConfig().seats).toHaveLength(2);
+    expect(readMeetingComposerConfig().seats[0]!.model).toBe("model-a");
+    setMeetingComposerSeatModel(first.id, "model-c");
+    expect(readMeetingComposerConfig().seats[0]).toMatchObject({
+      id: first.id,
+      model: "model-c",
+      options: [],
+    });
+  });
+
+  it("starts new rooms with bounded direct execution without overwriting saved preferences", () => {
+    expect(readMeetingComposerConfig()).toMatchObject({
+      style: "collaboration",
+      maxRevisions: 1,
+      allowAdditionalWorkers: false,
+    });
+    updateMeetingComposerConfig((config) => ({
+      ...config,
+      style: "meeting",
+      maxRevisions: 4,
+      allowAdditionalWorkers: true,
+    }));
+    expect(readMeetingComposerConfig()).toMatchObject({
+      style: "meeting",
+      maxRevisions: 4,
+      allowAdditionalWorkers: true,
+    });
+  });
+
   it("starts from the disabled default", () => {
     expect(readMeetingComposerConfig()).toEqual(DEFAULT_MEETING_COMPOSER_CONFIG);
   });

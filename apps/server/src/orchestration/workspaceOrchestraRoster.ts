@@ -11,6 +11,7 @@ export function orchestraWorkerCandidates(
   providers: ReadonlyArray<ServerProvider>,
   meeting: WorkspaceMeeting,
 ): WorkspaceMeetingParticipant[] {
+  if (meeting.allowAdditionalWorkers === false) return [];
   const existing = new Set(
     meeting.participants.map(
       (seat) => `${seat.modelSelection.instanceId}\n${seat.modelSelection.model}`,

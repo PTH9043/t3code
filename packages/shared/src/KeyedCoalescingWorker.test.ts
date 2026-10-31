@@ -6,6 +6,41 @@ import * as Effect from "effect/Effect";
 import { makeKeyedCoalescingWorker } from "./KeyedCoalescingWorker.ts";
 
 describe("makeKeyedCoalescingWorker", () => {
+  it.live("globally drains active and pending keys while coalescing a large update burst", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const processed: string[] = [];
+        const worker = yield* makeKeyedCoalescingWorker<string, number, never, never>({
+          merge: (_current, next) => next,
+          process: (key, value) =>
+            Effect.gen(function* () {
+              processed.push(`${key}:${value}`);
+              if (value === 0) {
+                yield* Deferred.succeed(started, undefined);
+                yield* Deferred.await(release);
+              }
+            }),
+        });
+        yield* worker.enqueue("a", 0);
+        yield* Deferred.await(started);
+        for (let i = 1; i <= 2_000; i++) yield* worker.enqueue("a", i);
+        yield* worker.enqueue("b", 1);
+        const drained = yield* Deferred.make<void>();
+        yield* worker.drain.pipe(
+          Effect.andThen(Deferred.succeed(drained, undefined)),
+          Effect.forkChild,
+        );
+        expect(yield* Deferred.isDone(drained)).toBe(false);
+        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(drained);
+        expect(processed).toEqual(["a:0", "a:2000", "b:1"]);
+        yield* worker.drain;
+      }),
+    ),
+  );
+
   it.live("waits for latest work enqueued during active processing before draining the key", () =>
     Effect.scoped(
       Effect.gen(function* () {

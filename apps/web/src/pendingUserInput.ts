@@ -1,8 +1,10 @@
 import type { UserInputQuestion } from "@t3tools/contracts";
+import type { ComposerImageAttachment } from "./composerDraftStore";
 
 export interface PendingUserInputDraftAnswer {
   selectedOptionLabels?: string[];
   customAnswer?: string;
+  images?: ComposerImageAttachment[];
 }
 
 export interface PendingUserInputProgress {
@@ -56,10 +58,16 @@ export function resolvePendingUserInputAnswer(
 
   const selectedOptionLabels = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
   if (question.multiSelect) {
-    return selectedOptionLabels.length > 0 ? selectedOptionLabels : null;
+    return selectedOptionLabels.length > 0
+      ? selectedOptionLabels
+      : draft?.images?.length
+        ? "첨부한 이미지를 참고해 주세요."
+        : null;
   }
 
-  return selectedOptionLabels[0] ?? null;
+  return (
+    selectedOptionLabels[0] ?? (draft?.images?.length ? "첨부한 이미지를 참고해 주세요." : null)
+  );
 }
 
 export function setPendingUserInputCustomAnswer(
@@ -73,6 +81,7 @@ export function setPendingUserInputCustomAnswer(
 
   return {
     customAnswer,
+    ...(draft?.images?.length ? { images: draft.images } : {}),
     ...(selectedOptionLabels && selectedOptionLabels.length > 0 ? { selectedOptionLabels } : {}),
   };
 }
@@ -90,6 +99,7 @@ export function togglePendingUserInputOptionSelection(
 
     return {
       customAnswer: "",
+      ...(draft?.images?.length ? { images: draft.images } : {}),
       ...(nextSelectedOptionLabels.length > 0
         ? { selectedOptionLabels: nextSelectedOptionLabels }
         : {}),
@@ -98,6 +108,7 @@ export function togglePendingUserInputOptionSelection(
 
   return {
     customAnswer: "",
+    ...(draft?.images?.length ? { images: draft.images } : {}),
     selectedOptionLabels: [optionLabel],
   };
 }

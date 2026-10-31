@@ -24,8 +24,10 @@ export interface ProjectionWorkspaceRagRepositoryShape {
     readonly itemPrefix?: string;
   }) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly search: (
-    input: WorkspaceRagSearchInput,
+    input: WorkspaceRagSearchInput & { readonly excludedSourceKeys?: ReadonlyArray<string> },
   ) => Effect.Effect<WorkspaceRagSearchResult, ProjectionRepositoryError>;
+  /** Wait for currently ready background indexing work; used by verification and maintenance. */
+  readonly drainSemanticIndex?: Effect.Effect<{ pages: number }, ProjectionRepositoryError>;
 }
 
 export class ProjectionWorkspaceRagRepository extends Context.Service<

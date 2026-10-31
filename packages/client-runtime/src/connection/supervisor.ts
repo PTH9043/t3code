@@ -31,6 +31,8 @@ import * as ConnectionWakeups from "./wakeups.ts";
 
 const RETRY_DELAYS_MS = [3_000, 4_000, 8_000, 16_000] as const;
 const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
+// Match the desktop backend's existing startup readiness window for local work.
+const LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT = "1 minute";
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
@@ -99,6 +101,33 @@ function exitUnlessInterrupted<A, E, R>(
 
 export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
+}
+
+function usesLocalBackend(target: ConnectionTarget): boolean {
+  if (target._tag === "BearerConnectionTarget") return target.connectionId.startsWith("local:");
+  if (target._tag !== "PrimaryConnectionTarget") return false;
+  try {
+    const http = new URL(target.httpBaseUrl);
+    const websocket = new URL(target.wsBaseUrl);
+    const loopback = (hostname: string) => {
+      const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+      return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    };
+    if (
+      (http.protocol === "t3code:" || http.protocol === "t3code-dev:") &&
+      http.hostname === "app"
+    ) {
+      return loopback(websocket.hostname);
+    }
+    return (
+      (http.protocol === "http:" || http.protocol === "https:") &&
+      (websocket.protocol === "ws:" || websocket.protocol === "wss:") &&
+      loopback(http.hostname) &&
+      loopback(websocket.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function retryDelayMs(failureCount: number): number {
@@ -225,9 +254,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const connectivity = yield* Connectivity.Connectivity;
   const driver = yield* ConnectionDriver.ConnectionDriver;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
+  const localBackend = usesLocalBackend(target);
   const initialIntent: SupervisorIntent = {
     desired: options?.initiallyDesired ?? false,
-    network: yield* connectivity.status,
+    network: localBackend ? "online" : yield* connectivity.status,
   };
   const intent = yield* Ref.make(initialIntent);
   const signals = yield* Queue.unbounded<SupervisorSignal>();
@@ -513,9 +543,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           }),
         ),
       ),
-      Effect.sleep(CONNECTION_ESTABLISHMENT_TIMEOUT).pipe(
-        Effect.as<EstablishmentEvent>({ _tag: "TimedOut" }),
-      ),
+      Effect.sleep(
+        localBackend ? LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT : CONNECTION_ESTABLISHMENT_TIMEOUT,
+      ).pipe(Effect.as<EstablishmentEvent>({ _tag: "TimedOut" })),
     ]);
 
     if (establishment._tag === "Interrupted") {
@@ -756,15 +786,16 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   });
 
   yield* connectivity.changes.pipe(
-    Stream.runForEach((network) =>
-      Ref.modify(intent, (current) =>
+    Stream.runForEach((observedNetwork) => {
+      const network = localBackend ? "online" : observedNetwork;
+      return Ref.modify(intent, (current) =>
         current.network === network ? [false, current] : ([true, { ...current, network }] as const),
       ).pipe(
         Effect.flatMap((changed) =>
           changed ? signal({ _tag: "NetworkChanged", network }) : Effect.void,
         ),
-      ),
-    ),
+      );
+    }),
     Effect.forkScoped,
   );
   yield* wakeups.changes.pipe(

@@ -19,6 +19,12 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+import { prepareWslManagedRuntime } from "../wsl/DesktopWslManagedRuntime.ts";
+
+export const WslManagedRuntimePreparer = Context.Reference<typeof prepareWslManagedRuntime>(
+  "@t3tools/desktop/backend/WslManagedRuntimePreparer",
+  { defaultValue: () => prepareWslManagedRuntime },
+);
 
 export class DesktopBackendObservabilitySettingsReadError extends Schema.TaggedErrorClass<DesktopBackendObservabilitySettingsReadError>()(
   "DesktopBackendObservabilitySettingsReadError",
@@ -29,6 +35,15 @@ export class DesktopBackendObservabilitySettingsReadError extends Schema.TaggedE
 ) {
   override get message(): string {
     return `Failed to read persisted backend observability settings at ${this.settingsPath}.`;
+  }
+}
+
+class DesktopWslManagedRuntimeError extends Schema.TaggedErrorClass<DesktopWslManagedRuntimeError>()(
+  "DesktopWslManagedRuntimeError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return this.cause instanceof Error ? this.cause.message : String(this.cause);
   }
 }
 
@@ -241,6 +256,8 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
   readonly windowsEntryPath: string;
   readonly windowsRepoRoot: string;
   readonly allowBuild: boolean;
+  readonly managedManifestPath: string;
+  readonly serverDirectory: string;
 }): Effect.fn.Return<
   WslPreflightSuccess | WslPreflightFailure,
   never,
@@ -248,6 +265,7 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
 > {
   const wslEnv = yield* DesktopWslEnvironment.DesktopWslEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
+  const prepareManagedRuntime = yield* WslManagedRuntimePreparer;
 
   const wslAvailable = yield* wslEnv.isAvailable;
   if (!wslAvailable) {
@@ -299,13 +317,48 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
     } as const;
   }
 
+  const managedFallback = Effect.fn("desktop.backendConfiguration.managedWslFallback")(function* (
+    original: WslPreflightFailure,
+  ) {
+    if (
+      !(yield* fileSystem.exists(input.managedManifestPath).pipe(Effect.orElseSucceed(() => false)))
+    ) {
+      return original;
+    }
+    return yield* Effect.tryPromise({
+      try: (signal) =>
+        prepareManagedRuntime(
+          {
+            distro: runningDistro,
+            manifestPath: input.managedManifestPath,
+            serverDirectory: input.serverDirectory,
+            nodeEngineRange: serverPackageJson.engines.node,
+          },
+          signal,
+        ),
+      catch: (cause) => new DesktopWslManagedRuntimeError({ cause }),
+    }).pipe(
+      Effect.map(
+        (prepared): WslPreflightSuccess => ({ _tag: "Ready", runningDistro, ...prepared }),
+      ),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          _tag: "Failed" as const,
+          reason: `WSL managed runtime unavailable: ${cause.message}`,
+          fatal: false,
+          retryLimit: WSL_TRANSIENT_PREFLIGHT_RETRY_LIMIT,
+        }),
+      ),
+    );
+  });
+
   const linuxEntry = yield* wslEnv.windowsToWslPath(runningDistro, input.windowsEntryPath);
   if (Option.isNone(linuxEntry)) {
-    return {
+    return yield* managedFallback({
       _tag: "Failed",
       reason: `wslpath conversion failed for ${input.windowsEntryPath}`,
       fatal: false,
-    } as const;
+    });
   }
 
   const nodePtyResult = yield* wslEnv.ensureNodePty(runningDistro, input.windowsRepoRoot, {
@@ -313,12 +366,12 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
     nodeEngineRange: serverPackageJson.engines.node,
   });
   if (!nodePtyResult.ok) {
-    return {
+    return yield* managedFallback({
       _tag: "Failed",
       reason: `WSL node-pty unavailable: ${nodePtyResult.reason}`,
       fatal: nodePtyResult.fatal,
       ...(nodePtyResult.retryLimit === undefined ? {} : { retryLimit: nodePtyResult.retryLimit }),
-    } as const;
+    });
   }
 
   return {
@@ -387,6 +440,8 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       tailscaleServePort: backendExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
       desktopTelemetryControlFd: 5,
+      desktopDirectRpcInputFd: 6,
+      desktopDirectRpcOutputFd: 7,
       ...Option.match(input.resourceMonitorPath, {
         onNone: () => ({}),
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
@@ -418,6 +473,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   input: SharedBootstrapInput & {
     readonly port: number;
     readonly distro: string | null;
+    readonly direct?: boolean;
   },
 ): Effect.fn.Return<
   DesktopBackendManager.DesktopBackendStartConfig,
@@ -457,6 +513,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     // inert.
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
+    ...(input.direct ? { desktopDirectRpcInputFd: 6, desktopDirectRpcOutputFd: 7 } : {}),
     // The packaged sidecar is a Windows executable and cannot run inside the
     // Linux WSL backend. Keep the field absent instead of passing an unusable
     // `/mnt/.../*.exe` path; WSL resource telemetry is reported unavailable.
@@ -480,6 +537,15 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     distro: input.distro,
     windowsEntryPath: wslEntryPath,
     windowsRepoRoot: wslAppRoot,
+    managedManifestPath: environment.isPackaged
+      ? environment.path.join(environment.resourcesPath, "wsl-runtime", "managed-linux-x64.json")
+      : environment.path.join(
+          environment.rootDir,
+          ".t3",
+          "wsl-runtime-build",
+          "managed-linux-x64.json",
+        ),
+    serverDirectory: environment.path.dirname(wslEntryPath),
     // Packaged builds ship a prebuilt Linux node-pty (built on Linux in CI and
     // attached to the Windows artifact — see build-desktop-artifact.ts), so the
     // WSL backend never needs a compiler, node-gyp, or network on first launch.
@@ -597,8 +663,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       `PATH=${launchPath}`,
       preflight.nodePath,
       preflight.linuxEntryPath,
-      "--bootstrap-fd",
-      "0",
+      ...(input.direct ? ["__wsl-direct-bridge"] : ["--bootstrap-fd", "0"]),
       ...devUrlArgs,
     ],
     preflightFailure: Option.none(),
@@ -662,6 +727,7 @@ export const make = Effect.gen(function* () {
       ...shared,
       port: backendExposure.port,
       distro: persistedSettings.wslDistro,
+      direct: true,
     }).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
@@ -724,7 +790,7 @@ export const make = Effect.gen(function* () {
     resolveWsl: (input) =>
       Effect.gen(function* () {
         const shared = yield* sharedInputs;
-        return yield* resolveWslStartConfig({ ...shared, ...input }).pipe(
+        return yield* resolveWslStartConfig({ ...shared, ...input, direct: true }).pipe(
           Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
           Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
           Effect.provideService(FileSystem.FileSystem, fileSystem),

@@ -1,4 +1,5 @@
 import * as Equal from "effect/Equal";
+import type { OrchestraTaskList } from "@t3tools/client-runtime/state/presentation";
 import {
   formatDuration,
   workEntryIndicatesToolNeutralStatus,
@@ -161,6 +162,7 @@ export type TimelineLatestTurn = Pick<
 >;
 
 export type MessagesTimelineRow =
+  | { kind: "orchestra"; id: string; createdAt: string; list: OrchestraTaskList }
   | {
       kind: "work";
       id: string;
@@ -444,6 +446,7 @@ function deriveTurnFolds(input: {
 
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  orchestraLists?: ReadonlyArray<OrchestraTaskList>;
   latestTurn?: TimelineLatestTurn | null;
   runningTurnId?: TurnId | null;
   expandedTurnIds?: ReadonlySet<TurnId>;
@@ -454,16 +457,30 @@ export function deriveMessagesTimelineRows(input: {
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
-  const durationStartByMessageId = computeMessageDurationStart(
-    input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+  const groupedMessageIds = new Set<string>(
+    input.orchestraLists?.flatMap((list) =>
+      list.tasks.flatMap((task) =>
+        task.attempts.flatMap((attempt) => (attempt.messageId === null ? [] : [attempt.messageId])),
+      ),
+    ),
   );
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
+  const timelineEntries = input.timelineEntries.filter((entry) =>
+    entry.kind === "message"
+      ? !groupedMessageIds.has(entry.message.id)
+      : entry.kind !== "work" ||
+        !entry.entry.orchestraMessageId ||
+        !groupedMessageIds.has(entry.entry.orchestraMessageId),
+  );
+  const durationStartByMessageId = computeMessageDurationStart(
+    timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+  );
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(timelineEntries);
   const unsettledTurnId = deriveUnsettledTurnId(
     input.latestTurn ?? null,
     input.runningTurnId ?? null,
   );
   const foldsByAnchorEntryId = deriveTurnFolds({
-    timelineEntries: input.timelineEntries,
+    timelineEntries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
     unsettledTurnId,
@@ -477,8 +494,8 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
 
-  for (let index = 0; index < input.timelineEntries.length; index += 1) {
-    const timelineEntry = input.timelineEntries[index];
+  for (let index = 0; index < timelineEntries.length; index += 1) {
+    const timelineEntry = timelineEntries[index];
     if (!timelineEntry) {
       continue;
     }
@@ -502,8 +519,8 @@ export function deriveMessagesTimelineRows(input: {
     if (timelineEntry.kind === "work") {
       const groupedEntries = [timelineEntry.entry];
       let cursor = index + 1;
-      while (cursor < input.timelineEntries.length) {
-        const nextEntry = input.timelineEntries[cursor];
+      while (cursor < timelineEntries.length) {
+        const nextEntry = timelineEntries[cursor];
         if (
           !nextEntry ||
           nextEntry.kind !== "work" ||
@@ -629,6 +646,20 @@ export function deriveMessagesTimelineRows(input: {
     });
   }
 
+  for (const list of input.orchestraLists ?? []) {
+    const row: MessagesTimelineRow = {
+      kind: "orchestra",
+      id: `orchestra:${list.id}`,
+      createdAt: list.createdAt,
+      list,
+    };
+    const index = nextRows.findIndex(
+      (entry) => entry.createdAt !== null && entry.createdAt > list.createdAt,
+    );
+    if (index < 0) nextRows.push(row);
+    else nextRows.splice(index, 0, row);
+  }
+
   if (input.isWorking) {
     nextRows.push({
       kind: "working",
@@ -665,6 +696,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "orchestra":
+      return a.list === (b as typeof a).list;
     case "working":
       return a.createdAt === (b as typeof a).createdAt;
 

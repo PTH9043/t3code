@@ -1,5 +1,7 @@
 # Gemini
 
+Google은 2026년 6월 18일부터 무료 개인 계정과 Google AI Pro·Ultra 계정에 대한 Gemini CLI 요청 지원을 종료했습니다. Google 로그인 정보가 저장되어 있어도 해당 계정으로 코딩 요청을 실행할 수는 없습니다. 개인 계정의 공식 대체 도구는 Antigravity CLI이며, T3 Code의 현재 Gemini 연결은 Antigravity 연결을 지원하지 않습니다. 지원되는 Gemini Code Assist 기업 계정은 기존 Google 로그인 흐름을 사용할 수 있습니다. [Google 공식 안내](https://github.com/google-gemini/gemini-cli/discussions/28017)
+
 이 문서는 T3 Code에서 Google 계정으로 Gemini CLI를 사용하고, 개인용·업무용 계정을 서로
 분리하는 방법을 설명합니다. 처음 설치하는 경우에는 [T3 Code 설치](./install.md)를 참고하세요.
 

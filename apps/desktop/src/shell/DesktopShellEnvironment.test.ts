@@ -200,35 +200,29 @@ describe("DesktopShellEnvironment", () => {
     }),
   );
 
-  it.effect("loads PowerShell profile environment on Windows", () =>
+  it.effect("loads inherited Windows environment through CMD with Unicode paths", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {
-        PATH: "C:\\Windows\\System32",
+        PATH: "C:\\Users\\박태현\\Node;C:\\Windows\\System32",
         APPDATA: "C:\\Users\\testuser\\AppData\\Roaming",
         LOCALAPPDATA: "C:\\Users\\testuser\\AppData\\Local",
         USERPROFILE: "C:\\Users\\testuser",
+        FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
+        FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
       };
 
       yield* runShellEnvironment({
         env,
         platform: "win32",
-        handler: (command) => {
-          if (command._tag !== "StandardCommand") return "";
-          const loadProfile = !command.args.includes("-NoProfile");
-          return loadProfile
-            ? envOutput({
-                PATH: "C:\\Profile\\Node;C:\\Windows\\System32",
-                FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
-                FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
-              })
-            : envOutput({ PATH: "C:\\Custom\\Bin;C:\\Windows\\System32" });
+        handler: () => {
+          throw new Error("Windows must not use the visible spawner");
         },
       });
 
       assert.equal(
         env.PATH,
         [
-          "C:\\Profile\\Node",
+          "C:\\Users\\박태현\\Node",
           "C:\\Windows\\System32",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
@@ -236,7 +230,6 @@ describe("DesktopShellEnvironment", () => {
           "C:\\Users\\testuser\\AppData\\Local\\pnpm",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Custom\\Bin",
         ].join(";"),
       );
       assert.equal(env.FNM_DIR, "C:\\Users\\testuser\\AppData\\Roaming\\fnm");
@@ -346,83 +339,46 @@ describe("DesktopShellEnvironment", () => {
     );
   });
 
-  it.effect("falls back to Windows PowerShell without warning when pwsh.exe is absent", () => {
+  it.effect("retains inherited Windows environment values", () => {
     const env: NodeJS.ProcessEnv = {
       PATH: "C:\\Windows\\System32",
       USERPROFILE: "C:\\Users\\testuser",
+      FNM_DIR: "C:\\Inherited\\fnm",
     };
-    const messages: Array<unknown> = [];
-    const logger = Logger.make(({ message }) => {
-      messages.push(message);
-    });
-
     return runShellEnvironment({
       env,
       platform: "win32",
-      failFor: (command) =>
-        command._tag === "StandardCommand" && command.command === "pwsh.exe"
-          ? PlatformError.systemError({
-              _tag: "NotFound",
-              module: "ChildProcess",
-              method: "spawn",
-              pathOrDescriptor: "pwsh.exe",
-            })
-          : undefined,
-      handler: () => envOutput({ PATH: "C:\\Fallback\\Bin;C:\\Windows\\System32" }),
-    }).pipe(
-      Effect.andThen(
-        Effect.sync(() => {
-          const errors = messages
-            .flatMap((message) => (Array.isArray(message) ? message : [message]))
-            .filter(isDesktopShellEnvironmentCommandError);
-          assert.lengthOf(errors, 0);
-          assert.include(env.PATH ?? "", "C:\\Fallback\\Bin");
-        }),
-      ),
-      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
-    );
-  });
-
-  it.effect("warns once per probe when no Windows PowerShell candidate exists", () => {
-    const env: NodeJS.ProcessEnv = {
-      PATH: "C:\\Windows\\System32",
-      USERPROFILE: "C:\\Users\\testuser",
-    };
-    const messages: Array<unknown> = [];
-    const logger = Logger.make(({ message }) => {
-      messages.push(message);
-    });
-
-    return runShellEnvironment({
-      env,
-      platform: "win32",
-      failFor: (command) =>
-        PlatformError.systemError({
-          _tag: "NotFound",
-          module: "ChildProcess",
-          method: "spawn",
-          pathOrDescriptor: command._tag === "StandardCommand" ? command.command : "unknown",
-        }),
       handler: () => "",
     }).pipe(
       Effect.andThen(
         Effect.sync(() => {
-          const errors = messages
-            .flatMap((message) => (Array.isArray(message) ? message : [message]))
-            .filter(isDesktopShellEnvironmentCommandError);
-          // One per probe (no-profile and profile), always for the last candidate.
-          assert.lengthOf(errors, 2);
-          assert.deepEqual(
-            errors.map((error) => error.executable),
-            ["powershell.exe", "powershell.exe"],
-          );
-          assert.deepEqual(
-            errors.map((error) => error.probe),
-            ["powershell-no-profile", "powershell-profile"],
-          );
+          assert.include(env.PATH ?? "", "C:\\Windows\\System32");
+          assert.equal(env.FNM_DIR, "C:\\Inherited\\fnm");
         }),
       ),
-      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    );
+  });
+
+  it.effect("does not use the generic shell spawner on Windows", () => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "C:\\Windows\\System32",
+      USERPROFILE: "C:\\Users\\testuser",
+    };
+    const commands: string[] = [];
+    return runShellEnvironment({
+      env,
+      platform: "win32",
+      handler: (command) => {
+        commands.push(command._tag);
+        return "";
+      },
+    }).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          assert.lengthOf(commands, 0);
+          assert.include(env.PATH ?? "", "C:\\Windows\\System32");
+        }),
+      ),
     );
   });
 });

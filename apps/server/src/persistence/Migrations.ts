@@ -78,6 +78,23 @@ import Migration0062 from "./Migrations/062_ClaimOrchestraNodeThreads.ts";
 import Migration0063 from "./Migrations/063_ProjectionWorkspaceRagBigramIndex.ts";
 import Migration0064 from "./Migrations/064_SharedDesignLibrary.ts";
 import Migration0065 from "./Migrations/065_WorkspaceKnowledgeScope.ts";
+import Migration0066 from "./Migrations/066_WorkspaceProgramHubMemory.ts";
+import Migration0067 from "./Migrations/067_WorkspaceDevelopment.ts";
+import Migration0068 from "./Migrations/068_ProviderAccountRateLimitIndex.ts";
+import Migration0069 from "./Migrations/069_RebuildTokenUsageAfterRecovery.ts";
+import Migration0070 from "./Migrations/070_WorkspaceTaskInbox.ts";
+import Migration0071 from "./Migrations/071_WorkspaceCollaborationAutomationSource.ts";
+import Migration0072 from "./Migrations/072_ReadOnlyResultCache.ts";
+import Migration0073 from "./Migrations/073_WorkspaceMemoryV2.ts";
+import Migration0074 from "./Migrations/074_SemanticIndexJobs.ts";
+import Migration0075 from "./Migrations/075_RecoveryActivityLookupIndexes.ts";
+import Migration0076 from "./Migrations/076_SemanticIndexFailureReason.ts";
+import Migration0077 from "./Migrations/077_WorkspaceWorkflows.ts";
+import Migration0078 from "./Migrations/078_WorkflowRunSummaries.ts";
+import Migration0079 from "./Migrations/079_WorkspaceMemoryChunks.ts";
+import Migration0080 from "./Migrations/080_WorkspaceMemoryChunkRows.ts";
+import Migration0081 from "./Migrations/081_WorkspaceRunControl.ts";
+import Migration0082 from "./Migrations/082_WorkspaceMemoryFolderScope.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -155,6 +172,23 @@ export const migrationEntries = [
   [63, "ProjectionWorkspaceRagBigramIndex", Migration0063],
   [64, "SharedDesignLibrary", Migration0064],
   [65, "WorkspaceKnowledgeScope", Migration0065],
+  [66, "WorkspaceProgramHubMemory", Migration0066],
+  [67, "WorkspaceDevelopment", Migration0067],
+  [68, "ProviderAccountRateLimitIndex", Migration0068],
+  [69, "RebuildTokenUsageAfterRecovery", Migration0069],
+  [70, "WorkspaceTaskInbox", Migration0070],
+  [71, "WorkspaceCollaborationAutomationSource", Migration0071],
+  [72, "ReadOnlyResultCache", Migration0072],
+  [73, "WorkspaceMemoryV2", Migration0073],
+  [74, "SemanticIndexJobs", Migration0074],
+  [75, "RecoveryActivityLookupIndexes", Migration0075],
+  [76, "SemanticIndexFailureReason", Migration0076],
+  [77, "WorkspaceWorkflows", Migration0077],
+  [78, "WorkflowRunSummaries", Migration0078],
+  [79, "WorkspaceMemoryChunks", Migration0079],
+  [80, "WorkspaceMemoryChunkRows", Migration0080],
+  [81, "WorkspaceRunControl", Migration0081],
+  [82, "WorkspaceMemoryFolderScope", Migration0082],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

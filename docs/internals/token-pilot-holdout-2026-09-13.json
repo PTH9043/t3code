@@ -1,0 +1,104 @@
+{
+  "reviewStatus": "Agent-authored expectations frozen before first execution on 2026-09-13; not human-reviewed. Do not tune the selector and reuse this score as independent evaluation.",
+  "sourceAliases": {
+    "hubCurrent": "knowledge-0d5fd9e9-b9ec-404b-8893-8aeb1070e2a6",
+    "hubAudit": "hub-native-audit-2026-09-12",
+    "hubOld": "knowledge-7a9c6b3b-9767-4393-bcde-d4003237d845",
+    "watcher": "repair-desktop-windows-watcher-cpu",
+    "ownership": "repair-desktop-process-ownership",
+    "cursor": "repair-token-cursor-per-execution",
+    "navigation": "repair-web-project-return-navigation",
+    "scope": "repair-memory-scope-migration",
+    "mobile": "repair-mobile-shared-presentation"
+  },
+  "queries": [
+    {
+      "id": "fresh-01",
+      "query": "허브 RowIndex의 최신 19컬럼 조회 1000회 측정값과 이전 측정의 차이를 설명해",
+      "expected": ["hubCurrent", "hubAudit"],
+      "requiredText": ["5.897"]
+    },
+    {
+      "id": "fresh-02",
+      "query": "Windows 데스크톱 번들 watcher가 빌드 뒤 CPU를 계속 쓰던 원인과 수정 근거",
+      "paths": ["apps/desktop"],
+      "expected": ["watcher"]
+    },
+    {
+      "id": "fresh-03",
+      "query": "데스크톱 창을 닫아도 자식 프로세스가 남는 문제의 소유권 정리",
+      "paths": ["apps/desktop"],
+      "expected": ["ownership"]
+    },
+    {
+      "id": "fresh-04",
+      "query": "오케스트라에서 실행별 토큰 커서가 messageId에 섞이지 않게 분리했던 수정",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["cursor"]
+    },
+    {
+      "id": "fresh-05",
+      "query": "프로젝트 제어센터에서 대화로 돌아갈 때 다른 프로젝트가 열리는 문제",
+      "paths": ["apps/web"],
+      "expected": ["navigation"]
+    },
+    {
+      "id": "fresh-06",
+      "query": "공용 지식과 폴더 한정 지식의 적용 범위를 저장한 migration 065",
+      "paths": ["apps/server/src/persistence"],
+      "expected": ["scope"]
+    },
+    {
+      "id": "fresh-07",
+      "query": "휴대폰에서도 오케스트라 블록의 담당 모델과 실행 상태를 표시하는 구현",
+      "paths": ["apps/mobile"],
+      "expected": ["mobile"]
+    },
+    {
+      "id": "fresh-08",
+      "query": "현재 허브 C++ 행 디코더의 속도 근거만 찾아줘",
+      "expected": ["hubCurrent", "hubAudit"],
+      "forbidden": ["hubOld"],
+      "requiredText": ["5.897"]
+    },
+    {
+      "id": "fresh-09",
+      "query": "로그인 폼의 비밀번호 보기 버튼에 접근성 이름을 붙여줘",
+      "paths": ["apps/web"],
+      "expected": []
+    },
+    { "id": "fresh-10", "query": "이번 주 식단표에서 아침과 저녁 순서를 바꿔줘", "expected": [] },
+    {
+      "id": "fresh-11",
+      "query": "CSV의 물 사용량을 월별 합계로 계산하는 함수가 필요해",
+      "expected": []
+    },
+    {
+      "id": "fresh-12",
+      "query": "AI가 추천한 영화 제목 20개를 가나다순으로 정렬해",
+      "expected": []
+    },
+    {
+      "id": "fresh-13",
+      "query": "재고 수량 입력창의 최댓값을 100으로 제한해",
+      "paths": ["apps/web"],
+      "expected": []
+    },
+    {
+      "id": "fresh-14",
+      "query": "스마트폰 화면에서 사진을 90도 회전하는 버튼을 만들어줘",
+      "paths": ["apps/mobile"],
+      "expected": []
+    },
+    {
+      "id": "fresh-15",
+      "query": "사용자가 고른 언어에 맞춰 결제 완료 문구를 번역해",
+      "expected": []
+    },
+    {
+      "id": "fresh-16",
+      "query": "점심 메뉴에 대한 찬성 반대 투표를 집계하는 코드를 작성해",
+      "expected": []
+    }
+  ]
+}

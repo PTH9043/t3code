@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Node's explicit windowsHide option is required for background verification on Windows.
+import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -9,7 +11,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   collectUint8StreamText,
@@ -17,6 +19,14 @@ import {
 } from "./stream/collectUint8StreamText.ts";
 
 export interface ProcessRunInput {
+  /** Windows verification must never create a console window. */
+  readonly background?: boolean;
+  /** Preserve exact child environment rather than merging it with the host. */
+  readonly replaceEnv?: boolean;
+  /** Execute a command through the system shell when required by a batch wrapper. */
+  readonly shell?: boolean;
+  /** Decode Unicode output from a hidden Windows command. */
+  readonly windowsOutputEncoding?: "utf16le";
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string | undefined;
@@ -397,11 +407,121 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
   } satisfies ProcessRunOutput;
 });
 
+export const runHiddenWindowsProcess = Effect.fn("ProcessRunner.runHiddenWindowsProcess")(
+  function* (
+    input: ProcessRunInput,
+    execFile: typeof NodeChildProcess.execFile = NodeChildProcess.execFile,
+  ) {
+    const environment = yield* HostProcessEnvironment;
+    const commandIndex = /(?:^|[\\/])cmd(?:\.exe)?$/iu.test(input.command)
+      ? input.args.findIndex((argument) => argument.toLowerCase() === "/c")
+      : -1;
+    const args =
+      commandIndex < 0
+        ? [...input.args]
+        : [
+            ...input.args.slice(0, commandIndex + 1),
+            '"' + input.args.slice(commandIndex + 1).join(" ") + '"',
+          ];
+    return yield* Effect.callback<ProcessRunOutput, ProcessRunError>((resume) => {
+      let closed = false;
+      const child = execFile(
+        input.command,
+        args,
+        {
+          cwd: input.spawnCwd ?? input.cwd,
+          env:
+            input.env === undefined
+              ? environment
+              : input.replaceEnv
+                ? input.env
+                : { ...environment, ...input.env },
+          shell: input.shell ?? false,
+          windowsHide: true,
+          windowsVerbatimArguments: commandIndex >= 0,
+          encoding: input.windowsOutputEncoding ?? "utf8",
+          maxBuffer: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+        },
+        (error, stdout, stderr) => {
+          closed = true;
+          if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+            resume(
+              Effect.fail(
+                new ProcessOutputLimitError({
+                  command: input.command,
+                  argumentCount: input.args.length,
+                  cwd: input.cwd,
+                  spawnCwd: input.spawnCwd,
+                  stream:
+                    Buffer.byteLength(stdout) >= (input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES)
+                      ? "stdout"
+                      : "stderr",
+                  maxBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+                  observedBytes: Math.max(Buffer.byteLength(stdout), Buffer.byteLength(stderr)),
+                }),
+              ),
+            );
+            return;
+          }
+          if (error && typeof error.code !== "number") {
+            resume(
+              Effect.fail(
+                new ProcessSpawnError({
+                  command: input.command,
+                  argumentCount: input.args.length,
+                  cwd: input.cwd,
+                  spawnCwd: input.spawnCwd,
+                  cause: error,
+                }),
+              ),
+            );
+            return;
+          }
+          resume(
+            Effect.succeed({
+              stdout,
+              stderr,
+              code: (error?.code ?? 0) as ChildProcessSpawner.ExitCode,
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+          );
+        },
+      );
+      child.stdin?.end(input.stdin ?? "");
+      return Effect.callback<void>((finish) => {
+        if (closed || child.pid === undefined || child.exitCode !== null) {
+          finish(Effect.void);
+          return;
+        }
+        NodeChildProcess.execFile(
+          "taskkill.exe",
+          ["/PID", String(child.pid), "/T", "/F"],
+          { windowsHide: true, timeout: 10_000 },
+          () => {
+            finish(Effect.void);
+          },
+        );
+      });
+    });
+  },
+);
+
 export const make = Effect.fn("ProcessRunner.make")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const platform = yield* HostProcessPlatform;
+  const environment = yield* HostProcessEnvironment;
 
   const run: ProcessRunner["Service"]["run"] = (input) =>
-    finalizeRunProcess(runProcessCore(spawner, input), input);
+    finalizeRunProcess(
+      input.background === true && platform === "win32"
+        ? runHiddenWindowsProcess(input).pipe(
+            Effect.provideService(HostProcessEnvironment, environment),
+          )
+        : runProcessCore(spawner, input),
+      input,
+    );
 
   return ProcessRunner.of({
     run,

@@ -1,4 +1,5 @@
 import { pipe } from "effect/Function";
+import { importedConversationMessages, importedConversationActivity } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as O from "effect/Order";
 import type {
@@ -119,7 +120,8 @@ function compactActivityPayload(
   if (
     activity.kind === "context-window.updated" ||
     activity.kind === "orchestra.block" ||
-    activity.kind === "conversation.handoff.prepared"
+    activity.kind === "conversation.handoff.prepared" ||
+    activity.kind === "conversation.imported"
   )
     return activity;
   const payload = activity.payload;
@@ -279,9 +281,23 @@ export function applyThreadDetailEvent(
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
-          messages: [],
+          messages: event.payload.importedConversation
+            ? importedConversationMessages(
+                event.payload.threadId,
+                event.payload.importedConversation,
+                event.payload.createdAt,
+              )
+            : [],
           proposedPlans: [],
-          activities: [],
+          activities: event.payload.importedConversation
+            ? [
+                importedConversationActivity(
+                  event.payload.threadId,
+                  event.payload.importedConversation,
+                  event.payload.createdAt,
+                ),
+              ]
+            : [],
           checkpoints: [],
           session: null,
         },

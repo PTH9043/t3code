@@ -18,6 +18,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
@@ -42,6 +43,7 @@ import {
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import { selectComposerFiles } from "../../lib/attachmentLimits";
 import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
@@ -62,7 +64,10 @@ import {
   type PromptStashEntry,
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
+import { ChatWorkflowLauncher } from "./ChatWorkflowLauncher";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { ComposerFilePicker } from "./ComposerFilePicker";
+import { fileDropTargetKey, useProjectFileDropStore } from "../../projectFileDropStore";
 import { compressImageForStash, compressImageToByteLimit } from "../../lib/imageCompression";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
@@ -85,6 +90,7 @@ import {
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -94,7 +100,11 @@ import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerOrchestraQuestionPanel } from "./ComposerOrchestraQuestionPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
-import { setAskFirstEnabled, useAskFirstEnabled } from "../../askFirstStore";
+import {
+  COMPOSER_REQUEST_MODES,
+  toggleComposerRequestMode,
+  useComposerRequestMode,
+} from "../../askFirstStore";
 import { useMeetingComposerConfig } from "../../meetingComposerStore";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
@@ -448,44 +458,42 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   );
 });
 
-/**
- * "질문 먼저" — checked, every send from this tab (a task or a meeting topic)
- * makes the AI come back with its plan and clarifying questions and WAIT,
- * instead of starting work. Per-tab, persisted until turned off.
- */
-const AskFirstToggle = memo(function AskFirstToggle() {
-  const enabled = useAskFirstEnabled();
+const RequestModeControl = memo(function RequestModeControl() {
+  const mode = useComposerRequestMode();
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <ComposerControl
-            className={cn(
-              "shrink-0 whitespace-nowrap",
-              enabled
-                ? "bg-accent text-accent-foreground hover:bg-accent/80"
-                : "text-secondary-label hover:text-foreground",
-            )}
-            type="button"
-            onClick={() => setAskFirstEnabled(!enabled)}
-            aria-label="질문 먼저"
-            aria-pressed={enabled}
-            data-ask-first-toggle="true"
-          />
-        }
-      >
-        <ComposerControlIcon
-          icon={MessageCircleQuestionIcon}
-          className={enabled ? "text-current opacity-100" : undefined}
-        />
-        <span className="sr-only sm:not-sr-only">질문 먼저</span>
-      </TooltipTrigger>
-      <TooltipPopup side="top">
-        {enabled
-          ? "켜짐: 오케스트라든 작업이든 시작 전에 계획과 질문을 먼저 물어봅니다."
-          : "켜면 오케스트라·작업을 시작하기 전에 반드시 나에게 먼저 물어봅니다."}
-      </TooltipPopup>
-    </Tooltip>
+    <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="요청 방식">
+      {COMPOSER_REQUEST_MODES.filter((option) => option.value !== "direct").map((option) => {
+        const enabled = mode === option.value;
+        return (
+          <Tooltip key={option.value}>
+            <TooltipTrigger
+              render={
+                <ComposerControl
+                  className={cn(
+                    "shrink-0 whitespace-nowrap",
+                    enabled && "bg-accent text-accent-foreground hover:bg-accent/80",
+                  )}
+                  type="button"
+                  aria-label={option.label}
+                  aria-pressed={enabled}
+                  data-request-mode-toggle={option.value}
+                  onClick={() => toggleComposerRequestMode(option.value)}
+                />
+              }
+            >
+              <ComposerControlIcon
+                icon={option.value === "ask-first" ? MessageCircleQuestionIcon : PencilRulerIcon}
+              />
+              <span>{option.label}</span>
+            </TooltipTrigger>
+            <TooltipPopup side="top">
+              {enabled ? "켜짐 · 다시 누르면 끕니다. " : "꺼짐 · "}
+              {option.description}
+            </TooltipPopup>
+          </Tooltip>
+        );
+      })}
+    </div>
   );
 });
 
@@ -494,6 +502,7 @@ const AskFirstToggle = memo(function AskFirstToggle() {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerHandle {
+  addFiles: (files: File[]) => boolean;
   focusAtEnd: () => void;
   focusAt: (cursor: number) => void;
   insertTextAtEnd: (text: string, options?: { ensureLeadingBoundary?: boolean }) => boolean;
@@ -539,6 +548,9 @@ export interface ChatComposerHandle {
 export interface ChatComposerProps {
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
+  workflowProject?: EnvironmentProject | null;
+  development?: WorkspaceDevelopmentPanelProps | null;
+  developmentUnavailableReason?: string;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
   draftId: DraftId | null;
@@ -625,8 +637,17 @@ export interface ChatComposerProps {
     decision: ProviderApprovalDecision,
   ) => Promise<unknown>;
   onSelectActivePendingUserInputOption: (questionId: string, optionLabel: string) => void;
-  onAdvanceActivePendingUserInput: () => void;
   onPreviousActivePendingUserInputQuestion: () => void;
+  onAddPendingQuestionImages: (
+    requestId: ApprovalRequestId,
+    questionId: string,
+    images: ComposerImageAttachment[],
+  ) => void;
+  onRemovePendingQuestionImage: (
+    requestId: ApprovalRequestId,
+    questionId: string,
+    imageId: string,
+  ) => void;
   onChangeActivePendingUserInputCustomAnswer: (
     questionId: string,
     value: string,
@@ -635,7 +656,11 @@ export interface ChatComposerProps {
     cursorAdjacentToMention: boolean,
   ) => void;
 
-  onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderModelSelect: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ModelSelection["options"],
+  ) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
@@ -661,7 +686,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
-    isServerThread: _isServerThread,
+    isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
@@ -707,8 +732,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onImplementPlanInNewThread,
     onRespondToApproval,
     onSelectActivePendingUserInputOption,
-    onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
+    onAddPendingQuestionImages,
+    onRemovePendingQuestionImage,
     onChangeActivePendingUserInputCustomAnswer,
     onProviderModelSelect,
     getModelDisabledReason,
@@ -733,9 +759,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
+  useEffect(() => {
+    if (composerImages.length > 0)
+      window.desktopBridge?.reportFileDropStatus?.({
+        stage: "composer.rendered",
+        fileCount: composerImages.length,
+      });
+  }, [composerImages]);
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
-  const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const insertComposerDraftTerminalContext = useComposerDraftStore(
@@ -1000,6 +1032,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [isAiTaskOpen, setIsAiTaskOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
@@ -1041,6 +1074,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
    * next draft.
    */
   const pendingImageCompressionsRef = useRef<Map<ThreadId, number>>(new Map());
+  const pendingAttachmentBytesRef = useRef<Map<ThreadId, number>>(new Map());
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1189,6 +1223,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const isComposerApprovalState = activePendingApproval !== null;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const activePendingImages = activePendingProgress?.activeQuestion
+    ? (activePendingDraftAnswers[activePendingProgress.activeQuestion.id]?.images ?? [])
+    : [];
   const hasComposerHeader =
     isComposerApprovalState ||
     pendingUserInputs.length > 0 ||
@@ -1263,7 +1300,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   // An armed meeting swaps the single-model effort picker for a per-seat
   // entry point (see the footer controls below).
-  const meetingArmedForControls = useMeetingComposerConfig().enabled;
+  const meetingConfig = useMeetingComposerConfig();
+  const meetingArmedForControls = meetingConfig.enabled;
   const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -1284,9 +1322,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             canAdvance: activePendingProgress.canAdvance,
             isResponding: activePendingIsResponding,
             isComplete: Boolean(activePendingResolvedAnswers),
+            isCancelable: activePendingUserInput?.requestId.startsWith("async:") ?? false,
           }
         : null,
-    [activePendingIsResponding, activePendingProgress, activePendingResolvedAnswers],
+    [
+      activePendingIsResponding,
+      activePendingProgress,
+      activePendingResolvedAnswers,
+      activePendingUserInput,
+    ],
   );
   const collapsedComposerPrimaryActionDisabled =
     phase === "running" ||
@@ -1309,13 +1353,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     },
     [composerDraftTarget, setComposerDraftPrompt],
-  );
-
-  const addComposerImage = useCallback(
-    (image: ComposerImageAttachment) => {
-      addComposerDraftImage(composerDraftTarget, image);
-    },
-    [composerDraftTarget, addComposerDraftImage],
   );
 
   const addComposerImagesToDraft = useCallback(
@@ -1527,6 +1564,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         await Promise.all(
           composerImages.map(async (image) => {
             try {
+              // Large originals remain available to send without duplicating them
+              // as base64 in localStorage. The existing unsaved-file notice applies.
+              if (image.file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) return;
+              const existing = existingPersistedById.get(image.id);
+              if (existing) {
+                stagedAttachmentById.set(image.id, existing);
+                return;
+              }
               const dataUrl = await readFileAsDataUrl(image.file);
               stagedAttachmentById.set(image.id, {
                 id: image.id,
@@ -1534,6 +1579,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 mimeType: image.mimeType,
                 sizeBytes: image.sizeBytes,
                 dataUrl,
+                ...(image.type === "file" ? { type: "file" as const } : {}),
               });
             } catch {
               const existingPersisted = existingPersistedById.get(image.id);
@@ -2211,6 +2257,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const oversizedImageNames: string[] = [];
       const unreadableImageNames: string[] = [];
       for (const image of images) {
+        if (image.type === "file") {
+          try {
+            candidateAttachments.push({
+              type: "file",
+              id: image.id,
+              name: image.name,
+              mimeType: image.mimeType,
+              sizeBytes: image.sizeBytes,
+              dataUrl: await readFileAsDataUrl(image.file),
+            });
+          } catch {
+            unreadableImageNames.push(image.name);
+          }
+          continue;
+        }
         const result = await compressImageForStash(image.file);
         if (!result.ok) {
           // "too large" and "could not be read" are distinct outcomes; the
@@ -2336,12 +2397,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   const addComposerImages = async (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
-    if (pendingUserInputs.length > 0) {
+    if (isConnecting || isComposerApprovalState || projectSelectionRequired) return;
+    const question = activePendingProgress?.activeQuestion;
+    const requestId = activePendingUserInput?.requestId;
+    if (pendingUserInputs.length > 0 && (!question || !requestId || activePendingIsResponding)) {
       toastManager.add({
         type: "error",
-        title: "계획 질문에 답한 뒤 이미지를 첨부하세요.",
+        title: "질문을 확인한 뒤 이미지를 첨부하세요.",
       });
       return;
+    }
+    if ((question || orchestraQuestion) && files.some((file) => !file.type.startsWith("image/"))) {
+      toastManager.add({ type: "error", title: "질문에는 이미지 파일을 첨부하세요." });
+      files = files.filter((file) => file.type.startsWith("image/"));
+      if (!files.length) return;
     }
     // Captured before the awaits below: the user may switch threads while a
     // large image is being compressed, and the attachments and errors belong
@@ -2352,29 +2421,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // accepted files reserve their attachment slots (via the pending counter)
     // before the first await, keeping the total under the limit.
     const pendingCount = pendingImageCompressionsRef.current.get(threadId) ?? 0;
-    let reservedCount = composerImagesRef.current.length + pendingCount;
-    const acceptedFiles: File[] = [];
-    let error: string | null = null;
-    for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        error = `'${file.name}' 파일 형식은 지원하지 않습니다. 이미지 파일만 첨부하세요.`;
-        continue;
-      }
-      if (reservedCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `메시지 하나에 이미지를 최대 ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}개까지 첨부할 수 있습니다.`;
-        break;
-      }
-      acceptedFiles.push(file);
-      reservedCount += 1;
-    }
+    const pendingBytes = pendingAttachmentBytesRef.current.get(threadId) ?? 0;
+    const currentImages = question
+      ? Object.values(activePendingDraftAnswers).flatMap((answer) => answer.images ?? [])
+      : (getComposerDraft(composerDraftTarget)?.images ?? []);
+    const {
+      files: acceptedFiles,
+      reservedBytes,
+      error,
+    } = selectComposerFiles(files, {
+      count: currentImages.length + pendingCount,
+      bytes: currentImages.reduce((total, image) => total + image.sizeBytes, 0) + pendingBytes,
+    });
     setThreadError(threadId, error);
     if (acceptedFiles.length === 0) return;
 
     pendingImageCompressionsRef.current.set(threadId, pendingCount + acceptedFiles.length);
+    pendingAttachmentBytesRef.current.set(threadId, pendingBytes + reservedBytes);
     try {
       const nextImages: ComposerImageAttachment[] = [];
       let compressionError: string | null = null;
       for (const file of acceptedFiles) {
+        if (!file.type.startsWith("image/")) {
+          nextImages.push({
+            type: "file",
+            id: randomUUID(),
+            name: file.name || "file",
+            mimeType: file.type || "application/octet-stream",
+            sizeBytes: file.size,
+            previewUrl: "",
+            file,
+          });
+          continue;
+        }
         // Images over the wire cap are downscaled to fit rather than
         // refused; files already within it pass through byte-for-byte.
         const compressed = await compressImageToByteLimit(file, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
@@ -2397,10 +2476,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           file: attachmentFile,
         });
       }
-      if (nextImages.length === 1 && nextImages[0]) {
-        addComposerImage(nextImages[0]);
-      } else if (nextImages.length > 1) {
-        addComposerImagesToDraft(nextImages);
+      if (nextImages.length > 0) {
+        if (question && requestId) onAddPendingQuestionImages(requestId, question.id, nextImages);
+        else addComposerImagesToDraft(nextImages);
       }
       // Only failures are reported here. Success must not pass `null`: by
       // now other work (a failed send, an overlapping paste) may have set a
@@ -2409,7 +2487,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (compressionError !== null) {
         setThreadError(threadId, compressionError);
       }
+    } catch {
+      setThreadError(threadId, "파일을 첨부하지 못했습니다. 파일을 다시 선택해 주세요.");
+      toastManager.add({ type: "error", title: "파일을 첨부하지 못했습니다." });
     } finally {
+      const remainingBytes = (pendingAttachmentBytesRef.current.get(threadId) ?? 0) - reservedBytes;
+      if (remainingBytes > 0) pendingAttachmentBytesRef.current.set(threadId, remainingBytes);
+      else pendingAttachmentBytesRef.current.delete(threadId);
       const remaining =
         (pendingImageCompressionsRef.current.get(threadId) ?? 0) - acceptedFiles.length;
       if (remaining > 0) {
@@ -2423,6 +2507,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const removeComposerImage = (imageId: string) => {
     removeComposerImageFromDraft(imageId);
   };
+
+  const projectDropFiles = useProjectFileDropStore(
+    (state) => state.pending[fileDropTargetKey(composerDraftTarget)],
+  );
+  useEffect(() => {
+    if (
+      !projectDropFiles?.length ||
+      !activeThreadId ||
+      isConnecting ||
+      isComposerApprovalState ||
+      projectSelectionRequired ||
+      (pendingUserInputs.length > 0 &&
+        (!activePendingProgress?.activeQuestion || activePendingIsResponding))
+    )
+      return;
+    const files = useProjectFileDropStore.getState().take(composerDraftTarget);
+    void addComposerImages(files);
+  }, [
+    projectDropFiles,
+    activeThreadId,
+    isConnecting,
+    isComposerApprovalState,
+    projectSelectionRequired,
+    pendingUserInputs.length,
+    composerDraftTarget,
+    addComposerImages,
+  ]);
 
   // ------------------------------------------------------------------
   // Callbacks: paste / drag
@@ -2587,6 +2698,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useImperativeHandle(
     composerRef,
     () => ({
+      addFiles: (files: File[]) => {
+        if (
+          !activeThreadId ||
+          isConnecting ||
+          isComposerApprovalState ||
+          projectSelectionRequired ||
+          (pendingUserInputs.length > 0 &&
+            (!activePendingProgress?.activeQuestion || activePendingIsResponding))
+        )
+          return false;
+        void addComposerImages(files);
+        focusComposer();
+        return true;
+      },
       focusAtEnd: () => {
         composerEditorRef.current?.focusAtEnd();
       },
@@ -2675,6 +2800,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }),
     [
       activeThread,
+      activeThreadId,
       composerDraftTarget,
       composerCursor,
       composerTerminalContexts,
@@ -2688,6 +2814,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isConnecting,
       isComposerApprovalState,
       pendingUserInputs.length,
+      activePendingProgress?.activeQuestion,
+      activePendingIsResponding,
+      activePendingDraftAnswers,
+      activePendingUserInput?.requestId,
+      onAddPendingQuestionImages,
       projectSelectionRequired,
       applyPromptReplacement,
       isComposerModelPickerOpen,
@@ -2711,6 +2842,41 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       className="mx-auto w-full min-w-0 max-w-3xl"
       data-chat-composer-form="true"
     >
+      <ChatWorkflowLauncher
+        project={props.workflowProject ?? null}
+        contextKey={activeThreadId ?? draftId ?? "draft"}
+        threadId={isServerThread ? activeThreadId : null}
+        prompt={prompt}
+        attachmentCount={composerImages.length}
+        startBlocked={
+          isSendBusy ||
+          isPreparingWorktree ||
+          isComposerApprovalState ||
+          pendingUserInputs.length > 0 ||
+          showPlanFollowUpPrompt
+        }
+        runtimeMode={runtimeMode}
+        interactionMode={interactionMode}
+        meetingConfig={meetingConfig}
+        currentModel={noProviderAvailable ? null : selectedModelSelection}
+        open={isAiTaskOpen}
+        onOpenChange={setIsAiTaskOpen}
+        instanceEntries={providerInstanceEntries}
+        modelOptionsByInstance={modelOptionsByInstance}
+        development={
+          props.development ? { ...props.development, mainModel: selectedModelSelection } : null
+        }
+        onMainModelChange={(model) =>
+          onProviderModelSelect(model.instanceId, model.model, model.options)
+        }
+        unavailableReason={
+          environmentUnavailable
+            ? `${environmentUnavailable.label}에 연결한 뒤 실행하세요.`
+            : isConnecting
+              ? "연결 중입니다."
+              : null
+        }
+      />
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
@@ -2760,7 +2926,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   question={orchestraQuestion.question}
                   options={orchestraQuestion.options}
                   isAnswering={orchestraQuestionAnswering}
-                  onAnswer={onAnswerOrchestraQuestion}
+                  onAnswer={(answer) => {
+                    if (
+                      activeThreadId &&
+                      (pendingImageCompressionsRef.current.get(activeThreadId) ?? 0) > 0
+                    ) {
+                      toastManager.add({
+                        type: "warning",
+                        title: "이미지 첨부가 끝난 뒤 답변하세요.",
+                      });
+                      return;
+                    }
+                    onAnswerOrchestraQuestion(answer);
+                  }}
                 />
               </div>
             ) : activePendingApproval ? (
@@ -2778,8 +2956,42 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
-                  onAdvance={onAdvanceActivePendingUserInput}
                 />
+                {activePendingUserInput &&
+                activePendingProgress?.activeQuestion &&
+                activePendingImages.length ? (
+                  <div className="flex flex-wrap gap-2 px-3 pb-3" aria-label="질문에 첨부한 이미지">
+                    {activePendingImages.map((image) => (
+                      <div
+                        key={image.id}
+                        className="relative h-16 w-16 overflow-hidden rounded-lg border border-border"
+                      >
+                        <img
+                          src={image.previewUrl}
+                          alt={image.name}
+                          className="h-full w-full object-cover"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          className="absolute right-1 top-1 bg-background/80"
+                          aria-label={`${image.name} 제거`}
+                          disabled={activePendingIsResponding}
+                          onClick={() =>
+                            onRemovePendingQuestionImage(
+                              activePendingUserInput.requestId,
+                              activePendingProgress.activeQuestion!.id,
+                              image.id,
+                            )
+                          }
+                        >
+                          <XIcon />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : showPlanFollowUpPrompt && activeProposedPlan ? (
               <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
@@ -2818,7 +3030,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
-                onAdvance={onAdvanceActivePendingUserInput}
               />
               <div className="px-3 pb-3 sm:px-4">
                 <div
@@ -2841,11 +3052,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {activePendingProgress?.customAnswer || "직접 답변 작성"}
                   </button>
-                  {activePendingProgress?.activeQuestion?.multiSelect ? (
+                  {activePendingProgress?.activeQuestion ? (
                     <ComposerPrimaryActions
                       compact
                       pendingAction={pendingPrimaryAction}
-                      isRunning={false}
+                      isRunning={phase === "running"}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isSendBusy}
@@ -3023,9 +3234,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     .map((image) => (
                       <div
                         key={image.id}
-                        className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
+                        className={cn(
+                          "relative h-16 overflow-hidden rounded-lg border border-border/80 bg-background",
+                          image.type === "file" ? "w-56" : "w-16",
+                        )}
+                        data-composer-attachment={image.type}
+                        title={image.name}
                       >
-                        {image.previewUrl ? (
+                        {image.type === "image" && image.previewUrl ? (
                           <button
                             type="button"
                             className="h-full w-full cursor-zoom-in"
@@ -3039,12 +3255,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             <img
                               src={image.previewUrl}
                               alt={image.name}
+                              onLoad={() =>
+                                window.desktopBridge?.reportFileDropStatus?.({
+                                  stage: "image.loaded",
+                                  fileCount: 1,
+                                })
+                              }
+                              onError={() => {
+                                window.desktopBridge?.reportFileDropStatus?.({
+                                  stage: "image.failed",
+                                  fileCount: 1,
+                                });
+                                setThreadError(
+                                  activeThreadId,
+                                  `'${image.name}' 이미지 미리보기를 불러오지 못했습니다. PNG·JPEG·WebP 등으로 변환해 다시 첨부하세요.`,
+                                );
+                              }}
                               className="h-full w-full object-cover"
                             />
                           </button>
                         ) : (
-                          <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-secondary-label">
-                            {image.name}
+                          <div className="flex h-full min-w-0 flex-col justify-center px-3 pr-8 text-[11px]">
+                            <span className="truncate font-medium">{image.name}</span>
+                            <span className="text-secondary-label">
+                              {image.sizeBytes < 1024
+                                ? `${image.sizeBytes} B`
+                                : image.sizeBytes < 1024 * 1024
+                                  ? `${(image.sizeBytes / 1024).toFixed(1)} KB`
+                                  : `${(image.sizeBytes / (1024 * 1024)).toFixed(1)} MB`}
+                            </span>
                           </div>
                         )}
                         {nonPersistedComposerImageIdSet.has(image.id) && (
@@ -3117,7 +3356,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : noProviderAvailable
                             ? "메시지를 보내려면 설정에서 제공자를 활성화하세요"
                             : phase === "disconnected"
-                              ? "후속 변경을 요청하거나 이미지를 첨부하세요"
+                              ? "후속 변경을 요청하거나 파일을 첨부하세요"
                               : "무엇이든 물어보세요. @ 파일/폴더, $ 스킬, / 명령을 사용할 수 있어요"
                 }
                 disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
@@ -3130,7 +3369,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerPrimaryActions
                     compact
                     pendingAction={pendingPrimaryAction}
-                    isRunning={false}
+                    isRunning={phase === "running"}
                     showPlanFollowUpPrompt={false}
                     promptHasText={false}
                     isSendBusy={isSendBusy}
@@ -3174,6 +3413,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
             >
               <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <ComposerFilePicker
+                  disabled={
+                    isConnecting ||
+                    isComposerApprovalState ||
+                    projectSelectionRequired ||
+                    (pendingUserInputs.length > 0 &&
+                      (!activePendingProgress?.activeQuestion || activePendingIsResponding))
+                  }
+                  onFiles={(files) => {
+                    void addComposerImages(files);
+                    focusComposer();
+                  }}
+                />
                 {noProviderAvailable ? (
                   <Button
                     type="button"
@@ -3194,6 +3446,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     lockedProvider={lockedProvider}
                     lockedContinuationGroupKey={lockedContinuationGroupKey}
                     meetingTarget={composerDraftTarget}
+                    development={
+                      props.development
+                        ? {
+                            ...props.development,
+                            mainModel: selectedModelSelection,
+                          }
+                        : null
+                    }
+                    developmentUnavailableReason={
+                      props.developmentUnavailableReason ??
+                      (props.isLocalDraftThread
+                        ? "먼저 메시지를 보내 대화를 만든 뒤 지속 작업실을 선택하세요."
+                        : "프로젝트 기본 폴더의 대화에서 지속 작업실을 선택하세요.")
+                    }
                     instanceEntries={providerInstanceEntries}
                     keybindings={keybindings}
                     modelOptionsByInstance={modelOptionsByInstance}
@@ -3209,6 +3475,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onOpenChange={(open) => {
                       setIsComposerModelPickerOpen(open);
                     }}
+                    {...(props.workflowProject
+                      ? {
+                          onOpenAiTask: () => {
+                            setIsComposerModelPickerOpen(false);
+                            setIsAiTaskOpen(true);
+                          },
+                        }
+                      : {})}
                     {...(getModelDisabledReason ? { getModelDisabledReason } : {})}
                     onInstanceModelChange={onProviderModelSelect}
                   />
@@ -3239,7 +3513,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               <ComposerControl
                                 className="shrink-0 whitespace-nowrap text-secondary-label hover:text-foreground"
                                 type="button"
-                                onClick={() => setIsComposerModelPickerOpen(true)}
+                                onClick={() => {
+                                  if (props.workflowProject) {
+                                    setIsAiTaskOpen(true);
+                                  } else {
+                                    setIsComposerModelPickerOpen(true);
+                                  }
+                                }}
                                 aria-label="참가자별 노력 설정"
                                 data-meeting-seat-effort="true"
                               />
@@ -3268,7 +3548,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     />
                   </>
                 )}
-                <AskFirstToggle />
+                <RequestModeControl />
               </div>
 
               {/* Right side: send / stop button */}

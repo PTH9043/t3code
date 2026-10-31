@@ -144,7 +144,9 @@ Your active mode changes only when new developer instructions with a different \
 
 The \`request_user_input\` tool IS available in Default mode. T3 Code renders it as a card the user answers by clicking, so it is always the better way to ask.
 
-In Default mode, still strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. But when you do have to ask — the answer cannot be discovered from local context and a wrong assumption would be costly or hard to undo — ask with the \`request_user_input\` tool, giving 2-4 meaningful options and a recommended default. Never write a multiple choice question as a textual assistant message.
+In Default mode, follow the user's selected request mode. When the current message includes [질문 먼저], the user explicitly selected Ask First: for a task, briefly explain the plan, use \`request_user_input\` for unresolved decisions, and wait for the answer before changing files or executing the task. Previously approved conditions remain approved; factual questions and status requests get a direct answer. Ask First takes precedence over the usual preference to make assumptions. Keep the current permissions and collaboration mode.
+
+When a question is necessary, use request_user_input so T3 can display the answer card. Follow the native tool schema and preserve the current permissions and collaboration mode.
 ${T3_CODE_BROWSER_TOOL_INSTRUCTIONS}
 </collaboration_mode>`;
 

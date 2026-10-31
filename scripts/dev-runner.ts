@@ -2,12 +2,17 @@
 
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
+import * as NodeCrypto from "node:crypto";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import { resolveGitWorktreePath, resolveWorktreeT3Home } from "@t3tools/shared/devHome";
-import { HostProcessEnvironment, HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessPlatform,
+  HostProcessWorkingDirectory,
+} from "@t3tools/shared/hostProcess";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Hash from "effect/Hash";
@@ -328,6 +333,7 @@ export function createDevRunnerEnv({
     const configuredBaseDir = t3Home?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
     const isDesktopMode = mode === "dev:desktop";
+    const hostPlatform = yield* HostProcessPlatform;
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
@@ -350,6 +356,8 @@ export function createDevRunnerEnv({
     // (serviceLauncherClient.ts resolveStartup).
     delete output.T3_SERVICE_LAUNCHER_CONTEXT;
     delete output.T3_BOOT_SERVICE_UNIT;
+    delete output.T3CODE_DESKTOP_DEV_PIPE;
+    delete output.T3CODE_DESKTOP_DEV_PIPE_TOKEN;
 
     if (!isDesktopMode) {
       output.T3CODE_PORT = String(serverPort);
@@ -383,11 +391,13 @@ export function createDevRunnerEnv({
       }
     } else {
       output.T3CODE_PORT = String(serverPort);
-      output.VITE_HTTP_URL = `http://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
-      output.VITE_WS_URL = `ws://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
-      // Desktop pins the renderer to loopback on purpose; an ambient marker
-      // must not make Vite drop those URLs.
-      delete output.T3CODE_SINGLE_ORIGIN_DEV;
+      delete output.VITE_HTTP_URL;
+      delete output.VITE_WS_URL;
+      output.T3CODE_SINGLE_ORIGIN_DEV = "1";
+      if (hostPlatform === "win32") {
+        output.T3CODE_DESKTOP_DEV_PIPE = `\\\\.\\pipe\\t3-vite-${NodeCrypto.randomUUID()}`;
+        output.T3CODE_DESKTOP_DEV_PIPE_TOKEN = NodeCrypto.randomBytes(32).toString("hex");
+      }
       delete output.T3CODE_MODE;
       delete output.T3CODE_NO_BROWSER;
       delete output.T3CODE_HOST;

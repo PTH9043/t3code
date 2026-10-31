@@ -17,6 +17,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as Path from "effect/Path";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -39,7 +40,9 @@ import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import { CodexAsyncAnswerDeliveryError, makeCodexAsyncQuestions } from "./CodexAsyncQuestions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const isCodexRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -116,6 +119,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly skills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -143,7 +147,10 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
-  readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly interruptTurn: (
+    turnId?: TurnId,
+    questionRequestId?: ApprovalRequestId,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -155,6 +162,7 @@ export interface CodexSessionRuntimeShape {
   readonly respondToUserInput: (
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
+    images?: ReadonlyArray<{ readonly type: "image"; readonly url: string }>,
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
@@ -162,10 +170,55 @@ export interface CodexSessionRuntimeShape {
 
 export type CodexSessionRuntimeError =
   | CodexErrors.CodexAppServerError
+  | CodexAsyncAnswerDeliveryError
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
+  | CodexSessionRuntimeSkillNotRegisteredError
   | CodexSessionRuntimeThreadIdMissingError;
+
+export class CodexSessionRuntimeSkillNotRegisteredError extends Schema.TaggedErrorClass<CodexSessionRuntimeSkillNotRegisteredError>()(
+  "CodexSessionRuntimeSkillNotRegisteredError",
+  { name: Schema.String },
+) {
+  override get message(): string {
+    return `The pinned Codex workflow skill was not registered: ${this.name}`;
+  }
+}
+
+interface CodexSkillClient {
+  readonly request: <M extends "skills/extraRoots/set" | "skills/list">(
+    method: M,
+    payload: CodexRpc.ClientRequestParamsByMethod[M],
+  ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+}
+
+export const registerCodexWorkflowSkills = Effect.fn("CodexSessionRuntime.registerWorkflowSkills")(
+  function* (
+    client: CodexSkillClient,
+    cwd: string,
+    skills: ReadonlyArray<{ readonly name: string; readonly path: string }>,
+  ) {
+    if (skills.length === 0) return;
+    const path = yield* Path.Path;
+    yield* client.request("skills/extraRoots/set", {
+      extraRoots: [...new Set(skills.map((skill) => path.dirname(path.dirname(skill.path))))],
+    });
+    const listed = yield* client.request("skills/list", { cwds: [cwd], forceReload: true });
+    const registered = listed.data.flatMap((entry) => entry.skills);
+    for (const skill of skills) {
+      const expectedPath = path.resolve(skill.path);
+      if (
+        !registered.some(
+          (entry) =>
+            entry.enabled && entry.name === skill.name && path.resolve(entry.path) === expectedPath,
+        )
+      ) {
+        return yield* new CodexSessionRuntimeSkillNotRegisteredError({ name: skill.name });
+      }
+    }
+  },
+);
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -231,7 +284,10 @@ interface PendingUserInput {
   readonly requestId: ApprovalRequestId;
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
-  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly answers: Deferred.Deferred<
+    ProviderUserInputAnswers,
+    CodexErrors.CodexAppServerRequestError
+  >;
 }
 
 type CodexServerNotification = {
@@ -368,6 +424,7 @@ function buildCodexCollaborationMode(input: {
 export function buildTurnStartParams(input: {
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
+  readonly skills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
   readonly prompt?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -388,6 +445,8 @@ export function buildTurnStartParams(input: {
       text: input.prompt,
     });
   }
+  for (const skill of input.skills ?? [])
+    turnInput.push({ type: "skill", name: skill.name, path: skill.path });
   for (const attachment of input.attachments ?? []) {
     turnInput.push(attachment);
   }
@@ -850,16 +909,19 @@ export const makeCodexSessionRuntime = (
 ): Effect.Effect<
   CodexSessionRuntimeShape,
   CodexErrors.CodexAppServerError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope | Path.Path
 > =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
+    const path = yield* Path.Path;
     const events = yield* Queue.unbounded<ProviderEvent>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
+    const lastTurnInput = yield* Ref.make<CodexSessionRuntimeSendTurnInput | undefined>(undefined);
+    const userInputCorrelationsRef = yield* Ref.make(new Map<string, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
@@ -955,6 +1017,69 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+
+    const asyncQuestions = yield* makeCodexAsyncQuestions({
+      requested: (question) =>
+        Effect.gen(function* () {
+          yield* emitEvent({
+            kind: "request",
+            threadId: options.threadId,
+            method: "item/tool/requestUserInput",
+            requestId: question.requestId,
+            turnId: question.turnId,
+            itemId: question.itemId,
+            payload: {
+              threadId: yield* readProviderThreadId,
+              turnId: question.turnId,
+              itemId: question.itemId,
+              isBlocking: false,
+              questions: question.questions,
+            },
+          });
+        }),
+      resolved: (question, answers, turnId) =>
+        emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "item/tool/requestUserInput/answered",
+          requestId: question.requestId,
+          turnId,
+          itemId: question.itemId,
+          payload: { answers },
+        }),
+      closed: (question) =>
+        Effect.gen(function* () {
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "serverRequest/resolved",
+            requestId: question.requestId,
+            turnId: question.turnId,
+            itemId: question.itemId,
+            payload: {
+              threadId: yield* readProviderThreadId,
+              requestId: question.requestId,
+              t3UserInputResolved: "closed",
+            },
+          });
+        }),
+      sendAnswer: (text, images) =>
+        Effect.gen(function* () {
+          const session = yield* Ref.get(sessionRef);
+          if (session.activeTurnId) {
+            yield* client.request("turn/steer", {
+              threadId: yield* readProviderThreadId,
+              expectedTurnId: session.activeTurnId,
+              input: [{ type: "text", text }, ...(images ?? [])],
+            });
+            return session.activeTurnId;
+          }
+          const previous = yield* Ref.get(lastTurnInput);
+          return (yield* sendTurn({ ...previous, input: text, attachments: images ?? [] })).turnId;
+        }),
+      rejectedBeforeDelivery: (error) =>
+        isCodexRequestError(error) && [-32600, -32601, -32602].includes(error.code),
+    });
 
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
@@ -1256,7 +1381,7 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
-        const payload = notification.params;
+        let payload: ProviderEvent["payload"] = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childParentTurnId = (() => {
@@ -1346,6 +1471,35 @@ export const makeCodexSessionRuntime = (
           const correlation = rawRequestId
             ? (yield* Ref.get(approvalCorrelationsRef)).get(rawRequestId)
             : undefined;
+          const userInput = (yield* Ref.get(userInputCorrelationsRef)).get(rawRequestId);
+          if (userInput) {
+            const unanswered = (yield* Ref.get(pendingUserInputsRef)).has(userInput.requestId);
+            requestId = userInput.requestId;
+            turnId = userInput.turnId ?? turnId;
+            itemId = userInput.itemId ?? itemId;
+            payload = {
+              ...notification.params,
+              t3UserInputResolved: unanswered ? "closed" : "answered",
+            };
+            yield* Ref.update(userInputCorrelationsRef, (current) => {
+              const next = new Map(current);
+              next.delete(rawRequestId);
+              return next;
+            });
+            if (unanswered) {
+              yield* Ref.update(pendingUserInputsRef, (current) => {
+                const next = new Map(current);
+                next.delete(userInput.requestId);
+                return next;
+              });
+              yield* Deferred.fail(
+                userInput.answers,
+                CodexErrors.CodexAppServerRequestError.invalidParams(
+                  "Question resolved by the provider.",
+                ),
+              );
+            }
+          }
           if (correlation) {
             requestId = correlation.requestId;
             requestKind = correlation.requestKind;
@@ -1373,6 +1527,14 @@ export const makeCodexSessionRuntime = (
             : {}),
           ...(payload !== undefined ? { payload } : {}),
         });
+        if (
+          notification.method === "item/completed" &&
+          turnId &&
+          !foreignConversation &&
+          childParentTurnId === undefined
+        ) {
+          yield* asyncQuestions.register(notification.params.item, turnId);
+        }
       });
 
     const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
@@ -1554,12 +1716,20 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
+    yield* client.handleServerRequest("item/tool/requestUserInput", (payload, context) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4("user-input-request"));
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
-        const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+        const answers = yield* Deferred.make<
+          ProviderUserInputAnswers,
+          CodexErrors.CodexAppServerRequestError
+        >();
+        yield* Ref.update(userInputCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(String(context.requestId), { requestId, turnId, itemId, answers });
+          return next;
+        });
 
         yield* Ref.update(pendingUserInputsRef, (current) => {
           const next = new Map(current);
@@ -1707,9 +1877,16 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      const requestedThreadId = readResumeCursorThreadId(options.resumeCursor);
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
+        continuity:
+          requestedThreadId === undefined
+            ? "new"
+            : requestedThreadId === providerThreadId
+              ? "resumed"
+              : "resume-fallback",
         cwd: opened.cwd,
         model: opened.model,
         resumeCursor: { threadId: providerThreadId },
@@ -1737,6 +1914,11 @@ export const makeCodexSessionRuntime = (
       }
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      yield* asyncQuestions.close.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to close native async question cards.", { cause }),
+        ),
+      );
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
@@ -1751,69 +1933,99 @@ export const makeCodexSessionRuntime = (
       yield* Queue.shutdown(events);
     });
 
+    const sendTurn = (input: CodexSessionRuntimeSendTurnInput) =>
+      Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        const hasStartedTurn = yield* Ref.getAndSet(hasStartedTurnRef, true);
+        if (
+          shouldReloadConfiguredMcpServerBeforeTurn({
+            appServerArgs: options.appServerArgs,
+            hasStartedTurn,
+          })
+        ) {
+          yield* client.request("config/mcpServer/reload", undefined).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
+                cause,
+              }),
+            ),
+          );
+        }
+        const normalizedModel = normalizeCodexModelSlug(
+          input.model ?? (yield* Ref.get(sessionRef)).model,
+        );
+        if (input.skills?.length) {
+          yield* registerCodexWorkflowSkills(client, options.cwd, input.skills).pipe(
+            Effect.provideService(Path.Path, path),
+          );
+        }
+        const params = yield* buildTurnStartParams({
+          threadId: providerThreadId,
+          runtimeMode: options.runtimeMode,
+          ...(input.input ? { prompt: input.input } : {}),
+          ...(input.skills ? { skills: input.skills } : {}),
+          ...(input.attachments ? { attachments: input.attachments } : {}),
+          ...(normalizedModel ? { model: normalizedModel } : {}),
+          ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+          ...(input.effort ? { effort: input.effort } : {}),
+          ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+        });
+        yield* Ref.set(lastTurnInput, input);
+        const rawResponse = yield* client.raw.request("turn/start", params);
+        const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+          Effect.mapError((error) =>
+            CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              error,
+              { method: "turn/start" },
+            ),
+          ),
+        );
+        const turnId = TurnId.make(response.turn.id);
+        yield* updateSession(sessionRef, {
+          status: "running",
+          activeTurnId: turnId,
+          ...(normalizedModel ? { model: normalizedModel } : {}),
+        });
+        const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        return {
+          threadId: options.threadId,
+          turnId,
+          ...(resumedProviderThreadId
+            ? { resumeCursor: { threadId: resumedProviderThreadId } }
+            : {}),
+        } satisfies ProviderTurnStartResult;
+      });
     return {
       start,
       getSession: Ref.get(sessionRef),
-      sendTurn: (input) =>
-        Effect.gen(function* () {
-          const providerThreadId = yield* readProviderThreadId;
-          const hasStartedTurn = yield* Ref.getAndSet(hasStartedTurnRef, true);
-          if (
-            shouldReloadConfiguredMcpServerBeforeTurn({
-              appServerArgs: options.appServerArgs,
-              hasStartedTurn,
-            })
-          ) {
-            yield* client.request("config/mcpServer/reload", undefined).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
-                  cause,
-                }),
-              ),
-            );
-          }
-          const normalizedModel = normalizeCodexModelSlug(
-            input.model ?? (yield* Ref.get(sessionRef)).model,
-          );
-          const params = yield* buildTurnStartParams({
-            threadId: providerThreadId,
-            runtimeMode: options.runtimeMode,
-            ...(input.input ? { prompt: input.input } : {}),
-            ...(input.attachments ? { attachments: input.attachments } : {}),
-            ...(normalizedModel ? { model: normalizedModel } : {}),
-            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
-            ...(input.effort ? { effort: input.effort } : {}),
-            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-          });
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-                "decode-response-payload",
-                error,
-                { method: "turn/start" },
-              ),
-            ),
-          );
-          const turnId = TurnId.make(response.turn.id);
-          yield* updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: turnId,
-            ...(normalizedModel ? { model: normalizedModel } : {}),
-          });
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-          return {
-            threadId: options.threadId,
-            turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
-          } satisfies ProviderTurnStartResult;
-        }),
-      interruptTurn: (turnId) =>
+      sendTurn,
+      interruptTurn: (turnId, questionRequestId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          // Close the selected question independently of provider interrupts.
+          // A stale or unresponsive turn must not leave its card stuck open.
+          if (questionRequestId) {
+            const cancelled = yield* asyncQuestions.cancel(questionRequestId);
+            if (
+              !cancelled &&
+              questionRequestId.startsWith("async:") &&
+              !(yield* asyncQuestions.has(questionRequestId))
+            ) {
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                method: "serverRequest/resolved",
+                requestId: questionRequestId,
+                payload: {
+                  threadId: providerThreadId,
+                  requestId: questionRequestId,
+                  t3UserInputResolved: "closed",
+                },
+              });
+            }
+          }
           // Stop-everything: children are full threads with their own turns;
           // interrupting only the parent leaves the fleet running. Interrupt
           // each live child turn first, best-effort per child, BOUNDED: the
@@ -1835,13 +2047,12 @@ export const makeCodexSessionRuntime = (
             { concurrency: 8, discard: true },
           ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
           const effectiveTurnId = turnId ?? session.activeTurnId;
-          if (!effectiveTurnId) {
-            return;
+          if (effectiveTurnId) {
+            yield* client.request("turn/interrupt", {
+              threadId: providerThreadId,
+              turnId: effectiveTurnId,
+            });
           }
-          yield* client.request("turn/interrupt", {
-            threadId: providerThreadId,
-            turnId: effectiveTurnId,
-          });
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
@@ -1893,15 +2104,16 @@ export const makeCodexSessionRuntime = (
             },
           });
         }),
-      respondToUserInput: (requestId, answers) =>
+      respondToUserInput: (requestId, answers, images) =>
         Effect.gen(function* () {
+          const codexAnswers = yield* toCodexUserInputAnswers(answers);
+          if (yield* asyncQuestions.answer(requestId, codexAnswers, images)) return;
           const pending = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
           if (!pending) {
             return yield* new CodexSessionRuntimePendingUserInputNotFoundError({
               requestId,
             });
           }
-          const codexAnswers = yield* toCodexUserInputAnswers(answers);
           yield* Ref.update(pendingUserInputsRef, (current) => {
             const next = new Map(current);
             next.delete(requestId);

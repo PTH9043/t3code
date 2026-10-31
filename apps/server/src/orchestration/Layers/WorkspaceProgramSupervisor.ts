@@ -21,7 +21,7 @@ import {
   type WorkspaceProgramRun,
 } from "@t3tools/contracts";
 import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -47,6 +47,12 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
+  HUB_COMMAND_ENV,
+  HUB_YIELD_EXIT_CODE,
+  hubEnvironment,
+  windowsJobGuardCandidates,
+} from "../hubMemoryGuard.ts";
+import {
   buildWorkspaceProgramIntegrityTask,
   evaluateWorkspaceProgramIntegrityRun,
 } from "../workspaceProgramIntegrity.ts";
@@ -59,6 +65,8 @@ const MAX_LOG_CHARS = 65_536;
 const LOG_PERSIST_INTERVAL_MS = 1_000;
 const STOP_SIGNAL_GRACE = Duration.seconds(2);
 const STOP_TIMEOUT = Duration.seconds(5);
+/** How long a program that yielded its hub slot waits before it is started again. */
+const HUB_YIELD_RETRY = Duration.seconds(60);
 const ANSI_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const SECRET_NAME_PATTERN = /(token|secret|password|passwd|api.?key|auth|cookie)/i;
 
@@ -142,6 +150,7 @@ interface LiveProgram {
   run: WorkspaceProgramRun;
   intentionalStop: boolean;
   lastPersistedAt: number;
+  logFlushScheduled: boolean;
   unsubscribeData: () => void;
   unsubscribeExit: () => void;
 }
@@ -153,12 +162,16 @@ type WorkItem =
       readonly incidentId?: WorkspaceIncidentId;
     }
   | { readonly type: "stop"; readonly projectId: ProjectId; readonly programId: WorkspaceProgramId }
+  | { readonly type: "hub-ready"; readonly key: string; readonly runId: WorkspaceProgramRunId }
+  | { readonly type: "program-updated"; readonly program: WorkspaceProgram }
+  | { readonly type: "stop-project"; readonly projectId: ProjectId }
   | {
       readonly type: "restart";
       readonly program: WorkspaceProgram;
       readonly incidentId?: WorkspaceIncidentId;
     }
   | { readonly type: "output"; readonly key: string; readonly pid: number; readonly data: string }
+  | { readonly type: "flush-logs"; readonly key: string; readonly runId: WorkspaceProgramRunId }
   | {
       readonly type: "exit";
       readonly key: string;
@@ -253,7 +266,10 @@ function shellFor(platform: NodeJS.Platform, command: string): { shell: string; 
   return { shell: process.env.SHELL?.trim() || "/bin/sh", args: ["-lc", command] };
 }
 
-function programEnvironment(program: WorkspaceProgram): NodeJS.ProcessEnv {
+function programEnvironment(
+  program: WorkspaceProgram,
+  hubVariables: Readonly<Record<string, string>> = {},
+): NodeJS.ProcessEnv {
   const retained = [
     "PATH",
     "Path",
@@ -270,12 +286,17 @@ function programEnvironment(program: WorkspaceProgram): NodeJS.ProcessEnv {
     "TERM",
   ];
   const names = new Set([...retained, ...program.environmentVariableNames]);
-  return Object.fromEntries(
-    [...names].flatMap((name) => {
-      const value = process.env[name];
-      return value === undefined ? [] : [[name, value]];
-    }),
-  );
+  return {
+    ...Object.fromEntries(
+      [...names].flatMap((name) => {
+        const value = process.env[name];
+        return value === undefined ? [] : [[name, value]];
+      }),
+    ),
+    // Hub-computed values (shared dataset paths, commit cap) are the one thing
+    // the allowlist cannot express: they exist nowhere in the server's own env.
+    ...hubVariables,
+  };
 }
 
 function redactSecrets(value: string, program: WorkspaceProgram): string {
@@ -376,11 +397,23 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcessPlatform;
+  const architecture = yield* HostProcessArchitecture;
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4;
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
   const livePrograms = new Map<string, LiveProgram>();
+  let shuttingDown = false;
+  /** Starts waiting for a hub concurrency slot, keyed like livePrograms. */
+  const queuedStarts = new Map<
+    string,
+    {
+      program: WorkspaceProgram;
+      incidentId: WorkspaceIncidentId | undefined;
+      run: WorkspaceProgramRun;
+      ready: boolean;
+    }
+  >();
   const incidentByFingerprint = new Map<string, WorkspaceIncident>();
   const restartIncidentByProgram = new Map<string, WorkspaceIncidentId>();
   /** Last time each (program, fingerprint) pair opened an incident, to coalesce repeats. */
@@ -688,8 +721,24 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
   const persistLiveRun = Effect.fn("WorkspaceProgramSupervisor.persistLiveRun")(function* (
     state: LiveProgram,
   ) {
+    if (state.logFlushScheduled) return;
     const at = yield* nowIso;
-    if (Date.parse(at) - state.lastPersistedAt < LOG_PERSIST_INTERVAL_MS) return;
+    const remaining = LOG_PERSIST_INTERVAL_MS - (Date.parse(at) - state.lastPersistedAt);
+    if (remaining > 0) {
+      state.logFlushScheduled = true;
+      yield* forkParked(
+        Effect.sleep(Duration.millis(remaining)).pipe(
+          Effect.andThen(
+            worker.enqueue({
+              type: "flush-logs",
+              key: keyOf(state.program.projectId, state.program.id),
+              runId: state.run.id,
+            }),
+          ),
+        ),
+      );
+      return;
+    }
     state.lastPersistedAt = Date.parse(at);
     state.run = { ...state.run, updatedAt: at };
     yield* dispatchRun(state.run);
@@ -727,8 +776,58 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     );
   };
 
+  const queueStart = Effect.fn("WorkspaceProgramSupervisor.queueStart")(function* (
+    program: WorkspaceProgram,
+    incidentId?: WorkspaceIncidentId,
+    ready = true,
+  ) {
+    const key = keyOf(program.projectId, program.id);
+    if (!program.enabled || shuttingDown) return;
+    const pending = queuedStarts.get(key);
+    if (pending !== undefined) {
+      pending.ready = ready;
+      pending.program = program;
+      pending.incidentId = incidentId;
+      return;
+    }
+    const at = yield* nowIso;
+    const run: WorkspaceProgramRun = {
+      id: WorkspaceProgramRunId.make(yield* randomUUID),
+      projectId: program.projectId,
+      programId: program.id,
+      status: "starting",
+      pid: null,
+      startedAt: at,
+      stoppedAt: null,
+      exitCode: null,
+      exitSignal: null,
+      healthStatus: "unknown",
+      consecutiveHealthFailures: 0,
+      lastHealthCheckAt: null,
+      lastHealthFailure: null,
+      recentLogTail: ready
+        ? program.hubMemory.concurrencyGroup === null
+          ? ""
+          : "허브 실행 슬롯 대기 중\n"
+        : "허브 대기 양보: 60초 후 다시 시작합니다.\n",
+      updatedAt: at,
+    };
+    queuedStarts.set(key, { program, incidentId, run, ready });
+    if (!ready || program.hubMemory.concurrencyGroup !== null || livePrograms.has(key)) {
+      yield* dispatchRun(run);
+    }
+    if (!ready) {
+      yield* forkParked(
+        Effect.sleep(HUB_YIELD_RETRY).pipe(
+          Effect.andThen(worker.enqueue({ type: "hub-ready", key, runId: run.id })),
+        ),
+      );
+    }
+  });
+
   const startProgram = Effect.fn("WorkspaceProgramSupervisor.startProgram")(function* (
     program: WorkspaceProgram,
+    queuedRun: WorkspaceProgramRun,
     incidentId?: WorkspaceIncidentId,
   ) {
     const key = keyOf(program.projectId, program.id);
@@ -739,32 +838,52 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     const root = path.resolve(project.value.workspaceRoot);
     const relative = path.relative(root, cwd).replaceAll("\\", "/");
     if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) {
+      const stoppedAt = yield* nowIso;
+      yield* dispatchRun({
+        ...queuedRun,
+        status: "failed",
+        stoppedAt,
+        updatedAt: stoppedAt,
+        recentLogTail: "프로그램 실행 경로가 프로젝트 폴더 밖을 가리킵니다.",
+      });
       return yield* Effect.logWarning("Workspace program directory escaped its project", {
         projectId: program.projectId,
         programId: program.id,
       });
     }
+    const hub = hubEnvironment(program, root, path);
+    if (hub.rejectedDatasets.length > 0) {
+      yield* Effect.logWarning("Workspace program shared datasets escaped the project root", {
+        projectId: program.projectId,
+        programId: program.id,
+        datasets: hub.rejectedDatasets,
+      });
+    }
     const startedAt = yield* nowIso;
-    const runId = WorkspaceProgramRunId.make(yield* randomUUID);
     let run: WorkspaceProgramRun = {
-      id: runId,
-      projectId: program.projectId,
-      programId: program.id,
-      status: "starting",
-      pid: null,
+      ...queuedRun,
       startedAt,
-      stoppedAt: null,
-      exitCode: null,
-      exitSignal: null,
-      healthStatus: "unknown",
-      consecutiveHealthFailures: 0,
-      lastHealthCheckAt: null,
-      lastHealthFailure: null,
       recentLogTail: "",
       updatedAt: startedAt,
     };
     yield* dispatchRun(run);
-    const shell = shellFor(platform, program.command);
+    // A commit cap needs a Windows Job Object around the program; the guard
+    // reads the command from the environment so nothing here re-quotes it.
+    // Elsewhere the cap is advisory (published, not enforced).
+    const guarded = platform === "win32" && program.hubMemory.commitLimitMb !== null;
+    let shell = shellFor(platform, program.command);
+    if (guarded) {
+      const candidates = windowsJobGuardCandidates(path, architecture);
+      // A missing binary fails through the normal spawn-failure path, never without a cap.
+      let binary = candidates[0]!;
+      for (const candidate of candidates) {
+        if (yield* fileSystem.exists(candidate)) {
+          binary = candidate;
+          break;
+        }
+      }
+      shell = { shell: binary, args: [] };
+    }
     const spawned = yield* Effect.result(
       ptyAdapter.spawn({
         shell: shell.shell,
@@ -772,7 +891,10 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
         cwd,
         cols: 120,
         rows: 30,
-        env: programEnvironment(program),
+        env: programEnvironment(program, {
+          ...hub.env,
+          ...(guarded ? { [HUB_COMMAND_ENV]: program.command } : {}),
+        }),
       }),
     );
     if (spawned._tag === "Failure") {
@@ -814,6 +936,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
       run,
       intentionalStop: false,
       lastPersistedAt: Date.parse(run.updatedAt),
+      logFlushScheduled: false,
       unsubscribeData: () => undefined,
       unsubscribeExit: () => undefined,
     };
@@ -834,6 +957,62 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
       yield* resolveIncident(program.projectId, incidentId);
     }
     yield* startHealthLoop(state);
+  });
+
+  const cancelQueuedStart = Effect.fn("WorkspaceProgramSupervisor.cancelQueuedStart")(function* (
+    projectId: ProjectId,
+    programId: WorkspaceProgramId,
+  ) {
+    const key = keyOf(projectId, programId);
+    const pending = queuedStarts.get(key);
+    queuedStarts.delete(key);
+    if (pending === undefined) return;
+    const program = yield* programRepository.getProgram({ projectId, programId });
+    if (Option.isNone(program)) return;
+    const stoppedAt = yield* nowIso;
+    yield* dispatchRun({ ...pending.run, status: "exited", stoppedAt, updatedAt: stoppedAt });
+  });
+
+  /** Re-read definitions at admission; a queued snapshot must not undo edits or removals. */
+  const drainQueuedStarts = Effect.fn("WorkspaceProgramSupervisor.drainQueuedStarts")(function* () {
+    if (shuttingDown) return;
+    const definitions = new Map<ProjectId, ReadonlyArray<WorkspaceProgram>>();
+    for (const [key, pending] of queuedStarts) {
+      const projectId = pending.program.projectId;
+      let programs = definitions.get(projectId);
+      if (programs === undefined) {
+        programs = yield* programRepository.listPrograms(projectId);
+        definitions.set(projectId, programs);
+      }
+      const program = programs.find((candidate) => candidate.id === pending.program.id);
+      if (program === undefined || !program.enabled) {
+        yield* cancelQueuedStart(projectId, pending.program.id);
+        continue;
+      }
+      if (!pending.ready || livePrograms.has(key)) continue;
+      const group = program.hubMemory.concurrencyGroup;
+      if (group !== null) {
+        const running = [...livePrograms.values()].filter(
+          (state) =>
+            state.program.projectId === projectId &&
+            state.program.hubMemory.concurrencyGroup === group,
+        );
+        // A group has one effective limit. Conflicting member settings use the strictest cap,
+        // including the definitions of processes already running under an older setting.
+        const slots = Math.min(
+          ...[
+            program,
+            ...programs.filter((entry) => entry.enabled),
+            ...running.map((state) => state.program),
+          ]
+            .filter((entry) => entry.hubMemory.concurrencyGroup === group)
+            .map((entry) => entry.hubMemory.concurrencySlots ?? 1),
+        );
+        if (running.length >= slots) continue;
+      }
+      queuedStarts.delete(key);
+      yield* startProgram(program, pending.run, pending.incidentId);
+    }
   });
 
   /**
@@ -865,6 +1044,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     programId: WorkspaceProgramId,
   ) {
     const key = keyOf(projectId, programId);
+    yield* cancelQueuedStart(projectId, programId);
     const state = livePrograms.get(key);
     if (state === undefined) return;
     state.intentionalStop = true;
@@ -1153,15 +1333,42 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
   ) {
     switch (item.type) {
       case "start":
-        yield* startProgram(item.program, item.incidentId);
+        if (!livePrograms.has(keyOf(item.program.projectId, item.program.id))) {
+          yield* queueStart(item.program, item.incidentId);
+        }
+        return;
+      case "hub-ready": {
+        const pending = queuedStarts.get(item.key);
+        if (pending?.run.id === item.runId) pending.ready = true;
+        return;
+      }
+      case "program-updated":
+        if (!item.program.enabled) yield* stopProgram(item.program.projectId, item.program.id);
+        return;
+      case "stop-project":
+        for (const [key, pending] of queuedStarts) {
+          if (pending.program.projectId === item.projectId) queuedStarts.delete(key);
+        }
+        for (const state of livePrograms.values()) {
+          if (state.program.projectId === item.projectId) {
+            yield* stopProgram(item.projectId, state.program.id);
+          }
+        }
         return;
       case "stop":
         yield* stopProgram(item.projectId, item.programId);
         return;
       case "restart":
         yield* stopProgram(item.program.projectId, item.program.id);
-        yield* startProgram(item.program, item.incidentId);
+        yield* queueStart(item.program, item.incidentId);
         return;
+      case "flush-logs": {
+        const state = livePrograms.get(item.key);
+        if (state === undefined || state.run.id !== item.runId) return;
+        state.logFlushScheduled = false;
+        yield* persistLiveRun(state);
+        return;
+      }
       case "output": {
         const state = livePrograms.get(item.key);
         if (state === undefined || state.process.pid !== item.pid) return;
@@ -1203,9 +1410,16 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           if (key.startsWith(`${item.key}:`)) incidentCoalesceAt.delete(key);
         }
         const stoppedAt = yield* nowIso;
+        // Exit 75 from a grouped program is a hub yield: it saved its state and
+        // handed the slot back (hub_wait.pause). Not a failure, and it comes
+        // back after the retry delay — behind any sibling already queued.
+        const yielded =
+          !state.intentionalStop &&
+          item.event.exitCode === HUB_YIELD_EXIT_CODE &&
+          state.program.hubMemory.concurrencyGroup !== null;
         state.run = {
           ...state.run,
-          status: state.intentionalStop ? "exited" : "failed",
+          status: state.intentionalStop || yielded ? "exited" : "failed",
           pid: null,
           stoppedAt,
           exitCode: item.event.exitCode,
@@ -1213,6 +1427,10 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
           updatedAt: stoppedAt,
         };
         yield* dispatchRun(state.run);
+        if (yielded) {
+          yield* queueStart(state.program, undefined, false);
+          state.intentionalStop = true;
+        }
         if (!state.intentionalStop) {
           const repairIncidentId = restartIncidentByProgram.get(item.key);
           if (repairIncidentId !== undefined) {
@@ -1353,7 +1571,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
             `프로그램 ID: ${current.programId}`,
             `요약: ${current.summary}`,
             `자동 진단: ${current.diagnosis ?? "없음"}`,
-            "수정 후 관련 검증을 수행하세요. Fable은 필수 검증이 모두 통과하고 신뢰도가 낮지 않을 때만 구조화된 최종 합성 결과의 repairApproved를 true로 설정해야 합니다.",
+            "수정 후 관련 검증을 수행하세요. 총괄 모델은 필수 검증이 모두 통과하고 신뢰도가 낮지 않을 때만 구조화된 최종 합성 결과의 repairApproved를 true로 설정해야 합니다.",
           ].join("\n\n"),
           createdAt,
         });
@@ -1431,6 +1649,17 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
 
   worker = yield* makeDrainableWorker((item: WorkItem) =>
     processWork(item).pipe(
+      Effect.andThen(
+        item.type === "start" ||
+          item.type === "stop" ||
+          item.type === "restart" ||
+          item.type === "exit" ||
+          item.type === "hub-ready" ||
+          item.type === "program-updated" ||
+          item.type === "stop-project"
+          ? drainQueuedStarts()
+          : Effect.void,
+      ),
       Effect.catchCause((cause) =>
         Effect.logError("Workspace program supervisor work item failed", {
           type: item.type,
@@ -1445,13 +1674,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
       case "project.program-upserted":
         return Effect.gen(function* () {
           const program = event.payload.program;
-          if (!program.enabled && livePrograms.has(keyOf(program.projectId, program.id))) {
-            yield* worker.enqueue({
-              type: "stop",
-              projectId: program.projectId,
-              programId: program.id,
-            });
-          }
+          yield* worker.enqueue({ type: "program-updated", program });
           if (program.integrity.enabled && program.integrity.status === "queued") {
             yield* worker.enqueue({
               type: "integrity-cycle",
@@ -1581,18 +1804,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
             (tracked) => worker.enqueue({ type: "integrity-stop", ...tracked }),
             { concurrency: 1, discard: true },
           );
-          yield* Effect.forEach(
-            [...livePrograms.values()].filter(
-              (state) => state.program.projectId === event.payload.projectId,
-            ),
-            (state) =>
-              worker.enqueue({
-                type: "stop",
-                projectId: state.program.projectId,
-                programId: state.program.id,
-              }),
-            { concurrency: 1, discard: true },
-          );
+          yield* worker.enqueue({ type: "stop-project", projectId: event.payload.projectId });
         });
       default:
         return Effect.void;
@@ -1700,20 +1912,24 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     if (started) return;
     started = true;
     yield* Effect.addFinalizer(() =>
-      Effect.forEach(
-        [...livePrograms.values()],
-        (state) =>
-          stopProgram(state.program.projectId, state.program.id).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Workspace program shutdown failed", {
-                projectId: state.program.projectId,
-                programId: state.program.id,
-                cause: conciseCause(cause),
-              }),
+      Effect.gen(function* () {
+        shuttingDown = true;
+        queuedStarts.clear();
+        yield* Effect.forEach(
+          [...livePrograms.values()],
+          (state) =>
+            stopProgram(state.program.projectId, state.program.id).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Workspace program shutdown failed", {
+                  projectId: state.program.projectId,
+                  programId: state.program.id,
+                  cause: conciseCause(cause),
+                }),
+              ),
             ),
-          ),
-        { concurrency: 1, discard: true },
-      ),
+          { concurrency: 1, discard: true },
+        );
+      }),
     );
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
@@ -1778,7 +1994,8 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
       (run) =>
         Effect.gen(function* () {
           const stoppedAt = yield* nowIso;
-          const wasStopping = run.status === "stopping";
+          const wasStopping =
+            run.status === "stopping" || (run.status === "starting" && run.pid === null);
           const recoveredRun: WorkspaceProgramRun = {
             ...run,
             status: wasStopping ? "exited" : "failed",

@@ -97,6 +97,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
       try {
         const images = await convertPastedImagesToAttachments({
           uris,
+          existingBytes: attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0),
           existingCount: attachments.length,
         });
         if (images.length > 0) {
@@ -137,7 +138,10 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
   }, [selectedLines, selectedTheme, target]);
 
   async function handlePickImages(): Promise<void> {
-    const result = await pickComposerImages({ existingCount: attachments.length });
+    const result = await pickComposerImages({
+      existingBytes: attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0),
+      existingCount: attachments.length,
+    });
     if (result.images.length > 0) {
       setAttachments((current) => [...current, ...result.images]);
     }

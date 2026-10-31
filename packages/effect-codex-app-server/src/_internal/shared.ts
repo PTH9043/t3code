@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import * as CodexError from "../errors.ts";
+import { preserveAsyncQuestionMetadata } from "./asyncQuestion.ts";
 
 export const JsonRpcId = Schema.Union([Schema.Number, Schema.String]);
 
@@ -65,6 +66,7 @@ export const decodeNotificationPayload = <A, I>(
   raw: unknown,
 ): Effect.Effect<A, CodexError.CodexAppServerProtocolParseError> =>
   decodeOptionalPayload(method, schema, raw).pipe(
+    Effect.map((decoded) => preserveAsyncQuestionMetadata(method, raw, decoded)),
     Effect.mapError((error) =>
       CodexError.CodexAppServerProtocolParseError.fromRequestError(
         "decode-notification-payload",

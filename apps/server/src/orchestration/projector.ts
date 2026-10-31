@@ -37,6 +37,7 @@ import {
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
 } from "./Schemas.ts";
+import { importedConversationMessages, importedConversationActivity } from "@t3tools/contracts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -341,8 +342,22 @@ export function projectEvent(
             snoozedUntil: null,
             snoozedAt: null,
             deletedAt: null,
-            messages: [],
-            activities: [],
+            messages: payload.importedConversation
+              ? importedConversationMessages(
+                  payload.threadId,
+                  payload.importedConversation,
+                  payload.createdAt,
+                )
+              : [],
+            activities: payload.importedConversation
+              ? [
+                  importedConversationActivity(
+                    payload.threadId,
+                    payload.importedConversation,
+                    payload.createdAt,
+                  ),
+                ]
+              : [],
             checkpoints: [],
             session: null,
           },

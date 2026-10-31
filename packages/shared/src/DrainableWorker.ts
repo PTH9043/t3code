@@ -11,6 +11,8 @@
 import * as Scope from "effect/Scope";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
+import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
@@ -70,66 +72,97 @@ export const makeDrainableWorker = <A, E, R>(
     return { enqueue, drain } satisfies DrainableWorker<A>;
   });
 
+export interface KeyedDrainableWorker<A> extends DrainableWorker<A> {
+  readonly activeKeyCount: Effect.Effect<number>;
+}
+
 /**
- * Create a drainable worker that serializes items per key while processing
- * different keys concurrently.
- *
- * Each key lazily gets its own long-lived worker (created in the scope this
- * constructor ran in), so items sharing a key run strictly in enqueue order
- * while distinct keys never wait on each other. The per-key fiber is
- * deliberately eternal — the same lifetime as `makeDrainableWorker`'s single
- * fiber — because handlers fork session-lifetime child fibers that must
- * outlive the item that spawned them; a short-lived per-item fiber would
- * interrupt those children the moment its item settled.
- *
- * `drain` resolves once every enqueued item, across all keys, has finished.
- *
- * Known trade-off: per-key workers are never reclaimed, so a long-lived
- * worker keyed by an unbounded identifier (thread ids, say) accumulates one
- * parked fiber and empty queue per key ever seen. Each costs only memory —
- * acceptable for the current consumers, but key by something bounded if that
- * ever changes.
+ * Serialize queued items per key and release idle queues and fibers.
+ * Session-lifetime work must fork into its owning session scope; handlers
+ * still receive the constructor's context for scoped effects.
  */
 export const makeKeyedDrainableWorker = <A, E, R>(
   keyOf: (item: A) => string,
   process: (item: A) => Effect.Effect<void, E, R>,
-): Effect.Effect<DrainableWorker<A>, never, Scope.Scope | R> =>
+): Effect.Effect<KeyedDrainableWorker<A>, never, Scope.Scope | R> =>
   Effect.gen(function* () {
     const context = yield* Effect.context<Scope.Scope | R>();
+    const owner = yield* Scope.Scope;
     const outstanding = yield* TxRef.make(0);
-    const workers = new Map<string, DrainableWorker<A>>();
-    // Guards the check-then-create window below: concurrent enqueues for the
-    // same fresh key would otherwise each build a worker and split the items
-    // across two queues, silently breaking the per-key order contract.
-    const workerCreation = yield* Semaphore.make(1);
+    const queues = new Map<string, TxQueue.TxQueue<A>>();
+    const gate = yield* Semaphore.make(1);
+    let closed = false;
 
-    // Global accounting wraps the per-key workers' own (unused) counters so
-    // drain() covers items regardless of which key they landed on.
-    const counted = (item: A) =>
-      Effect.ensuring(process(item), TxRef.update(outstanding, (n) => n - 1).pipe(Effect.tx));
-
-    const workerForKey = (key: string) =>
-      workerCreation.withPermit(
+    yield* Effect.addFinalizer(() =>
+      gate.withPermit(
         Effect.gen(function* () {
-          let worker = workers.get(key);
-          if (worker === undefined) {
-            worker = yield* makeDrainableWorker(counted).pipe(Effect.provide(context));
-            workers.set(key, worker);
-          }
-          return worker;
+          closed = true;
+          for (const queue of queues.values()) yield* TxQueue.shutdown(queue);
+          queues.clear();
+          yield* TxRef.set(outstanding, 0).pipe(Effect.tx);
         }),
-      );
+      ),
+    );
+
+    const runKey = (key: string, queue: TxQueue.TxQueue<A>) =>
+      Effect.gen(function* () {
+        while (true) {
+          const next = yield* gate.withPermit(
+            Effect.gen(function* () {
+              const item = yield* TxQueue.poll(queue).pipe(Effect.tx);
+              if (Option.isNone(item)) {
+                if (queues.get(key) === queue) queues.delete(key);
+                yield* TxQueue.shutdown(queue);
+              }
+              return item;
+            }),
+          );
+          if (Option.isNone(next)) return;
+          let idle = false;
+          yield* process(next.value).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("Keyed worker item failed", { cause: Cause.pretty(cause) }),
+            ),
+            Effect.ensuring(
+              gate.withPermit(
+                Effect.gen(function* () {
+                  idle = (yield* TxQueue.size(queue)) === 0;
+                  if (idle) {
+                    if (queues.get(key) === queue) queues.delete(key);
+                    yield* TxQueue.shutdown(queue);
+                  }
+                  yield* TxRef.update(outstanding, (n) => n - 1).pipe(Effect.tx);
+                }),
+              ),
+            ),
+          );
+          if (idle) return;
+        }
+      });
 
     const enqueue = (item: A) =>
-      // Uninterruptible so the outstanding increment and the queue offer
-      // cannot be separated by an interrupt — a bare increment would leave
-      // drain() retrying forever.
-      Effect.uninterruptible(
+      gate.withPermit(
         Effect.gen(function* () {
-          yield* TxRef.update(outstanding, (n) => n + 1).pipe(Effect.tx);
-          const worker = yield* workerForKey(keyOf(item));
-          yield* worker.enqueue(item);
-        }),
+          if (closed) return;
+          const key = keyOf(item);
+          let queue = queues.get(key);
+          const create = queue === undefined;
+          if (queue === undefined) {
+            queue = yield* TxQueue.unbounded<A>();
+            queues.set(key, queue);
+          }
+          yield* TxQueue.offer(queue, item).pipe(
+            Effect.andThen(TxRef.update(outstanding, (n) => n + 1)),
+            Effect.tx,
+          );
+          if (create)
+            yield* runKey(key, queue).pipe(
+              Effect.provide(context),
+              Effect.forkIn(owner, { uninterruptible: false }),
+            );
+        }).pipe(Effect.uninterruptible),
       );
 
     const drain: DrainableWorker<A>["drain"] = TxRef.get(outstanding).pipe(
@@ -137,5 +170,9 @@ export const makeKeyedDrainableWorker = <A, E, R>(
       Effect.tx,
     );
 
-    return { enqueue, drain } satisfies DrainableWorker<A>;
+    return {
+      enqueue,
+      drain,
+      activeKeyCount: Effect.sync(() => queues.size),
+    } satisfies KeyedDrainableWorker<A>;
   });

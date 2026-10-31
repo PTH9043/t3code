@@ -17,12 +17,16 @@ const PATH_CAPTURE_END = "__T3CODE_PATH_END__";
 const SHELL_ENV_NAME_PATTERN = /^[A-Z0-9_]+$/;
 const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
-const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
-
 type ExecFileSyncLike = (
   file: string,
   args: ReadonlyArray<string>,
   options: { encoding: "utf8"; timeout: number },
+) => string;
+
+type WindowsExecFileSyncLike = (
+  file: string,
+  args: ReadonlyArray<string>,
+  options: { encoding: "utf16le"; timeout: number; windowsHide: true },
 ) => string;
 
 function canExecuteFile(filePath: string): boolean {
@@ -142,6 +146,7 @@ export const SpawnExecutableResolution = Context.Reference<SpawnExecutableResolv
 );
 
 export interface WindowsEnvironmentProbeOptions {
+  /** Retained for callers compiled against the old probe; CMD does not load shell profiles. */
   readonly loadProfile?: boolean;
 }
 
@@ -261,24 +266,6 @@ function buildEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
     .join("; ");
 }
 
-function buildWindowsEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    ...names.flatMap((name) => {
-      if (!SHELL_ENV_NAME_PATTERN.test(name)) {
-        throw new Error(`Unsupported environment variable name: ${name}`);
-      }
-
-      return [
-        `Write-Output '${envCaptureStart(name)}'`,
-        `$value = [Environment]::GetEnvironmentVariable('${name}')`,
-        "if ($null -ne $value -and $value.Length -gt 0) { Write-Output $value }",
-        `Write-Output '${envCaptureEnd(name)}'`,
-      ];
-    }),
-  ].join("; ");
-}
-
 function extractEnvironmentValue(output: string, name: string): string | undefined {
   const startMarker = envCaptureStart(name);
   const endMarker = envCaptureEnd(name);
@@ -349,56 +336,53 @@ export const CommandAvailability = Context.Reference<CommandAvailabilityChecker>
 
 export function readEnvironmentFromWindowsShell(
   names: ReadonlyArray<string>,
-  execFile?: ExecFileSyncLike,
+  execFile?: WindowsExecFileSyncLike,
 ): Partial<Record<string, string>>;
 export function readEnvironmentFromWindowsShell(
   names: ReadonlyArray<string>,
   options?: WindowsEnvironmentProbeOptions,
-  execFile?: ExecFileSyncLike,
+  execFile?: WindowsExecFileSyncLike,
 ): Partial<Record<string, string>>;
 export function readEnvironmentFromWindowsShell(
   names: ReadonlyArray<string>,
-  optionsOrExecFile?: WindowsEnvironmentProbeOptions | ExecFileSyncLike,
-  maybeExecFile?: ExecFileSyncLike,
+  optionsOrExecFile?: WindowsEnvironmentProbeOptions | WindowsExecFileSyncLike,
+  maybeExecFile?: WindowsExecFileSyncLike,
 ): Partial<Record<string, string>> {
   if (names.length === 0) {
     return {};
   }
 
-  const options =
-    typeof optionsOrExecFile === "function"
-      ? ({} satisfies WindowsEnvironmentProbeOptions)
-      : (optionsOrExecFile ?? {});
-  const execFile: ExecFileSyncLike =
-    typeof optionsOrExecFile === "function"
-      ? optionsOrExecFile
-      : (maybeExecFile ?? (NodeChildProcess.execFileSync as ExecFileSyncLike));
-  const command = buildWindowsEnvironmentCaptureCommand(names);
-  const args = [
-    "-NoLogo",
-    ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
-    "-NonInteractive",
-    "-Command",
-    command,
-  ];
-  for (const shell of WINDOWS_SHELL_CANDIDATES) {
-    try {
-      const output = execFile(shell, args, { encoding: "utf8", timeout: 5000 });
-
-      const environment: Partial<Record<string, string>> = {};
-      for (const name of names) {
-        const value = extractEnvironmentValue(output, name);
-        if (value !== undefined) {
-          environment[name] = value;
-        }
-      }
-      return environment;
-    } catch {
-      continue;
+  for (const name of names) {
+    if (!SHELL_ENV_NAME_PATTERN.test(name)) {
+      throw new Error(`Unsupported environment variable name: ${name}`);
     }
   }
 
-  return {};
+  const execFile: WindowsExecFileSyncLike =
+    typeof optionsOrExecFile === "function"
+      ? optionsOrExecFile
+      : (maybeExecFile ?? NodeChildProcess.execFileSync);
+  try {
+    const output = execFile("cmd.exe", ["/d", "/u", "/c", "set"], {
+      encoding: "utf16le",
+      timeout: 5000,
+      windowsHide: true,
+    });
+    const requestedNames = new Set(names);
+    const environment: Partial<Record<string, string>> = {};
+    for (const line of output.replace(/^\uFEFF/u, "").split(/\r?\n/u)) {
+      const separator = line.indexOf("=");
+      if (separator <= 0) continue;
+      const name = line.slice(0, separator).toUpperCase();
+      const value = line.slice(separator + 1);
+      if (requestedNames.has(name) && value.length > 0) {
+        environment[name] = value;
+      }
+    }
+    return environment;
+  } catch {
+    return {};
+  }
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -753,52 +737,24 @@ function readWindowsEnvironmentSafely(
   }
 }
 
-function mergeWindowsEnv(
-  currentEnv: NodeJS.ProcessEnv,
-  patch: Partial<Record<string, string>>,
-): NodeJS.ProcessEnv {
-  const nextEnv: NodeJS.ProcessEnv = { ...currentEnv };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value !== undefined) {
-      nextEnv[key] = value;
-    }
-  }
-  return nextEnv;
-}
-
 export const resolveWindowsEnvironment = Effect.fn("shell.resolveWindowsEnvironment")(function* (
   env: NodeJS.ProcessEnv,
 ): Effect.fn.Return<Partial<NodeJS.ProcessEnv>, never, FileSystem.FileSystem | Path.Path> {
   const readEnvironment = yield* WindowsShellEnvironment;
-  const commandAvailable = yield* CommandAvailability;
   const inheritedPath = readEnvPath(env);
-  const shellPath = readWindowsEnvironmentSafely(readEnvironment, ["PATH"], {
-    loadProfile: false,
-  }).PATH;
-  const mergedPath = mergePathValues(shellPath, inheritedPath, "win32");
+  const shellEnvironment = readWindowsEnvironmentSafely(readEnvironment, [
+    "PATH",
+    "FNM_DIR",
+    "FNM_MULTISHELL_PATH",
+  ]);
+  const mergedPath = mergePathValues(shellEnvironment.PATH, inheritedPath, "win32");
   const knownCliPath = resolveKnownWindowsCliDirs(env).join(WINDOWS_PATH_DELIMITER);
-  const baselinePath = mergePathValues(knownCliPath, mergedPath, "win32");
-  const baselinePatch: Partial<NodeJS.ProcessEnv> = baselinePath ? { PATH: baselinePath } : {};
-  const baselineEnv = mergeWindowsEnv(env, baselinePatch);
-
-  if (yield* commandAvailable("node", { env: baselineEnv })) {
-    return baselinePatch;
-  }
-
-  const profiledEnvironment = readWindowsEnvironmentSafely(
-    readEnvironment,
-    ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"],
-    { loadProfile: true },
-  );
-  const profiledPath = mergePathValues(profiledEnvironment.PATH, baselinePath, "win32");
-  const profiledPatch: Partial<NodeJS.ProcessEnv> = {
-    ...(profiledPath ? { PATH: profiledPath } : {}),
-    ...(profiledEnvironment.FNM_DIR ? { FNM_DIR: profiledEnvironment.FNM_DIR } : {}),
-    ...(profiledEnvironment.FNM_MULTISHELL_PATH
-      ? { FNM_MULTISHELL_PATH: profiledEnvironment.FNM_MULTISHELL_PATH }
+  const path = mergePathValues(knownCliPath, mergedPath, "win32");
+  return {
+    ...(path ? { PATH: path } : {}),
+    ...(shellEnvironment.FNM_DIR ? { FNM_DIR: shellEnvironment.FNM_DIR } : {}),
+    ...(shellEnvironment.FNM_MULTISHELL_PATH
+      ? { FNM_MULTISHELL_PATH: shellEnvironment.FNM_MULTISHELL_PATH }
       : {}),
   };
-  return Object.keys(profiledPatch).length > 0
-    ? { ...baselinePatch, ...profiledPatch }
-    : baselinePatch;
 });

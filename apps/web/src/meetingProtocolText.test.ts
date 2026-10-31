@@ -64,7 +64,7 @@ describe("formatMeetingProtocolText", () => {
     expect(output).toContain("작업 2개:");
     expect(output).toContain("1. **구현** — codex");
     expect(output).toContain("핸들러를 작성한다.");
-    expect(output).toContain("2. **검증** — fable (의존: impl)");
+    expect(output).toContain("2. **검증** — 총괄 (의존: impl)");
     expect(output).toContain("다음: 구현 노드부터 실행");
   });
 
@@ -147,4 +147,12 @@ describe("formatMeetingProtocolText", () => {
     expect(output).toContain("🏁 최종 결과");
     expect(output).toContain("깨진 페이로드");
   });
+});
+
+it("renders the conductor's confirmed scope without protocol tags, including streaming", () => {
+  expect(formatMeetingProtocolText("<t3_ready>가격·지갑 검증</t3_ready>")).toContain(
+    "가격·지갑 검증",
+  );
+  expect(formatMeetingProtocolText("<t3_ready>가격·지갑 검증</t3_ready>")).not.toContain("<t3_");
+  expect(formatMeetingProtocolText("<t3_ready>가격·지갑")).not.toContain("<t3_");
 });

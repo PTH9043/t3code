@@ -59,6 +59,7 @@ export interface ThreadDetailScreenProps {
   readonly activePendingUserInputDrafts: Record<string, PendingUserInputDraftAnswer>;
   readonly activePendingUserInputAnswers: Record<string, string> | null;
   readonly respondingUserInputId: ApprovalRequestId | null;
+  readonly pickingUserInputId: ApprovalRequestId | null;
   readonly draftMessage: string;
   readonly draftAttachments: ReadonlyArray<DraftComposerImageAttachment>;
   readonly connectionStateLabel: EnvironmentConnectionPhase;
@@ -105,6 +106,15 @@ export interface ThreadDetailScreenProps {
     customAnswer: string,
   ) => void;
   readonly onSubmitUserInput: () => Promise<unknown>;
+  readonly onPickUserInputImages: (
+    requestId: ApprovalRequestId,
+    questionId: string,
+  ) => Promise<void>;
+  readonly onRemoveUserInputImage: (
+    requestId: ApprovalRequestId,
+    questionId: string,
+    imageId: string,
+  ) => void;
   readonly showContent?: boolean;
 }
 
@@ -426,9 +436,18 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       drafts={props.activePendingUserInputDrafts}
                       answers={props.activePendingUserInputAnswers}
                       respondingUserInputId={props.respondingUserInputId}
+                      pickingUserInputId={props.pickingUserInputId}
+                      canStop={
+                        props.activePendingUserInput.requestId.startsWith("async:") ||
+                        props.selectedThread.session?.status === "running" ||
+                        props.selectedThread.session?.status === "starting"
+                      }
+                      onStop={props.onStopThread}
                       onSelectOption={props.onSelectUserInputOption}
                       onChangeCustomAnswer={props.onChangeUserInputCustomAnswer}
                       onSubmit={props.onSubmitUserInput}
+                      onPickImages={props.onPickUserInputImages}
+                      onRemoveImage={props.onRemoveUserInputImage}
                     />
                   ) : null}
                 </Animated.View>
@@ -452,6 +471,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               environmentLabel={props.environmentLabel}
               threadSyncPhase={threadSyncPhase}
               selectedThread={props.selectedThread}
+              pendingQuestionRequestId={props.activePendingUserInput?.requestId}
               serverConfig={props.serverConfig}
               queueCount={props.selectedThreadQueueCount}
               activeThreadBusy={props.activeThreadBusy}

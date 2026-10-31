@@ -25,6 +25,7 @@ import type {
   ReviewDiffPreviewResult,
 } from "./review.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
+import type { DesktopJasnaBridge } from "./jasna.ts";
 import type { AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
 import type {
   ProjectListEntriesInput,
@@ -285,6 +286,8 @@ export interface DesktopEnvironmentBootstrap {
   // from id because a default-tracking instance keeps the stable
   // "wsl:default" IPC target while each run launches a specific distro.
   runningDistro?: string | null;
+  directRpc?: boolean;
+  directHost?: string;
   httpBaseUrl: string | null;
   wsBaseUrl: string | null;
   bootstrapToken?: string;
@@ -294,6 +297,8 @@ export const DesktopEnvironmentBootstrapSchema = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   runningDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  directRpc: Schema.optionalKey(Schema.Boolean),
+  directHost: Schema.optionalKey(Schema.String),
   httpBaseUrl: Schema.NullOr(Schema.String),
   wsBaseUrl: Schema.NullOr(Schema.String),
   bootstrapToken: Schema.optionalKey(Schema.String),
@@ -1004,7 +1009,93 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
   input: PreviewAutomationWaitForInput,
 });
 
+export const DesktopFileDropStatus = Schema.Struct({
+  stage: Schema.Literals([
+    "renderer.received",
+    "renderer.queued",
+    "renderer.rejected",
+    "composer.rendered",
+    "image.loaded",
+    "image.failed",
+  ]),
+  fileCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 8 })),
+  reason: Schema.optional(
+    Schema.Literals(["route-changed", "no-target", "no-files", "read-error", "chat", "project"]),
+  ),
+  point: Schema.optional(
+    Schema.Struct({
+      x: Schema.Int,
+      y: Schema.Int,
+      width: Schema.Int,
+      height: Schema.Int,
+      source: Schema.optional(Schema.Literals(["message", "payload"])),
+    }),
+  ),
+});
+export type DesktopFileDropStatus = typeof DesktopFileDropStatus.Type;
+
+export interface DesktopFileDrop {
+  readonly pointSource?: "message" | "payload";
+  readonly targetUrl: string;
+  readonly files: readonly {
+    readonly name: string;
+    readonly type: string;
+    readonly bytes: Uint8Array;
+  }[];
+  readonly x: number;
+  readonly y: number;
+  readonly error: string | null;
+}
+
+export interface DesktopDirectRpcBridge {
+  readonly open: (backendId?: string) => Promise<number>;
+  readonly send: (clientId: number, data: string) => Promise<void>;
+  readonly close: (clientId: number) => Promise<void>;
+  readonly onFrame: (
+    listener: (frame: import("./desktopDirect.ts").DesktopDirectRpcOutput) => void,
+  ) => () => void;
+}
+
 export interface DesktopBridge {
+  /** Desktop Google identity verification. It does not grant environment access by itself. */
+  googleSignIn?: {
+    readonly enrollT3?: (clientId: string) => Promise<{
+      readonly subject: string;
+      readonly expiresAt: string;
+      readonly email?: string;
+      readonly name?: string;
+    }>;
+    readonly loginT3?: () => Promise<{
+      readonly subject: string;
+      readonly expiresAt: string;
+      readonly email?: string;
+      readonly name?: string;
+    }>;
+    readonly unenrollT3?: () => Promise<boolean>;
+    readonly enrollmentStatusT3?: () => Promise<boolean>;
+    readonly logoutT3?: () => Promise<void>;
+    readonly start: (clientId: string) => Promise<{
+      readonly subject: string;
+      readonly expiresAt: string;
+      readonly email?: string;
+      readonly name?: string;
+    }>;
+    readonly cancel: () => Promise<void>;
+    readonly status: () => Promise<{
+      readonly subject: string;
+      readonly expiresAt: string;
+      readonly email?: string;
+      readonly name?: string;
+    } | null>;
+    readonly signOut: () => Promise<void>;
+  };
+  /** Direct RPC channel for this desktop's own backend. */
+  directRpc?: DesktopDirectRpcBridge;
+  /** Local video restoration through the selected Jasna installation. */
+  jasna?: DesktopJasnaBridge;
+  /** Windows shell drops accepted by the elevated main window. Older shells omit this bridge. */
+  onFilesDropped?: (listener: (drop: DesktopFileDrop) => void) => () => void;
+  reportFileDropStatus?: (status: DesktopFileDropStatus) => void;
   getAppBranding: () => DesktopAppBranding | null;
   // One bootstrap per pool instance currently registered with bootstrap
   // info (omits instances whose backend hasn't produced a config yet).

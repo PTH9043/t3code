@@ -4,6 +4,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import { ProviderExecutionContext } from "@t3tools/contracts";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
@@ -15,10 +17,13 @@ import { forkParked } from "../../serverActivation.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
 const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
-const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_ERROR_INACTIVITY_THRESHOLD_MS = 60 * 1000;
+const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
+const isExecutionContext = Schema.is(ProviderExecutionContext);
 
 export interface ProviderSessionReaperLiveOptions {
   readonly inactivityThresholdMs?: number;
+  readonly errorInactivityThresholdMs?: number;
   readonly sweepIntervalMs?: number;
 }
 
@@ -33,6 +38,10 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       options?.inactivityThresholdMs ?? DEFAULT_INACTIVITY_THRESHOLD_MS,
     );
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
+    const errorInactivityThresholdMs = Math.max(
+      1,
+      options?.errorInactivityThresholdMs ?? DEFAULT_ERROR_INACTIVITY_THRESHOLD_MS,
+    );
 
     const sweep = Effect.gen(function* () {
       const bindings = yield* directory.listBindings();
@@ -41,6 +50,18 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
       for (const binding of bindings) {
         if (binding.status === "stopped") {
+          continue;
+        }
+
+        // Orchestra session keys have no conversation row. Their executor owns
+        // completion and cleanup, including long turns and unanswered questions.
+        const payload = binding.runtimePayload;
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          "execution" in payload &&
+          isExecutionContext(payload.execution)
+        ) {
           continue;
         }
 
@@ -55,13 +76,17 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         }
 
         const idleDurationMs = now - lastSeenMs;
-        if (idleDurationMs < inactivityThresholdMs) {
+        if (idleDurationMs < Math.min(inactivityThresholdMs, errorInactivityThresholdMs)) {
           continue;
         }
 
         const thread = yield* projectionSnapshotQuery
           .getThreadShellById(binding.threadId)
           .pipe(Effect.map(Option.getOrUndefined));
+        const isFailed = thread?.session?.status === "error";
+        if (idleDurationMs < (isFailed ? errorInactivityThresholdMs : inactivityThresholdMs)) {
+          continue;
+        }
         if (thread?.session?.activeTurnId != null) {
           yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
             threadId: binding.threadId,
@@ -84,13 +109,32 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           continue;
         }
 
+        if (thread?.hasPendingApprovals || thread?.hasPendingUserInput) continue;
+        // A new turn may already be active in the adapter before its projection arrives.
+        if (isFailed) {
+          const live = yield* providerService.listSessions();
+          if (
+            live.some(
+              (session) => session.threadId === binding.threadId && session.activeTurnId != null,
+            )
+          )
+            continue;
+        }
+        if (isFailed) {
+          const current = (yield* directory.listBindings()).find(
+            (candidate) => candidate.threadId === binding.threadId,
+          );
+          if (!current || current.lastSeenAt !== binding.lastSeenAt || current.status === "stopped")
+            continue;
+        }
+
         const reaped = yield* providerService.stopSession({ threadId: binding.threadId }).pipe(
           Effect.tap(() =>
             Effect.logInfo("provider.session.reaped", {
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
-              reason: "inactivity_threshold",
+              reason: isFailed ? "failed_session_inactivity" : "inactivity_threshold",
             }),
           ),
           Effect.as(true),
@@ -137,6 +181,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
         yield* Effect.logInfo("provider.session.reaper.started", {
           inactivityThresholdMs,
+          errorInactivityThresholdMs,
           sweepIntervalMs,
         });
       });

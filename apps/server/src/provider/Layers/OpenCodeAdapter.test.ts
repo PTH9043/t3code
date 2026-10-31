@@ -74,6 +74,7 @@ const runtimeMock = {
     sessionDirectoryById: new Map<string, string>(),
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    eventSubscribeOverride: null as (() => Promise<{ stream: AsyncIterable<unknown> }>) | null,
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -94,6 +95,7 @@ const runtimeMock = {
     this.state.sessionDirectoryById.clear();
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
+    this.state.eventSubscribeOverride = null;
   },
 };
 
@@ -204,13 +206,14 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
       },
       event: {
-        subscribe: async () => ({
-          stream: (async function* () {
-            for (const event of runtimeMock.state.subscribedEvents) {
-              yield event;
-            }
-          })(),
-        }),
+        subscribe: async () =>
+          runtimeMock.state.eventSubscribeOverride?.() ?? {
+            stream: (async function* () {
+              for (const event of runtimeMock.state.subscribedEvents) {
+                yield event;
+              }
+            })(),
+          },
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
   loadOpenCodeInventory: () =>
@@ -830,7 +833,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         runtimeMode: "full-access",
       });
 
-      yield* adapter.sendTurn({
+      const receipt = yield* adapter.sendTurn({
         threadId: asThreadId("thread-custom-instance"),
         input: "Fix it",
         modelSelection: createModelSelection(
@@ -845,6 +848,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       NodeAssert.deepEqual(runtimeMock.state.promptCalls.at(-1), {
         sessionID: "http://127.0.0.1:9999/session",
+        messageID: receipt.nativeMessageId,
         model: {
           providerID: "anthropic",
           modelID: "claude-sonnet-4-5",
@@ -882,13 +886,14 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
 
-      yield* adapter.sendTurn({
+      const receipt = yield* adapter.sendTurn({
         threadId,
         input: "Fix it",
       });
 
       NodeAssert.deepEqual(runtimeMock.state.promptCalls.at(-1), {
         sessionID: "http://127.0.0.1:9999/session",
+        messageID: receipt.nativeMessageId,
         model: {
           providerID: "anthropic",
           modelID: "claude-sonnet-4-5",
@@ -1225,9 +1230,9 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         {
           type: "message.updated",
           properties: {
-            sessionID: "http://127.0.0.1:9999/session",
             info: {
               id: "msg-native-log",
+              sessionID: "http://127.0.0.1:9999/session",
               role: "assistant",
             },
           },
@@ -1372,6 +1377,65 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(sessions.length, 1);
       NodeAssert.equal(sessions[0]?.threadId, "thread-native-log-failure");
       NodeAssert.deepEqual(closeCallsDuringRun, []);
+    }),
+  );
+
+  it.effect("reconnects the event stream after a transient failure", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-event-pump-reconnect");
+      let subscribeCount = 0;
+      runtimeMock.state.eventSubscribeOverride = async () => {
+        subscribeCount++;
+        if (subscribeCount === 1) {
+          return {
+            stream: (async function* () {
+              yield { type: "session.idle" };
+              throw new Error("socket hang up");
+            })(),
+          };
+        }
+        return {
+          stream: (async function* () {
+            yield { type: "session.idle" };
+          })(),
+        };
+      };
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* advanceTestClock(10_000);
+      NodeAssert.equal(subscribeCount >= 2, true);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("resubscribes after a clean stream end", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-event-pump-clean-end");
+      let subscribeCount = 0;
+      runtimeMock.state.eventSubscribeOverride = async () => {
+        subscribeCount++;
+        return {
+          stream: (async function* () {
+            yield { type: "session.idle" };
+          })(),
+        };
+      };
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* advanceTestClock(10_000);
+      // Clean stream end → reconnect loop resubscribes after 500ms.
+      NodeAssert.equal(subscribeCount >= 2, true);
+      yield* adapter.stopSession(threadId);
     }),
   );
 });

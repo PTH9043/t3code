@@ -1,6 +1,7 @@
 import * as NodeNet from "node:net";
 
 import { it as effectIt } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Net from "@t3tools/shared/Net";
 import * as Cause from "effect/Cause";
@@ -8,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { expect } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -23,11 +25,60 @@ const TestProcessRunner = Layer.succeed(ProcessRunner.ProcessRunner, {
           _tag: "NotFound",
           module: "ChildProcess",
           method: "spawn",
-          description: "PowerShell is not installed in the test environment",
+          description: "The process probe is unavailable in the test environment",
         }),
       }),
     ),
 });
+
+effectIt("uses native Windows commands and preserves process and terminal ownership", () =>
+  Effect.gen(function* () {
+    const commands: string[] = [];
+    const layer = PortScanner.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(ProcessRunner.ProcessRunner, {
+            run: (input) => {
+              commands.push(input.command);
+              const stdout =
+                input.command === "netstat.exe"
+                  ? "  TCP    0.0.0.0:53123    0.0.0.0:0    LISTENING    1234\r\n  TCP    127.0.0.1:53124    127.0.0.1:443    ESTABLISHED    1234\r\n"
+                  : '"node.exe","1234","Console","1","100 K"\r\n';
+              return Effect.succeed({
+                stdout,
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            },
+          }),
+          Net.layer,
+          Layer.succeed(HostProcessPlatform, "win32"),
+        ),
+      ),
+    );
+    const result = yield* Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "thread-one",
+        terminalId: "terminal-one",
+        processIds: [1234],
+      });
+      return yield* scanner.scan();
+    }).pipe(Effect.provide(layer), Effect.scoped);
+    expect(commands).toEqual(["netstat.exe", "tasklist.exe"]);
+    expect(result).toEqual([
+      expect.objectContaining({
+        port: 53123,
+        pid: 1234,
+        processName: "node",
+        terminal: { threadId: "thread-one", terminalId: "terminal-one" },
+      }),
+    ]);
+  }),
+);
 
 const makeProbeFailureLayer = (run: ProcessRunner.ProcessRunner["Service"]["run"]) =>
   PortScanner.layer.pipe(
@@ -85,6 +136,30 @@ const openCommonDevServer = Effect.fn("PortScannerTest.openCommonDevServer")(fun
 const commonDevServer = Effect.acquireRelease(
   openCommonDevServer(PortScanner.COMMON_DEV_PORTS),
   ({ server }) => closeServer(server),
+);
+
+effectIt("discovers a real Windows listener with native commands", () =>
+  Effect.gen(function* () {
+    if ((yield* HostProcessPlatform) !== "win32") return;
+    const { port } = yield* commonDevServer;
+    const scanner = yield* PortScanner.PortDiscovery;
+    const found = (yield* scanner.scan()).find((entry) => entry.port === port);
+    expect(found?.pid).toBe(process.pid);
+    expect(found?.processName?.toLowerCase()).toBe("node");
+  }).pipe(
+    Effect.provide(
+      PortScanner.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)),
+            Net.layer,
+            Layer.succeed(HostProcessPlatform, "win32"),
+          ),
+        ),
+      ),
+    ),
+    Effect.scoped,
+  ),
 );
 
 /**

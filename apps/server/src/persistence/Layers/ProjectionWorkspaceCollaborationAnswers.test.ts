@@ -210,9 +210,15 @@ it.effect(
         ...event,
         eventId: EventId.make("answer-event-2"),
         sequence: 2,
-        payload: answer,
+        payload: {
+          ...answer,
+          imageReferences: [{ name: "photo.png", path: "D:/attachments/photo.png" }],
+        },
       });
       expect((yield* read).meeting?.pendingQuestion).toBeNull();
       expect((yield* read).meeting?.answers[0]?.nodeId).toBe("node-a");
+      expect((yield* read).meeting?.answers[0]?.imageReferences).toEqual([
+        { name: "photo.png", path: "D:/attachments/photo.png" },
+      ]);
     }).pipe(Effect.provide(projectionLayer)),
 );

@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
+import { WSL_DIRECT_HOST } from "../../backend/DesktopLocalProtocolHost.ts";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import * as DesktopWslBackend from "../../wsl/DesktopWslBackend.ts";
@@ -138,6 +139,13 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
         id: instance.id,
         label: runningDistro === null ? yield* instance.label : `WSL (${runningDistro})`,
         runningDistro,
+        ...(bootstrap.desktopDirectRpcInputFd !== undefined &&
+        bootstrap.desktopDirectRpcOutputFd !== undefined
+          ? {
+              directRpc: true,
+              ...(instance.id.startsWith("wsl:") ? { directHost: WSL_DIRECT_HOST } : {}),
+            }
+          : {}),
         httpBaseUrl: httpBaseUrl.href,
         wsBaseUrl: toWebSocketBaseUrl(httpBaseUrl),
         ...(bootstrap.desktopBootstrapToken

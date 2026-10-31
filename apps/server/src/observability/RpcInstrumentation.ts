@@ -10,7 +10,6 @@ import * as Stream from "effect/Stream";
 import { outcomeFromExit } from "./Attributes.ts";
 import { metricAttributes, rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
 
-const RPC_SPAN_PREFIX = "ws.rpc";
 const DEFAULT_RPC_SPAN_ATTRIBUTES = {
   "rpc.transport": "websocket",
   "rpc.system": "effect-rpc",
@@ -25,6 +24,9 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
 function shouldTraceRpc(method: string): boolean {
   return !RPC_METHODS_WITH_TRACING_DISABLED.has(method);
 }
+
+const rpcSpanName = (method: string, traceAttributes?: Readonly<Record<string, unknown>>) =>
+  `${traceAttributes?.["rpc.transport"] === "desktop-direct" ? "direct.rpc" : "ws.rpc"}.${method}`;
 
 const rpcSpanAttributes = (
   method: string,
@@ -42,7 +44,7 @@ const withRpcEffectTracing = <A, E, R>(
 ): Effect.Effect<A, E, R> =>
   shouldTraceRpc(method)
     ? effect.pipe(
-        Effect.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
+        Effect.withSpan(rpcSpanName(method, traceAttributes), {
           attributes: rpcSpanAttributes(method, traceAttributes),
         }),
       )
@@ -55,7 +57,7 @@ const withRpcStreamTracing = <A, E, R>(
 ): Stream.Stream<A, E, R> =>
   shouldTraceRpc(method)
     ? stream.pipe(
-        Stream.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
+        Stream.withSpan(rpcSpanName(method, traceAttributes), {
           attributes: rpcSpanAttributes(method, traceAttributes),
         }),
       )

@@ -165,6 +165,51 @@ describe("environmentBootstrap", () => {
     );
   });
 
+  it("uses the desktop scheme for native local requests without changing the remote socket target", () => {
+    vi.stubGlobal("window", {
+      location: new URL("t3code-dev://app/control-center"),
+      desktopBridge: {
+        directRpc: {},
+        getLocalEnvironmentBootstraps: () => [
+          {
+            id: "primary",
+            label: "Windows",
+            runningDistro: null,
+            directRpc: true,
+            httpBaseUrl: "http://127.0.0.1:3773",
+            wsBaseUrl: "ws://127.0.0.1:3773",
+          },
+        ],
+      },
+    });
+    expect(readPrimaryEnvironmentTarget().target).toEqual({
+      httpBaseUrl: "t3code-dev://app/",
+      wsBaseUrl: "ws://127.0.0.1:3773/",
+    });
+    expect(resolvePrimaryEnvironmentHttpUrl("/api/assets/example")).toBe(
+      "t3code-dev://app/api/assets/example",
+    );
+  });
+
+  it("does not select direct transport when the backend did not advertise it", () => {
+    vi.stubGlobal("window", {
+      location: new URL("t3code-dev://app/control-center"),
+      desktopBridge: {
+        directRpc: {},
+        getLocalEnvironmentBootstraps: () => [
+          {
+            id: "primary",
+            label: "WSL",
+            runningDistro: null,
+            httpBaseUrl: "http://127.0.0.1:3773",
+            wsBaseUrl: "ws://127.0.0.1:3773",
+          },
+        ],
+      },
+    });
+    expect(readPrimaryEnvironmentTarget().target.httpBaseUrl).toBe("http://127.0.0.1:3773/");
+  });
+
   it("uses the vite proxy for desktop-managed loopback descriptor requests during local dev", async () => {
     vi.stubEnv("VITE_DEV_SERVER_URL", "http://127.0.0.1:5733");
     vi.stubGlobal("window", {

@@ -16,6 +16,38 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("AI search settings", () => {
+  it("supplies defaults for existing settings and keeps partial updates partial", () => {
+    expect(decodeServerSettings({}).aiSearch).toMatchObject({
+      semanticEnabled: true,
+      ocrEnabled: true,
+      researchDailyUsd: null,
+    });
+    expect(decodeServerSettingsPatch({ aiSearch: { researchDailyUsd: 0.5 } }).aiSearch).toEqual({
+      researchDailyUsd: 0.5,
+    });
+    expect(decodeServerSettingsPatch({ aiSearch: { semanticEnabled: false } }).aiSearch).toEqual({
+      semanticEnabled: false,
+    });
+  });
+  it.each([0, -1, Infinity, NaN])("rejects an invalid research dollar limit: %s", (value) => {
+    expect(() => decodeServerSettingsPatch({ aiSearch: { researchDailyUsd: value } })).toThrow();
+  });
+});
+
+describe("account auto switch settings", () => {
+  it("defaults off and accepts independent partial updates", () => {
+    expect(decodeServerSettings({}).providerAutoSwitch).toEqual({
+      codex: false,
+      claudeAgent: true,
+    });
+    expect(
+      decodeServerSettingsPatch({ providerAutoSwitch: { codex: true } }).providerAutoSwitch,
+    ).toEqual({ codex: true });
+    expect(() => decodeServerSettingsPatch({ providerAutoSwitch: { codex: "true" } })).toThrow();
+  });
+});
+
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
     expect(decodeClientSettings({}).wordWrap).toBe(true);
@@ -107,7 +139,7 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults text generation to Luna at low reasoning effort", () => {
     expect(DEFAULT_SERVER_SETTINGS.textGenerationModelSelection).toEqual({
       instanceId: ProviderInstanceId.make("codex"),
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       options: [{ id: "reasoningEffort", value: "low" }],
     });
   });

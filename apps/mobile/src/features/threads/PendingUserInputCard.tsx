@@ -2,6 +2,7 @@ import type { ApprovalRequestId } from "@t3tools/contracts";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import { cn } from "../../lib/cn";
 import type { PendingUserInput, PendingUserInputDraftAnswer } from "../../lib/threadActivity";
 
@@ -10,6 +11,9 @@ export interface PendingUserInputCardProps {
   readonly drafts: Record<string, PendingUserInputDraftAnswer>;
   readonly answers: Record<string, string> | null;
   readonly respondingUserInputId: ApprovalRequestId | null;
+  readonly pickingUserInputId: ApprovalRequestId | null;
+  readonly canStop: boolean;
+  readonly onStop: () => void;
   readonly onSelectOption: (
     requestId: ApprovalRequestId,
     questionId: string,
@@ -21,6 +25,12 @@ export interface PendingUserInputCardProps {
     customAnswer: string,
   ) => void;
   readonly onSubmit: () => Promise<unknown>;
+  readonly onPickImages: (requestId: ApprovalRequestId, questionId: string) => Promise<void>;
+  readonly onRemoveImage: (
+    requestId: ApprovalRequestId,
+    questionId: string,
+    imageId: string,
+  ) => void;
 }
 
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
@@ -35,6 +45,16 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
       <Text className="font-t3-bold text-lg text-neutral-950 dark:text-neutral-50">
         Fill in the pending answers
       </Text>
+      {props.canStop ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="질문 중지"
+          onPress={props.onStop}
+          className="self-start rounded-xl border border-red-400 px-3 py-2"
+        >
+          <Text className="font-t3-bold text-sm text-red-700 dark:text-red-300">질문 중지</Text>
+        </Pressable>
+      ) : null}
       {props.pendingUserInput.questions.map((question) => {
         const draft = props.drafts[question.id];
         return (
@@ -88,6 +108,34 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
               placeholder="또는 직접 답변 입력"
               className="min-h-[54px] rounded-2xl border border-neutral-200 bg-white px-3.5 py-3 font-sans text-base text-neutral-950 dark:border-white/8 dark:bg-neutral-950/70 dark:text-neutral-50"
             />
+            <View
+              pointerEvents={
+                props.pickingUserInputId !== null ||
+                props.respondingUserInputId === props.pendingUserInput.requestId
+                  ? "none"
+                  : "auto"
+              }
+            >
+              <ComposerAttachmentStrip
+                attachments={draft?.images ?? []}
+                onRemove={(imageId) =>
+                  props.onRemoveImage(props.pendingUserInput.requestId, question.id, imageId)
+                }
+              />
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              disabled={
+                props.pickingUserInputId !== null ||
+                props.respondingUserInputId === props.pendingUserInput.requestId
+              }
+              onPress={() => void props.onPickImages(props.pendingUserInput.requestId, question.id)}
+              className="self-start rounded-xl border border-neutral-300 px-3 py-2 dark:border-neutral-700"
+            >
+              <Text className="font-t3-bold text-sm text-neutral-700 dark:text-neutral-300">
+                사진 첨부
+              </Text>
+            </Pressable>
           </View>
         );
       })}
@@ -97,7 +145,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           props.answers ? "bg-blue-500" : "bg-neutral-200 dark:bg-neutral-700/60",
         )}
         disabled={
-          props.answers === null || props.respondingUserInputId === props.pendingUserInput.requestId
+          props.answers === null ||
+          props.pickingUserInputId !== null ||
+          props.respondingUserInputId === props.pendingUserInput.requestId
         }
         onPress={() => void props.onSubmit()}
       >

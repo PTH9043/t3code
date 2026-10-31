@@ -363,7 +363,19 @@ export const makeSessionRecoveryReactor = Effect.gen(function* () {
       threadId: thread.id,
       createdAt: yield* nowIso,
     });
-    const activities = yield* activityRepository.listByThreadId({ threadId: thread.id });
+    const activities = yield* activityRepository.listByThreadIdAndKinds({
+      threadId: thread.id,
+      kinds: [
+        "session.recovered",
+        "task.started",
+        "task.completed",
+        "task.updated",
+        "user-input.requested",
+        "user-input.resolved",
+        "provider.user-input.respond.failed",
+      ],
+      completedToolNames: ["ScheduleWakeup"],
+    });
     const abandonedQuestions = thread.hasPendingUserInput
       ? yield* abandonOpenQuestions(thread.id, activities)
       : 0;

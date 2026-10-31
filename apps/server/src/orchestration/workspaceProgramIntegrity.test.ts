@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   ProjectId,
   ProviderInstanceId,
@@ -206,6 +207,7 @@ it("builds a project-scoped ping-pong task with commands and prior evidence", ()
       validationCommands: ["vp test run apps/web/src/example.test.ts"],
       status: "queued",
     },
+    hubMemory: DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
     createdAt: at,
     updatedAt: at,
   };

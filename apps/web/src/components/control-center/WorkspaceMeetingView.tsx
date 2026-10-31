@@ -15,6 +15,7 @@ const MODE_LABELS: Record<WorkspaceMeeting["mode"], string> = {
 };
 
 const PHASE_LABELS: Record<WorkspaceMeeting["phase"], string> = {
+  clarifying: "지휘 AI 확인",
   discussing: "토론 중",
   planning: "계획 수립",
   executing: "실행 중",
@@ -238,6 +239,12 @@ export function WorkspaceMeetingView(props: {
           {meeting.answers.map((answer) => (
             <p key={`${answer.answeredAt}:${answer.question}`} className="text-muted-foreground">
               <span className="text-foreground">{answer.question}</span> → {answer.answer}
+              {answer.imageReferences?.length ? (
+                <span>
+                  {" "}
+                  · 이미지: {answer.imageReferences.map((image) => image.name).join(", ")}
+                </span>
+              ) : null}
             </p>
           ))}
         </div>

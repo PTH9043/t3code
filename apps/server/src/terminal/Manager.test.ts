@@ -1298,12 +1298,7 @@ it.layer(
 
       if (platform === "win32") {
         expect(
-          ptyAdapter.spawnInputs.some(
-            (input) =>
-              input.shell === "pwsh.exe" ||
-              input.shell === "powershell.exe" ||
-              input.shell === "cmd.exe",
-          ),
+          ptyAdapter.spawnInputs.some((input) => input.shell.toLowerCase().endsWith("cmd.exe")),
         ).toBe(true);
       } else {
         expect(
@@ -1315,7 +1310,7 @@ it.layer(
     }),
   );
 
-  it.effect("prefers PowerShell over ComSpec for Windows terminals", () =>
+  it.effect("starts Windows terminals in CMD with AutoRun disabled", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {
         env: {
@@ -1329,14 +1324,14 @@ it.layer(
 
       expect(ptyAdapter.spawnInputs[0]).toEqual(
         expect.objectContaining({
-          shell: "pwsh.exe",
-          args: ["-NoLogo"],
+          shell: "C:\\Windows\\System32\\cmd.exe",
+          args: ["/d"],
         }),
       );
     }),
   );
 
-  it.effect("falls back to built-in PowerShell by absolute path on Windows", () =>
+  it.effect("falls back to CMD when a custom Windows shell is unavailable", () =>
     Effect.gen(function* () {
       const ptyAdapter = new FakePtyAdapter();
       const { manager } = yield* createManager(5, {
@@ -1348,20 +1343,61 @@ it.layer(
           SystemRoot: "C:\\Windows",
         },
       }).pipe(Effect.provide(withHostPlatform("win32")));
-      ptyAdapter.spawnFailures.push(
-        new Error("spawn custom-shell.exe ENOENT"),
-        new Error("spawn pwsh.exe ENOENT"),
-      );
+      ptyAdapter.spawnFailures.push(new Error("spawn custom-shell.exe ENOENT"));
 
       yield* manager.open(openInput());
 
       expect(ptyAdapter.spawnInputs.map((input) => input.shell)).toEqual([
         "C:\\missing\\custom-shell.exe",
-        "pwsh.exe",
-        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "C:\\Windows\\System32\\cmd.exe",
       ]);
-      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(["-NoLogo"]);
-      expect(ptyAdapter.spawnInputs[2]?.args).toEqual(["-NoLogo"]);
+      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(["/d"]);
+    }),
+  );
+
+  it.effect("does not start a requested PowerShell terminal on Windows", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "powershell.exe",
+        env: { ComSpec: "C:\\Windows\\System32\\cmd.exe", SystemRoot: "C:\\Windows" },
+      }).pipe(Effect.provide(withHostPlatform("win32")));
+      yield* manager.open(openInput());
+      expect(ptyAdapter.spawnInputs[0]).toEqual(
+        expect.objectContaining({
+          shell: "C:\\Windows\\System32\\cmd.exe",
+          args: ["/d"],
+        }),
+      );
+    }),
+  );
+
+  it.effect("the hidden Windows process probe reads a real process tree", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcessPlatform) !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const script = yield* fs.makeTempFileScoped({ prefix: "t3-probe-test-", suffix: ".vbs" });
+      yield* fs.writeFileString(script, TerminalManager.WINDOWS_PROCESS_PROBE_SCRIPT);
+      const result = yield* runner.run({
+        background: true,
+        command: "cscript.exe",
+        args: ["//NoLogo", "//B", "//U", script],
+        windowsOutputEncoding: "utf16le",
+        maxOutputBytes: 32_768,
+        outputMode: "truncate",
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout.split(/\r?\n/u).some((line) => line.startsWith(`${process.pid}|`))).toBe(
+        true,
+      );
+      yield* fs.writeFileString(script, "WScript.StdOut.WriteLine ChrW(54620) & ChrW(44544)");
+      const unicode = yield* runner.run({
+        background: true,
+        command: "cscript.exe",
+        args: ["//NoLogo", "//B", "//U", script],
+        windowsOutputEncoding: "utf16le",
+      });
+      expect(unicode.stdout.trim()).toBe("한글");
     }),
   );
 

@@ -9,7 +9,7 @@ import "./index.css";
 
 import { isElectron } from "./env";
 import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
-import { hasCloudPublicConfig } from "./cloud/publicConfig";
+import { hasClerkPublicConfig, hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter } from "./router";
 import {
   syncDocumentElectronPlatformClasses,
@@ -43,14 +43,22 @@ const app = <AppRoot router={router} />;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    {clerkPublishableKey && hasCloudPublicConfig() ? (
+    {clerkPublishableKey && hasClerkPublicConfig() ? (
       isElectron ? (
         <ElectronClerkProvider publishableKey={clerkPublishableKey} passkeys={passkeys}>
-          <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          {hasCloudPublicConfig() ? (
+            <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          ) : (
+            app
+          )}
         </ElectronClerkProvider>
       ) : (
         <ClerkProvider publishableKey={clerkPublishableKey}>
-          <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          {hasCloudPublicConfig() ? (
+            <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          ) : (
+            app
+          )}
         </ClerkProvider>
       )
     ) : (

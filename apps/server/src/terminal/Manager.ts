@@ -1,3 +1,4 @@
+import { makeKeyedLock } from "@t3tools/shared/KeyedLock";
 /**
  * TerminalManager - Terminal session orchestration service interface.
  *
@@ -51,7 +52,6 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
@@ -101,13 +101,14 @@ class TerminalSubprocessCheckError extends Schema.TaggedErrorClass<TerminalSubpr
   {
     cause: Schema.optional(Schema.Defect()),
     terminalPid: Schema.Number,
-    command: Schema.Literals(["powershell", "pgrep", "ps"]),
+    command: Schema.Literals(["cscript", "pgrep", "ps"]),
   },
 ) {
   override get message(): string {
     return `Failed to inspect terminal subprocesses for PID ${this.terminalPid} with ${this.command}`;
   }
 }
+const isTerminalSubprocessCheckError = Schema.is(TerminalSubprocessCheckError);
 
 class TerminalProcessSignalError extends Schema.TaggedErrorClass<TerminalProcessSignalError>()(
   "TerminalProcessSignalError",
@@ -488,7 +489,7 @@ function enqueueProcessEvent(
 
 function defaultShellResolver(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string {
   if (platform === "win32") {
-    return "pwsh.exe";
+    return windowsCmdPath(env);
   }
   return env.SHELL ?? "bash";
 }
@@ -535,8 +536,11 @@ function shellCandidateFromCommand(
 ): ShellCandidate | null {
   if (!command || command.length === 0) return null;
   const shellName = basenameForPlatform(command, platform).toLowerCase();
-  if (platform === "win32" && (shellName === "pwsh.exe" || shellName === "powershell.exe")) {
-    return { shell: command, args: ["-NoLogo"] };
+  if (platform === "win32" && /^(?:pwsh|powershell)(?:\.exe)?$/u.test(shellName)) {
+    return null;
+  }
+  if (platform === "win32" && /^(?:cmd)(?:\.exe)?$/u.test(shellName)) {
+    return { shell: command, args: ["/d"] };
   }
   if (platform !== "win32" && shellName === "zsh") {
     return { shell: command, args: ["-o", "nopromptsp"] };
@@ -546,16 +550,6 @@ function shellCandidateFromCommand(
 
 function windowsSystemRoot(env: NodeJS.ProcessEnv): string {
   return env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
-}
-
-function windowsPowerShellPath(env: NodeJS.ProcessEnv): string {
-  return joinWindowsPath(
-    windowsSystemRoot(env),
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
 }
 
 function windowsCmdPath(env: NodeJS.ProcessEnv): string {
@@ -593,9 +587,6 @@ function resolveShellCandidates(
   if (platform === "win32") {
     return uniqueShellCandidates([
       requested,
-      shellCandidateFromCommand("pwsh.exe", platform),
-      shellCandidateFromCommand(windowsPowerShellPath(env), platform),
-      shellCandidateFromCommand("powershell.exe", platform),
       shellCandidateFromCommand(env.ComSpec ?? null, platform),
       shellCandidateFromCommand(windowsCmdPath(env), platform),
       shellCandidateFromCommand("cmd.exe", platform),
@@ -670,76 +661,89 @@ function parseFirstChildPidFromPgrep(stdout: string): number | null {
   return null;
 }
 
+export const WINDOWS_PROCESS_PROBE_SCRIPT = [
+  'Set service = GetObject("winmgmts:{impersonationLevel=impersonate}!\\\\.\\root\\cimv2")',
+  'Set processes = service.ExecQuery("SELECT ProcessId,ParentProcessId,Name FROM Win32_Process")',
+  "For Each item In processes",
+  '  WScript.StdOut.WriteLine CStr(item.ProcessId) & "|" & CStr(item.ParentProcessId) & "|" & CStr(item.Name)',
+  "Next",
+].join("\r\n");
+
 function windowsInspectSubprocess(
   terminalPid: number,
   platform: NodeJS.Platform,
+  probeFile: string,
 ): Effect.Effect<
   TerminalSubprocessInspectResult,
   TerminalSubprocessCheckError,
   ProcessRunner.ProcessRunner
 > {
-  const command =
-    'Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { Write-Output "$($_.ProcessId)|$($_.ParentProcessId)|$($_.Name)" }';
   return Effect.gen(function* () {
     const processRunner = yield* ProcessRunner.ProcessRunner;
     return yield* processRunner.run({
-      // powershell.exe is a real executable — never spawn it through cmd.exe
-      // shell mode, which would re-tokenize the `-Command` payload (pipes,
-      // semicolons) before PowerShell ever sees it.
-      command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-Command", command],
+      background: true,
+      command: "cscript.exe",
+      args: ["//NoLogo", "//B", "//U", probeFile],
+      windowsOutputEncoding: "utf16le",
       timeout: "1500 millis",
       maxOutputBytes: 32_768,
       outputMode: "truncate",
       timeoutBehavior: "timedOutResult",
     });
   }).pipe(
-    Effect.map((result) => {
-      if (result.code !== 0) {
-        return { hasRunningSubprocess: false, childCommand: null, processIds: [] } as const;
-      }
-      const processNameById = new Map<number, string>();
-      const childrenByParent = new Map<number, number[]>();
-      for (const line of result.stdout.split(/\r?\n/g)) {
-        const [pidRaw, parentPidRaw, nameRaw] = line.trim().split("|", 3);
-        const pid = Number(pidRaw);
-        const parentPid = Number(parentPidRaw);
-        if (!Number.isInteger(pid) || !Number.isInteger(parentPid)) continue;
-        processNameById.set(pid, nameRaw?.trim() ?? "");
-        const children = childrenByParent.get(parentPid) ?? [];
-        children.push(pid);
-        childrenByParent.set(parentPid, children);
-      }
-      const directChildren = childrenByParent.get(terminalPid) ?? [];
-      const childPid = directChildren[0];
-      if (childPid === undefined) {
-        return { hasRunningSubprocess: false, childCommand: null, processIds: [] } as const;
-      }
-      const processIds = new Set<number>([terminalPid]);
-      const pending = [terminalPid];
-      while (pending.length > 0) {
-        const parentPid = pending.pop();
-        if (parentPid === undefined) continue;
-        for (const pid of childrenByParent.get(parentPid) ?? []) {
-          if (processIds.has(pid)) continue;
-          processIds.add(pid);
-          pending.push(pid);
+    Effect.flatMap(
+      (result): Effect.Effect<TerminalSubprocessInspectResult, TerminalSubprocessCheckError> => {
+        if (result.timedOut || result.code !== 0 || !result.stdout.trim()) {
+          return Effect.fail(new TerminalSubprocessCheckError({ terminalPid, command: "cscript" }));
         }
-      }
-      const normalized = normalizeChildCommandName(processNameById.get(childPid) ?? "", platform);
-      return {
-        hasRunningSubprocess: true,
-        childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
-        processIds: [...processIds],
-      } as const;
-    }),
-    Effect.mapError(
-      (cause) =>
-        new TerminalSubprocessCheckError({
-          cause,
-          terminalPid,
-          command: "powershell",
-        }),
+        const processNameById = new Map<number, string>();
+        const childrenByParent = new Map<number, number[]>();
+        for (const line of result.stdout.split(/\r?\n/g)) {
+          const [pidRaw, parentPidRaw, nameRaw] = line.trim().split("|", 3);
+          const pid = Number(pidRaw);
+          const parentPid = Number(parentPidRaw);
+          if (!Number.isInteger(pid) || !Number.isInteger(parentPid)) continue;
+          processNameById.set(pid, nameRaw?.trim() ?? "");
+          const children = childrenByParent.get(parentPid) ?? [];
+          children.push(pid);
+          childrenByParent.set(parentPid, children);
+        }
+        const directChildren = childrenByParent.get(terminalPid) ?? [];
+        const childPid = directChildren[0];
+        if (childPid === undefined) {
+          return Effect.succeed({
+            hasRunningSubprocess: false,
+            childCommand: null,
+            processIds: [],
+          } as const);
+        }
+        const processIds = new Set<number>([terminalPid]);
+        const pending = [terminalPid];
+        while (pending.length > 0) {
+          const parentPid = pending.pop();
+          if (parentPid === undefined) continue;
+          for (const pid of childrenByParent.get(parentPid) ?? []) {
+            if (processIds.has(pid)) continue;
+            processIds.add(pid);
+            pending.push(pid);
+          }
+        }
+        const normalized = normalizeChildCommandName(processNameById.get(childPid) ?? "", platform);
+        return Effect.succeed({
+          hasRunningSubprocess: true,
+          childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
+          processIds: [...processIds],
+        } as const);
+      },
+    ),
+    Effect.mapError((cause) =>
+      isTerminalSubprocessCheckError(cause)
+        ? cause
+        : new TerminalSubprocessCheckError({
+            cause,
+            terminalPid,
+            command: "cscript",
+          }),
     ),
   );
 }
@@ -890,13 +894,18 @@ const posixInspectSubprocess = Effect.fn("terminal.posixInspectSubprocess")(func
   };
 });
 
-function defaultSubprocessInspectorForPlatform(platform: NodeJS.Platform) {
+function defaultSubprocessInspectorForPlatform(
+  platform: NodeJS.Platform,
+  windowsProbeFile?: string,
+) {
   return Effect.fn("terminal.defaultSubprocessInspector")(function* (terminalPid: number) {
     if (!Number.isInteger(terminalPid) || terminalPid <= 0) {
       return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
     }
     if (platform === "win32") {
-      return yield* windowsInspectSubprocess(terminalPid, platform);
+      if (!windowsProbeFile)
+        return yield* new TerminalSubprocessCheckError({ terminalPid, command: "cscript" });
+      return yield* windowsInspectSubprocess(terminalPid, platform, windowsProbeFile);
     }
     return yield* posixInspectSubprocess(terminalPid, platform);
   });
@@ -1277,12 +1286,20 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const windowsProbeFile =
+    platform === "win32" && options.subprocessInspector === undefined
+      ? yield* fileSystem.makeTempFileScoped({ prefix: "t3-process-probe-", suffix: ".vbs" }).pipe(
+          Effect.tap((file) => fileSystem.writeFileString(file, WINDOWS_PROCESS_PROBE_SCRIPT)),
+          Effect.option,
+        )
+      : Option.none<string>();
   const subprocessInspector =
     options.subprocessInspector ??
     ((terminalPid) =>
-      defaultSubprocessInspectorForPlatform(platform)(terminalPid).pipe(
-        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-      ));
+      defaultSubprocessInspectorForPlatform(
+        platform,
+        Option.getOrUndefined(windowsProbeFile),
+      )(terminalPid).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner)));
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
@@ -1297,7 +1314,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     sessions: new Map(),
     killFibers: new Map(),
   });
-  const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const workerScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
@@ -1451,29 +1467,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     f: (state: TerminalManagerState) => readonly [A, TerminalManagerState],
   ) => SynchronizedRef.modify(managerStateRef, f);
 
-  const getThreadSemaphore = (threadId: string) =>
-    SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-      const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-        current.get(threadId),
-      );
-      return Option.match(existing, {
-        onNone: () =>
-          Semaphore.make(1).pipe(
-            Effect.map((semaphore) => {
-              const next = new Map(current);
-              next.set(threadId, semaphore);
-              return [semaphore, next] as const;
-            }),
-          ),
-        onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-      });
-    });
-
-  const withThreadLock = <A, E, R>(
-    threadId: string,
-    effect: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, R> =>
-    Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+  const withThreadLock = makeKeyedLock().withKey;
 
   const clearKillFiber = Effect.fn("terminal.clearKillFiber")(function* (
     process: PtyAdapter.PtyProcess | null,

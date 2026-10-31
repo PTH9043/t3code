@@ -15,9 +15,10 @@ export function knowledgeAppliesToContext(
 ): boolean {
   const scope = item.scope ?? "project";
   if (scope === "environment") {
-    return context.includeShared !== false || item.projectId === context.projectId;
+    return context.includeShared === true || item.projectId === context.projectId;
   }
   if (item.projectId !== context.projectId) return false;
+  if (scope === "project") return (context.contextPaths?.length ?? 0) === 0;
   if (scope !== "folder") return true;
   const folder = item.appliesToFolder?.replaceAll("\\", "/");
   if (!folder) return false;

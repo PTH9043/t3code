@@ -1,28 +1,43 @@
+import { buildInitialWorkspaceTaskGraph } from "../workspaceTaskGraph.ts";
 import {
+  EventId,
+  ProviderDriverKind,
+  type ProviderExecutionContext,
+  type ProviderRuntimeEvent,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   MessageId,
   WorkspaceCollaborationRunId,
+  WorkspaceMemoryError,
   WorkspaceMeetingParticipantId,
   WorkspaceTaskNodeId,
   type OrchestrationEvent,
+  type OrchestrationCommand,
   type OrchestrationThread,
   type WorkspaceCollaborationRun,
   type WorkspaceMeeting,
+  type WorkspacePromptComposeInput,
+  WorkspaceCollaborationRun as WorkspaceCollaborationRunSchema,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
+import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import { workflowDefaults } from "@t3tools/shared/workflow";
+import { WorkspaceWorkflowStore } from "../../persistence/WorkspaceWorkflowStore.ts";
 import { expect, it } from "@effect/vitest";
 
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import type { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
@@ -42,6 +57,7 @@ import {
 import { WorkspaceCollaborationReactor } from "../Services/WorkspaceCollaborationReactor.ts";
 import {
   WorkspaceAgentExecutor,
+  WorkspaceAgentExecutionError,
   type WorkspaceAgentExecutionInput,
 } from "../Services/WorkspaceAgentExecutor.ts";
 import { OrchestrationTurnWaitLive } from "./OrchestrationTurnWait.ts";
@@ -49,6 +65,11 @@ import { WorkspaceCollaborationReactorLive } from "./WorkspaceCollaborationReact
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
 import * as WorktreeProvisionService from "../../git/WorktreeProvisionService.ts";
 import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
+import { ServerConfig } from "../../config.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { WorkspaceAgentControl, makeWorkspaceAgentControl } from "../WorkspaceAgentControl.ts";
+import { WorkspaceAgentExecutorLive } from "./WorkspaceAgentExecutor.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
 
 /**
  * Deterministic provisioning fakes: non-isolating runs never touch them, and
@@ -196,12 +217,24 @@ function respondForMeetingPrompt(prompt: string): string {
 }
 
 function makeHarness(input: {
+  readonly memoryDirective?: string;
+  readonly memoryContext?: string;
+  readonly memoryFailure?: boolean;
+  readonly memoryPaths?: ReadonlyArray<string>;
+  readonly memoryPathsFailure?: boolean;
+  readonly compactHandoffs?: boolean;
+  readonly liveExecutor?: boolean;
   readonly run: WorkspaceCollaborationRun;
+  readonly existingThreads?: ReadonlyArray<OrchestrationThread>;
   readonly respond: (prompt: string) => string;
   readonly onTurnStart?: (input: {
     readonly prompt: string;
     readonly run: WorkspaceCollaborationRun;
   }) => Effect.Effect<void>;
+  readonly executionFailure?: (
+    execution: WorkspaceAgentExecutionInput,
+  ) => WorkspaceAgentExecutionError | undefined;
+  readonly onRunUpdated?: (run: WorkspaceCollaborationRun) => Effect.Effect<void>;
   /**
    * Mutable on purpose: the projection writes interjections outside the run
    * snapshot, so the fake mirrors that by grafting this array onto every read.
@@ -216,8 +249,14 @@ function makeHarness(input: {
         ? run
         : { ...run, meeting: { ...run.meeting, interjections: [...liveInterjections] } };
     const runRef = yield* Ref.make(input.run);
-    const threadsRef = yield* Ref.make(new Map<string, OrchestrationThread>());
+    const threadsRef = yield* Ref.make(
+      new Map<string, OrchestrationThread>(
+        (input.existingThreads ?? []).map((thread) => [thread.id, thread]),
+      ),
+    );
+    const commandsRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
     const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+    const compositionsRef = yield* Ref.make<ReadonlyArray<WorkspacePromptComposeInput>>([]);
     const executionsRef = yield* Ref.make<ReadonlyArray<WorkspaceAgentExecutionInput>>([]);
     const sessionStopsRef = yield* Ref.make(0);
     const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
@@ -226,9 +265,41 @@ function makeHarness(input: {
     const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
       Effect.gen(function* () {
         sequence += 1;
+        yield* Ref.update(commandsRef, (current) => [...current, command]);
         switch (command.type) {
+          case "thread.message.assistant.delta":
+          case "thread.message.assistant.complete":
+            yield* Ref.update(threadsRef, (current) => {
+              const existing = current.get(command.threadId);
+              if (!existing) return current;
+              const previous = existing.messages.find(
+                (message) => message.id === command.messageId,
+              );
+              const message = {
+                id: command.messageId,
+                role: "assistant" as const,
+                text:
+                  (previous?.text ?? "") +
+                  (command.type === "thread.message.assistant.delta" ? command.delta : ""),
+                attachments: [],
+                turnId: null,
+                streaming: command.type === "thread.message.assistant.delta",
+                createdAt: previous?.createdAt ?? command.createdAt,
+                updatedAt: command.createdAt,
+              };
+              const next = new Map(current);
+              next.set(command.threadId, {
+                ...existing,
+                messages: previous
+                  ? existing.messages.map((entry) => (entry.id === message.id ? message : entry))
+                  : [...existing.messages, message],
+              });
+              return next;
+            });
+            break;
           case "project.collaboration.run.update":
             yield* Ref.set(runRef, command.run);
+            if (input.onRunUpdated !== undefined) yield* input.onRunUpdated(command.run);
             break;
           case "thread.session.stop":
             yield* Ref.update(sessionStopsRef, (count) => count + 1);
@@ -358,6 +429,9 @@ function makeHarness(input: {
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
       recordInterjection: () => Effect.void,
+      recordControl: () => Effect.void,
+      recordReview: () => Effect.void,
+      requestVerification: () => Effect.void,
       getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
         Ref.get(runRef).pipe(
           Effect.map((run) =>
@@ -380,15 +454,26 @@ function makeHarness(input: {
     } satisfies ProjectionWorkspaceCollaborationRunRepository["Service"];
     // No role bindings at all: a meeting must run on its roster alone.
     const query = {
+      getWorkspaceContextSettings: () =>
+        Effect.succeed(
+          input.compactHandoffs
+            ? { memoryMode: "relevant" as const, compactHandoffs: true, autoChatMemory: false }
+            : undefined,
+        ),
+      getCommandReadModel: () => Effect.succeed({ projects: [], threads: [] }),
       listWorkspaceAgentRoles: () => Effect.succeed({ roles: [] }),
-      composeWorkspacePrompt: () =>
+      composeWorkspacePrompt: (request: WorkspacePromptComposeInput) =>
         Effect.succeed({
-          prompt: "Workspace ID: workspace-m\n현재 사용자 작업: 서버 기능 구현",
+          prompt: `Workspace ID: workspace-m\n필수 사용자 지침: 확인하지 않은 검사를 통과했다고 쓰지 않는다.\n현재 사용자 작업: ${request.task}`,
           sourceItemIds: [],
           ragMatches: [],
           truncated: false,
-        }),
-      getThreadDetailById: (threadId: ThreadId) =>
+        }).pipe(Effect.tap(() => Ref.update(compositionsRef, (current) => [...current, request]))),
+      getThreadShellById: (threadId: ThreadId) =>
+        Ref.get(threadsRef).pipe(
+          Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
+        ),
+      getThreadRuntimeContext: (threadId: ThreadId) =>
         Ref.get(threadsRef).pipe(
           Effect.map((threads) => Option.fromNullishOr(threads.get(threadId))),
         ),
@@ -402,11 +487,13 @@ function makeHarness(input: {
         instanceId: ProviderInstanceId.make("claude-a"),
         driverKind: "claude",
         enabled: true,
+        snapshot: { getSnapshot: Effect.succeed({}) },
       },
       {
         instanceId: ProviderInstanceId.make("codex-a"),
         driverKind: "codex",
         enabled: true,
+        snapshot: { getSnapshot: Effect.succeed({}) },
       },
     ] as unknown as ReadonlyArray<ProviderInstance>;
     const providerRegistry = {
@@ -414,18 +501,134 @@ function makeHarness(input: {
         Effect.succeed(providerInstances.find((instance) => instance.instanceId === instanceId)),
       listInstances: Effect.succeed(providerInstances),
     } as unknown as ProviderInstanceRegistry["Service"];
+    const liveExecutorLayer = WorkspaceAgentExecutorLive.pipe(
+      Layer.provideMerge(
+        Layer.effect(
+          WorkspaceAgentControl,
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            return yield* makeWorkspaceAgentControl({
+              stateDir: yield* fs.makeTempDirectoryScoped(),
+              runs: repository,
+              query,
+              engine,
+              activities: {
+                listByThreadIdAndKinds: ({ threadId, kinds }) =>
+                  Ref.get(commandsRef).pipe(
+                    Effect.map((commands) => {
+                      const rows = new Map<string, ProjectionThreadActivity>();
+                      for (const command of commands) {
+                        if (
+                          command.type !== "thread.activity.append" ||
+                          command.threadId !== threadId ||
+                          !kinds.includes(command.activity.kind)
+                        )
+                          continue;
+                        rows.set(command.activity.id, {
+                          ...command.activity,
+                          activityId: command.activity.id,
+                          threadId,
+                        });
+                      }
+                      return [...rows.values()];
+                    }),
+                  ),
+              },
+            });
+          }),
+        ),
+      ),
+      Layer.provideMerge(
+        Layer.unwrap(
+          Effect.gen(function* () {
+            const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+            const sessions = new Map<ThreadId, ProviderExecutionContext>();
+            return Layer.mock(ProviderService)({
+              startSession: (threadId, request) =>
+                Effect.sync(() => {
+                  if (request.execution) sessions.set(threadId, request.execution);
+                  return {
+                    threadId,
+                    provider: ProviderDriverKind.make("codex"),
+                    status: "ready" as const,
+                    runtimeMode: request.runtimeMode,
+                    createdAt: at,
+                    updatedAt: at,
+                  };
+                }),
+              sendTurn: (request) =>
+                Effect.gen(function* () {
+                  const prompt = request.input ?? "";
+                  const execution = sessions.get(request.threadId)!;
+                  if (input.onTurnStart)
+                    yield* input.onTurnStart({ prompt, run: yield* Ref.get(runRef) });
+                  yield* Ref.update(promptsRef, (current) => [...current, prompt]);
+                  const base = {
+                    provider: ProviderDriverKind.make("codex"),
+                    threadId: request.threadId,
+                    execution,
+                    createdAt: at,
+                  };
+                  yield* PubSub.publish(events, {
+                    ...base,
+                    type: "content.delta",
+                    eventId: EventId.make(execution.executionId + ":delta"),
+                    payload: { streamKind: "assistant_text", delta: input.respond(prompt) },
+                  });
+                  yield* PubSub.publish(events, {
+                    ...base,
+                    type: "turn.completed",
+                    eventId: EventId.make(execution.executionId + ":done"),
+                    payload: { state: "completed" },
+                  });
+                  return { threadId: request.threadId, turnId: TurnId.make(execution.executionId) };
+                }),
+              stopSession: () => Effect.void,
+              streamEvents: Stream.fromPubSub(events),
+            });
+          }),
+        ),
+      ),
+    );
     const layer = WorkspaceCollaborationReactorLive.pipe(
       Layer.provideMerge(
-        Layer.succeed(WorkspaceAgentExecutor, {
-          execute: (execution) =>
-            Effect.gen(function* () {
-              yield* Ref.update(executionsRef, (current) => [...current, execution]);
-              if (input.onTurnStart !== undefined)
-                yield* input.onTurnStart({ prompt: execution.prompt, run: yield* Ref.get(runRef) });
-              yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
-              return input.respond(execution.prompt);
+        input.memoryDirective === undefined &&
+          !input.memoryFailure &&
+          input.memoryPaths === undefined
+          ? Layer.empty
+          : Layer.mock(WorkspaceMemory)({
+              context: (_projectId, _task, directivesOnly) =>
+                input.memoryFailure
+                  ? Effect.fail(new WorkspaceMemoryError({ message: "memory unavailable" }))
+                  : Effect.succeed(
+                      directivesOnly
+                        ? input.memoryDirective!
+                        : (input.memoryContext ?? "unexpected full memory"),
+                    ),
+              contextPaths: () =>
+                input.memoryPathsFailure
+                  ? Effect.fail(new WorkspaceMemoryError({ message: "folder unavailable" }))
+                  : Effect.succeed(input.memoryPaths ?? []),
             }),
-        }),
+      ),
+      Layer.provideMerge(
+        input.liveExecutor
+          ? liveExecutorLayer
+          : Layer.succeed(WorkspaceAgentExecutor, {
+              execute: (execution) =>
+                Effect.gen(function* () {
+                  yield* Ref.update(executionsRef, (current) => [...current, execution]);
+                  const failure = input.executionFailure?.(execution);
+                  if (failure) return yield* failure;
+                  if (input.onTurnStart !== undefined)
+                    yield* input.onTurnStart({
+                      prompt: execution.prompt,
+                      run: yield* Ref.get(runRef),
+                    });
+                  yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
+                  return input.respond(execution.prompt);
+                }),
+            }),
       ),
       Layer.provideMerge(OrchestrationTurnWaitLive),
       Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
@@ -438,9 +641,20 @@ function makeHarness(input: {
       ),
       Layer.provideMerge(Layer.succeed(ProviderInstanceRegistry, providerRegistry)),
       Layer.provideMerge(orchestraWorktreeStubs),
+      Layer.provideMerge(ServerConfig.layerTest("D:/repo", { prefix: "t3-meeting-context-" })),
       Layer.provideMerge(NodeServices.layer),
     );
-    return { runRef, promptsRef, executionsRef, threadsRef, sessionStopsRef, pubsub, layer };
+    return {
+      runRef,
+      promptsRef,
+      compositionsRef,
+      executionsRef,
+      threadsRef,
+      commandsRef,
+      sessionStopsRef,
+      pubsub,
+      layer,
+    };
   });
 }
 
@@ -472,6 +686,256 @@ const executeWrapUp = (roundCount: number) => ({
   answeredAt: at,
   nodeId: null,
 });
+
+const decodeContextSourcePath = Schema.decodeSync(Schema.fromJsonString(Schema.String));
+const runJsonSchema = Schema.fromJsonString(WorkspaceCollaborationRunSchema);
+const decodeRunJson = Schema.decodeEffect(runJsonSchema);
+const encodeRunJson = Schema.encodeEffect(runJsonSchema);
+
+it.effect("passes required user directives to every meeting and orchestra execution", () =>
+  Effect.gen(function* () {
+    const directive = "<t3_user_directives>REQUIRED_USER_RULE</t3_user_directives>";
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      memoryDirective: directive,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+      expect(executions.some((execution) => execution.orchestraPhase === "meeting")).toBe(true);
+      expect(executions.some((execution) => execution.orchestraPhase === "task")).toBe(true);
+      expect(executions.every((execution) => execution.prompt.includes(directive))).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("reports missing user directives to every direct execution", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({ run: orchestraRun(), respond: respondForOrchestraPrompt });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect(executions.length).toBeGreaterThan(0);
+      expect(
+        executions.every((execution) => execution.prompt.includes("<t3_memory_unavailable>")),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("reports a failed directive lookup to every direct execution", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      memoryFailure: true,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect(executions.length).toBeGreaterThan(0);
+      expect(
+        executions.every((execution) => execution.prompt.includes("<t3_memory_unavailable>")),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("parks an AI-planned meeting when the shared run control requests a pause", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: {
+        ...meetingRun(),
+        runControl: { control: "pause-requested", controlRevision: 1, updatedAt: at },
+      },
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(harness.promptsRef)).toEqual([]);
+      expect((yield* Ref.get(harness.runRef)).runControl).toMatchObject({
+        control: "paused",
+        controlRevision: 1,
+      });
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("executes an AI-planned graph with the selected model and permission snapshot", () =>
+  Effect.gen(function* () {
+    const selected = { instanceId: ProviderInstanceId.make("codex-a"), model: "selected-model" };
+    const roleBindings = (["coordinator", "implementer", "researcher"] as const).map((role) => ({
+      projectId,
+      role,
+      displayName: selected.model,
+      modelSelection: selected,
+      runtimeMode: "full-access" as const,
+      interactionMode: "plan" as const,
+      instructions: "",
+      enabled: true,
+      updatedAt: at,
+    }));
+    const harness = yield* makeHarness({
+      run: {
+        ...meetingRun(),
+        meeting: null,
+        runContext: { requestDigest: "fixture", roleBindings, requestMode: "direct" },
+        runControl: { control: "active", controlRevision: 0, updatedAt: at },
+      },
+      respond: (prompt) =>
+        prompt.includes("Return one strict machine-readable proposal between <t3_task_graph>")
+          ? `<t3_task_graph>${JSON.stringify({ summary: "Plan", nextAction: "Implement", nodes: [{ id: "build", kind: "implementation", agent: "codex", title: "Build", task: "Implement", goal: "Complete", context: "Request", input: "Goal", constraints: [], expectedOutput: "Result", successCriteria: ["Verified"], dependsOn: [], priority: 1 }] })}</t3_task_graph>`
+          : respondForMeetingPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect(executions.length).toBeGreaterThan(0);
+      expect(
+        executions.every(
+          (entry) =>
+            entry.modelSelection.model === selected.model &&
+            entry.modelSelection.instanceId === selected.instanceId &&
+            entry.runtimeMode === "full-access" &&
+            entry.interactionMode === "plan",
+        ),
+      ).toBe(true);
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("persists meeting failures and stops an exhausted step after reconstruction", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: meetingRun({ maxRounds: 0, phase: "planning" }),
+      respond: () => "계획 JSON 없는 잘못된 응답",
+    });
+    const failed = yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("failed");
+      expect(run.meeting?.turnFailures).toMatchObject([{ key: "plan", count: 2 }]);
+      expect(
+        (yield* Ref.get(harness.promptsRef)).filter((prompt) =>
+          prompt.startsWith("# Workspace Meeting Plan"),
+        ),
+      ).toHaveLength(2);
+      return run;
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    const decoded = yield* decodeRunJson(yield* encodeRunJson(failed));
+    const resumed = yield* makeHarness({
+      run: { ...decoded, status: "running", error: null },
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(resumed.promptsRef)).toEqual([]);
+      expect((yield* Ref.get(resumed.runRef)).status).toBe("failed");
+      expect((yield* Ref.get(resumed.runRef)).meeting?.turnFailures).toEqual(
+        decoded.meeting?.turnFailures,
+      );
+    }).pipe(Effect.provide(resumed.layer), Effect.scoped);
+  }),
+);
+
+it.effect("a reconstructed meeting spends only its remaining failure budget", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: meetingRun({
+        maxRounds: 0,
+        phase: "planning",
+        turnFailures: [{ key: "plan", count: 1, message: "previous failure" }],
+      }),
+      respond: () => "잘못된 계획",
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("failed");
+      expect(run.meeting?.turnFailures).toMatchObject([{ key: "plan", count: 2 }]);
+      expect(
+        (yield* Ref.get(harness.promptsRef)).filter((prompt) =>
+          prompt.startsWith("# Workspace Meeting Plan"),
+        ),
+      ).toHaveLength(1);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+it.effect(
+  "keeps the complete long statement and node output behind bounded source references",
+  () =>
+    Effect.gen(function* () {
+      const longStatement =
+        "Complete opening paragraph.\n\n" +
+        "statement detail ".repeat(2000) +
+        "\n\nUnresolved dissent at the statement tail.";
+      const longOutput =
+        "Complete result heading.\n\n" +
+        "implementation detail ".repeat(6000) +
+        "\n\nPending external evidence at the node tail.";
+      const harness = yield* makeHarness({
+        run: meetingRun({ answers: [executeWrapUp(1)] }),
+        compactHandoffs: true,
+        respond: (prompt) =>
+          prompt.startsWith("# Workspace Meeting Statement")
+            ? longStatement
+            : prompt.includes("Node: build\n")
+              ? longOutput
+              : respondForMeetingPrompt(prompt),
+      });
+      yield* Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* awaitRunStatus(harness.runRef, "completed");
+        const statement = run.meeting!.rounds[0]!.statements[0]!.content;
+        const output = run.graph!.nodes.find((node) => node.id === "build")!.output!;
+        expect(statement.length).toBeLessThanOrEqual(20_000);
+        expect(output.length).toBeLessThanOrEqual(100_000);
+        for (const [preview, original] of [
+          [statement, longStatement],
+          [output, longOutput],
+        ]) {
+          const source = preview!.match(/원문 파일: ("(?:[^"\\]|\\.)*");/u)?.[1];
+          expect(source).toBeDefined();
+          expect(yield* fs.readFileString(decodeContextSourcePath(source!))).toBe(original);
+          expect(preview).toContain("미리보기만으로 검증을 통과시키지 마세요");
+        }
+        const prompts = yield* Ref.get(harness.promptsRef);
+        expect(
+          prompts.some(
+            (prompt) =>
+              prompt.startsWith("# Workspace Meeting Round Close") && prompt.includes("원문 파일:"),
+          ),
+        ).toBe(true);
+        expect(
+          prompts.some(
+            (prompt) => prompt.includes("Node: validate-build") && prompt.includes("원문 파일:"),
+          ),
+        ).toBe(true);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
 
 it.effect("runs the meeting, plans onto the roster, and executes with the same seats", () =>
   Effect.gen(function* () {
@@ -505,6 +969,13 @@ it.effect("runs the meeting, plans onto the roster, and executes with the same s
       );
       const meetingThreads = yield* Ref.get(harness.threadsRef);
       expect(meetingThreads.size).toBe(1);
+      const summary = meetingThreads
+        .get(meetingThread!)
+        ?.messages.find((message) => message.id === `orchestra-summary:${run.id}`);
+      expect(summary?.streaming).toBe(false);
+      expect(summary?.text).toContain("오케스트라 대화 정리");
+      expect(summary?.text).toContain("합의: 서버 구현으로 진행");
+      expect(summary?.text).toContain("회의 합의대로 구현 완료");
       // Without an orchestra the one conversation is the person's own, so
       // nothing marks it as a run internal and nothing hides it.
       expect([...meetingThreads.values()].every((t) => t.orchestraRunThreadId === null)).toBe(true);
@@ -597,65 +1068,274 @@ it.effect(
     }),
 );
 
-it.effect("holds the meeting in the conversation the person sent it from", () =>
-  Effect.gen(function* () {
-    const existingThreadId = ThreadId.make("thread-existing");
-    const harness = yield* makeHarness({
-      run: meetingRun({ threadId: existingThreadId, answers: [executeWrapUp(1)] }),
-      respond: respondForMeetingPrompt,
-    });
-    // The person's conversation predates the meeting; its title is theirs.
-    yield* Ref.update(harness.threadsRef, (current) => {
-      const next = new Map(current);
-      next.set(existingThreadId, {
-        id: existingThreadId,
-        projectId,
-        title: "내 원래 대화",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("claude-a"),
-          model: "claude-fable",
-        },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        latestTurn: null,
+it.effect.each([
+  [false, true],
+  [true, true],
+  [true, false],
+] as const)(
+  "executes a workflow with selected models (live=%s, existing chat=%s)",
+  ([liveExecutor, existingChat]) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("workflow-existing-chat");
+      const definition = {
+        ...workflowDefaults()[0]!,
+        revision: 1,
+        archived: false,
+        digest: "fixture-digest",
         createdAt: at,
+      };
+      const models = {
+        coordinator: { instanceId: ProviderInstanceId.make("claude-a"), model: "lead-model" },
+        implementer: { instanceId: ProviderInstanceId.make("codex-a"), model: "build-model" },
+        researcher: { instanceId: ProviderInstanceId.make("claude-a"), model: "research-model" },
+      };
+      const roleBindings = (["coordinator", "implementer", "researcher"] as const).map((role) => ({
+        projectId,
+        role,
+        displayName: role,
+        modelSelection: models[role],
+        runtimeMode: "approval-required" as const,
+        interactionMode: "default" as const,
+        instructions: "",
+        enabled: true,
         updatedAt: at,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        deletedAt: null,
-        messages: [],
-        proposedPlans: [],
-        activities: [],
-        checkpoints: [],
-        session: null,
-      } as unknown as OrchestrationThread);
-      return next;
-    });
-
-    yield* Effect.gen(function* () {
-      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
-      yield* reactor.start();
-      yield* reactor.drain;
-
-      const run = yield* Ref.get(harness.runRef);
-      expect(run.status).toBe("completed");
-      expect(run.meeting?.threadId).toBe(existingThreadId);
-
-      const threads = yield* Ref.get(harness.threadsRef);
-      // No fresh thread was opened, and the person's title survived.
-      expect(threads.size).toBe(1);
-      expect(threads.get(existingThreadId)?.title).toBe("내 원래 대화");
-      expect(
-        run.meeting?.rounds[0]?.statements.every(
-          (statement) => statement.threadId === existingThreadId,
+      }));
+      let failedOnce = false;
+      const harness = yield* makeHarness({
+        liveExecutor,
+        executionFailure: (execution) => {
+          if (!liveExecutor && execution.execution.nodeId === "execute" && !failedOnce) {
+            failedOnce = true;
+            return new WorkspaceAgentExecutionError({ message: "temporary test failure" });
+          }
+          return undefined;
+        },
+        run: {
+          ...meetingRun(),
+          meeting: null,
+          workflow: {
+            definitionId: definition.id,
+            definitionRevision: 1,
+            definitionDigest: definition.digest,
+            definition,
+            title: definition.title,
+            values: { goal: "workflow target" },
+            nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+            roleBindings,
+            roleModels: models,
+            ...(existingChat ? { threadId } : {}),
+            control: "active",
+            controlRevision: 0,
+            updatedAt: at,
+            requestDigest: "fixture",
+          },
+        },
+        respond: respondForMeetingPrompt,
+      });
+      if (existingChat)
+        yield* Ref.update(harness.threadsRef, (current) => {
+          const next = new Map(current);
+          next.set(threadId, {
+            id: threadId,
+            projectId,
+            title: "기존 대화",
+            modelSelection: models.coordinator,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            latestTurn: null,
+            createdAt: at,
+            updatedAt: at,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          } as OrchestrationThread);
+          return next;
+        });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(harness.runRef);
+        expect(run.status, run.error ?? undefined).toBe("completed");
+        const actualThreadId = existingChat
+          ? threadId
+          : run.steps.find((step) => step.threadId !== null)?.threadId;
+        expect(actualThreadId).toBeTruthy();
+        const executions = yield* Ref.get(harness.executionsRef);
+        if (!liveExecutor) {
+          expect(executions.length).toBeGreaterThan(0);
+          expect(executions.every((entry) => entry.execution.ownerThreadId === threadId)).toBe(
+            true,
+          );
+          expect(
+            executions.find((entry) => entry.kind === "implementation")?.modelSelection,
+          ).toEqual(models.implementer);
+          expect(
+            executions
+              .filter((entry) => entry.execution.nodeId === "execute")
+              .map((entry) => entry.modelSelection),
+          ).toEqual([models.implementer, models.implementer]);
+          expect(executions.find((entry) => entry.kind === "validation")?.modelSelection).toEqual(
+            models.coordinator,
+          );
+        }
+        const threads = yield* Ref.get(harness.threadsRef);
+        expect(threads.size).toBe(1);
+        expect(
+          threads
+            .get(actualThreadId!)
+            ?.messages.find((message) => message.id === `orchestra-summary:${run.id}`)?.text,
+        ).toContain("회의 합의대로 구현 완료");
+        const commands = yield* Ref.get(harness.commandsRef);
+        expect(commands.some((command) => command.type === "thread.create")).toBe(!existingChat);
+        if (liveExecutor) {
+          expect(
+            commands.some(
+              (command) =>
+                command.type === "thread.message.assistant.delta" &&
+                command.threadId === actualThreadId &&
+                command.delta.includes("구현을 완료했다"),
+            ),
+          ).toBe(true);
+        }
+      }).pipe(
+        Effect.provide(
+          harness.layer.pipe(
+            Layer.provideMerge(
+              Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+            ),
+          ),
         ),
-      ).toBe(true);
-    }).pipe(Effect.provide(harness.layer), Effect.scoped);
-  }),
+        Effect.scoped,
+      );
+    }),
 );
+
+for (const folderFailure of [false, true]) {
+  it.effect(
+    `holds the meeting in the conversation and ${folderFailure ? "reports a folder lookup failure" : "uses its selected folder"}`,
+    () =>
+      Effect.gen(function* () {
+        const existingThreadId = ThreadId.make("thread-existing");
+        const harness = yield* makeHarness({
+          run: meetingRun({ threadId: existingThreadId, answers: [executeWrapUp(1)] }),
+          memoryDirective: "REQUIRED_USER_RULE",
+          memoryContext: "CURRENT_FOLDER_MEMORY",
+          memoryPaths: ["apps/web"],
+          memoryPathsFailure: folderFailure,
+          respond: respondForMeetingPrompt,
+        });
+        // The person's conversation predates the meeting; its title is theirs.
+        yield* Ref.update(harness.threadsRef, (current) => {
+          const next = new Map(current);
+          next.set(existingThreadId, {
+            id: existingThreadId,
+            projectId,
+            title: "내 원래 대화",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claude-a"),
+              model: "claude-fable",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            latestTurn: null,
+            createdAt: at,
+            updatedAt: at,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            deletedAt: null,
+            messages: [
+              {
+                id: MessageId.make("selected-folder"),
+                role: "user",
+                text: "apps/web 폴더에서 계속해",
+                streaming: false,
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                attachments: [],
+                turnId: null,
+              },
+              {
+                id: MessageId.make("prior-work"),
+                role: "assistant",
+                text: "OTHER_FOLDER_PRIVATE_CANARY",
+                streaming: false,
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                attachments: [],
+                turnId: null,
+              },
+            ],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          } as unknown as OrchestrationThread);
+          return next;
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+          yield* reactor.start();
+          yield* reactor.drain;
+
+          const run = yield* Ref.get(harness.runRef);
+          expect(run.status).toBe("completed");
+          const compositions = yield* Ref.get(harness.compositionsRef);
+          expect(
+            compositions.every((request) => !request.task.includes("OTHER_FOLDER_PRIVATE_CANARY")),
+          ).toBe(true);
+          expect(compositions.every((request) => request.contextPaths?.[0] === "apps/web")).toBe(
+            true,
+          );
+          if (folderFailure) expect(compositions).toHaveLength(0);
+          else expect(compositions.length).toBeGreaterThan(0);
+          expect(compositions.every((request) => request.includeRag === true)).toBe(true);
+          expect(
+            compositions.every(
+              (request) =>
+                request.includeShared === false &&
+                request.includeSharedLibrary === false &&
+                request.contextMode === "relevant",
+            ),
+          ).toBe(true);
+          const prompts = yield* Ref.get(harness.promptsRef);
+          if (folderFailure)
+            expect(
+              prompts.every((prompt) => prompt.includes("<t3_folder_memory_unavailable>")),
+            ).toBe(true);
+          expect(prompts.every((prompt) => !prompt.includes("OTHER_FOLDER_PRIVATE_CANARY"))).toBe(
+            true,
+          );
+          expect(prompts.every((prompt) => prompt.includes("REQUIRED_USER_RULE"))).toBe(true);
+          if (!folderFailure)
+            expect(prompts.some((prompt) => prompt.includes("CURRENT_FOLDER_MEMORY"))).toBe(true);
+          expect(run.meeting?.threadId).toBe(existingThreadId);
+
+          const threads = yield* Ref.get(harness.threadsRef);
+          // No fresh thread was opened, and the person's title survived.
+          expect(threads.size).toBe(1);
+          expect(threads.get(existingThreadId)?.title).toBe("내 원래 대화");
+          expect(
+            run.meeting?.rounds[0]?.statements.every(
+              (statement) => statement.threadId === existingThreadId,
+            ),
+          ).toBe(true);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
 
 it.effect("hands a mid-round interjection to the very next speaker", () =>
   Effect.gen(function* () {
@@ -802,6 +1482,13 @@ it.effect("parks at the wrap-up gate and concludes without execution when the pe
       expect(concluded.finalOutput).toContain("## 회의 결론");
       expect(concluded.finalOutput).toContain("합의: 서버 구현으로 진행");
       expect(concluded.finalOutput).toContain("## 회의 전문");
+      yield* reactor.drain;
+      const summary = (yield* Ref.get(harness.threadsRef))
+        .get(concluded.meeting!.threadId!)
+        ?.messages.find((message) => message.id === `orchestra-summary:${runId}`);
+      expect(summary?.text).toContain("여기서 종료 (실행 없음)");
+      expect(summary?.text).toContain("논의와 결정");
+      expect(summary?.text).not.toContain("## 회의 전문");
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );
@@ -821,6 +1508,13 @@ it.effect("finalizes a parked run when the person cancels instead of answering",
       const parked = yield* Ref.get(harness.runRef);
       expect(parked.status).toBe("running");
       expect(parked.meeting?.pendingQuestion).not.toBeNull();
+      expect(
+        (yield* Ref.get(harness.commandsRef)).some(
+          (command) =>
+            command.type === "thread.message.assistant.delta" &&
+            command.messageId === `orchestra-summary:${runId}`,
+        ),
+      ).toBe(false);
 
       // The projection flips the status before the event is published.
       yield* Ref.update(harness.runRef, (run) => ({
@@ -834,7 +1528,81 @@ it.effect("finalizes a parked run when the person cancels instead of answering",
 
       const cancelled = yield* awaitRunStatus(harness.runRef, "cancelled");
       expect(cancelled.error).toBeNull();
+      expect(cancelled.meeting?.pendingQuestion).toBeNull();
+      yield* reactor.drain;
+      const summary = (yield* Ref.get(harness.threadsRef))
+        .get(cancelled.meeting!.threadId!)
+        ?.messages.find((message) => message.id === `orchestra-summary:${runId}`);
+      expect(summary?.streaming).toBe(false);
+      expect(summary?.text).toContain("중지됨");
+      expect(summary?.text).toContain("미완료 작업은 완료로 처리하지 않았습니다");
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "publishes failure details in the existing conversation without claiming unfinished work is complete",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({
+        run: meetingRun(),
+        respond: () => {
+          throw new Error("provider disconnected");
+        },
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(h.runRef);
+        expect(run.status).toBe("failed");
+        const summary = (yield* Ref.get(h.threadsRef))
+          .get(run.meeting!.threadId!)
+          ?.messages.find((message) => message.id === `orchestra-summary:${runId}`);
+        expect(summary?.streaming).toBe(false);
+        expect(summary?.text).toContain("**실패**");
+        expect(summary?.text).toContain("provider disconnected");
+        expect(summary?.text).not.toContain("### 최종 결과");
+      }).pipe(Effect.provide(h.layer), Effect.scoped);
+    }),
+);
+
+it.effect("does not duplicate a terminal run summary when the run is delivered again", () =>
+  Effect.gen(function* () {
+    const first = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+    }).pipe(Effect.provide(first.layer), Effect.scoped);
+    const run = yield* Ref.get(first.runRef);
+    const threads = [...(yield* Ref.get(first.threadsRef)).values()];
+    const second = yield* makeHarness({
+      run,
+      existingThreads: threads,
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* Effect.service(WorkspaceCollaborationReactor);
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(second.promptsRef)).toEqual([]);
+      expect(
+        (yield* Ref.get(second.commandsRef)).filter(
+          (command) =>
+            command.type === "thread.message.assistant.delta" ||
+            command.type === "thread.message.assistant.complete",
+        ),
+      ).toEqual([]);
+      expect(
+        (yield* Ref.get(second.threadsRef))
+          .get(run.meeting!.threadId!)
+          ?.messages.filter((message) => message.id === `orchestra-summary:${runId}`),
+      ).toHaveLength(1);
+    }).pipe(Effect.provide(second.layer), Effect.scoped);
   }),
 );
 
@@ -978,6 +1746,7 @@ it.effect("still retries a node when the person's revision budget is 1", () =>
       // retry at all — the plan already sits on revision 1 — so the very first
       // rejected reply ended it.
       run: meetingRun({ maxRevisions: 1, answers: [executeWrapUp(1)] }),
+      memoryDirective: "필수 사용자 지침: 확인하지 않은 검사를 통과했다고 쓰지 않는다.",
       respond: (prompt) => {
         if (prompt.includes("Return one strict receipt between <t3_validation>")) {
           receipts += 1;
@@ -997,6 +1766,21 @@ it.effect("still retries a node when the person's revision budget is 1", () =>
       expect(validation?.status).toBe("completed");
       expect(validation?.attempts).toHaveLength(2);
       expect(validation?.attempts[0]?.status).toBe("failed");
+      expect(validation?.attempts[0]?.output).toBe("구현은 괜찮아 보인다.");
+      expect(validation?.attempts[0]?.formatRepair?.chars).toBe("구현은 괜찮아 보인다.".length);
+      const executions = yield* Ref.get(harness.executionsRef);
+      const repair = executions.find((entry) => entry.usagePhase === "format-repair");
+      expect(repair?.prompt).toContain("ORIGINAL OUTPUT (verbatim):");
+      expect(repair?.prompt).toContain("구현은 괜찮아 보인다.");
+      expect(repair?.prompt).toContain("Do not repeat research, tools, builds, tests, file edits");
+      expect(repair?.prompt).not.toContain("DEPENDENCIES:");
+      expect(repair?.prompt).not.toContain("redo the work");
+      expect(repair?.prompt).not.toContain("Independently verify the target output");
+      expect(repair?.prompt).toContain(
+        "필수 사용자 지침: 확인하지 않은 검사를 통과했다고 쓰지 않는다.",
+      );
+      expect(executions.filter((entry) => entry.execution.nodeId === "build")).toHaveLength(1);
+      expect(repair?.execution.attempt).toBe(2);
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );
@@ -1084,8 +1868,53 @@ const orchestraRun = (meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollabo
   orchestra: { maxParallel: 2, isolateWorktrees: false },
 });
 
+import { reviewWorkspaceOrchestraPlan } from "../workspaceOrchestraReview.ts";
+import { WorkspaceDevelopmentGit } from "../WorkspaceDevelopmentGit.ts";
+
 const seatQuestion = (question: string) =>
   `<t3_question>${JSON.stringify({ question, options: ["A", "B"], context: "선택이 남았다." })}</t3_question>`;
+
+it.effect("orchestra: persists a finished sibling while another execution is still running", () =>
+  Effect.gen(function* () {
+    const slowStarted = yield* Deferred.make<void>();
+    const releaseSlow = yield* Deferred.make<void>();
+    const fastPersisted = yield* Deferred.make<WorkspaceCollaborationRun>();
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      respond: respondForOrchestraPrompt,
+      onTurnStart: ({ prompt }) =>
+        Effect.gen(function* () {
+          if (prompt.includes("Node: research-p1\n")) {
+            yield* Deferred.succeed(slowStarted, undefined);
+            yield* Deferred.await(releaseSlow);
+          } else if (prompt.includes("Node: research-p2\n")) {
+            yield* Deferred.await(slowStarted);
+          }
+        }),
+      onRunUpdated: (run) =>
+        run.graph?.nodes.some(
+          (node) => node.id === "research-p2" && node.attempts.at(-1)?.status === "completed",
+        )
+          ? Deferred.succeed(fastPersisted, run).pipe(Effect.asVoid)
+          : Effect.void,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const partial = yield* Deferred.await(fastPersisted);
+      expect(partial.graph?.status).toBe("executing");
+      expect(partial.graph?.nodes.find((node) => node.id === "research-p1")?.status).toBe(
+        "running",
+      );
+      expect(
+        partial.graph?.nodes.find((node) => node.id === "research-p2")?.attempts.at(-1)?.status,
+      ).toBe("completed");
+      yield* Deferred.succeed(releaseSlow, undefined);
+      yield* reactor.drain;
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
 
 it.effect("orchestra: runs independent executions side by side inside one conversation", () =>
   Effect.gen(function* () {
@@ -1143,6 +1972,8 @@ it.effect("orchestra: runs independent executions side by side inside one conver
 it.effect("orchestra: isolation=true runs write chains in parallel, each in its own worktree", () =>
   Effect.gen(function* () {
     const writeWaves: string[][] = [];
+    const firstWriteStarted = yield* Deferred.make<void>();
+    const secondWriteStarted = yield* Deferred.make<void>();
     const harness = yield* makeHarness({
       run: { ...orchestraRun(), orchestra: { maxParallel: 2, isolateWorktrees: true } },
       respond: (prompt) =>
@@ -1151,11 +1982,18 @@ it.effect("orchestra: isolation=true runs write chains in parallel, each in its 
           '"kind":"implementation"',
         ),
       onTurnStart: ({ prompt, run }) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (!prompt.includes("# Workspace Task Graph Assignment")) return;
           const running = run.graph?.nodes.filter((node) => node.status === "running") ?? [];
           if (running.some((node) => node.kind === "implementation" || node.kind === "debug")) {
             writeWaves.push(running.map((node) => String(node.id)).toSorted());
+            if (prompt.includes("Node: research-p1\n")) {
+              yield* Deferred.succeed(firstWriteStarted, undefined);
+              yield* Deferred.await(secondWriteStarted);
+            } else if (prompt.includes("Node: research-p2\n")) {
+              yield* Deferred.succeed(secondWriteStarted, undefined);
+              yield* Deferred.await(firstWriteStarted);
+            }
           }
         }),
     });
@@ -1345,4 +2183,671 @@ it.effect(
         ).toBe(true);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
+);
+
+it.effect("settles blocked nodes too when a cancelled run drains", () =>
+  Effect.gen(function* () {
+    const initial = meetingRun();
+    const graph = buildInitialWorkspaceTaskGraph(initial.task);
+    const harness = yield* makeHarness({
+      run: {
+        ...initial,
+        status: "cancel-requested",
+        graph: {
+          ...graph,
+          nodes: [
+            { ...graph.nodes[0]!, status: "completed" },
+            { ...graph.nodes[0]!, id: WorkspaceTaskNodeId.make("waiting"), status: "blocked" },
+          ],
+        },
+      },
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("cancelled");
+      expect(run.graph?.nodes[0]?.status).toBe("completed");
+      expect(run.graph!.nodes.length).toBeGreaterThan(1);
+      expect(run.graph?.nodes.slice(1).every((node) => node.status === "cancelled")).toBe(true);
+      expect(yield* Ref.get(harness.promptsRef)).toEqual([]);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+for (const maxRounds of [0, 1]) {
+  it.effect(
+    `asks the selected conductor first and parks before ${maxRounds === 0 ? "direct execution" : "discussion"}`,
+    () =>
+      Effect.gen(function* () {
+        const question = "가격·지갑 검증만 진행할까요?";
+        const harness = yield* makeHarness({
+          run: meetingRun({ phase: "clarifying", maxRounds, chairParticipantId: pid("p2") }),
+          respond: (prompt) => {
+            expect(prompt.startsWith("# Workspace Meeting Intake")).toBe(true);
+            return `작업 범위를 확인하겠습니다.<t3_question>${JSON.stringify({ question, options: ["가격·지갑만 진행", "설명만"], context: "범위 확인" })}</t3_question>`;
+          },
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const parked = yield* Ref.get(harness.runRef);
+          expect(parked.graph).toBeNull();
+          expect(parked.meeting?.rounds).toEqual([]);
+          expect(parked.meeting?.pendingQuestion).toMatchObject({
+            question,
+            askedByParticipantId: pid("p2"),
+          });
+          const executions = yield* Ref.get(harness.executionsRef);
+          expect(executions).toHaveLength(1);
+          expect(executions[0]?.modelSelection.instanceId).toBe("codex-a");
+          expect(executions[0]?.title).toBe("지휘 AI · 질문 먼저");
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
+
+it.effect("receives the saved answer in the conductor before planning and assigning work", () =>
+  Effect.gen(function* () {
+    const answer = "가격·지갑 검증만 진행하세요. 프로그램 재시작은 금지합니다.";
+    const harness = yield* makeHarness({
+      run: meetingRun({
+        phase: "clarifying",
+        maxRounds: 0,
+        chairParticipantId: pid("p2"),
+        answers: [{ question: "어떤 작업을 할까요?", answer, answeredAt: at, nodeId: null }],
+      }),
+      respond: (prompt) =>
+        prompt.startsWith("# Workspace Meeting Intake")
+          ? "<t3_ready>가격·지갑 검증만 진행합니다.</t3_ready>"
+          : respondForMeetingPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("completed");
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect(executions[0]?.modelSelection.instanceId).toBe("codex-a");
+      expect(executions[0]?.prompt).toContain(answer);
+      const plan = executions.find((entry) => entry.prompt.startsWith("# Workspace Meeting Plan"));
+      expect(plan?.prompt).toContain(answer);
+      expect(plan?.modelSelection.instanceId).toBe("codex-a");
+      expect(run.graph?.nodes.some((node) => node.kind === "implementation")).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+for (const answer of [null, "작업하지 말고 설명만 해 주세요."]) {
+  it.effect(
+    `ends with the conductor's answer and no graph for ${answer === null ? "a question" : "an explanation-only reply"}`,
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          run: meetingRun({
+            phase: "clarifying",
+            maxRounds: 0,
+            answers:
+              answer === null
+                ? []
+                : [{ question: "진행할까요?", answer, answeredAt: at, nodeId: null }],
+          }),
+          respond: () => "이 프로그램의 역할을 설명합니다. 요청된 작업은 시작하지 않습니다.",
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const run = yield* Ref.get(harness.runRef);
+          expect(run.status).toBe("completed");
+          expect(run.graph).toBeNull();
+          expect(run.meeting?.phase).toBe("done");
+          expect(run.finalOutput).toContain("프로그램의 역할");
+          expect(yield* Ref.get(harness.executionsRef)).toHaveLength(1);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
+
+for (const output of [
+  "<t3_ready>바로 실행</t3_ready>",
+  '<t3_task_graph>{"nodes":[]}</t3_task_graph>',
+]) {
+  it.effect(`refuses an attempted execution before an answer: ${output}`, () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        run: meetingRun({ phase: "clarifying", maxRounds: 0 }),
+        respond: () => output,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        expect((yield* Ref.get(harness.runRef)).status).toBe("failed");
+        expect((yield* Ref.get(harness.runRef)).graph).toBeNull();
+        expect(yield* Ref.get(harness.executionsRef)).toHaveLength(1);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+}
+
+it.effect("resumes a parked question without calling the conductor again", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: meetingRun({
+        phase: "clarifying",
+        pendingQuestion: {
+          question: "진행 범위는?",
+          askedByParticipantId: pid("p1"),
+          options: [],
+          context: "",
+          askedAt: at,
+          nodeId: null,
+        },
+      }),
+      respond: respondForMeetingPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(harness.executionsRef)).toEqual([]);
+      expect((yield* Ref.get(harness.runRef)).graph).toBeNull();
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("dispatches a finished worker's validator while its slow sibling still runs", () =>
+  Effect.gen(function* () {
+    const slowStarted = yield* Deferred.make<void>();
+    const releaseSlow = yield* Deferred.make<void>();
+    const validatorStarted = yield* Deferred.make<void>();
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      respond: respondForOrchestraPrompt,
+      onTurnStart: ({ prompt }) =>
+        Effect.gen(function* () {
+          if (prompt.includes("Node: research-p1\n")) {
+            yield* Deferred.succeed(slowStarted, undefined);
+            yield* Deferred.await(releaseSlow);
+          }
+          if (prompt.includes("Node: research-p2\n")) yield* Deferred.await(slowStarted);
+          if (prompt.includes("Node: validate-research-p2\n"))
+            yield* Deferred.succeed(validatorStarted, undefined);
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* Deferred.await(validatorStarted);
+      const partial = yield* Ref.get(harness.runRef);
+      expect(partial.graph?.nodes.find((node) => node.id === "research-p1")?.status).toBe(
+        "running",
+      );
+      expect(
+        partial.graph?.nodes.filter((node) => node.status === "running").length,
+      ).toBeLessThanOrEqual(2);
+      yield* Deferred.succeed(releaseSlow, undefined);
+      yield* reactor.drain;
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "parks before execution, saves a human edit without spending retries, and resumes only on confirmation",
+  () =>
+    Effect.gen(function* () {
+      const completed = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        run: { ...orchestraRun(), orchestra: { ...orchestraRun().orchestra!, reviewPlan: true } },
+        respond: respondForOrchestraPrompt,
+        onRunUpdated: (run) =>
+          run.status === "completed"
+            ? Deferred.succeed(completed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const parked = yield* Ref.get(harness.runRef);
+        expect(parked.graph?.planReview?.status).toBe("pending");
+        expect(parked.graph!.nodes.flatMap((node) => node.attempts)).toHaveLength(0);
+        const target = parked.graph!.nodes.find((node) => node.id === "research-p2")!;
+        const request = {
+          projectId,
+          runId,
+          expectedRevision: 0,
+          edits: [
+            {
+              nodeId: target.id,
+              title: "사용자가 고친 작업",
+              task: "이 지시로만 조사한다.",
+              participantId: target.participantId,
+              dependsOn: [],
+            },
+          ],
+          approve: false,
+          reviewedAt: at,
+        };
+        const saved = reviewWorkspaceOrchestraPlan(parked, request)!;
+        expect(saved.revision).toBe(parked.graph!.revision);
+        expect(saved.planReview?.status).toBe("pending");
+        expect(
+          reviewWorkspaceOrchestraPlan({ ...parked, graph: saved }, { ...request, approve: true }),
+        ).toBeNull();
+        const approved = reviewWorkspaceOrchestraPlan(
+          { ...parked, graph: saved },
+          { ...request, expectedRevision: 1, approve: true },
+        )!;
+        yield* Ref.set(harness.runRef, { ...parked, graph: approved });
+        yield* PubSub.publish(harness.pubsub, {
+          type: "project.collaboration-run-reviewed",
+          payload: { ...request, expectedRevision: 1, approve: true },
+        } as unknown as OrchestrationEvent);
+        yield* Deferred.await(completed);
+        yield* reactor.drain;
+        const executions = yield* Ref.get(harness.executionsRef);
+        expect(
+          executions.find((execution) => execution.execution.nodeId === target.id)?.prompt,
+        ).toContain("이 지시로만 조사한다.");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect("stops at the persisted worker-turn limit and retains finished output", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: { ...orchestraRun(), orchestra: { ...orchestraRun().orchestra!, maxWorkerTurns: 1 } },
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("실행 한도");
+      expect(run.graph!.nodes.flatMap((node) => node.attempts)).toHaveLength(1);
+      expect(run.graph!.nodes.some((node) => node.output !== null)).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "keeps AI-approved work pending until actual verification passes, then resumes without rerunning workers",
+  () =>
+    Effect.gen(function* () {
+      let passed = false;
+      let checks = 0;
+      const completed = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        run: {
+          ...orchestraRun(),
+          orchestra: {
+            ...orchestraRun().orchestra!,
+            completionCheck: true,
+            verificationCommands: ["test-command"],
+          },
+        },
+        respond: respondForMeetingPrompt,
+        onRunUpdated: (run) =>
+          run.status === "completed"
+            ? Deferred.succeed(completed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      const git = Layer.mock(WorkspaceDevelopmentGit)({
+        inspect: () =>
+          Effect.succeed({
+            sha: "base",
+            branch: "main",
+            commonDirectory: "repo",
+            clean: true,
+            fingerprint: "current",
+          }),
+        verify: (_cwd, commands) =>
+          Effect.sync(() => {
+            checks++;
+            return {
+              passed,
+              artifacts: [],
+              commands: commands.map((command) => ({
+                ...command,
+                exitCode: passed ? 0 : 7,
+                timedOut: false,
+                logPath: "receipt.log",
+              })),
+            };
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const pending = yield* Ref.get(harness.runRef);
+        expect(pending.graph?.status).toBe("completed");
+        expect(pending.status).toBe("running");
+        expect(pending.graph?.delivery?.status).toBe("failed");
+        expect(pending.graph?.delivery?.commands[0]?.exitCode).toBe(7);
+        expect(pending.finalOutput).toContain("구현 완료");
+        const workersBefore = (yield* Ref.get(harness.executionsRef)).length;
+        passed = true;
+        yield* Ref.set(harness.runRef, {
+          ...pending,
+          graph: {
+            ...pending.graph!,
+            delivery: { ...pending.graph!.delivery!, status: "verifying" },
+          },
+        });
+        yield* PubSub.publish(harness.pubsub, {
+          type: "project.collaboration-verification-requested",
+          payload: { projectId, runId, verificationCommands: ["test-command"], requestedAt: at },
+        } as unknown as OrchestrationEvent);
+        yield* Deferred.await(completed);
+        yield* reactor.drain;
+        expect((yield* Ref.get(harness.runRef)).graph?.delivery?.status).toBe("passed");
+        expect((yield* Ref.get(harness.executionsRef)).length).toBe(workersBefore);
+        expect(checks).toBe(2);
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(git))), Effect.scoped);
+    }),
+);
+
+it.effect(
+  "cancels verification immediately and interrupts its worker without marking completion",
+  () =>
+    Effect.gen(function* () {
+      const verificationStarted = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        run: {
+          ...orchestraRun(),
+          orchestra: {
+            ...orchestraRun().orchestra!,
+            completionCheck: true,
+            verificationCommands: ["test-command"],
+          },
+        },
+        respond: respondForMeetingPrompt,
+        onRunUpdated: (run) =>
+          run.status === "cancelled"
+            ? Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      const git = Layer.mock(WorkspaceDevelopmentGit)({
+        inspect: () =>
+          Effect.succeed({
+            sha: "base",
+            branch: "main",
+            commonDirectory: "repo",
+            clean: true,
+            fingerprint: "current",
+          }),
+        verify: () =>
+          Deferred.succeed(verificationStarted, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* Deferred.await(verificationStarted);
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          status: "cancel-requested" as const,
+        }));
+        yield* PubSub.publish(harness.pubsub, {
+          type: "project.collaboration-run-cancel-requested",
+          payload: { projectId, runId, cancelledAt: at },
+        } as unknown as OrchestrationEvent);
+        yield* Deferred.await(interrupted);
+        yield* Deferred.await(cancelled);
+        yield* reactor.drain;
+        expect((yield* Ref.get(harness.runRef)).status).toBe("cancelled");
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(git))), Effect.scoped);
+    }),
+);
+
+it.effect("parks a genuine limit without occupying the run and resumes once at its deadline", () =>
+  Effect.gen(function* () {
+    const waiting = yield* Deferred.make<void>();
+    const resumed = yield* Deferred.make<void>();
+    let limited = false;
+    const run = orchestraRun();
+    const harness = yield* makeHarness({
+      run: { ...run, orchestra: { ...run.orchestra!, resumeAfterLimit: true } },
+      respond: respondForOrchestraPrompt,
+      executionFailure: (execution) => {
+        if (execution.prompt.includes("Node: research-p1\n") && !limited) {
+          limited = true;
+          return new WorkspaceAgentExecutionError({
+            message: "HTTP 429 Too Many Requests; Retry-After: 60",
+          });
+        }
+        return undefined;
+      },
+      onTurnStart: ({ prompt }) =>
+        prompt.includes("Node: research-p1\n")
+          ? Deferred.succeed(resumed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      onRunUpdated: (run) =>
+        run.graph?.nodes.some((n) => n.usageRecovery?.phase === "waiting")
+          ? Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* Deferred.await(waiting);
+      yield* reactor.drain;
+      const parked = yield* Ref.get(harness.runRef);
+      expect(parked.status).toBe("running");
+      expect(parked.graph?.nodes.find((n) => n.id === "research-p1")?.attempts).toHaveLength(1);
+      yield* TestClock.adjust("61 seconds");
+      yield* Deferred.await(resumed);
+      yield* reactor.drain;
+      const done = yield* Ref.get(harness.runRef);
+      expect(done.status, done.error ?? undefined).toBe("completed");
+      expect(done.graph?.nodes.find((n) => n.id === "research-p1")?.attempts).toHaveLength(2);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+for (const cancel of [false, true]) {
+  it.effect(`restores a persisted usage wait on startup (cancel=${cancel})`, () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const graph = buildInitialWorkspaceTaskGraph("recovered task");
+      const run = orchestraRun({ phase: "executing" });
+      const harness = yield* makeHarness({
+        run: {
+          ...run,
+          status: "running",
+          orchestra: { ...run.orchestra!, resumeAfterLimit: true },
+          graph: {
+            ...graph,
+            status: "executing",
+            nodes: graph.nodes.map((n) => ({
+              ...n,
+              kind: "research",
+              participantId: pid("p1"),
+              usageRecovery: {
+                fingerprint: "persisted",
+                resumeAt: "1970-01-01T00:01:01.000Z",
+                count: 1,
+                phase: "waiting",
+                lastError: "HTTP 429",
+              },
+            })),
+          },
+        },
+        respond: () => seatQuestion("재개한 작업 확인"),
+        onTurnStart: () => Deferred.succeed(entered, undefined).pipe(Effect.asVoid),
+        onRunUpdated: (run) =>
+          run.status === "cancelled"
+            ? Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        expect(yield* Ref.get(harness.executionsRef)).toHaveLength(0);
+        if (cancel) {
+          yield* Ref.update(harness.runRef, (r) => ({ ...r, status: "cancel-requested" as const }));
+          yield* PubSub.publish(harness.pubsub, {
+            type: "project.collaboration-run-cancel-requested",
+            payload: { projectId, runId, cancelledAt: at },
+          } as OrchestrationEvent);
+          yield* Deferred.await(cancelled);
+          yield* reactor.drain;
+        }
+        yield* TestClock.adjust("61 seconds");
+        if (!cancel) {
+          yield* Deferred.await(entered);
+          yield* reactor.drain;
+          expect((yield* Ref.get(harness.runRef)).meeting?.pendingQuestion?.question).toBe(
+            "재개한 작업 확인",
+          );
+        } else {
+          yield* reactor.drain;
+          expect(yield* Ref.get(harness.executionsRef)).toHaveLength(0);
+          expect((yield* Ref.get(harness.runRef)).status).toBe("cancelled");
+        }
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+}
+
+for (const maxRounds of [0, 1]) {
+  it.effect(
+    `live executor: plans without a graph and completes with agent control enabled (rounds=${maxRounds})`,
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          liveExecutor: true,
+          run: orchestraRun({ maxRounds, phase: maxRounds === 0 ? "planning" : "discussing" }),
+          respond: respondForOrchestraPrompt,
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const done = yield* Ref.get(harness.runRef);
+          expect(done.error).toBeNull();
+          expect(done.status).toBe("completed");
+          expect(done.graph?.nodes.some((node) => node.attempts.length > 0)).toBe(true);
+          const prompts = yield* Ref.get(harness.promptsRef);
+          expect(
+            prompts.filter((prompt) => prompt.startsWith("# Workspace Meeting Plan")),
+          ).toHaveLength(1);
+          expect(
+            prompts.find((prompt) => prompt.startsWith("# Workspace Meeting Plan")),
+          ).not.toContain("<workspace_agent_mailbox>");
+          expect(prompts.some((prompt) => prompt.includes("<workspace_agent_mailbox>"))).toBe(true);
+          const control = Option.getOrThrow(yield* Effect.serviceOption(WorkspaceAgentControl));
+          const records = (yield* control.overview({ projectId, runId })).records;
+          const handoff = records.find((record) => record.recordType === "handoff");
+          expect(handoff).toBeDefined();
+          const evidence = yield* control.evidence({ projectId, runId, recordId: handoff!.id });
+          expect(prompts).toContain(evidence.text);
+          const missing = yield* control
+            .prepare({
+              projectId,
+              runId,
+              nodeId: WorkspaceTaskNodeId.make("missing-task"),
+              executionId: "orchestra:run-m:missing-task:1",
+              prompt: "must not be submitted",
+              model: "test-model",
+              providerInstanceId: "codex-a",
+            })
+            .pipe(Effect.result);
+          expect(missing).toMatchObject({
+            _tag: "Failure",
+            failure: { message: "인계할 작업 단계를 찾을 수 없습니다." },
+          });
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
+
+it.effect("live executor: asks before creating a graph with agent control enabled", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      liveExecutor: true,
+      run: orchestraRun({ phase: "clarifying", maxRounds: 0, chairParticipantId: pid("p2") }),
+      respond: () => seatQuestion("분석할 지표의 기간과 출처를 알려 주세요."),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const parked = yield* Ref.get(harness.runRef);
+      expect(parked.error).toBeNull();
+      expect(parked.graph).toBeNull();
+      expect(parked.meeting?.pendingQuestion?.question).toBe(
+        "분석할 지표의 기간과 출처를 알려 주세요.",
+      );
+      expect(yield* Ref.get(harness.promptsRef)).toHaveLength(1);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+for (const runtimeMode of [
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+] as const) {
+  it.effect(`uses the app-selected ${runtimeMode} for the conductor and every task phase`, () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        run: orchestraRun({ runtimeMode, interactionMode: "default" }),
+        respond: respondForOrchestraPrompt,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+        const executions = yield* Ref.get(harness.executionsRef);
+        expect(executions.some((e) => e.orchestraPhase === "meeting")).toBe(true);
+        expect(executions.some((e) => e.kind === "research")).toBe(true);
+        expect(executions.every((e) => e.runtimeMode === runtimeMode)).toBe(true);
+        expect(executions.every((e) => e.interactionMode === "default")).toBe(true);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+}
+
+it.effect("keeps the app-selected plan interaction mode on the conductor", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: orchestraRun({
+        phase: "clarifying",
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      }),
+      respond: () => seatQuestion("계획에서 확인할 정보를 알려 주세요."),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const executions = yield* Ref.get(harness.executionsRef);
+      expect(executions).toHaveLength(1);
+      expect(executions[0]).toMatchObject({
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      });
+      expect((yield* Ref.get(harness.runRef)).graph).toBeNull();
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
 );

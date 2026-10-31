@@ -257,14 +257,18 @@ export function PreviewAutomationHosts() {
         <PreviewAutomationHost
           key={environment.environmentId}
           environmentId={environment.environmentId}
+          connected={environment.connection.phase === "connected"}
         />
       ))}
     </>
   );
 }
 
-function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId }) {
-  const { environmentId } = props;
+function PreviewAutomationHost(props: {
+  readonly environmentId: EnvironmentId;
+  readonly connected: boolean;
+}) {
+  const { environmentId, connected } = props;
   const registry = useContext(RegistryContext);
   const [automationClientId] = useState(createPreviewAutomationClientId);
   const initialAutomationHost = useMemo<PreviewAutomationHostState>(
@@ -708,6 +712,10 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
   useAtomValue(automationRequestConsumerAtom);
 
   useEffect(() => {
+    // A focus report is only deliverable while the environment is connected.
+    // Sending it against a disconnected target cannot succeed, so it would
+    // surface as a command failure on every focus/blur event.
+    if (!connected) return;
     const report = () => {
       if (!automationConnectionId) return;
       void focusAutomationHost({
@@ -727,7 +735,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
       window.removeEventListener("focus", report);
       window.removeEventListener("blur", report);
     };
-  }, [automationClientId, automationConnectionId, environmentId, focusAutomationHost]);
+  }, [automationClientId, automationConnectionId, connected, environmentId, focusAutomationHost]);
 
   return null;
 }

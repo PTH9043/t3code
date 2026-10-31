@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
+import { useProjectFileDrop } from "../hooks/useProjectFileDrop";
 import { getLocalStorageItem } from "../hooks/useLocalStorage";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import { cn, isMacPlatform } from "../lib/utils";
@@ -18,6 +19,8 @@ import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../ho
 import LegacyThreadSidebar from "./LegacySidebar";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+import { AiHelpHost } from "./help/AiHelpHost";
+import { AiHelpButton } from "./help/AiHelpButton";
 import { ControlCenterSidebarNav } from "./control-center/ControlCenterSidebarNav";
 import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
@@ -94,7 +97,7 @@ function SidebarControl() {
 
   return (
     <div
-      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center"
+      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center gap-1"
       data-sidebar-control=""
     >
       <Tooltip>
@@ -115,11 +118,13 @@ function SidebarControl() {
           주 사이드바 열기/닫기{shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
+      {!isSidebarVisible ? <AiHelpButton className="pointer-events-auto" /> : null}
     </div>
   );
 }
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
+  useProjectFileDrop();
   const navigate = useNavigate();
   const legacySidebarEnabled = useLegacySidebarEnabled();
   // Settings routes show the settings nav in place of whichever thread
@@ -220,6 +225,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         <SidebarRail />
       </Sidebar>
       {children}
+      <AiHelpHost />
       <SidebarControl />
     </SidebarProvider>
   );

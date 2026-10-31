@@ -13,10 +13,68 @@ import {
 
 import {
   buildThreadFeed,
+  buildPendingUserInputAnswers,
+  buildPendingUserInputImages,
+  derivePendingUserInputs,
   deriveThreadFeedPresentation,
+  setPendingUserInputCustomAnswer,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
+
+it("keeps a question image with its answer and sends the upload without client-only fields", () => {
+  const image = {
+    id: "draft-image",
+    type: "image" as const,
+    name: "photo.png",
+    mimeType: "image/png",
+    sizeBytes: 3,
+    dataUrl: "data:image/png;base64,YWJj",
+    previewUri: "file:///photo.png",
+  };
+  const draft = setPendingUserInputCustomAnswer({ images: [image] }, "details");
+  expect(draft.images).toEqual([image]);
+  expect(
+    buildPendingUserInputAnswers(
+      [{ id: "q", header: "Q", question: "?", options: [], multiSelect: false }],
+      { q: { images: [image] } },
+    ),
+  ).toEqual({ q: "첨부한 이미지를 참고해 주세요." });
+  expect(buildPendingUserInputImages({ q: draft })).toEqual([
+    {
+      questionId: "q",
+      image: {
+        type: "image",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 3,
+        dataUrl: "data:image/png;base64,YWJj",
+      },
+    },
+  ]);
+});
+
+it("retains a free-text native question until its request is resolved", () => {
+  const question = makeActivity({
+    id: EventId.make("question-free-text"),
+    createdAt: "2026-10-26T00:00:00.000Z",
+    kind: "user-input.requested",
+    summary: "Question",
+    payload: {
+      requestId: "free-text",
+      questions: [{ id: "target", header: "Target", question: "Which directory?", options: [] }],
+    },
+  });
+  expect(derivePendingUserInputs([question])[0]?.questions[0]?.options).toEqual([]);
+  const resolved = makeActivity({
+    id: EventId.make("question-resolved"),
+    createdAt: "2026-10-26T00:00:01.000Z",
+    kind: "user-input.resolved",
+    summary: "Closed",
+    payload: { requestId: "free-text", reason: "provider-resolved" },
+  });
+  expect(derivePendingUserInputs([question, resolved])).toEqual([]);
+});
 
 function makeActivity(
   input: Partial<OrchestrationThreadActivity> &

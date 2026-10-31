@@ -1,5 +1,6 @@
 import type { ProviderUserInputAnswers, UserInputQuestion } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -205,11 +206,12 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
     const activeSessionIdRef = yield* Ref.make<string | undefined>(undefined);
     const pendingRef = yield* Ref.make<ReadonlyArray<PendingXAiPromptCompletion>>([]);
     const completedPromptIdsRef = yield* Ref.make<ReadonlyArray<string>>([]);
-    let nextPromptFallbackId = 0;
-    const allocatePromptFallbackId = Effect.sync(() => {
-      nextPromptFallbackId += 1;
-      return `t3-xai-prompt-${nextPromptFallbackId}`;
-    });
+    const crypto = yield* Crypto.Crypto;
+    // A resumed native session must not reuse the previous runtime's prompt IDs.
+    const allocatePromptFallbackId = crypto.randomUUIDv4.pipe(
+      Effect.map((id) => `t3-xai-prompt-${id}`),
+      Effect.orDie,
+    );
 
     yield* runtime.handleExtNotification(
       "_x.ai/session/prompt_complete",

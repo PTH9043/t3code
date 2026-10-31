@@ -10,6 +10,18 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("exposes reversible independent Claude cache settings", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")]!;
+    const fields = deriveProviderSettingsFields(claude);
+    for (const key of ["promptCacheTtl", "subagentPromptCacheTtl"]) {
+      const field = fields.find((candidate) => candidate.key === key)!;
+      expect(field.control).toBe("select");
+      expect(field.options?.map((option) => option.value)).toEqual(["inherit", "5m", "1h"]);
+      expect(
+        nextProviderConfigWithFieldValue({ [key]: "1h", binaryPath: "claude" }, field, "inherit"),
+      ).toEqual({ [key]: "inherit", binaryPath: "claude" });
+    }
+  });
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 

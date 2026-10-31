@@ -1,3 +1,8 @@
+import { makeKeyedLock } from "@t3tools/shared/KeyedLock";
+import {
+  makeProviderTurnHistoryFactory,
+  type ProviderTurnHistory,
+} from "../ProviderTurnHistory.ts";
 import {
   ApprovalRequestId,
   type GrokSettings,
@@ -19,15 +24,12 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -35,6 +37,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { grokManagedMcpServers, makeManagedMcpResolver } from "../../mcp/ManagedMcpTools.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -53,6 +56,7 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { makeGrokTokenUsageTracker } from "../acp/GrokTokenUsage.ts";
 import {
   applyGrokAcpModelSelection,
   currentGrokModelIdFromSessionSetup,
@@ -107,7 +111,7 @@ interface GrokSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  readonly history: ProviderTurnHistory;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
@@ -145,15 +149,10 @@ function appendPromptResultToTurn(
   turnId: TurnId,
   promptParts: ReadonlyArray<EffectAcpSchema.ContentBlock>,
   result: EffectAcpSchema.PromptResponse,
-): void {
-  const existingTurnRecord = ctx.turns.find((turn) => turn.id === turnId);
-  ctx.turns = existingTurnRecord
-    ? ctx.turns.map((turn) =>
-        turn.id === turnId
-          ? { ...turn, items: [...turn.items, { prompt: promptParts, result }] }
-          : turn,
-      )
-    : [...ctx.turns, { id: turnId, items: [{ prompt: promptParts, result }] }];
+): Effect.Effect<void, ProviderAdapterProcessError> {
+  return ctx.history
+    .append(turnId, { prompt: promptParts, result })
+    .pipe(Effect.andThen(ctx.history.complete(turnId)));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -229,9 +228,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("grok");
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const resolveManagedMcp = yield* makeManagedMcpResolver();
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const serverConfig = yield* Effect.service(ServerConfig);
     const crypto = yield* Crypto.Crypto;
+    const createTurnHistory = yield* makeProviderTurnHistoryFactory;
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -242,7 +243,6 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
 
     const sessions = new Map<ThreadId, GrokSessionContext>();
-    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -273,26 +273,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
 
-    const getThreadSemaphore = (threadId: string) =>
-      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-        const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-          current.get(threadId),
-        );
-        return Option.match(existing, {
-          onNone: () =>
-            Semaphore.make(1).pipe(
-              Effect.map((semaphore) => {
-                const next = new Map(current);
-                next.set(threadId, semaphore);
-                return [semaphore, next] as const;
-              }),
-            ),
-          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-        });
-      });
-
-    const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
-      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+    const withThreadLock = makeKeyedLock().withKey;
 
     const settlePromptInFlight = (
       threadId: ThreadId,
@@ -568,8 +549,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             provider: PROVIDER,
             threadId: input.threadId,
           });
+          const observeUsage = makeGrokTokenUsageTracker();
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const managedServers = grokManagedMcpServers(yield* resolveManagedMcp(PROVIDER, cwd));
           const acp = yield* makeGrokAcpRuntime({
             grokSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
@@ -577,9 +560,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
-            ...(mcpSession
-              ? {
-                  mcpServers: [
+            mcpServers: [
+              ...managedServers,
+              ...(mcpSession
+                ? [
                     {
                       type: "http" as const,
                       name: "t3-code",
@@ -591,10 +575,35 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         },
                       ],
                     },
-                  ],
-                }
-              : {}),
+                  ]
+                : []),
+            ],
             ...acpNativeLoggers,
+            protocolLogging: {
+              logIncoming: true,
+              logOutgoing: true,
+              logger: (event) =>
+                Effect.gen(function* () {
+                  for (const observation of observeUsage(
+                    event,
+                    sessions.get(input.threadId)?.activeTurnId,
+                  )) {
+                    yield* offerRuntimeEvent({
+                      type: "thread.token-usage.updated",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: observation.turnId,
+                      payload: { consumption: observation.consumption },
+                    });
+                  }
+                  yield* acpNativeLoggers.protocolLogging?.logger?.(event) ?? Effect.void;
+                }).pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning("Could not publish Grok token usage.", { error }),
+                  ),
+                ),
+            },
           }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(Scope.Scope, sessionScope),
@@ -662,6 +671,25 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   ),
                 ),
               { discard: true },
+            );
+            yield* acp.handleExtNotification(
+              "_x.ai/session/update",
+              Schema.Unknown,
+              (notification) =>
+                mapAcpCallbackFailure(
+                  Effect.forEach(observeUsage.completion(notification), (observation) =>
+                    Effect.gen(function* () {
+                      yield* offerRuntimeEvent({
+                        type: "thread.token-usage.updated",
+                        ...(yield* makeEventStamp()),
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        turnId: observation.turnId,
+                        payload: { consumption: observation.consumption },
+                      });
+                    }),
+                  ).pipe(Effect.asVoid),
+                ),
             );
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
@@ -751,6 +779,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             provider: PROVIDER,
             providerInstanceId: boundInstanceId,
             status: "ready",
+            continuity: resumeSessionId ? "resumed" : "new",
             runtimeMode: input.runtimeMode,
             cwd,
             ...(boundModelId ? { model: resolveGrokAcpBaseModelId(boundModelId) } : {}),
@@ -772,7 +801,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
-            turns: [],
+            history: yield* createTurnHistory({
+              directory: path.join(serverConfig.stateDir, "provider-history", PROVIDER),
+              provider: PROVIDER,
+              threadId: input.threadId,
+            }),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
@@ -876,7 +909,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             Effect.catch((cause) =>
               Effect.logError("Failed to process Grok runtime notification.", { cause }),
             ),
-            Effect.forkChild,
+            Effect.forkIn(sessionScope),
           );
 
           ctx.notificationFiber = nf;
@@ -1142,7 +1175,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 };
               }
 
-              appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
+              yield* appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
               ctx.session = {
                 ...ctx.session,
                 status: "running",
@@ -1241,7 +1274,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     ) {
                       return;
                     }
-                    appendPromptResultToTurn(
+                    yield* appendPromptResultToTurn(
                       ctx,
                       prepared.turnId,
                       prepared.promptParts,
@@ -1394,7 +1427,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     const readThread: GrokAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return { threadId, turns: yield* ctx.history.read };
       });
 
     const rollbackThread: GrokAdapterShape["rollbackThread"] = (threadId, numTurns) =>

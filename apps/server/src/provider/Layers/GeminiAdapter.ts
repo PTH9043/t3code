@@ -1,3 +1,8 @@
+import { makeKeyedLock } from "@t3tools/shared/KeyedLock";
+import {
+  makeProviderTurnHistoryFactory,
+  type ProviderTurnHistory,
+} from "../ProviderTurnHistory.ts";
 import {
   ApprovalRequestId,
   type GeminiSettings,
@@ -24,9 +29,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -60,6 +63,7 @@ import {
 } from "../acp/GeminiAcpSupport.ts";
 import { type GeminiAdapterShape } from "../Services/GeminiAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { acpPromptTokenConsumption } from "../tokenConsumption.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -90,7 +94,7 @@ interface GeminiSessionContext {
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  readonly history: ProviderTurnHistory;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
@@ -118,15 +122,10 @@ function appendPromptResultToTurn(
   turnId: TurnId,
   promptParts: ReadonlyArray<EffectAcpSchema.ContentBlock>,
   result: EffectAcpSchema.PromptResponse,
-): void {
-  const existingTurnRecord = ctx.turns.find((turn) => turn.id === turnId);
-  ctx.turns = existingTurnRecord
-    ? ctx.turns.map((turn) =>
-        turn.id === turnId
-          ? { ...turn, items: [...turn.items, { prompt: promptParts, result }] }
-          : turn,
-      )
-    : [...ctx.turns, { id: turnId, items: [{ prompt: promptParts, result }] }];
+): Effect.Effect<void, ProviderAdapterProcessError> {
+  return ctx.history
+    .append(turnId, { prompt: promptParts, result })
+    .pipe(Effect.andThen(ctx.history.complete(turnId)));
 }
 
 const resolveNotificationTurnId = (ctx: GeminiSessionContext): TurnId | undefined =>
@@ -208,6 +207,7 @@ export function makeGeminiAdapter(
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const serverConfig = yield* Effect.service(ServerConfig);
     const crypto = yield* Crypto.Crypto;
+    const createTurnHistory = yield* makeProviderTurnHistoryFactory;
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -218,7 +218,6 @@ export function makeGeminiAdapter(
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
 
     const sessions = new Map<ThreadId, GeminiSessionContext>();
-    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -249,26 +248,7 @@ export function makeGeminiAdapter(
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
 
-    const getThreadSemaphore = (threadId: string) =>
-      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-        const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-          current.get(threadId),
-        );
-        return Option.match(existing, {
-          onNone: () =>
-            Semaphore.make(1).pipe(
-              Effect.map((semaphore) => {
-                const next = new Map(current);
-                next.set(threadId, semaphore);
-                return [semaphore, next] as const;
-              }),
-            ),
-          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-        });
-      });
-
-    const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
-      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+    const withThreadLock = makeKeyedLock().withKey;
 
     const settlePromptInFlight = (
       threadId: ThreadId,
@@ -671,6 +651,7 @@ export function makeGeminiAdapter(
             provider: PROVIDER,
             providerInstanceId: boundInstanceId,
             status: "ready",
+            continuity: resumeSessionId ? "resumed" : "new",
             runtimeMode: input.runtimeMode,
             cwd,
             ...(boundModelId ? { model: resolveGeminiAcpBaseModelId(boundModelId) } : {}),
@@ -691,7 +672,11 @@ export function makeGeminiAdapter(
             acp,
             notificationFiber: undefined,
             pendingApprovals,
-            turns: [],
+            history: yield* createTurnHistory({
+              directory: path.join(serverConfig.stateDir, "provider-history", PROVIDER),
+              provider: PROVIDER,
+              threadId: input.threadId,
+            }),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
@@ -795,7 +780,7 @@ export function makeGeminiAdapter(
             Effect.catch((cause) =>
               Effect.logError("Failed to process Gemini runtime notification.", { cause }),
             ),
-            Effect.forkChild,
+            Effect.forkIn(sessionScope),
           );
 
           ctx.notificationFiber = nf;
@@ -987,6 +972,7 @@ export function makeGeminiAdapter(
         );
 
         const promptFailureMessageRef = yield* Ref.make<string | undefined>(undefined);
+        const usageRequestId = yield* randomUUIDv4;
 
         return yield* Effect.gen(function* () {
           const result = yield* prepared.acp
@@ -1010,6 +996,23 @@ export function makeGeminiAdapter(
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
               ),
             );
+
+          const consumption = acpPromptTokenConsumption({
+            provider: "gemini",
+            requestId: usageRequestId,
+            model: prepared.displayModel ?? null,
+            result,
+          });
+          if (consumption.length > 0) {
+            yield* offerRuntimeEvent({
+              type: "thread.token-usage.updated",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId: prepared.turnId,
+              payload: { consumption },
+            });
+          }
 
           return yield* withThreadLock(
             input.threadId,
@@ -1061,7 +1064,7 @@ export function makeGeminiAdapter(
                 };
               }
 
-              appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
+              yield* appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
               ctx.session = {
                 ...ctx.session,
                 status: "running",
@@ -1160,7 +1163,7 @@ export function makeGeminiAdapter(
                     ) {
                       return;
                     }
-                    appendPromptResultToTurn(
+                    yield* appendPromptResultToTurn(
                       ctx,
                       prepared.turnId,
                       prepared.promptParts,
@@ -1308,7 +1311,7 @@ export function makeGeminiAdapter(
     const readThread: GeminiAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return { threadId, turns: yield* ctx.history.read };
       });
 
     const rollbackThread: GeminiAdapterShape["rollbackThread"] = (threadId, numTurns) =>

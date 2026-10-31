@@ -5,7 +5,7 @@ import {
 } from "@t3tools/contracts";
 import { memo, useEffect, useMemo, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import { UsersIcon } from "lucide-react";
+import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
 import { buttonVariants } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -18,7 +18,7 @@ import {
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
 import type { ProviderInstanceEntry } from "../../providerInstances";
-import { useMeetingComposerConfig, type MeetingComposerTarget } from "../../meetingComposerStore";
+import type { MeetingComposerTarget } from "../../meetingComposerStore";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
@@ -38,20 +38,21 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   compact?: boolean;
   disabled?: boolean;
   terminalOpen?: boolean;
-  /** Present in the chat composer, where the picker can also convene an AI meeting. */
+  /** Present in the chat composer, which can open the shared AI work panel. */
   meetingTarget?: MeetingComposerTarget | null;
+  development?: WorkspaceDevelopmentPanelProps | null;
+  developmentUnavailableReason?: string;
   open?: boolean;
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
   triggerAriaLabel?: string;
   onOpenChange?: (open: boolean) => void;
+  onOpenAiTask?: () => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
-  const meetingConfig = useMeetingComposerConfig();
-  const meetingArmed = (props.meetingTarget ?? null) !== null && meetingConfig.enabled;
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -166,54 +167,27 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         }
       >
         <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          {meetingArmed ? (
-            // The armed meeting replaces the model identity on the trigger:
-            // sending now convenes the roster, not a single-model turn.
-            <>
-              <UsersIcon className="size-4 shrink-0 text-primary" />
-              <Tooltip>
-                <TooltipTrigger
-                  render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}
-                >
-                  {meetingConfig.style === "collaboration"
-                    ? "오케스트라 · 바로 실행"
-                    : "오케스트라"}
-                  {meetingConfig.seats.length > 0 ? ` · ${meetingConfig.seats.length}명` : ""}
-                </TooltipTrigger>
-                <TooltipPopup side="top">
-                  {meetingConfig.seats.length > 0
-                    ? meetingConfig.seats.map((seat) => seat.displayName).join(", ")
-                    : "참가자를 선택하세요"}
-                </TooltipPopup>
-              </Tooltip>
-            </>
-          ) : (
-            <>
-              {activeEntry ? (
-                <ProviderInstanceIcon
-                  driverKind={activeEntry.driverKind}
-                  displayName={activeEntry.displayName}
-                  accentColor={activeEntry.accentColor}
-                  showBadge={showInstanceBadge}
-                  className="size-4"
-                  iconClassName={cn("size-4", props.activeProviderIconClassName)}
-                  indicatorBackground="var(--input)"
-                  badgeClassName={cn(
-                    "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3",
-                    "px-0.5 text-[7px]",
-                  )}
-                />
-              ) : null}
-              <Tooltip>
-                <TooltipTrigger
-                  render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}
-                >
-                  {triggerTitle}
-                </TooltipTrigger>
-                <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
-              </Tooltip>
-            </>
-          )}
+          {activeEntry ? (
+            <ProviderInstanceIcon
+              driverKind={activeEntry.driverKind}
+              displayName={activeEntry.displayName}
+              accentColor={activeEntry.accentColor}
+              showBadge={showInstanceBadge}
+              className="size-4"
+              iconClassName={cn("size-4", props.activeProviderIconClassName)}
+              indicatorBackground="var(--input)"
+              badgeClassName={cn(
+                "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3",
+                "px-0.5 text-[7px]",
+              )}
+            />
+          ) : null}
+          <Tooltip>
+            <TooltipTrigger render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}>
+              {triggerTitle}
+            </TooltipTrigger>
+            <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
+          </Tooltip>
         </span>
         <span aria-hidden="true" className="flex items-center">
           <ComposerControlChevron />
@@ -225,16 +199,28 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         viewportClassName="rounded-lg !overflow-hidden p-0"
       >
         <ModelPickerContent
+          key={
+            typeof props.meetingTarget === "string"
+              ? props.meetingTarget
+              : props.meetingTarget
+                ? `${props.meetingTarget.environmentId}:${props.meetingTarget.threadId}`
+                : "models"
+          }
           activeInstanceId={activeInstanceId}
           model={props.model}
           lockedProvider={props.lockedProvider}
           lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
           meetingTarget={props.meetingTarget ?? null}
+          development={props.development ?? null}
+          {...(props.developmentUnavailableReason
+            ? { developmentUnavailableReason: props.developmentUnavailableReason }
+            : {})}
           instanceEntries={props.instanceEntries}
           {...(props.keybindings ? { keybindings: props.keybindings } : {})}
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
           onRequestClose={() => setIsMenuOpen(false)}
+          {...(props.onOpenAiTask ? { onOpenAiTask: props.onOpenAiTask } : {})}
           {...(props.getModelDisabledReason
             ? { getModelDisabledReason: props.getModelDisabledReason }
             : {})}

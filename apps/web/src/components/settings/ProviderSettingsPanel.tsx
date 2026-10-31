@@ -1,4 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
+import { McpToolsSection } from "./McpToolsSection";
+import { ExtensionsSection } from "./ExtensionsSection";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
@@ -38,6 +40,7 @@ import { usePrimarySessionState } from "../../environments/primary";
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { resolveAppModelSelectionState } from "../../modelSelection";
+import { formatProviderDriverKindLabel } from "../../providerModels";
 import {
   useEnvironments,
   usePrimaryEnvironmentId,
@@ -60,6 +63,8 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { Switch } from "../ui/switch";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -71,6 +76,8 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { GeminiLoginDialog } from "./GeminiLoginDialog";
+import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
+import { GlmConnectionDialog } from "./GlmConnectionDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
@@ -397,6 +404,8 @@ export function EnvironmentProviderSettings({
   });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [isDeepSeekDialogOpen, setIsDeepSeekDialogOpen] = useState(false);
+  const [isGlmDialogOpen, setIsGlmDialogOpen] = useState(false);
   const [geminiLoginTarget, setGeminiLoginTarget] = useState<{
     readonly instanceId: ProviderInstanceId;
     readonly displayName: string;
@@ -586,6 +595,13 @@ export function EnvironmentProviderSettings({
     }
   }
 
+  const rowGroups = new Map<ProviderDriverKind, InstanceRow[]>();
+  for (const row of rows) {
+    const list = rowGroups.get(row.driver) ?? [];
+    list.push(row);
+    rowGroups.set(row.driver, list);
+  }
+
   const updateProviderInstance = (
     row: InstanceRow,
     next: ProviderInstanceConfig,
@@ -684,6 +700,12 @@ export function EnvironmentProviderSettings({
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
             {!readOnly ? (
               <>
+                <Button size="sm" variant="outline" onClick={() => setIsDeepSeekDialogOpen(true)}>
+                  DeepSeek 연결
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setIsGlmDialogOpen(true)}>
+                  GLM 연결
+                </Button>
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -740,6 +762,34 @@ export function EnvironmentProviderSettings({
           aria-disabled={readOnly || undefined}
           className={readOnly ? "space-y-1 opacity-50 select-none" : "space-y-1"}
         >
+          {(["codex", "claudeAgent"] as const).map((driver) => (
+            <SettingsRow
+              key={driver}
+              {...searchableSetting(
+                driver === "codex" ? "codex-auto-switch" : "claude-auto-switch",
+              )}
+              description={
+                driver === "codex"
+                  ? "주간 한도를 다 써도 크레딧이 남으면 유지합니다. 실제 429 오류가 발생하면 다른 Codex 계정으로 전환합니다."
+                  : "사용 한도를 다 쓰거나 실제 429 오류가 발생하면 다른 Claude 계정으로 전환합니다. Codex 설정과 독립적으로 동작합니다."
+              }
+              control={
+                <Switch
+                  checked={settings.providerAutoSwitch?.[driver] ?? false}
+                  disabled={readOnly}
+                  aria-label={driver === "codex" ? "Codex 자동 전환" : "Claude 자동 전환"}
+                  onCheckedChange={(checked) =>
+                    updateSettings({ providerAutoSwitch: { [driver]: Boolean(checked) } })
+                  }
+                />
+              }
+            />
+          ))}
+          <p className="px-3 pb-2 text-xs text-muted-foreground sm:px-4">
+            같은 모델을 지원하는 별도 로그인 계정만 선택합니다. 실패한 요청은 재전송하지 않으며 다음
+            입력부터 새 계정을 사용합니다. 지속 Owner·Main 바인딩과 자동 작업의 고정 프로필은
+            유지됩니다.
+          </p>
           <SettingsRow
             title={
               <span className="inline-flex items-center gap-1.5">
@@ -804,120 +854,153 @@ export function EnvironmentProviderSettings({
             }
           />
 
-          {rows.map((row) => {
-            const driverOption = getDriverOption(row.driver);
-            const liveProvider = serverProviders.find(
-              (candidate) => candidate.instanceId === row.instanceId,
-            );
-            const updateCandidate = liveProvider
-              ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
-              : undefined;
-            const isDriverUpdateRunning =
-              updateCandidate !== undefined &&
-              (updatingProviderDrivers.has(updateCandidate.driver) ||
-                serverProviders.some(
-                  (provider) =>
-                    provider.driver === updateCandidate.driver && isProviderUpdateActive(provider),
-                ));
-            const showInlineUpdateButton =
-              updateCandidate !== undefined &&
-              hasOneClickUpdateProviderCandidate(updateCandidate, serverProviders);
-            const canRunInlineUpdate =
-              updateCandidate !== undefined &&
-              canOneClickUpdateProviderCandidate(updateCandidate, serverProviders) &&
-              !updatingProviderDrivers.has(updateCandidate.driver);
-            const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
-              hiddenModels: [],
-              modelOrder: [],
-            };
-            const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
-              favorite.provider === row.instanceId
-                ? Result.succeed(favorite.model)
-                : Result.failVoid,
-            );
-            const resetLabel = driverOption?.label ?? String(row.driver);
-            const headerAction =
-              row.isDefault && row.isDirty ? (
-                <SettingResetButton
-                  label={`${resetLabel} CLI 설정`}
-                  onClick={() => resetDefaultInstance(row.driver)}
-                />
-              ) : null;
-            const displayName =
-              row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
-            const authAction =
-              row.driver === ProviderDriverKind.make("gemini") ? (
-                <Button
-                  type="button"
-                  size="xs"
-                  variant={liveProvider?.auth.status === "authenticated" ? "ghost" : "outline"}
-                  onClick={() => setGeminiLoginTarget({ instanceId: row.instanceId, displayName })}
-                >
-                  {liveProvider?.auth.status === "authenticated"
-                    ? "Google 계정 변경"
-                    : "Google로 로그인"}
-                </Button>
-              ) : null;
+          {[...rowGroups.entries()].map(([driver, groupRows]) => {
+            const driverOption = getDriverOption(driver);
+            const groupLabel = driverOption?.label ?? formatProviderDriverKindLabel(driver);
+            const enabledCount = groupRows.filter((row) => row.instance.enabled ?? true).length;
             return (
-              <ProviderInstanceCard
-                key={row.instanceId}
-                instanceId={row.instanceId}
-                instance={row.instance}
-                driverOption={driverOption}
-                liveProvider={liveProvider}
-                isExpanded={openInstanceDetails[row.instanceId] ?? false}
-                onExpandedChange={(open) =>
-                  setOpenInstanceDetails((existing) => ({
-                    ...existing,
-                    [row.instanceId]: open,
-                  }))
-                }
-                onUpdate={(next) => {
-                  const wasEnabled = row.instance.enabled ?? true;
-                  const isDisabling = next.enabled === false && wasEnabled;
-                  const shouldClearTextGen = isDisabling && textGenInstanceId === row.instanceId;
-                  if (shouldClearTextGen) {
-                    updateProviderInstance(row, next, {
-                      textGenerationModelSelection:
-                        DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-                    });
-                  } else {
-                    updateProviderInstance(row, next);
-                  }
-                }}
-                onDelete={row.isDefault ? undefined : () => deleteProviderInstance(row.instanceId)}
-                headerAction={headerAction}
-                authAction={authAction}
-                hiddenModels={modelPreferences.hiddenModels}
-                favoriteModels={favoriteModels}
-                modelOrder={modelPreferences.modelOrder}
-                onHiddenModelsChange={(hiddenModels) =>
-                  updateProviderModelPreferences(row.instanceId, {
-                    ...modelPreferences,
-                    hiddenModels,
-                  })
-                }
-                onFavoriteModelsChange={(favoriteModels) =>
-                  updateProviderFavoriteModels(row.instanceId, favoriteModels)
-                }
-                onModelOrderChange={(modelOrder) =>
-                  updateProviderModelPreferences(row.instanceId, {
-                    ...modelPreferences,
-                    modelOrder,
-                  })
-                }
-                onRunUpdate={
-                  showInlineUpdateButton && updateCandidate
-                    ? () => {
-                        if (!canRunInlineUpdate) {
-                          return;
+              <section
+                key={driver}
+                className="grid gap-3 rounded-xl border border-border/60 bg-muted/10 p-3"
+              >
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-semibold">{groupLabel}</h3>
+                    <p className="text-[11px] text-muted-foreground">
+                      계정 {groupRows.length}개
+                      {groupRows.length > 1 ? ` · 사용 ${enabledCount}개` : ""}
+                    </p>
+                  </div>
+                  {groupRows.length > 1 ? <Badge variant="outline">계정 그룹</Badge> : null}
+                </div>
+                <div className="grid gap-3">
+                  {groupRows.map((row) => {
+                    const liveProvider = serverProviders.find(
+                      (candidate) => candidate.instanceId === row.instanceId,
+                    );
+                    const updateCandidate = liveProvider
+                      ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
+                      : undefined;
+                    const isDriverUpdateRunning =
+                      updateCandidate !== undefined &&
+                      (updatingProviderDrivers.has(updateCandidate.driver) ||
+                        serverProviders.some(
+                          (provider) =>
+                            provider.driver === updateCandidate.driver &&
+                            isProviderUpdateActive(provider),
+                        ));
+                    const showInlineUpdateButton =
+                      updateCandidate !== undefined &&
+                      hasOneClickUpdateProviderCandidate(updateCandidate, serverProviders);
+                    const canRunInlineUpdate =
+                      updateCandidate !== undefined &&
+                      canOneClickUpdateProviderCandidate(updateCandidate, serverProviders) &&
+                      !updatingProviderDrivers.has(updateCandidate.driver);
+                    const modelPreferences = settings.providerModelPreferences?.[
+                      row.instanceId
+                    ] ?? {
+                      hiddenModels: [],
+                      modelOrder: [],
+                    };
+                    const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
+                      favorite.provider === row.instanceId
+                        ? Result.succeed(favorite.model)
+                        : Result.failVoid,
+                    );
+                    const resetLabel = driverOption?.label ?? String(row.driver);
+                    const headerAction =
+                      row.isDefault && row.isDirty ? (
+                        <SettingResetButton
+                          label={`${resetLabel} CLI 설정`}
+                          onClick={() => resetDefaultInstance(row.driver)}
+                        />
+                      ) : null;
+                    const displayName =
+                      row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
+                    const authAction =
+                      row.driver === ProviderDriverKind.make("gemini") ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant={
+                            liveProvider?.auth.status === "authenticated" ? "ghost" : "outline"
+                          }
+                          onClick={() =>
+                            setGeminiLoginTarget({ instanceId: row.instanceId, displayName })
+                          }
+                        >
+                          {liveProvider?.auth.status === "authenticated"
+                            ? "Google 계정 변경"
+                            : "Google로 로그인"}
+                        </Button>
+                      ) : null;
+                    return (
+                      <ProviderInstanceCard
+                        key={row.instanceId}
+                        instanceId={row.instanceId}
+                        instance={row.instance}
+                        driverOption={driverOption}
+                        liveProvider={liveProvider}
+                        isExpanded={openInstanceDetails[row.instanceId] ?? false}
+                        onExpandedChange={(open) =>
+                          setOpenInstanceDetails((existing) => ({
+                            ...existing,
+                            [row.instanceId]: open,
+                          }))
                         }
-                        void runProviderUpdate(updateCandidate);
-                      }
-                    : undefined
-                }
-                isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
-              />
+                        onUpdate={(next) => {
+                          const wasEnabled = row.instance.enabled ?? true;
+                          const isDisabling = next.enabled === false && wasEnabled;
+                          const shouldClearTextGen =
+                            isDisabling && textGenInstanceId === row.instanceId;
+                          if (shouldClearTextGen) {
+                            updateProviderInstance(row, next, {
+                              textGenerationModelSelection:
+                                DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+                            });
+                          } else {
+                            updateProviderInstance(row, next);
+                          }
+                        }}
+                        onDelete={
+                          row.isDefault ? undefined : () => deleteProviderInstance(row.instanceId)
+                        }
+                        headerAction={headerAction}
+                        authAction={authAction}
+                        hiddenModels={modelPreferences.hiddenModels}
+                        favoriteModels={favoriteModels}
+                        modelOrder={modelPreferences.modelOrder}
+                        onHiddenModelsChange={(hiddenModels) =>
+                          updateProviderModelPreferences(row.instanceId, {
+                            ...modelPreferences,
+                            hiddenModels,
+                          })
+                        }
+                        onFavoriteModelsChange={(favoriteModels) =>
+                          updateProviderFavoriteModels(row.instanceId, favoriteModels)
+                        }
+                        onModelOrderChange={(modelOrder) =>
+                          updateProviderModelPreferences(row.instanceId, {
+                            ...modelPreferences,
+                            modelOrder,
+                          })
+                        }
+                        onRunUpdate={
+                          showInlineUpdateButton && updateCandidate
+                            ? () => {
+                                if (!canRunInlineUpdate) {
+                                  return;
+                                }
+                                void runProviderUpdate(updateCandidate);
+                              }
+                            : undefined
+                        }
+                        isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+                      />
+                    );
+                  })}
+                </div>
+              </section>
             );
           })}
         </div>
@@ -930,6 +1013,18 @@ export function EnvironmentProviderSettings({
           environmentLabel={environmentLabel}
           onOpenChange={setIsAddInstanceDialogOpen}
         />
+      ) : null}
+      <McpToolsSection environmentId={environmentId} readOnly={readOnly} />
+      <ExtensionsSection environmentId={environmentId} readOnly={readOnly} />
+      {isDeepSeekDialogOpen ? (
+        <DeepSeekConnectionDialog
+          open
+          environmentId={environmentId}
+          onOpenChange={setIsDeepSeekDialogOpen}
+        />
+      ) : null}
+      {isGlmDialogOpen ? (
+        <GlmConnectionDialog open environmentId={environmentId} onOpenChange={setIsGlmDialogOpen} />
       ) : null}
       {geminiLoginTarget ? (
         <GeminiLoginDialog

@@ -1,3 +1,5 @@
+import { PROVIDER_SEND_TURN_MAX_IMAGE_SOURCE_BYTES } from "@t3tools/contracts";
+
 /**
  * Downscale + re-encode for image attachments that are too big for where
  * they're headed. Two consumers share the same pipeline:
@@ -23,7 +25,7 @@ export const MAX_STASH_IMAGE_DATA_URL_CHARS = 1_300_000;
  * proxy for pixel count, and decoding hundreds of megapixels into an
  * ImageBitmap can OOM the tab — beyond this we refuse rather than risk it.
  */
-export const MAX_COMPRESSIBLE_SOURCE_BYTES = 50 * 1024 * 1024;
+export const MAX_COMPRESSIBLE_SOURCE_BYTES = PROVIDER_SEND_TURN_MAX_IMAGE_SOURCE_BYTES;
 /**
  * Quality ladder tried in order until the encoded image fits the budget.
  * The floor stays high enough to avoid visible blocking on UI screenshots;

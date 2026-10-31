@@ -34,6 +34,7 @@ import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2Enabled } from "../threads/use-thread-list-v2-enabled";
+import { TaskDashboardSummary } from "./TaskDashboardSummary";
 import { environmentServerConfigsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import {
@@ -1051,7 +1052,12 @@ export function HomeScreen(props: HomeScreenProps) {
     );
   }
 
-  const listHeader = Platform.OS === "ios" ? null : <HomeTopContentSpacer />;
+  const listHeader = (
+    <View>
+      {Platform.OS === "ios" ? null : <HomeTopContentSpacer />}
+      <TaskDashboardSummary threads={scopedThreads} onSelect={props.onSelectThread} />
+    </View>
+  );
 
   // Keep the selected project visible as the parent of the flat conversation
   // rows; the project menu changes this parent rather than enabling a mixed list.

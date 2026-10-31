@@ -379,6 +379,56 @@ export class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").ad
 
 export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(
+    HttpApiEndpoint.get("googleEnrollment", "/api/auth/google/enrollment", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Struct({ registered: Schema.Boolean }),
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleEnrollChallenge", "/api/auth/google/enroll/challenge", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ clientId: TrimmedNonEmptyString }),
+      success: Schema.Struct({ challenge: TrimmedNonEmptyString, clientId: TrimmedNonEmptyString }),
+      error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleEnroll", "/api/auth/google/enroll", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ challenge: TrimmedNonEmptyString, idToken: TrimmedNonEmptyString }),
+      success: Schema.Struct({ subject: TrimmedNonEmptyString }),
+      error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleUnenroll", "/api/auth/google/unenroll", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Struct({ removed: Schema.Boolean }),
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleChallenge", "/api/auth/google/challenge", {
+      success: Schema.Struct({ challenge: TrimmedNonEmptyString, clientId: TrimmedNonEmptyString }),
+      error: EnvironmentSessionCreationErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("googleSession", "/api/auth/google/session", {
+      payload: Schema.Struct({ challenge: TrimmedNonEmptyString, idToken: TrimmedNonEmptyString }),
+      success: AuthBrowserSessionResult,
+      error: EnvironmentSessionCreationErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("googleToken", "/api/auth/google/token", {
+      payload: Schema.Struct({ challenge: TrimmedNonEmptyString, idToken: TrimmedNonEmptyString }),
+      success: AuthAccessTokenResult,
+      error: EnvironmentSessionCreationErrors,
+    }),
+  )
+  .add(
     HttpApiEndpoint.get("session", "/api/auth/session", {
       headers: OptionalBearerHeaders,
       success: AuthSessionState,

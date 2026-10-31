@@ -109,6 +109,38 @@ function driverKindLabel(driverKind: ProviderDriverKind): string {
   return PROVIDER_DISPLAY_NAMES[driverKind] ?? formatProviderDriverKindLabel(driverKind);
 }
 
+export interface ProviderDriverGroup {
+  readonly driverKind: ProviderDriverKind;
+  readonly label: string;
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly readyCount: number;
+  readonly unavailableCount: number;
+}
+
+export function groupProviderInstanceEntriesByDriver(
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+): ReadonlyArray<ProviderDriverGroup> {
+  const groups = new Map<ProviderDriverKind, ProviderInstanceEntry[]>();
+  for (const entry of entries) {
+    const list = groups.get(entry.driverKind);
+    if (list) {
+      list.push(entry);
+    } else {
+      groups.set(entry.driverKind, [entry]);
+    }
+  }
+  return [...groups.entries()].map(([driverKind, groupEntries]) => {
+    const readyCount = groupEntries.filter(isProviderInstancePickerReady).length;
+    return {
+      driverKind,
+      label: driverKindLabel(driverKind),
+      entries: groupEntries,
+      readyCount,
+      unavailableCount: groupEntries.length - readyCount,
+    } satisfies ProviderDriverGroup;
+  });
+}
+
 export function normalizeProviderAccentColor(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;

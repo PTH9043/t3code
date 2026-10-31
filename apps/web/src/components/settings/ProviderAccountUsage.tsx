@@ -1,4 +1,8 @@
-import type { ServerProviderUsage, ServerProviderUsageWindow } from "@t3tools/contracts";
+import type {
+  ProviderDriverKind,
+  ServerProviderUsage,
+  ServerProviderUsageWindow,
+} from "@t3tools/contracts";
 import { GaugeIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
@@ -80,19 +84,32 @@ function sourceLabel(usage: ServerProviderUsage | undefined): string {
   return "현재 서버 실행";
 }
 
-function creditsLabel(usage: ServerProviderUsage | undefined): string {
+function creditsLabel(usage: ServerProviderUsage | undefined): string | null {
   if (usage?.credits?.unlimited) return "무제한";
-  if (usage?.credits?.balance !== undefined) return usage.credits.balance;
-  return "정보 없음";
+  if (usage?.credits?.hasCredits === false) return null;
+  if (usage?.credits?.balance !== undefined) {
+    const balance = Number(usage.credits.balance.replaceAll(",", ""));
+    if (Number.isFinite(balance))
+      return balance > 0 ? balance.toLocaleString("ko-KR", { maximumFractionDigits: 6 }) : null;
+  }
+  return usage?.credits?.hasCredits === true ? "사용 가능" : null;
 }
 
 export function ProviderAccountUsage({
   usage,
+  driver,
   className,
 }: {
   readonly usage: ServerProviderUsage | undefined;
+  readonly driver?: ProviderDriverKind;
   readonly className?: string;
 }) {
+  const credits = creditsLabel(usage);
+  const weekly =
+    usage?.secondary ??
+    (usage?.primary?.windowDurationMinutes === 10_080 ? usage.primary : undefined);
+  const primary = driver === "codex" ? undefined : usage?.primary;
+  const secondary = driver === "codex" ? weekly : usage?.secondary;
   return (
     <section
       className={cn(
@@ -111,23 +128,37 @@ export function ProviderAccountUsage({
         </Badge>
       </div>
 
-      <dl className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+      <dl className={cn("grid grid-cols-2 gap-1.5", credits ? "sm:grid-cols-5" : "sm:grid-cols-4")}>
         <UsageMetric
           label="누적 토큰"
           value={
             usage?.lifetimeTokens === undefined ? "정보 없음" : formatTokens(usage.lifetimeTokens)
           }
         />
-        <UsageMetric label="이번 실행" value={formatTokens(usage?.sessionTokens ?? 0)} />
-        <UsageMetric label="세션" value={`${usage?.sessionCount ?? 0}개`} />
-        <UsageMetric label="활성 세션" value={`${usage?.activeSessionCount ?? 0}개`} />
-        <UsageMetric label="크레딧" value={creditsLabel(usage)} />
+        <UsageMetric
+          label="이번 실행"
+          value={usage === undefined ? "정보 없음" : formatTokens(usage.sessionTokens)}
+        />
+        <UsageMetric
+          label="세션"
+          value={usage === undefined ? "정보 없음" : `${usage.sessionCount}개`}
+        />
+        <UsageMetric
+          label="활성 세션"
+          value={usage === undefined ? "정보 없음" : `${usage.activeSessionCount}개`}
+        />
+        {credits ? <UsageMetric label="크레딧" value={credits} /> : null}
       </dl>
 
-      {usage?.primary || usage?.secondary ? (
+      {primary || secondary ? (
         <div className="grid gap-3 sm:grid-cols-2">
-          {usage.primary ? <UsageWindow label="단기 한도" window={usage.primary} /> : null}
-          {usage.secondary ? <UsageWindow label="장기 한도" window={usage.secondary} /> : null}
+          {primary ? <UsageWindow label="단기 한도" window={primary} /> : null}
+          {secondary ? (
+            <UsageWindow
+              label={driver === "codex" ? "주간 한도" : "장기 한도"}
+              window={secondary}
+            />
+          ) : null}
         </div>
       ) : (
         <p className="text-[10px] leading-relaxed text-muted-foreground">

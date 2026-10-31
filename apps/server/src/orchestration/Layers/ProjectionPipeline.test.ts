@@ -2886,3 +2886,104 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(
+  Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-conversation-folder-")),
+)("OrchestrationProjectionPipeline conversation folder scope", (it) => {
+  it.effect("scopes nested worktrees and keeps sibling worktrees project-scoped", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-03-01T00:00:00.000Z";
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-folder-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-folder"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-folder-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-folder-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-folder"),
+          title: "Folder Project",
+          workspaceRoot: "/tmp/folder-project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      for (const [threadId, worktreePath] of [
+        ["thread-nested", "/tmp/folder-project/worktrees/feature"],
+        ["thread-sibling", "/tmp/folder-project-worktree"],
+      ] as const) {
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make(`evt-${threadId}`),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: now,
+          commandId: CommandId.make(`cmd-${threadId}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-${threadId}`),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            projectId: ProjectId.make("project-folder"),
+            title: threadId,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make(`evt-${threadId}-message`),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: now,
+          commandId: CommandId.make(`cmd-${threadId}-message`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-${threadId}-message`),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            messageId: MessageId.make(`${threadId}-message`),
+            role: "user",
+            text: `remember ${threadId}`,
+            attachments: [],
+            turnId: null,
+            streaming: false,
+            inputOrigin: "user",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+
+      const rows = yield* sql<{ threadTag: string; relativeFolder: string | null }>`
+        SELECT substr(item_id, 1, 0) AS "threadTag", relative_folder AS "relativeFolder"
+        FROM projection_workspace_knowledge_items
+        WHERE project_id = 'project-folder' AND kind = 'rag-source'
+        ORDER BY relative_folder
+      `;
+      assert.deepEqual(rows.map((row) => row.relativeFolder).sort(), [null, "worktrees/feature"]);
+    }),
+  );
+});

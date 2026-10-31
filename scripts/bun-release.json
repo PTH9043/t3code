@@ -1,0 +1,10 @@
+{
+  "version": "1.4.4",
+  "release": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4",
+  "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-windows-x64-baseline.zip",
+  "archiveSha256": "0f20ce6674d4f2dbcc8c5d59fdf99f7ba45f8c3b367e0f5781cbfa30a1c78d99",
+  "archiveBytes": 54731686,
+  "entry": "bun-windows-x64-baseline/bun.exe",
+  "binarySha256": "cb1d8e6564e655e49d30cead359750a1cbbd12f42651caa4b62244d7bd93c244",
+  "binaryBytes": 115281496
+}

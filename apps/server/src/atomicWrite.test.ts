@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
 import { writeFileStringAtomically } from "./atomicWrite.ts";
@@ -34,6 +35,19 @@ const makeFileSystem = (renameOutcomes: ReadonlyArray<string | null>) => {
 };
 
 describe("writeFileStringAtomically", () => {
+  it.effect("writes hash-named artifacts near the Windows path limit", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-path-" });
+      const directory = path.join(root, "n".repeat(Math.max(1, 180 - root.length)));
+      const filePath = path.join(directory, "a".repeat(64) + ".json");
+      yield* writeFileStringAtomically({ filePath, contents: "first", mode: 0o600 });
+      yield* writeFileStringAtomically({ filePath, contents: "replacement", mode: 0o600 });
+      assert.strictEqual(yield* fs.readFileString(filePath), "replacement");
+      assert.deepStrictEqual(yield* fs.readDirectory(directory), ["a".repeat(64) + ".json"]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   // The retry backoff sleeps on the Clock, so these two run on the live
   // clock rather than the TestClock `it.effect` installs.
   it.live("retries the final rename while Windows reports the target as in use", () =>

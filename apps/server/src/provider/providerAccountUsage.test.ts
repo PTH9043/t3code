@@ -41,6 +41,24 @@ function runtimeEvent(input: {
 }
 
 describe("provider account usage", () => {
+  it("preserves numeric provider credit balances without inventing missing balances", () => {
+    expect(
+      normalizeProviderRateLimits({ credits: { balance: 62500, hasCredits: true } })?.credits,
+    ).toEqual({ balance: "62500", hasCredits: true });
+    expect(
+      normalizeProviderRateLimits({ credits: { balance: Number.POSITIVE_INFINITY } }),
+    ).toBeUndefined();
+  });
+  it("does not fabricate a context or account counter from consumption-only evidence", () => {
+    const state = makeEmptyProviderAccountUsageState();
+    const event = runtimeEvent({
+      id: "consumption-only",
+      type: "thread.token-usage.updated",
+      createdAt: "2026-09-12T00:00:00.000Z",
+      payload: { consumption: [] },
+    });
+    expect(reduceProviderAccountUsage(state, event)).toBe(state);
+  });
   it("normalizes Codex quota windows and credits", () => {
     expect(
       normalizeProviderRateLimits({

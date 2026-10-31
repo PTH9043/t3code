@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
   DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
   EventId,
   ProjectId,
@@ -59,6 +60,7 @@ function programFixture(projectId: ProjectId, programId: WorkspaceProgramId): Wo
     errorPatterns: [],
     enabled: true,
     integrity: DEFAULT_WORKSPACE_PROGRAM_INTEGRITY,
+    hubMemory: DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
     createdAt: at,
     updatedAt: at,
   };
@@ -185,7 +187,10 @@ it("requires typed non-low validation before an incident repair can restart", ()
 });
 
 function event(
-  type: "project.program-start-requested" | "project.program-stop-requested",
+  type:
+    | "project.program-start-requested"
+    | "project.program-stop-requested"
+    | "project.program-restart-requested",
   projectId: ProjectId,
   programId: WorkspaceProgramId,
   sequence: number,
@@ -236,8 +241,14 @@ function supervisorHarness(input: {
   readonly dispatched: Queue.Queue<OrchestrationCommand>;
   readonly onSpawn: (spawnInput: PtyAdapter.PtySpawnInput) => void;
   readonly onDispatch?: (command: OrchestrationCommand) => void;
+  /** Extra programs of the same project (hub concurrency tests). */
+  readonly siblings?: ReadonlyArray<WorkspaceProgram>;
+  readonly programs?: () => ReadonlyArray<WorkspaceProgram>;
+  /** Per-spawn process factory; defaults to the single `process`. */
+  readonly processFor?: (spawnInput: PtyAdapter.PtySpawnInput) => PtyAdapter.PtyProcess;
 }) {
-  const { projectId, programId, program, events, dispatched } = input;
+  const { projectId, program, events, dispatched } = input;
+  const programs = input.programs ?? (() => [program, ...(input.siblings ?? [])]);
   const unused = Effect.never;
   const base = Layer.mergeAll(
     NodeServices.layer,
@@ -280,6 +291,7 @@ function supervisorHarness(input: {
       getThreadCheckpointContext: () => Effect.succeed(Option.none()),
       getFullThreadDiffContext: () => Effect.succeed(Option.none()),
       getThreadShellById: () => Effect.succeed(Option.none()),
+      getThreadRuntimeContext: () => Effect.die("unused runtime context"),
       getThreadDetailById: () => Effect.succeed(Option.none()),
       getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
     }),
@@ -287,13 +299,14 @@ function supervisorHarness(input: {
       upsertProgram: () => Effect.void,
       removeProgram: () => Effect.void,
       removeByProjectId: () => Effect.void,
-      getProgram: (input) =>
-        Effect.succeed(
-          input.projectId === projectId && input.programId === programId
-            ? Option.some(program)
-            : Option.none(),
-        ),
-      listPrograms: () => Effect.succeed([program]),
+      getProgram: (input) => {
+        const found =
+          input.projectId === projectId
+            ? programs().find((candidate) => candidate.id === input.programId)
+            : undefined;
+        return Effect.succeed(found === undefined ? Option.none() : Option.some(found));
+      },
+      listPrograms: () => Effect.sync(programs),
       listAutoStartPrograms: () => Effect.succeed([]),
       updateIntegrity: () => Effect.void,
       listIntegrityPrograms: () => Effect.succeed([]),
@@ -316,6 +329,9 @@ function supervisorHarness(input: {
       requestCancel: () => Effect.void,
       recordAnswer: () => Effect.void,
       recordInterjection: () => Effect.void,
+      recordControl: () => Effect.void,
+      recordReview: () => Effect.void,
+      requestVerification: () => Effect.void,
       getById: () => Effect.succeed(Option.none()),
       list: () => Effect.succeed([]),
       listResumable: () => Effect.succeed([]),
@@ -334,7 +350,7 @@ function supervisorHarness(input: {
       spawn: (spawnInput) =>
         Effect.sync(() => {
           input.onSpawn(spawnInput);
-          return input.process;
+          return input.processFor?.(spawnInput) ?? input.process;
         }),
     }),
   );
@@ -406,6 +422,422 @@ it.effect("starts and stops only the PTY process created for the requested Works
           dispatched,
           onSpawn: (input) => {
             spawnInput = input;
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+it.effect("flushes a quiet startup log after the write interval without another output event", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("quiet-startup");
+    const programId = WorkspaceProgramId.make("probe");
+    const program = programFixture(projectId, programId);
+    const events = yield* Queue.unbounded<OrchestrationEvent>();
+    const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+    const fake = fakeProcessWithPid(4322);
+    let onData: ((data: string) => void) | undefined;
+    yield* Effect.gen(function* () {
+      const supervisor = yield* WorkspaceProgramSupervisor;
+      yield* supervisor.start();
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, programId, 1));
+      yield* takeRunUpdate(dispatched, "running");
+      onData?.("HUB_NATIVE_");
+      onData?.("READY\n");
+      yield* supervisor.drain;
+      yield* TestClock.adjust(Duration.seconds(1));
+      const flushed = yield* takeRunUpdate(dispatched, "running");
+      expect(flushed.run.recentLogTail).toBe("HUB_NATIVE_READY\n");
+    }).pipe(
+      Effect.provide(
+        supervisorHarness({
+          projectId,
+          programId,
+          program,
+          events,
+          dispatched,
+          onSpawn: () => undefined,
+          process: {
+            ...fake.process,
+            onData: (listener) => {
+              onData = listener;
+              return () => {
+                onData = undefined;
+              };
+            },
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+function fakeProcessWithPid(pid: number): {
+  readonly process: PtyAdapter.PtyProcess;
+  readonly exit: (event: PtyAdapter.PtyExitEvent) => void;
+} {
+  let exitListener: ((exit: PtyAdapter.PtyExitEvent) => void) | undefined;
+  return {
+    process: {
+      pid,
+      write: () => undefined,
+      resize: () => undefined,
+      kill: () => exitListener?.({ exitCode: 0, signal: null }),
+      onData: () => () => undefined,
+      onExit: (listener) => {
+        exitListener = listener;
+        return () => {
+          if (exitListener === listener) exitListener = undefined;
+        };
+      },
+    },
+    exit: (event) => exitListener?.(event),
+  };
+}
+
+it.effect(
+  "wraps a program with a commit cap in the Windows job guard and publishes its shared datasets",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("hub-guarded");
+      const programId = WorkspaceProgramId.make("research");
+      const program: WorkspaceProgram = {
+        ...programFixture(projectId, programId),
+        command: "python -X utf8 research.py --resume",
+        hubMemory: {
+          commitLimitMb: 3072,
+          concurrencyGroup: null,
+          concurrencySlots: null,
+          sharedDatasets: [{ name: "WALLET_EVENTS", relativeSource: "data/wallet_events.jsonl" }],
+        },
+      };
+      const events = yield* Queue.unbounded<OrchestrationEvent>();
+      const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+      let spawnInput: PtyAdapter.PtySpawnInput | undefined;
+      const fake = fakeProcessWithPid(77);
+
+      yield* Effect.gen(function* () {
+        const supervisor = yield* WorkspaceProgramSupervisor;
+        yield* supervisor.start();
+        yield* Queue.offer(
+          events,
+          event("project.program-start-requested", projectId, programId, 1),
+        );
+        yield* takeRunUpdate(dispatched, "running");
+        expect(spawnInput?.shell.toLowerCase()).toMatch(/t3-hub-guard\.exe$/);
+        expect(spawnInput?.args).toEqual([]);
+        expect(spawnInput?.env).toMatchObject({
+          T3_HUB_GUARDED_COMMAND: "python -X utf8 research.py --resume",
+          T3_HUB_MEMORY_HARD_CAP_MB: "3072",
+        });
+        expect(spawnInput?.env?.T3_HUB_DATASET_WALLET_EVENTS?.replaceAll("\\", "/")).toBe(
+          "D:/workspace-supervisor/data/wallet_events.jsonl",
+        );
+        expect(spawnInput?.env?.T3_HUB_MANIFEST).toContain('"commitLimitMb":3072');
+      }).pipe(
+        Effect.provide(
+          supervisorHarness({
+            projectId,
+            programId,
+            program,
+            process: fake.process,
+            events,
+            dispatched,
+            onSpawn: (input) => {
+              spawnInput = input;
+            },
+          }),
+        ),
+        Effect.scoped,
+      );
+    }),
+);
+
+it.effect("queues a program behind its hub concurrency slots until a sibling exits", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("hub-slots");
+    const firstId = WorkspaceProgramId.make("research-a");
+    const secondId = WorkspaceProgramId.make("research-b");
+    const budget = {
+      commitLimitMb: null,
+      concurrencyGroup: "research",
+      concurrencySlots: 1,
+      sharedDatasets: [],
+    } as const;
+    const first: WorkspaceProgram = { ...programFixture(projectId, firstId), hubMemory: budget };
+    const second: WorkspaceProgram = {
+      ...programFixture(projectId, secondId),
+      command: "npm run research-b",
+      hubMemory: budget,
+    };
+    const events = yield* Queue.unbounded<OrchestrationEvent>();
+    const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+    const spawnedCommands: string[] = [];
+    const fakes = [fakeProcessWithPid(1), fakeProcessWithPid(2)];
+
+    yield* Effect.gen(function* () {
+      const supervisor = yield* WorkspaceProgramSupervisor;
+      yield* supervisor.start();
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, firstId, 1));
+      const firstRunning = yield* takeRunUpdate(dispatched, "running");
+      expect(firstRunning.run.programId).toBe(firstId);
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, secondId, 2));
+      const waiting = yield* takeRunUpdate(dispatched, "starting");
+      expect(waiting.run).toMatchObject({ programId: secondId, pid: null });
+      expect(spawnedCommands).toEqual(["npm run dev"]);
+
+      yield* Queue.offer(events, event("project.program-stop-requested", projectId, firstId, 3));
+      yield* takeRunUpdate(dispatched, "exited");
+      const secondRunning = yield* takeRunUpdate(dispatched, "running");
+      expect(secondRunning.run.programId).toBe(secondId);
+      expect(spawnedCommands).toEqual(["npm run dev", "npm run research-b"]);
+    }).pipe(
+      Effect.provide(
+        supervisorHarness({
+          projectId,
+          programId: firstId,
+          program: first,
+          siblings: [second],
+          process: fakes[0]!.process,
+          processFor: () => fakes[spawnedCommands.length - 1]!.process,
+          events,
+          dispatched,
+          onSpawn: (input) => {
+            const args = input.args ?? [];
+            spawnedCommands.push(args[args.length - 1] ?? "");
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+it.effect("treats exit 75 from a grouped program as a hub yield and starts it again later", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("hub-yield");
+    const programId = WorkspaceProgramId.make("research");
+    const program: WorkspaceProgram = {
+      ...programFixture(projectId, programId),
+      hubMemory: {
+        commitLimitMb: null,
+        concurrencyGroup: "research",
+        concurrencySlots: 2,
+        sharedDatasets: [],
+      },
+    };
+    const events = yield* Queue.unbounded<OrchestrationEvent>();
+    const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+    const fakes = [fakeProcessWithPid(11), fakeProcessWithPid(12)];
+    let spawnCount = 0;
+    const incidents: OrchestrationCommand[] = [];
+
+    yield* Effect.gen(function* () {
+      const supervisor = yield* WorkspaceProgramSupervisor;
+      yield* supervisor.start();
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, programId, 1));
+      const running = yield* takeRunUpdate(dispatched, "running");
+      expect(running.run.pid).toBe(11);
+      fakes[0]!.exit({ exitCode: 75, signal: null });
+      const exited = yield* takeRunUpdate(dispatched, "exited");
+      expect(exited.run).toMatchObject({ exitCode: 75, status: "exited" });
+      expect(incidents).toEqual([]);
+      yield* TestClock.adjust(Duration.seconds(61));
+      const restarted = yield* takeRunUpdate(dispatched, "running");
+      expect(restarted.run.pid).toBe(12);
+      expect(spawnCount).toBe(2);
+    }).pipe(
+      Effect.provide(
+        supervisorHarness({
+          projectId,
+          programId,
+          program,
+          process: fakes[0]!.process,
+          processFor: () => fakes[spawnCount - 1]!.process,
+          events,
+          dispatched,
+          onSpawn: () => {
+            spawnCount += 1;
+          },
+          onDispatch: (command) => {
+            if (command.type === "project.program.incident.upsert") incidents.push(command);
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+for (const action of ["stop", "disable", "remove"] as const) {
+  it.effect(`cancels a yielded program's pending restart on ${action}`, () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make(`hub-cancel-${action}`);
+      const programId = WorkspaceProgramId.make("research");
+      const program: WorkspaceProgram = {
+        ...programFixture(projectId, programId),
+        hubMemory: {
+          ...DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
+          concurrencyGroup: "research",
+          concurrencySlots: 1,
+        },
+      };
+      let definitions: ReadonlyArray<WorkspaceProgram> = [program];
+      const events = yield* Queue.unbounded<OrchestrationEvent>();
+      const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+      const fake = fakeProcessWithPid(101);
+      let spawns = 0;
+      yield* Effect.gen(function* () {
+        const supervisor = yield* WorkspaceProgramSupervisor;
+        yield* supervisor.start();
+        yield* Queue.offer(
+          events,
+          event("project.program-start-requested", projectId, programId, 1),
+        );
+        yield* takeRunUpdate(dispatched, "running");
+        fake.exit({ exitCode: 75, signal: null });
+        yield* takeRunUpdate(dispatched, "exited");
+        const waiting = yield* takeRunUpdate(dispatched, "starting");
+        expect(waiting.run.recentLogTail).toContain("60초");
+        if (action === "disable") {
+          definitions = [{ ...program, enabled: false }];
+          yield* Queue.offer(events, {
+            ...event("project.program-start-requested", projectId, programId, 2),
+            type: "project.program-upserted",
+            payload: { program: definitions[0]! },
+          });
+        } else if (action === "remove") {
+          definitions = [];
+          yield* Queue.offer(events, {
+            ...event("project.program-stop-requested", projectId, programId, 2),
+            type: "project.program-removed",
+            payload: { projectId, programId, removedAt: at },
+          });
+        } else {
+          yield* Queue.offer(
+            events,
+            event("project.program-stop-requested", projectId, programId, 2),
+          );
+        }
+        if (action !== "remove") yield* takeRunUpdate(dispatched, "exited");
+        yield* TestClock.adjust(Duration.seconds(61));
+        yield* supervisor.drain;
+        expect(spawns).toBe(1);
+      }).pipe(
+        Effect.provide(
+          supervisorHarness({
+            projectId,
+            programId,
+            program,
+            programs: () => definitions,
+            process: fake.process,
+            events,
+            dispatched,
+            onSpawn: () => {
+              spawns += 1;
+            },
+          }),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
+}
+
+it.effect("restarts after the old process exit has been processed", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("hub-restart");
+    const programId = WorkspaceProgramId.make("research");
+    const program = programFixture(projectId, programId);
+    const events = yield* Queue.unbounded<OrchestrationEvent>();
+    const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+    const fakes = [fakeProcessWithPid(111), fakeProcessWithPid(112)];
+    let spawns = 0;
+    yield* Effect.gen(function* () {
+      const supervisor = yield* WorkspaceProgramSupervisor;
+      yield* supervisor.start();
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, programId, 1));
+      yield* takeRunUpdate(dispatched, "running");
+      yield* Queue.offer(
+        events,
+        event("project.program-restart-requested", projectId, programId, 2),
+      );
+      const restarted = yield* takeRunUpdate(dispatched, "running");
+      expect(restarted.run.pid).toBe(112);
+      expect(spawns).toBe(2);
+    }).pipe(
+      Effect.provide(
+        supervisorHarness({
+          projectId,
+          programId,
+          program,
+          process: fakes[0]!.process,
+          processFor: () => fakes[spawns - 1]!.process,
+          events,
+          dispatched,
+          onSpawn: () => {
+            spawns += 1;
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+it.effect("honors the strictest group cap and uses the latest queued definition", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("hub-latest");
+    const firstId = WorkspaceProgramId.make("first");
+    const secondId = WorkspaceProgramId.make("second");
+    const first: WorkspaceProgram = {
+      ...programFixture(projectId, firstId),
+      hubMemory: {
+        ...DEFAULT_WORKSPACE_PROGRAM_HUB_MEMORY,
+        concurrencyGroup: "research",
+        concurrencySlots: 1,
+      },
+    };
+    const second: WorkspaceProgram = {
+      ...programFixture(projectId, secondId),
+      command: "old-command",
+      hubMemory: { ...first.hubMemory, concurrencySlots: 4 },
+    };
+    let definitions = [first, second];
+    const events = yield* Queue.unbounded<OrchestrationEvent>();
+    const dispatched = yield* Queue.unbounded<OrchestrationCommand>();
+    const fakes = [fakeProcessWithPid(121), fakeProcessWithPid(122)];
+    const commands: string[] = [];
+    yield* Effect.gen(function* () {
+      const supervisor = yield* WorkspaceProgramSupervisor;
+      yield* supervisor.start();
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, firstId, 1));
+      yield* takeRunUpdate(dispatched, "running");
+      yield* Queue.offer(events, event("project.program-start-requested", projectId, secondId, 2));
+      yield* takeRunUpdate(dispatched, "starting");
+      yield* supervisor.drain;
+      expect(commands).toEqual([first.command]);
+      definitions = [first, { ...second, command: "updated-command" }];
+      yield* Queue.offer(events, event("project.program-stop-requested", projectId, firstId, 3));
+      const admitted = yield* takeRunUpdate(dispatched, "running");
+      expect(admitted.run.programId).toBe(secondId);
+      expect(commands).toEqual([first.command, "updated-command"]);
+    }).pipe(
+      Effect.provide(
+        supervisorHarness({
+          projectId,
+          programId: firstId,
+          program: first,
+          programs: () => definitions,
+          process: fakes[0]!.process,
+          processFor: () => fakes[commands.length - 1]!.process,
+          events,
+          dispatched,
+          onSpawn: (input) => {
+            commands.push(input.args?.at(-1) ?? "");
           },
         }),
       ),

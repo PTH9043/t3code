@@ -681,6 +681,9 @@ export function PreviewView({
         onPictureInPicture={previewBridge && tabId ? handlePictureInPicture : undefined}
         pictureInPicture={miniPlayer?.tabId === tabId}
         pictureInPictureDisabled={!desktopOverlay?.hasWebContents || isUnreachable}
+        onNativePreview={previewBridge && tabId ? handleNativePictureInPicture : undefined}
+        nativePreviewOpen={desktopOverlay?.pictureInPicture ?? false}
+        nativePreviewDisabled={!desktopOverlay?.hasWebContents || isUnreachable}
         onPickElement={previewBridge && tabId ? handlePickElement : undefined}
         pickActive={pickActive}
         // Disable when there's no tab (nothing to pick on) OR the page

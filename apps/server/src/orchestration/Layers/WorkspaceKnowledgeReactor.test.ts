@@ -93,6 +93,12 @@ const upserted: OrchestrationEvent = {
 it.effect("reconciles a long-term-memory event into its Workspace-selected root", () =>
   Effect.scoped(
     Effect.gen(function* () {
+      const archivedItem: WorkspaceKnowledgeItem = {
+        ...item,
+        id: WorkspaceKnowledgeItemId.make("memory-2"),
+        status: "archived",
+      };
+      const mirroredItems = new Map<string, WorkspaceKnowledgeItem>();
       const synchronized = yield* Deferred.make<{
         readonly root: string;
         readonly item: WorkspaceKnowledgeItem;
@@ -101,21 +107,29 @@ it.effect("reconciles a long-term-memory event into its Workspace-selected root"
         getShellSnapshot: () =>
           Effect.succeed({ snapshotSequence: 0, projects: [], threads: [], updatedAt: now }),
         getProjectShellById: () => Effect.succeed(Option.some(project)),
-        listWorkspaceKnowledge: () => Effect.succeed({ items: [item] }),
+        listWorkspaceKnowledge: () => Effect.succeed({ items: [item, archivedItem] }),
       } as unknown as ProjectionSnapshotQueryShape;
       const layer = WorkspaceKnowledgeReactorLive.pipe(
         Layer.provideMerge(
           Layer.succeed(OrchestrationEngineService, {
             readEvents: () => Stream.empty,
             dispatch: () => Effect.die("dispatch should not be called"),
-            streamDomainEvents: Stream.make(upserted),
+            streamDomainEvents: Stream.make(upserted, {
+              ...upserted,
+              sequence: 2,
+              eventId: EventId.make("archived-memory"),
+              payload: { ...upserted.payload, itemId: archivedItem.id, status: "archived" },
+            }),
             latestSequence: Effect.succeed(1),
           }),
         ),
         Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
         Layer.provideMerge(
           Layer.succeed(WorkspaceKnowledgeFileStore, {
-            syncItem: (input) => Deferred.succeed(synchronized, input).pipe(Effect.asVoid),
+            syncItem: (input) =>
+              Effect.sync(() => {
+                mirroredItems.set(input.item.id, input.item);
+              }).pipe(Effect.andThen(Deferred.succeed(synchronized, input)), Effect.asVoid),
           }),
         ),
       );
@@ -128,6 +142,8 @@ it.effect("reconciles a long-term-memory event into its Workspace-selected root"
         expect(mirrored.item.projectId).toBe(projectId);
         expect(mirrored.item.id).toBe(itemId);
         yield* reactor.drain;
+        expect([...mirroredItems.keys()].sort()).toEqual([item.id, archivedItem.id].sort());
+        expect(mirroredItems.get(archivedItem.id)?.status).toBe("archived");
       }).pipe(Effect.provide(layer));
     }),
   ),

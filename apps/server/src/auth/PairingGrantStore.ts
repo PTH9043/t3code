@@ -238,7 +238,7 @@ type ConsumeResult =
       readonly grant: BootstrapGrant;
     };
 
-const DEFAULT_ONE_TIME_TOKEN_TTL_MINUTES = Duration.minutes(5);
+export const DEFAULT_ONE_TIME_TOKEN_TTL_MINUTES = Duration.minutes(5);
 // The desktop-bootstrap grant rides on a trusted IPC channel (fd3 or
 // stdin) at backend launch, so it doesn't have to be short-lived the
 // way a user-facing pairing link does. Letting it live for the

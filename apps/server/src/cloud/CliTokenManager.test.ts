@@ -100,7 +100,7 @@ it("formats loopback authorization with a headless-host fallback", () => {
       "Open this URL to authorize T3 Connect:",
       "  https://clerk.example.test/authorize",
       "",
-      "Press \u001b[1mEnter\u001b[22m to open it in your browser.",
+      "Opening it in your browser now.",
       "No browser on this device? Press \u001b[1mH\u001b[22m to switch to headless mode.",
     ].join("\n"),
   );
@@ -119,6 +119,29 @@ const userInput = (name: string): Terminal.UserInput => ({
   input: Option.some(name),
   key: { name, ctrl: false, meta: false, shift: name !== name.toLowerCase() },
 });
+
+it.effect("opens the browser immediately when requested", () =>
+  Effect.gen(function* () {
+    const queue = yield* Queue.make<Terminal.UserInput>();
+    const callback = yield* Deferred.make<string>();
+    yield* Deferred.succeed(callback, "clerk-code-123");
+    const opened: Array<string> = [];
+
+    const result = yield* CliTokenManager.waitForLoopbackAuthorization({
+      authorizationUrl: "https://clerk.example.test/authorize",
+      callback: Deferred.await(callback),
+      terminal: makeTestTerminal(queue),
+      launchBrowser: (url) =>
+        Effect.sync(() => {
+          opened.push(url);
+        }),
+      launchImmediately: true,
+    }).pipe(Effect.timeout("10 millis"));
+
+    assert.deepEqual(opened, ["https://clerk.example.test/authorize"]);
+    assert.equal(result._tag, "AuthorizationCode");
+  }).pipe(Effect.catchTag("TimeoutError", () => Effect.succeed(undefined))),
+);
 
 it.effect("opens the browser on Enter and switches the active flow on H", () =>
   Effect.gen(function* () {

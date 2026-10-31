@@ -44,8 +44,20 @@ export const makeOrchestrationTurnWait = Effect.gen(function* () {
 
         let pinned: Pick<OrchestrationLatestTurn, "turnId" | "requestedAt"> | null = null;
 
+        const finish = Effect.fnUntraced(function* (turn: OrchestrationLatestTurn) {
+          const result = yield* snapshotQuery.getThreadRuntimeContext(input.threadId, {
+            messages: true,
+          });
+          if (Option.isNone(result)) {
+            return yield* new OrchestrationTurnWaitThreadNotFoundError({
+              threadId: input.threadId,
+            });
+          }
+          return { thread: result.value, turn };
+        });
+
         while (true) {
-          const result = yield* snapshotQuery.getThreadDetailById(input.threadId);
+          const result = yield* snapshotQuery.getThreadRuntimeContext(input.threadId);
           if (Option.isNone(result)) {
             return yield* new OrchestrationTurnWaitThreadNotFoundError({
               threadId: input.threadId,
@@ -81,7 +93,7 @@ export const makeOrchestrationTurnWait = Effect.gen(function* () {
               // conversation. The caller wants the thread's eventual answer,
               // so the wait follows the new turn instead of abandoning it.
               pinned = { turnId: turn.turnId, requestedAt: turn.requestedAt };
-              if (turn.state !== "running") return { thread, turn };
+              if (turn.state !== "running") return yield* finish(turn);
             } else {
               const pinnedRow = yield* projectionTurnRepository.getByTurnId({
                 threadId: input.threadId,
@@ -98,17 +110,14 @@ export const makeOrchestrationTurnWait = Effect.gen(function* () {
               }
               const row = pinnedRow.value;
               if (row.state !== "pending" && row.state !== "running") {
-                return {
-                  thread,
-                  turn: {
-                    turnId: row.turnId,
-                    state: row.state,
-                    requestedAt: row.requestedAt,
-                    startedAt: row.startedAt,
-                    completedAt: row.completedAt,
-                    assistantMessageId: row.assistantMessageId,
-                  },
-                };
+                return yield* finish({
+                  turnId: row.turnId,
+                  state: row.state,
+                  requestedAt: row.requestedAt,
+                  startedAt: row.startedAt,
+                  completedAt: row.completedAt,
+                  assistantMessageId: row.assistantMessageId,
+                });
               }
             }
           } else {
@@ -117,7 +126,7 @@ export const makeOrchestrationTurnWait = Effect.gen(function* () {
             }
 
             if (isRequestedTurn && turn.turnId === pinned?.turnId && turn.state !== "running") {
-              return { thread, turn };
+              return yield* finish(turn);
             }
           }
 

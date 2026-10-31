@@ -50,7 +50,7 @@ it.effect("preserves recorded usage and collection boundaries in already migrate
     yield* sql`INSERT INTO projection_token_usage_cursors VALUES ('native-source', '{"inputTokens":42}', 456)`;
     yield* sql`INSERT INTO projection_token_usage_samples VALUES ('request', 'native-source', 'codex', 'test', '{"inputTokens":42}', '[]')`;
     const before = yield* sql`SELECT * FROM token_usage_collection`;
-    yield* runMigrations();
+    yield* runMigrations({ toMigrationInclusive: 60 });
     expect(yield* sql`SELECT * FROM token_usage_collection`).toEqual(before);
     expect(
       yield* sql`SELECT last_applied_sequence FROM projection_state WHERE projector = 'projection.token-usage-v1'`,

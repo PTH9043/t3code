@@ -7,6 +7,7 @@
  *
  * @module CodexAdapterLive
  */
+import { makeManagedMcpResolver, codexManagedMcpArgs } from "../../mcp/ManagedMcpTools.ts";
 import {
   type CanonicalItemType,
   type CanonicalRequestType,
@@ -29,11 +30,14 @@ import {
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import { codexTokenConsumption } from "../tokenConsumption.ts";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -242,6 +246,7 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
 }
 
 function itemTitle(itemType: CanonicalItemType, item?: CodexLifecycleItem): string | undefined {
+  if (item?.type === "imageGeneration") return "Generated image";
   if (itemType === "mcp_tool_call" && item?.type === "mcpToolCall") {
     return `${item.server} · ${item.tool}`;
   }
@@ -365,7 +370,7 @@ function toUserInputQuestions(questions: ReadonlyArray<CodexToolUserInputQuestio
       const id = trimText(question.id);
       const header = trimText(question.header);
       const prompt = trimText(question.question);
-      if (!id || !header || !prompt || options.length === 0) {
+      if (!id || !header || !prompt) {
         return undefined;
       }
       return {
@@ -1305,6 +1310,28 @@ function mapToRuntimeEvents(
     if (!payload) {
       return [];
     }
+    const userInputResolution =
+      typeof event.payload === "object" &&
+      event.payload !== null &&
+      "t3UserInputResolved" in event.payload
+        ? event.payload.t3UserInputResolved
+        : undefined;
+    if (userInputResolution === "closed")
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "user-input.resolved",
+          payload: { answers: {}, reason: "provider-resolved" },
+        },
+      ];
+    if (userInputResolution === "answered")
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "request.resolved",
+          payload: { requestType: "tool_user_input" },
+        },
+      ];
     const requestType = toRequestTypeFromKind(event.requestKind);
     return [
       {
@@ -1640,8 +1667,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
+  const resolveManagedMcp = yield* makeManagedMcpResolver();
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
+  const path = yield* Path.Path;
   const serverConfig = yield* Effect.service(ServerConfig);
   const nativeEventLogger =
     options?.nativeEventLogger ??
@@ -1676,6 +1705,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const managedServers = yield* resolveManagedMcp(PROVIDER, input.cwd);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1699,13 +1729,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
+                  ...codexManagedMcpArgs(managedServers),
                   "-c",
                   `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
                   "-c",
                   'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
                 ],
               }
-            : {}),
+            : managedServers.length > 0
+              ? { appServerArgs: codexManagedMcpArgs(managedServers) }
+              : {}),
         };
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;
@@ -1717,6 +1750,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           Effect.provideService(Scope.Scope, sessionScope),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
           Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(Path.Path, path),
           Effect.mapError(
             (cause) =>
               new ProviderAdapterProcessError({
@@ -1734,12 +1768,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         let latestConsumption:
           | Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
           | undefined;
-        // codex's cumulative counter lives in the app-server SESSION, not in the native
-        // thread: resuming the same thread restarts it from zero (observed on one thread
-        // 4,506,367 -> 727,411 -> 81,717 across two restarts). Keyed on the native thread
-        // alone the cursor keeps the old high-water mark, reads every later session as a
-        // regression and drops its usage for good, so the counter's lifetime has to be
-        // part of the source identity.
+        // Native resume can either carry the previous total or reset it. A separate
+        // epoch prevents permanent regressions; an unproven resumed counter starts
+        // with a baseline so historical usage is never charged to the retry again.
+        let counterStartsAtZero = input.resumeCursor == null;
         const counterEpoch = yield* crypto.randomUUIDv4.pipe(
           Effect.mapError(
             (cause) =>
@@ -1751,6 +1783,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
         );
+        let runtimeExited = false;
         const eventFiber = yield* Stream.runForEach(
           runtime.events,
           (event) =>
@@ -1768,10 +1801,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                       consumption: mapped.payload.consumption?.map((observation) => ({
                         ...observation,
                         sourceId: `${observation.sourceId}#${counterEpoch}`,
-                        // Every codex session counts from zero, resumed or not, so the
-                        // first notification is this session's own spend, not a carried
-                        // balance we would be double counting.
-                        startsAtZero: true,
+                        startsAtZero: counterStartsAtZero,
                       })),
                     },
                   };
@@ -1812,6 +1842,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 return;
               }
               yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+              if (runtimeEvents.some((mapped) => mapped.type === "session.exited"))
+                runtimeExited = true;
             }),
           // The event pump must live as long as the SESSION, not the caller:
           // forkChild tied it to whichever fiber happened to run startSession,
@@ -1819,7 +1851,37 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           // handler run inside a timeout race) killed it the moment that fiber
           // settled — codex kept running turns while every notification after
           // session-ready silently vanished (observed 2026-08-29).
-        ).pipe(Effect.forkIn(sessionScope));
+        ).pipe(
+          Effect.onExit((exit) => {
+            // Explicit scope cancellation is handled by stopSession. A native pump
+            // ending on its own must release callers even without session/exited.
+            if (runtimeExited || (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)))
+              return Effect.void;
+            return DateTime.now.pipe(
+              Effect.flatMap((at) =>
+                Queue.offer(runtimeEventQueue, {
+                  type: "session.exited",
+                  eventId: EventId.make(`codex-events-closed:${counterEpoch}`),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  createdAt: DateTime.formatIso(at),
+                  payload: {
+                    exitKind: "error",
+                    recoverable: true,
+                    reason: "Codex 실행 이벤트 연결이 종료되어 결과를 기다릴 수 없습니다.",
+                  },
+                }),
+              ),
+            );
+          }),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Codex session event stream stopped", {
+              threadId: input.threadId,
+              cause,
+            }),
+          ),
+          Effect.forkIn(sessionScope),
+        );
 
         const started = yield* runtime.start().pipe(
           Effect.mapError(
@@ -1840,6 +1902,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
+        if (started.continuity === "new" || started.continuity === "resume-fallback") {
+          counterStartsAtZero = true;
+        }
+
         sessions.set(input.threadId, {
           threadId: input.threadId,
           scope: sessionScope,
@@ -1854,7 +1920,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
   const resolveAttachment = Effect.fn("resolveAttachment")(function* (
-    input: ProviderSendTurnInput,
     attachment: NonNullable<ProviderSendTurnInput["attachments"]>[number],
   ) {
     const attachmentPath = resolveAttachmentPath({
@@ -1888,7 +1953,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const codexAttachments = yield* Effect.forEach(
       input.attachments ?? [],
-      (attachment) => resolveAttachment(input, attachment),
+      (attachment) => resolveAttachment(attachment),
       { concurrency: 1 },
     );
 
@@ -1904,6 +1969,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(input.workflowSkills ? { skills: input.workflowSkills } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),
@@ -1930,9 +1996,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
-  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
+  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId, options) =>
     requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+      Effect.flatMap((session) =>
+        session.runtime.interruptTurn(turnId, options?.questionRequestId),
+      ),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
@@ -1993,15 +2061,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     threadId,
     requestId,
     answers,
+    images,
   ) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.respondToUserInput(requestId, answers)),
-      Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
-          ? cause
-          : mapCodexRuntimeError(threadId, "item/tool/requestUserInput", cause),
-      ),
-    );
+    Effect.gen(function* () {
+      const resolved = yield* Effect.forEach(
+        images ?? [],
+        ({ image }) => resolveAttachment(image),
+        { concurrency: 1 },
+      );
+      const session = yield* requireSession(threadId);
+      const response = resolved.length
+        ? session.runtime.respondToUserInput(requestId, answers, resolved)
+        : session.runtime.respondToUserInput(requestId, answers);
+      return yield* response.pipe(
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(threadId, "item/tool/requestUserInput", cause),
+        ),
+      );
+    });
 
   const writeNativeEvent = Effect.fnUntraced(function* (event: ProviderEvent) {
     if (!nativeEventLogger) {

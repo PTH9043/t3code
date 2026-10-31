@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "reviewStatus": "agent-curated; user review pending; fixed before first run",
+  "queries": [
+    {
+      "id": "H1",
+      "query": "새 빌드 디렉터리로 바꾼 뒤 파일 변경 감지가 CPU를 계속 쓴다",
+      "paths": ["apps/desktop"],
+      "expected": ["repair-desktop-windows-watcher-cpu"]
+    },
+    {
+      "id": "H2",
+      "query": "폴더 rename 이벤트가 수십만 번 반복될 때 어떤 방식으로 바꿨나",
+      "paths": ["apps/desktop"],
+      "expected": ["repair-desktop-windows-watcher-cpu"]
+    },
+    {
+      "id": "H3",
+      "query": "실행파일 검색 경로가 길면 npm으로 설치한 CLI가 열리지 않는다",
+      "paths": ["packages/shared"],
+      "expected": ["repair-windows-npm-shim-path"]
+    },
+    {
+      "id": "H4",
+      "query": "Windows에서 명령어 검색 경로를 전역으로 줄이지 않고 Codex 실행을 고치는 방법",
+      "paths": ["packages/shared"],
+      "expected": ["repair-windows-npm-shim-path"]
+    },
+    {
+      "id": "H5",
+      "query": "AI 작업별 누적 집계가 다음 재시도 값을 빼는 문제",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["repair-token-cursor-per-execution"]
+    },
+    {
+      "id": "H6",
+      "query": "서로 다른 provider가 같은 sourceId를 보고할 때 소비량을 분리하는 기준",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["repair-token-cursor-per-execution"]
+    },
+    {
+      "id": "H7",
+      "query": "승인을 묻는 요청과 다른 좌석의 답변이 섞이지 않도록 실행 소유권을 정리해",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": ["repair-server-scoped-execution"]
+    },
+    {
+      "id": "H8",
+      "query": "휴대폰 대화 화면에 어떤 담당 AI가 발언했는지 표시해",
+      "paths": ["apps/mobile"],
+      "expected": ["repair-mobile-shared-presentation"]
+    },
+    {
+      "id": "H9",
+      "query": "아이를 지켜보는 영화 장면의 설명 문구를 작성해",
+      "paths": ["apps/desktop"],
+      "expected": []
+    },
+    {
+      "id": "H10",
+      "query": "지도에서 최단 탐색 경로를 찾는 함수를 작성해",
+      "paths": ["packages/shared"],
+      "expected": []
+    },
+    {
+      "id": "H11",
+      "query": "전기 소비량 그래프의 색상을 바꿔줘",
+      "paths": ["apps/web"],
+      "expected": []
+    },
+    {
+      "id": "H12",
+      "query": "선거 누적 집계 작업에서 표가 섞이는 오류를 고쳐줘",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": []
+    },
+    {
+      "id": "H13",
+      "query": "인공지능으로 요리 레시피를 작성하는 도움말 문구",
+      "paths": ["apps/server/src/orchestration"],
+      "expected": []
+    },
+    {
+      "id": "H14",
+      "query": "공유 패키지에 날짜를 YYYY-MM-DD로 표시하는 함수를 만들어",
+      "paths": ["packages/shared"],
+      "expected": []
+    },
+    {
+      "id": "H15",
+      "query": "휴대폰 설정 화면에 이용 약관 링크를 추가해",
+      "paths": ["apps/mobile"],
+      "expected": []
+    },
+    {
+      "id": "H16",
+      "query": "Windows 창의 닫기 버튼 아이콘 색상을 회색으로 바꿔줘",
+      "paths": ["apps/desktop"],
+      "expected": []
+    }
+  ]
+}

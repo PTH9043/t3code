@@ -23,6 +23,23 @@ export function desktopLocalConnectionId(backendId: string): string {
   return `${DESKTOP_LOCAL_CONNECTION_ID_PREFIX}${backendId}`;
 }
 
+/** The secondary WSL backend is served through the desktop's private protocol. */
+export function desktopLocalHttpBaseUrl(
+  bootstrap: DesktopEnvironmentBootstrap,
+  locationProtocol: string,
+): string | null {
+  if (bootstrap.directRpc === true && bootstrap.id.startsWith("wsl:")) {
+    if (
+      bootstrap.httpBaseUrl === null ||
+      (locationProtocol !== "t3code:" && locationProtocol !== "t3code-dev:") ||
+      !/^wsl-[0-9a-f]{48}$/u.test(bootstrap.directHost ?? "")
+    )
+      return null;
+    return `${locationProtocol}//${bootstrap.directHost}/`;
+  }
+  return bootstrap.httpBaseUrl;
+}
+
 export function isDesktopLocalConnectionTarget(
   target: ConnectionTarget,
 ): target is Extract<ConnectionTarget, { readonly _tag: "BearerConnectionTarget" }> {

@@ -1,5 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -177,3 +179,56 @@ describe("DesktopEnvironment", () => {
     }),
   );
 });
+
+for (const { name, hidden, inactive, expectedHidden } of [
+  {
+    name: "keeps the workspace background flag when no visible start is requested",
+    hidden: "false",
+    inactive: "false",
+    expectedHidden: true,
+  },
+  {
+    name: "shows an explicit inactive start despite a leftover workspace background flag",
+    hidden: "false",
+    inactive: "true",
+    expectedHidden: false,
+  },
+  {
+    name: "keeps explicit background verification hidden even with inactive start enabled",
+    hidden: "true",
+    inactive: "true",
+    expectedHidden: true,
+  },
+]) {
+  it.effect(name, () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      yield* fs.makeDirectory(path.join(root, ".t3"));
+      yield* fs.writeFileString(
+        path.join(root, ".t3", "desktop-background.flag"),
+        "background verification",
+      );
+      const environment = yield* DesktopEnvironment.DesktopEnvironment.pipe(
+        Effect.provide(
+          DesktopEnvironment.layer({
+            ...defaultInput,
+            dirname: path.join(root, "apps", "desktop", "dist-electron"),
+          }).pipe(
+            Layer.provide(
+              DesktopConfig.layerTest({
+                VITE_DEV_SERVER_URL: "http://localhost:5173",
+                T3CODE_DESKTOP_START_HIDDEN: hidden,
+                T3CODE_DESKTOP_START_INACTIVE: inactive,
+              }),
+            ),
+          ),
+        ),
+      );
+      assert.equal(environment.startHidden, expectedHidden);
+      assert.equal(environment.startInactive, inactive === "true");
+      assert.equal(environment.rootDir, path.resolve(root));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+}

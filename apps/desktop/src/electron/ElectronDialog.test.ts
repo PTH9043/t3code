@@ -7,16 +7,20 @@ import { beforeEach, vi } from "vite-plus/test";
 
 import * as ElectronDialog from "./ElectronDialog.ts";
 
-const { showMessageBoxMock, showOpenDialogMock, showErrorBoxMock } = vi.hoisted(() => ({
-  showMessageBoxMock: vi.fn(),
-  showOpenDialogMock: vi.fn(),
-  showErrorBoxMock: vi.fn(),
-}));
+const { showMessageBoxMock, showOpenDialogMock, showSaveDialogMock, showErrorBoxMock } = vi.hoisted(
+  () => ({
+    showMessageBoxMock: vi.fn(),
+    showOpenDialogMock: vi.fn(),
+    showSaveDialogMock: vi.fn(),
+    showErrorBoxMock: vi.fn(),
+  }),
+);
 
 vi.mock("electron", () => ({
   dialog: {
     showMessageBox: showMessageBoxMock,
     showOpenDialog: showOpenDialogMock,
+    showSaveDialog: showSaveDialogMock,
     showErrorBox: showErrorBoxMock,
   },
 }));
@@ -25,8 +29,40 @@ describe("ElectronDialog", () => {
   beforeEach(() => {
     showMessageBoxMock.mockReset();
     showOpenDialogMock.mockReset();
+    showSaveDialogMock.mockReset();
     showErrorBoxMock.mockReset();
   });
+
+  it.effect("opens a single-file picker when requested", () =>
+    Effect.gen(function* () {
+      showOpenDialogMock.mockResolvedValue({ canceled: false, filePaths: ["/tmp/input.mp4"] });
+      const dialog = yield* ElectronDialog.ElectronDialog;
+      const files = yield* dialog.pickFiles({
+        owner: Option.none(),
+        defaultPath: Option.none(),
+        filters: [],
+        multiple: false,
+      });
+      assert.deepEqual(files, ["/tmp/input.mp4"]);
+      assert.deepEqual(showOpenDialogMock.mock.calls[0]?.[0].properties, ["openFile"]);
+    }).pipe(Effect.provide(ElectronDialog.layer)),
+  );
+
+  it.effect("returns the chosen save path and preserves cancellation", () =>
+    Effect.gen(function* () {
+      const owner = { id: 5 } as BrowserWindow;
+      showSaveDialogMock.mockResolvedValueOnce({ canceled: false, filePath: "/tmp/output.mp4" });
+      showSaveDialogMock.mockResolvedValueOnce({ canceled: true });
+      const dialog = yield* ElectronDialog.ElectronDialog;
+      const input = {
+        owner: Option.some(owner),
+        filters: [{ name: "Video", extensions: ["mp4"] }],
+      };
+      assert.deepEqual(yield* dialog.saveFile(input), Option.some("/tmp/output.mp4"));
+      assert.deepEqual(yield* dialog.saveFile(input), Option.none());
+      assert.deepEqual(showSaveDialogMock.mock.calls[0], [owner, { filters: input.filters }]);
+    }).pipe(Effect.provide(ElectronDialog.layer)),
+  );
 
   it.effect("returns false without opening a confirm dialog for empty messages", () =>
     Effect.gen(function* () {

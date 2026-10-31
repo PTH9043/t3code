@@ -97,6 +97,7 @@ const ZOOM_LEVELS: ReadonlyArray<number> = [
 const DEFAULT_ZOOM_FACTOR = 1.0;
 const ZOOM_EPSILON = 0.001;
 const MAX_EVALUATION_BYTES = 64_000;
+const DEBUGGER_COMMAND_TIMEOUT_MS = 10_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_INTERACTIVE_ELEMENTS = 200;
 const MAX_SCREENSHOT_WIDTH = 1280;
@@ -505,6 +506,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     { readonly semaphore: Semaphore.Semaphore; users: number }
   >();
   const tabLifecycleGenerations = new Map<string, number>();
+  let nextTabGeneration = 0;
 
   const attempt = <A>(errorContext: PreviewOperationContext, evaluate: () => A) =>
     Effect.try({
@@ -519,6 +521,26 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       try: evaluate,
       catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
     });
+  const sendDebuggerCommand = (
+    errorContext: PreviewOperationContext,
+    wc: Electron.WebContents,
+    method: string,
+    commandParams?: Record<string, unknown>,
+  ) =>
+    attemptPromise(errorContext, () => wc.debugger.sendCommand(method, commandParams)).pipe(
+      Effect.timeoutOrElse({
+        duration: DEBUGGER_COMMAND_TIMEOUT_MS,
+        orElse: () =>
+          Effect.fail(
+            new PreviewOperationError({
+              ...errorContext,
+              cause: new Error(
+                `Preview browser command ${method} timed out after ${DEBUGGER_COMMAND_TIMEOUT_MS}ms.`,
+              ),
+            }),
+          ),
+      }),
+    );
   const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const currentMillis = Clock.currentTimeMillis;
   const encodeJson = (errorContext: PreviewOperationContext, value: unknown) =>
@@ -958,9 +980,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             yield* Effect.all(
               ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"].map(
                 (method) =>
-                  attemptPromise(
+                  sendDebuggerCommand(
                     { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
-                    () => wc.debugger.sendCommand(method),
+                    wc,
+                    method,
                   ),
               ),
               { concurrency: "unbounded", discard: true },
@@ -1047,9 +1070,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               webContentsId: wc.id,
             });
           }
-          const result = yield* attemptPromise(
+          const result = yield* sendDebuggerCommand(
             { operation: `${action}.${method}`, tabId, webContentsId: wc.id },
-            () => wc.debugger.sendCommand(method, commandParams),
+            wc,
+            method,
+            commandParams,
           );
           const after = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
           if (after !== epoch) {
@@ -1067,13 +1092,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // with a held key or focus emulation enabled for subsequent actions.
       const sendCleanup: SendCommand = Effect.fn("PreviewManager.sendCleanupCommand")(
         function* (method, commandParams) {
-          return yield* attemptPromise(
+          return yield* sendDebuggerCommand(
             {
               operation: `${action}.cleanup.${method}`,
               tabId,
               webContentsId: wc.id,
             },
-            () => wc.debugger.sendCommand(method, commandParams),
+            wc,
+            method,
+            commandParams,
           );
         },
       );
@@ -1126,6 +1153,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       awaitPromise,
       returnByValue,
       userGesture: true,
+      timeout: DEBUGGER_COMMAND_TIMEOUT_MS,
     }).pipe(
       Effect.flatMap((rawResponse) => {
         const response = rawResponse as CdpEvaluationResult;
@@ -1470,7 +1498,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       },
     );
     if (result.created) {
-      tabLifecycleGenerations.set(tabId, (tabLifecycleGenerations.get(tabId) ?? 0) + 1);
+      tabLifecycleGenerations.set(tabId, ++nextTabGeneration);
     }
     yield* emit(tabId, result.state);
     return result.state;
@@ -1504,6 +1532,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ] as const;
     });
     if (Option.isNone(tab)) return;
+    tabLifecycleGenerations.delete(tabId);
     const closedTab = tab.value;
     if (closedTab.webContentsId != null) {
       yield* Effect.all(
@@ -2365,7 +2394,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               minHeight: PICTURE_IN_PICTURE_MIN_HEIGHT,
               title: title.length > 0 ? `Preview · ${title}` : "Browser preview",
               show: false,
-              alwaysOnTop: true,
+              alwaysOnTop: false,
               autoHideMenuBar: true,
               fullscreenable: false,
               maximizable: false,
@@ -2373,7 +2402,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               resizable: true,
               skipTaskbar: true,
               backgroundColor: "#111111",
-              ...(hostPlatform === "darwin" ? { type: "panel" as const } : {}),
               webPreferences: {
                 preload: pictureInPicturePreloadPath,
                 backgroundThrottling: false,
@@ -2406,18 +2434,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           },
           () => {
             pictureInPictureWindow.once("closed", onClosed);
-            pictureInPictureWindow.setAlwaysOnTop(
-              true,
-              hostPlatform === "darwin" ? "floating" : "normal",
-            );
-            if (hostPlatform === "darwin") {
-              pictureInPictureWindow.setVisibleOnAllWorkspaces(true, {
-                visibleOnFullScreen: true,
-                // Electron otherwise temporarily transforms the entire app into
-                // a UIElement process, which removes the owning app from the Dock.
-                skipTransformProcessType: true,
-              });
-            }
           },
         ).pipe(
           Effect.onError(() =>

@@ -120,6 +120,8 @@ export interface PreparedConnection {
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
   readonly target: ConnectionTarget;
+  readonly transport?: "desktop-direct";
+  readonly directBackendId?: string;
 }
 
 export type SupervisorConnectionPhase =

@@ -1,5 +1,6 @@
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type UploadChatImageAttachment,
 } from "@t3tools/contracts";
@@ -15,6 +16,12 @@ export interface DraftComposerImageAttachment extends UploadChatImageAttachment 
 export function toUploadChatImageAttachments(
   attachments: ReadonlyArray<DraftComposerImageAttachment>,
 ): ReadonlyArray<UploadChatImageAttachment> {
+  if (
+    attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0) >
+    PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES
+  ) {
+    throw new Error("Attachments exceed the 50 MB combined limit. Send them in separate messages.");
+  }
   return attachments.map((attachment) => ({
     type: attachment.type,
     name: attachment.name,
@@ -42,7 +49,10 @@ async function loadClipboard() {
   }
 }
 
-export async function pickComposerImages(input: { readonly existingCount: number }): Promise<{
+export async function pickComposerImages(input: {
+  readonly existingCount: number;
+  readonly existingBytes?: number;
+}): Promise<{
   readonly images: ReadonlyArray<DraftComposerImageAttachment>;
   readonly error: string | null;
 }> {
@@ -81,6 +91,7 @@ export async function pickComposerImages(input: { readonly existingCount: number
   }
 
   const nextImages: DraftComposerImageAttachment[] = [];
+  let totalBytes = input.existingBytes ?? 0;
   let error: string | null = null;
 
   for (const asset of result.assets) {
@@ -101,6 +112,11 @@ export async function pickComposerImages(input: { readonly existingCount: number
       error = `'${asset.fileName ?? "image"}' exceeds the 10 MB attachment limit.`;
       continue;
     }
+    if (totalBytes + sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+      error = "Attachments exceed the 50 MB combined limit. Send them in separate messages.";
+      continue;
+    }
+    totalBytes += sizeBytes;
 
     nextImages.push({
       id: uuidv4(),
@@ -119,7 +135,10 @@ export async function pickComposerImages(input: { readonly existingCount: number
   };
 }
 
-export async function pasteComposerClipboard(input: { readonly existingCount: number }): Promise<{
+export async function pasteComposerClipboard(input: {
+  readonly existingCount: number;
+  readonly existingBytes?: number;
+}): Promise<{
   readonly images: ReadonlyArray<DraftComposerImageAttachment>;
   readonly text: string | null;
   readonly error: string | null;
@@ -156,6 +175,13 @@ export async function pasteComposerClipboard(input: { readonly existingCount: nu
 
     const base64 = image.data.split(",")[1] ?? "";
     const sizeBytes = estimateBase64ByteSize(base64);
+    if ((input.existingBytes ?? 0) + sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+      return {
+        images: [],
+        text: null,
+        error: "Attachments exceed the 50 MB combined limit. Send them in separate messages.",
+      };
+    }
     if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
       return {
         images: [],
@@ -234,10 +260,12 @@ export function isOwnedPastedImageUri(uri: string): boolean {
 export async function convertPastedImagesToAttachments(input: {
   readonly uris: ReadonlyArray<string>;
   readonly existingCount: number;
+  readonly existingBytes?: number;
 }): Promise<ReadonlyArray<DraftComposerImageAttachment>> {
   const { File } = await import("expo-file-system");
   const remainingSlots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS - input.existingCount;
   const results: DraftComposerImageAttachment[] = [];
+  let totalBytes = input.existingBytes ?? 0;
 
   for (const [index, uri] of input.uris.entries()) {
     const ownedTemporaryFile = isOwnedPastedImageUri(uri);
@@ -251,6 +279,10 @@ export async function convertPastedImagesToAttachments(input: {
       if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
         continue;
       }
+      if (totalBytes + sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+        continue;
+      }
+      totalBytes += sizeBytes;
       const mimeType = mimeTypeFromUri(uri);
       results.push({
         id: uuidv4(),

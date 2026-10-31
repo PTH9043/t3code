@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Windows probes must hide the CMD helper window.
+import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -19,15 +21,10 @@ interface ShellEnvironmentConfig {
   readonly userShell: Option.Option<string>;
 }
 
-interface WindowsProbeOptions {
-  readonly loadProfile: boolean;
-}
-
 const DesktopShellEnvironmentProbe = Schema.Literals([
   "login-shell",
   "launchctl-path",
-  "powershell-profile",
-  "powershell-no-profile",
+  "cmd-environment",
 ]);
 type DesktopShellEnvironmentProbe = typeof DesktopShellEnvironmentProbe.Type;
 
@@ -84,8 +81,7 @@ const LOGIN_SHELL_ENV_NAMES = [
   "XDG_SESSION_TYPE",
   "WAYLAND_DISPLAY",
 ] as const;
-const WINDOWS_PROFILE_ENV_NAMES = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"] as const;
-const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
+const WINDOWS_ENV_NAMES = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"] as const;
 const LOGIN_SHELL_TIMEOUT = Duration.seconds(5);
 const LAUNCHCTL_TIMEOUT = Duration.seconds(2);
 const PROCESS_TERMINATE_GRACE = Duration.seconds(1);
@@ -247,19 +243,6 @@ const capturePosixEnvironmentCommand = (names: ReadonlyArray<string>) =>
     })
     .join("; ");
 
-const captureWindowsEnvironmentCommand = (names: ReadonlyArray<string>) =>
-  [
-    "$ErrorActionPreference = 'Stop'",
-    ...names.flatMap((name) => {
-      return [
-        `Write-Output '${startMarker(name)}'`,
-        `$value = [Environment]::GetEnvironmentVariable('${name}')`,
-        "if ($null -ne $value -and $value.Length -gt 0) { Write-Output $value }",
-        `Write-Output '${endMarker(name)}'`,
-      ];
-    }),
-  ].join("; ");
-
 const extractEnvironment = (output: string, names: ReadonlyArray<string>): EnvironmentPatch => {
   const environment: EnvironmentPatch = {};
 
@@ -362,38 +345,39 @@ const readLaunchctlPath = runCommandOutput({
 }).pipe(Effect.map(trimNonEmpty));
 
 const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEnvironment")(
-  function* (
-    names: ReadonlyArray<string>,
-    options: WindowsProbeOptions,
-  ): Effect.fn.Return<EnvironmentPatch, never, ChildProcessSpawner.ChildProcessSpawner> {
-    if (names.length === 0) return {};
-
-    const args = [
-      "-NoLogo",
-      ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
-      "-NonInteractive",
-      "-Command",
-      captureWindowsEnvironmentCommand(names),
-    ];
-
-    // PowerShell 7 is absent on a stock Windows install, so a miss on every
-    // candidate but the last is the normal path and must not warn. Running out
-    // of candidates means the machine has no PowerShell at all, which does.
-    for (const [index, command] of WINDOWS_SHELL_CANDIDATES.entries()) {
-      const output = yield* runCommandOutput({
-        probe: options.loadProfile ? "powershell-profile" : "powershell-no-profile",
-        command,
-        args,
-        timeout: LOGIN_SHELL_TIMEOUT,
-        onMissingExecutable: index === WINDOWS_SHELL_CANDIDATES.length - 1 ? "warn" : "quiet",
-      });
-      const environment = extractEnvironment(output, names);
-      if (Object.keys(environment).length > 0) {
-        return environment;
-      }
+  function* (): Effect.fn.Return<EnvironmentPatch> {
+    const output = yield* Effect.tryPromise({
+      try: (signal) =>
+        new Promise<string>((resolve, reject) => {
+          NodeChildProcess.execFile(
+            "cmd.exe",
+            ["/d", "/u", "/c", "set"],
+            {
+              windowsHide: true,
+              encoding: "buffer",
+              timeout: Duration.toMillis(LOGIN_SHELL_TIMEOUT),
+              signal,
+            },
+            (error, stdout) => (error ? reject(error) : resolve(stdout.toString("utf16le"))),
+          );
+        }),
+      catch: (cause) =>
+        new DesktopShellEnvironmentCommandError({
+          probe: "cmd-environment",
+          executable: "cmd.exe",
+          argumentCount: 4,
+          cause,
+        }),
+    }).pipe(Effect.catch((error) => logShellEnvironmentCommandError(error).pipe(Effect.as(""))));
+    const wanted = new Set<string>(WINDOWS_ENV_NAMES);
+    const environment: EnvironmentPatch = {};
+    for (const line of output.split(/\r?\n/u)) {
+      const separator = line.indexOf("=");
+      if (separator < 1) continue;
+      const name = line.slice(0, separator).toUpperCase();
+      if (wanted.has(name)) environment[name] = line.slice(separator + 1);
     }
-
-    return {};
+    return environment;
   },
 );
 
@@ -401,25 +385,21 @@ const installWindowsEnvironment = Effect.fn("desktop.shellEnvironment.installWin
   function* (
     config: ShellEnvironmentConfig,
   ): Effect.fn.Return<void, never, ChildProcessSpawner.ChildProcessSpawner> {
-    const noProfile = yield* readWindowsEnvironment(["PATH"], { loadProfile: false });
-    const profile = yield* readWindowsEnvironment(WINDOWS_PROFILE_ENV_NAMES, {
-      loadProfile: true,
-    });
+    const inherited = yield* readWindowsEnvironment();
     const mergedPath = mergePaths("win32", [
-      trimNonEmpty(profile.PATH),
+      trimNonEmpty(inherited.PATH),
       trimNonEmpty(knownWindowsCliDirs(config.env).join(";")),
-      trimNonEmpty(noProfile.PATH),
       readEnvPath(config.env),
     ]);
 
     if (Option.isSome(mergedPath)) {
       config.env.PATH = mergedPath.value;
     }
-    if (!config.env.FNM_DIR && profile.FNM_DIR) {
-      config.env.FNM_DIR = profile.FNM_DIR;
+    if (!config.env.FNM_DIR && inherited.FNM_DIR) {
+      config.env.FNM_DIR = inherited.FNM_DIR;
     }
-    if (!config.env.FNM_MULTISHELL_PATH && profile.FNM_MULTISHELL_PATH) {
-      config.env.FNM_MULTISHELL_PATH = profile.FNM_MULTISHELL_PATH;
+    if (!config.env.FNM_MULTISHELL_PATH && inherited.FNM_MULTISHELL_PATH) {
+      config.env.FNM_MULTISHELL_PATH = inherited.FNM_MULTISHELL_PATH;
     }
   },
 );

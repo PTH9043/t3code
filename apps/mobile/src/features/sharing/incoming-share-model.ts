@@ -1,5 +1,6 @@
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -131,6 +132,7 @@ export async function buildIncomingShareDraft(input: {
 }): Promise<IncomingShareDraft> {
   const attachments: DraftComposerImageAttachment[] = [];
   const warnings: string[] = [];
+  let totalBytes = 0;
   const consumedResolvedPayloadIndexes = new Set<number>();
   let warnedAttachmentLimit = false;
 
@@ -184,6 +186,13 @@ export async function buildIncomingShareDraft(input: {
         continue;
       }
       const dataUrl = `data:${mimeType};base64,${base64}`;
+      if (totalBytes + sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+        warnings.push(
+          "Shared images exceed the 50 MB combined limit. Send them in separate messages.",
+        );
+        continue;
+      }
+      totalBytes += sizeBytes;
       attachments.push({
         id: `${input.id}:image:${index}`,
         type: "image",

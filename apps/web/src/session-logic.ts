@@ -70,6 +70,8 @@ export type WorkLogToolLifecycleStatus =
 
 export interface WorkLogEntry {
   id: string;
+  /** The owning task result for inline orchestra tool records. */
+  orchestraMessageId?: string;
   createdAt: string;
   turnId?: TurnId | null;
   label: string;
@@ -481,9 +483,6 @@ function parseUserInputQuestions(
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
-        return null;
-      }
       return {
         id: question.id,
         header: question.header,
@@ -1017,6 +1016,9 @@ function toDerivedWorkLogEntryUncached(activity: OrchestrationThreadActivity): D
     activityKind: activity.kind,
   };
   const itemType = extractWorkLogItemType(payload);
+  if (typeof payload?.executionId === "string" && typeof payload.messageId === "string") {
+    entry.orchestraMessageId = payload.messageId;
+  }
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {
     entry.detail = detail;
@@ -1243,6 +1245,11 @@ function mergeChangedFiles(
 }
 
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
+  const key = deriveUnscopedToolLifecycleCollapseKey(entry);
+  return key && entry.orchestraMessageId ? `${entry.orchestraMessageId}:${key}` : key;
+}
+
+function deriveUnscopedToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
   // Subagent lifecycle rows collapse by agent identity: one row per agent,
   // progress ticks fold into it, the terminal row wins the label.
   if (

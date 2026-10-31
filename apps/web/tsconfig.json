@@ -28,6 +28,7 @@
   "include": [
     "src",
     "vite.config.ts",
+    "desktop-dev-pipe.ts",
     "vercel.ts",
     "test",
     "scripts/warm-dep-cache.ts",

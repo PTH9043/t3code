@@ -122,6 +122,69 @@ const withHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 describe("DesktopBackendConfiguration", () => {
+  it.effect("uses the managed WSL runtime when the Windows drive is not mounted", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-wsl-managed-config-",
+      });
+      const entryPath = path.join(baseDir, "app.asar.unpacked/apps/server/dist/bin.mjs");
+      const manifestPath = path.join(baseDir, "wsl-runtime/managed-linux-x64.json");
+      yield* fileSystem.makeDirectory(path.dirname(entryPath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(manifestPath), { recursive: true });
+      yield* fileSystem.writeFileString(entryPath, "test entry");
+      yield* fileSystem.writeFileString(manifestPath, "test manifest");
+      const prepared: Array<{ distro: string; manifestPath: string; serverDirectory: string }> = [];
+      const config = yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        return yield* configuration.resolveWsl({ port: 5000, distro: "Alpine" });
+      }).pipe(
+        Effect.provideService(
+          DesktopBackendConfiguration.WslManagedRuntimePreparer,
+          async (input) => {
+            prepared.push(input);
+            return {
+              linuxEntryPath: "/home/user/.t3/runtime/server/bin.mjs",
+              nodePath: "/usr/bin/node",
+              resolvedPath: "/usr/bin:/bin",
+            };
+          },
+        ),
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(
+              DesktopWslEnvironment.layerTest({
+                isAvailable: true,
+                distros: [{ name: "Alpine", isDefault: true, version: 2 }],
+                windowsToWslPath: () => Option.none(),
+                getDistroIp: () => Option.none(),
+              }),
+            ),
+            Layer.provideMerge(
+              makeEnvironmentLayer(baseDir, {
+                appPath: baseDir,
+                platform: "win32",
+                resourcesPath: baseDir,
+              }),
+            ),
+          ),
+        ),
+      );
+      assert.isTrue(Option.isNone(config.preflightFailure));
+      assert.equal(prepared.length, 1);
+      assert.equal(prepared[0]?.distro, "Alpine");
+      assert.equal(prepared[0]?.manifestPath, manifestPath);
+      assert.equal(prepared[0]?.serverDirectory, path.dirname(entryPath));
+      assert.include(config.args, "/home/user/.t3/runtime/server/bin.mjs");
+      assert.include(config.args, "__wsl-direct-bridge");
+      assert.equal(config.bootstrap.desktopDirectRpcInputFd, 6);
+      assert.equal(config.bootstrap.desktopDirectRpcOutputFd, 7);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
     withHarness(
       Effect.gen(function* () {
@@ -273,6 +336,8 @@ describe("DesktopBackendConfiguration", () => {
         );
 
         assert.equal(config.bootstrapDelivery, "stdin");
+        assert.equal(config.bootstrap.desktopDirectRpcInputFd, 6);
+        assert.equal(config.bootstrap.desktopDirectRpcOutputFd, 7);
         assert.deepEqual(config.args, [
           "-d",
           "Ubuntu",
@@ -281,8 +346,7 @@ describe("DesktopBackendConfiguration", () => {
           "PATH=/home/test user's/.nvm/versions/node/v22.0.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/test user/bin:/opt/test's tools/bin:/usr/bin:/bin",
           nodePath,
           linuxEntryPath,
-          "--bootstrap-fd",
-          "0",
+          "__wsl-direct-bridge",
           "--dev-url",
           devServerUrl,
         ]);

@@ -43,10 +43,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   selectedInstanceId: ProviderInstanceId | "favorites";
   onSelectInstance: (instanceId: ProviderInstanceId | "favorites") => void;
   /**
-   * Instance entries to render as rail buttons. Each entry becomes one icon
-   * keyed by `instanceId`, so the default built-in Codex and a user-authored
-   * `codex_personal` appear as two distinct rail items, each routing to
-   * their own model list.
+   * Instance entries grouped by driver. Each driver gets one rail button;
+   * clicking it selects an actual `ProviderInstanceId`, preserving account-level
+   * model lists and dispatch identity.
    */
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   /** Render the favorites rail entry. Hidden for locked-provider instance switching. */
@@ -68,13 +67,42 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
-  const duplicateDriverCounts = useMemo(() => {
-    const counts = new Map<string, number>();
+  const selectedDriverKind = useMemo(() => {
+    if (props.selectedInstanceId === "favorites") return null;
+    return (
+      props.instanceEntries.find((entry) => entry.instanceId === props.selectedInstanceId)
+        ?.driverKind ?? null
+    );
+  }, [props.instanceEntries, props.selectedInstanceId]);
+  const driverGroups = useMemo(() => {
+    const groups = new Map<string, ProviderInstanceEntry[]>();
     for (const entry of props.instanceEntries) {
-      counts.set(entry.driverKind, (counts.get(entry.driverKind) ?? 0) + 1);
+      const list = groups.get(entry.driverKind) ?? [];
+      list.push(entry);
+      groups.set(entry.driverKind, list);
     }
-    return counts;
-  }, [props.instanceEntries]);
+    return [...groups.entries()].map(([driverKind, entries]) => {
+      const visibleEntries = entries;
+      const selectedEntry = entries.find((entry) => entry.instanceId === props.selectedInstanceId);
+      const representative =
+        selectedEntry ??
+        entries.find((entry) => isProviderInstancePickerReady(entry) && entry.isDefault) ??
+        entries.find((entry) => isProviderInstancePickerReady(entry)) ??
+        entries.find((entry) => entry.isDefault) ??
+        entries[0];
+      const allContextDisabled = entries.every(
+        (entry) => props.disabledInstanceIds?.has(entry.instanceId) ?? false,
+      );
+      const readyCount = entries.filter(isProviderInstancePickerReady).length;
+      return {
+        driverKind,
+        entries: visibleEntries,
+        representative,
+        allContextDisabled,
+        readyCount,
+      };
+    });
+  }, [props.instanceEntries, props.disabledInstanceIds, props.selectedInstanceId]);
 
   useLayoutEffect(() => {
     const content = sidebarContentRef.current;
@@ -83,13 +111,17 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     }
     const selectedItem = Array.from(
       content.querySelectorAll<HTMLElement>("[data-model-picker-provider]"),
-    ).find((item) => item.dataset.modelPickerProvider === props.selectedInstanceId);
+    ).find(
+      (item) =>
+        item.dataset.modelPickerProvider ===
+        (props.selectedInstanceId === "favorites" ? "favorites" : selectedDriverKind),
+    );
     if (!selectedItem) {
       setSelectedIndicatorTop(null);
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+  }, [props.instanceEntries, props.selectedInstanceId, selectedDriverKind, showFavorites]);
 
   return (
     <div className="w-11 shrink-0 overflow-hidden bg-muted/30" data-model-picker-sidebar="true">
@@ -138,24 +170,30 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             </>
           ) : null}
 
-          {/* Instance buttons (one per configured instance — built-in + custom) */}
-          {props.instanceEntries.map((entry) => {
-            const isUnavailable = !isProviderInstancePickerReady(entry);
-            const isContextDisabled = props.disabledInstanceIds?.has(entry.instanceId) ?? false;
-            const isDisabled = isUnavailable || isContextDisabled;
-            const isSelected = props.selectedInstanceId === entry.instanceId;
+          {/* Driver rail groups. Clicking a group still selects an exact account. */}
+          {driverGroups.map((group) => {
+            const entry = group.representative;
+            if (!entry) return null;
+            const groupUnavailable = group.readyCount === 0;
+            const isDisabled = groupUnavailable || group.allContextDisabled;
+            const isSelected = selectedDriverKind === group.driverKind;
             const isHovered = hoveredInstanceId === entry.instanceId;
-            const showNewBadge = props.newBadgeInstanceIds?.has(entry.instanceId) ?? false;
-            const showInstanceBadge =
-              Boolean(entry.accentColor) || (duplicateDriverCounts.get(entry.driverKind) ?? 0) > 1;
-
-            const tooltip = isUnavailable
-              ? describeUnavailableInstance(entry)
-              : isContextDisabled
-                ? (props.getDisabledInstanceTooltip?.(entry) ?? entry.displayName)
-                : showNewBadge
-                  ? `${entry.displayName} — New`
-                  : entry.displayName;
+            const showNewBadge = group.entries.some(
+              (candidate) => props.newBadgeInstanceIds?.has(candidate.instanceId) ?? false,
+            );
+            const showInstanceBadge = group.entries.length > 1 || Boolean(entry.accentColor);
+            const statusLines = group.entries.map((candidate) => {
+              const contextDisabled = props.disabledInstanceIds?.has(candidate.instanceId) ?? false;
+              const label = contextDisabled
+                ? (props.getDisabledInstanceTooltip?.(candidate) ??
+                  `${candidate.displayName}은(는) 이 대화에서 사용할 수 없습니다.`)
+                : describeUnavailableInstance(candidate);
+              return label;
+            });
+            const tooltip =
+              group.entries.length === 1
+                ? statusLines[0]
+                : `${entry.displayName} 외 ${group.entries.length - 1}개 계정\n${statusLines.join("\n")}`;
 
             const button = (
               <button
@@ -178,9 +216,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 aria-label={
                   isDisabled
                     ? tooltip
-                    : showNewBadge
-                      ? `${entry.displayName}, new`
-                      : entry.displayName
+                    : group.entries.length === 1
+                      ? entry.displayName
+                      : `${group.driverKind}, ${group.entries.length}개 계정`
                 }
               >
                 <ProviderInstanceIcon
@@ -206,6 +244,11 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     <SparklesIcon className="size-2" />
                   </span>
                 ) : null}
+                {group.entries.length > 1 ? (
+                  <span className="absolute -bottom-0.5 -right-0.5 z-10 flex h-4 min-w-4 items-center justify-center rounded-full bg-background px-1 text-[9px] font-semibold shadow-sm ring-1 ring-border/60">
+                    {group.entries.length}
+                  </span>
+                ) : null}
               </button>
             );
 
@@ -217,9 +260,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
 
             return (
               <div
-                key={entry.instanceId}
+                key={group.driverKind}
                 className="relative w-full"
-                data-model-picker-provider={entry.instanceId}
+                data-model-picker-provider={group.driverKind}
               >
                 <Tooltip>
                   <TooltipTrigger render={trigger} />
@@ -229,7 +272,16 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     align="center"
                     className={PICKER_TOOLTIP_CLASS}
                   >
-                    {tooltip}
+                    <div className="grid gap-1">
+                      <div className="font-medium">
+                        {group.entries.length === 1
+                          ? entry.displayName
+                          : `${group.driverKind} 계정 ${group.entries.length}개`}
+                      </div>
+                      {group.entries.length > 1 ? (
+                        <div className="whitespace-pre-line">{tooltip}</div>
+                      ) : null}
+                    </div>
                   </TooltipPopup>
                 </Tooltip>
               </div>

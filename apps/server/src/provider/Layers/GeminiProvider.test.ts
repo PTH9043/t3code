@@ -3,10 +3,32 @@ import { describe, expect, it } from "@effect/vitest";
 import { GeminiSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Cause from "effect/Cause";
 
-import { buildInitialGeminiProviderSnapshot, checkGeminiProviderStatus } from "./GeminiProvider.ts";
+import {
+  buildInitialGeminiProviderSnapshot,
+  checkGeminiProviderStatus,
+  geminiAcpStartupFailureMessage,
+} from "./GeminiProvider.ts";
 
 const decodeGeminiSettings = Schema.decodeSync(GeminiSettings);
+
+describe("Gemini service eligibility", () => {
+  it("explains Google's consumer CLI retirement for defects and typed failures", () => {
+    const error = new Error(
+      "This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products.",
+    );
+    for (const cause of [Cause.die(error), Cause.fail(error)]) {
+      expect(geminiAcpStartupFailureMessage(cause)).toContain("개인 계정");
+      expect(geminiAcpStartupFailureMessage(cause)).toContain("지원을 종료");
+    }
+  });
+  it("does not expose unknown startup error contents in the client status", () => {
+    const message = geminiAcpStartupFailureMessage(Cause.die(new Error("secret-key")));
+    expect(message).toContain("ACP startup failed");
+    expect(message).not.toContain("secret-key");
+  });
+});
 
 describe("buildInitialGeminiProviderSnapshot", () => {
   it.effect("returns a disabled snapshot when Gemini is disabled", () =>

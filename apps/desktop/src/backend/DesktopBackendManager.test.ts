@@ -34,6 +34,21 @@ const encodeDesktopTelemetryControl = Schema.encodeSync(
   Schema.fromJsonString(DesktopTelemetryControlMessage),
 );
 
+it.effect("keeps reading the direct pipe after a malformed output frame", () =>
+  Effect.gen(function* () {
+    const encoded = new TextEncoder().encode(
+      '{"type":"opened","clientId":1}\nnot-json\n{"type":"closed","clientId":1}\n',
+    );
+    const frames = yield* DesktopBackendManager.decodeDirectRpcOutputStream(
+      Stream.fromIterable([encoded.subarray(0, 7), encoded.subarray(7)]),
+    ).pipe(Stream.runCollect);
+    assert.deepEqual(Array.from(frames), [
+      { type: "opened", clientId: 1 },
+      { type: "closed", clientId: 1 },
+    ]);
+  }),
+);
+
 const baseConfig: DesktopBackendManager.DesktopBackendStartConfig = {
   executablePath: "/electron",
   args: ["/server/bin.mjs", "--bootstrap-fd", "3"],

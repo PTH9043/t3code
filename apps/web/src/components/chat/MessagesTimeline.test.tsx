@@ -1,4 +1,11 @@
-import { CheckpointRef, EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  EnvironmentId,
+  MessageId,
+  TurnId,
+  WorkspaceOrchestraBlock,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
@@ -172,6 +179,7 @@ beforeAll(async () => {
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
+const decodeOrchestraBlock = Schema.decodeUnknownSync(WorkspaceOrchestraBlock);
 
 function buildProps() {
   return {
@@ -226,6 +234,70 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders retries and their tool logs inside one orchestra list while preserving ordinary messages", () => {
+    const blocks = [1, 2].map((attempt) =>
+      decodeOrchestraBlock({
+        executionId: `execution-${attempt}`,
+        ownerThreadId: "thread-1",
+        runId: "run",
+        nodeId: "compute",
+        attempt,
+        messageId: `result-${attempt}`,
+        title: "Compute",
+        displayName: "Codex Sol",
+        role: "implementer",
+        kind: "implementation",
+        modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+        status: attempt === 1 ? "failed" : "running",
+      }),
+    );
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        orchestraBlocks={new Map(blocks.map((block) => [block.messageId, block]))}
+        timelineEntries={[
+          buildUserTimelineEntry("Keep this user message"),
+          ...blocks.map((block) => ({
+            kind: "message" as const,
+            id: block.messageId,
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: block.messageId,
+              role: "assistant" as const,
+              text: block.attempt === 1 ? "previous failed output" : "current live output",
+              turnId: null,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: block.attempt === 2,
+            },
+          })),
+          {
+            kind: "work",
+            id: "orchestra-tool",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "orchestra-tool",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Preserved tool evidence",
+              tone: "tool",
+              orchestraMessageId: "result-2",
+            },
+          },
+        ]}
+      />,
+    );
+    expect(markup.match(/data-orchestra-run=/g)).toHaveLength(1);
+    expect(markup.match(/data-orchestra-task=/g)).toHaveLength(1);
+    expect(markup).toContain("Keep this user message");
+    expect(markup).toContain("current live output");
+    expect(markup).toContain("재시도 1회");
+    expect(markup).toContain("도구 실행 기록 1개");
+    expect(markup).toContain("Preserved tool evidence");
+    expect(markup).toContain("최근 활동 · Preserved tool evidence");
+    expect(markup).not.toContain('data-timeline-row-kind="work"');
+    expect(markup).not.toContain("previous failed output");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

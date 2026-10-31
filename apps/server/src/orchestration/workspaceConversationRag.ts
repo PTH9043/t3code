@@ -199,6 +199,7 @@ export function toConversationRagKnowledgeItem(input: {
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly createdAt: IsoDateTime;
   readonly settings: WorkspaceConversationRagSettings;
+  readonly relativeFolder?: string | null;
 }): WorkspaceKnowledgeItem | null {
   if (!input.settings.enabled) return null;
   const attachments = attachmentContext(input.attachments);
@@ -218,7 +219,7 @@ export function toConversationRagKnowledgeItem(input: {
     content: compacted.content,
     status: "active",
     origin: "user",
-    relativeFolder: null,
+    relativeFolder: input.relativeFolder ?? null,
     tags: [
       AUTO_CONVERSATION_TAG,
       "compacted",
