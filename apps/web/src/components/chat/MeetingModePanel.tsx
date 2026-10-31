@@ -172,197 +172,194 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         <span className="font-normal normal-case">(2–{MAX_MEETING_SEATS}명)</span>
       </div>
       <div className="mt-1.5 grid gap-1">
-        {groupProviderInstanceEntriesByDriver(visibleEntries).map((group) => (
-          <div key={group.driverKind} className="space-y-1.5">
-            {group.entries.length > 1 && (
-              <div className="px-2 text-[11px] font-medium text-muted-foreground">
-                {group.label} · {group.entries.length}개 계정
-              </div>
-            )}
-            {group.entries.map((entry) => {
-              const ready = isProviderInstancePickerReady(entry);
-              const seats = config.seats.filter((seat) => seat.instanceId === entry.instanceId);
-              const options = props.modelOptionsByInstance.get(entry.instanceId) ?? [];
-              const available = options.filter(
-                (option) => !seats.some((seat) => seat.model === option.slug),
-              );
-              const nextModel = defaultSeatModel(available);
-              const showDisplayName = group.entries.length === 1;
-              return (
-                <div
-                  key={entry.instanceId}
-                  className="rounded-md border border-border/60 px-2 py-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <ProviderInstanceIcon
-                      driverKind={entry.driverKind}
-                      displayName={entry.displayName}
-                      accentColor={entry.accentColor}
-                      showBadge={Boolean(entry.accentColor)}
-                      className="size-4 shrink-0"
-                      iconClassName="size-4"
-                    />
-                    {showDisplayName ? (
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                        {entry.displayName}
-                        {!ready ? (
-                          <span className="ml-1 font-normal text-muted-foreground">
-                            (사용 불가)
-                          </span>
-                        ) : null}
-                      </span>
-                    ) : (
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                        {!ready ? <span className="text-muted-foreground">(사용 불가)</span> : null}
+        {groupProviderInstanceEntriesByDriver(visibleEntries).map((group) => {
+          // Collect all seats across all instances in this group
+          const groupSeats = config.seats.filter((seat) =>
+            group.entries.some((entry) => entry.instanceId === seat.instanceId),
+          );
+          // Pick first ready instance for new seats
+          const firstReadyEntry = group.entries.find(isProviderInstancePickerReady);
+          const ready = firstReadyEntry !== undefined;
+          // Merge all models from all instances in this group
+          const allOptions = Array.from(
+            new Map(
+              group.entries.flatMap((entry) => {
+                const instanceOptions = props.modelOptionsByInstance.get(entry.instanceId) ?? [];
+                return instanceOptions.map((model) => [model.slug, model]);
+              }),
+            ).values(),
+          );
+          const available = allOptions.filter(
+            (option) => !groupSeats.some((seat) => seat.model === option.slug),
+          );
+          const nextModel = defaultSeatModel(available);
+
+          return (
+            <div key={group.driverKind} className="space-y-1.5">
+              <div className="rounded-md border border-border/60 px-2 py-2">
+                <div className="flex items-center gap-2">
+                  <ProviderInstanceIcon
+                    driverKind={group.driverKind}
+                    displayName={group.label}
+                    accentColor={undefined}
+                    showBadge={false}
+                    className="size-4 shrink-0"
+                    iconClassName="size-4"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                    {group.label}
+                    {group.entries.length > 1 && (
+                      <span className="ml-1 font-normal text-muted-foreground">
+                        · {group.entries.length}개 계정
                       </span>
                     )}
-                    <button
-                      type="button"
-                      className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted disabled:opacity-40"
-                      aria-label={`${entry.displayName} 모델 추가`}
-                      disabled={
-                        !ready || nextModel === null || config.seats.length >= MAX_MEETING_SEATS
-                      }
-                      onClick={() => {
-                        if (nextModel === null) return;
-                        addMeetingComposerSeat({
-                          instanceId: entry.instanceId,
-                          model: nextModel,
-                          displayName: entry.displayName,
-                          options: meetingModelDefaultOptions(entry, nextModel),
-                        });
-                      }}
-                    >
-                      <PlusIcon className="size-3" />
-                      모델 추가
-                    </button>
-                  </div>
-                  {seats.map((seat) => {
-                    const seatId = seat.id;
-                    const modelLabel =
-                      options.find((option) => option.slug === seat.model)?.name ?? seat.model;
-                    const isConductor = (config.chairSeatId ?? config.seats[0]?.id) === seat.id;
-                    return (
-                      <div
-                        key={seat.id}
-                        data-meeting-seat={seat.id}
-                        className="mt-2 rounded border border-border/50 p-2"
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            aria-label={`${entry.displayName} ${modelLabel} 지휘 AI로 선택`}
-                            aria-pressed={isConductor}
-                            title={isConductor ? "지휘 AI" : "지휘 AI로 선택"}
-                            className={cn(
-                              "shrink-0 rounded p-1 hover:bg-muted",
-                              isConductor ? "text-primary" : "text-muted-foreground",
-                            )}
-                            onClick={() =>
-                              updateMeetingComposerConfig((current) => ({
-                                ...current,
-                                chairSeatId: seat.id,
-                              }))
-                            }
-                          >
-                            <CrownIcon className="size-3.5" />
-                          </button>
-                          <select
-                            className={SELECT_CLASS}
-                            value={seat.model}
-                            aria-label={`${entry.displayName} ${modelLabel} 모델`}
-                            disabled={!ready}
-                            onChange={(event) =>
-                              setMeetingComposerSeatModel(
-                                seatId,
-                                event.currentTarget.value,
-                                meetingModelDefaultOptions(entry, event.currentTarget.value),
-                              )
-                            }
-                          >
-                            {options.map((option) => (
-                              <option
-                                key={option.slug}
-                                value={option.slug}
-                                disabled={seats.some(
-                                  (other) => other.id !== seat.id && other.model === option.slug,
-                                )}
-                              >
-                                {option.shortName ?? option.name}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted"
-                            aria-label={`${entry.displayName} ${modelLabel} 제거`}
-                            onClick={() => toggleMeetingComposerSeat(seat)}
-                          >
-                            <XIcon className="size-3.5" />
-                          </button>
-                        </div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                          <span className="text-[11px] text-muted-foreground">
-                            {isConductor ? "지휘 AI" : "작업 AI"}
-                          </span>
-                          {
-                            // The same option descriptors the composer's effort picker
-                            // reads — so each seat's turns run at the effort chosen
-                            // here, not whatever the composer happens to be set to.
-                            getProviderOptionDescriptors({
-                              caps: getProviderModelCapabilities(
-                                entry.models,
-                                seat.model,
-                                entry.driverKind,
-                              ),
-                              selections: seat.options ?? null,
-                            })
-                              .filter((descriptor) => descriptor.type === "select")
-                              .map((descriptor) => {
-                                // A choice's VALUE is its id ("high"); the label is
-                                // display only. The descriptor already folded the
-                                // seat's stored selection into currentValue.
-                                const currentValue = getProviderOptionCurrentValue(descriptor);
-                                const shownValue =
-                                  typeof currentValue === "string" &&
-                                  descriptor.options.some((choice) => choice.id === currentValue)
-                                    ? currentValue
-                                    : (descriptor.options.find((choice) => choice.isDefault)?.id ??
-                                      descriptor.options[0]?.id ??
-                                      "");
-                                return (
-                                  <select
-                                    key={descriptor.id}
-                                    className={cn(SELECT_CLASS, "max-w-28 shrink-0")}
-                                    value={shownValue}
-                                    aria-label={`${entry.displayName} ${modelLabel} ${descriptor.label}`}
-                                    title={descriptor.label}
-                                    onChange={(event) =>
-                                      setMeetingComposerSeatOption(
-                                        seatId,
-                                        descriptor.id,
-                                        event.currentTarget.value,
-                                      )
-                                    }
-                                  >
-                                    {descriptor.options.map((choice) => (
-                                      <option key={choice.id} value={choice.id}>
-                                        {choice.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                );
-                              })
-                          }
-                        </div>
-                      </div>
-                    );
-                  })}
+                    {!ready ? (
+                      <span className="ml-1 font-normal text-muted-foreground">(사용 불가)</span>
+                    ) : null}
+                  </span>
+                  <button
+                    type="button"
+                    className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted disabled:opacity-40"
+                    aria-label={`${group.label} 모델 추가`}
+                    disabled={
+                      !ready || nextModel === null || config.seats.length >= MAX_MEETING_SEATS
+                    }
+                    onClick={() => {
+                      if (nextModel === null || !firstReadyEntry) return;
+                      addMeetingComposerSeat({
+                        instanceId: firstReadyEntry.instanceId,
+                        model: nextModel,
+                        displayName: group.label,
+                        options: meetingModelDefaultOptions(firstReadyEntry, nextModel),
+                      });
+                    }}
+                  >
+                    <PlusIcon className="size-3" />
+                    모델 추가
+                  </button>
                 </div>
-              );
-            })}
-          </div>
-        ))}
+                {groupSeats.map((seat) => {
+                  const seatId = seat.id;
+                  const seatEntry = group.entries.find(
+                    (entry) => entry.instanceId === seat.instanceId,
+                  );
+                  if (!seatEntry) return null;
+                  const seatReady = isProviderInstancePickerReady(seatEntry);
+                  const modelLabel =
+                    allOptions.find((option) => option.slug === seat.model)?.name ?? seat.model;
+                  const isConductor = (config.chairSeatId ?? config.seats[0]?.id) === seat.id;
+                  return (
+                    <div
+                      key={seat.id}
+                      data-meeting-seat={seat.id}
+                      className="mt-2 rounded border border-border/50 p-2"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          aria-label={`${group.label} ${modelLabel} 지휘 AI로 선택`}
+                          aria-pressed={isConductor}
+                          title={isConductor ? "지휘 AI" : "지휘 AI로 선택"}
+                          className={cn(
+                            "shrink-0 rounded p-1 hover:bg-muted",
+                            isConductor ? "text-primary" : "text-muted-foreground",
+                          )}
+                          onClick={() =>
+                            updateMeetingComposerConfig((current) => ({
+                              ...current,
+                              chairSeatId: seat.id,
+                            }))
+                          }
+                        >
+                          <CrownIcon className="size-3.5" />
+                        </button>
+                        <select
+                          className={SELECT_CLASS}
+                          value={seat.model}
+                          aria-label={`${group.label} ${modelLabel} 모델`}
+                          disabled={!seatReady}
+                          onChange={(event) =>
+                            setMeetingComposerSeatModel(
+                              seatId,
+                              event.currentTarget.value,
+                              meetingModelDefaultOptions(seatEntry, event.currentTarget.value),
+                            )
+                          }
+                        >
+                          {allOptions.map((option) => (
+                            <option
+                              key={option.slug}
+                              value={option.slug}
+                              disabled={groupSeats.some(
+                                (other) => other.id !== seat.id && other.model === option.slug,
+                              )}
+                            >
+                              {option.shortName ?? option.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted"
+                          aria-label={`${group.label} ${modelLabel} 제거`}
+                          onClick={() => toggleMeetingComposerSeat(seat)}
+                        >
+                          <XIcon className="size-3.5" />
+                        </button>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-muted-foreground">
+                          {isConductor ? "지휘 AI" : "작업 AI"}
+                        </span>
+                        {getProviderOptionDescriptors({
+                          caps: getProviderModelCapabilities(
+                            seatEntry.models,
+                            seat.model,
+                            seatEntry.driverKind,
+                          ),
+                          selections: seat.options ?? null,
+                        })
+                          .filter((descriptor) => descriptor.type === "select")
+                          .map((descriptor) => {
+                            const currentValue = getProviderOptionCurrentValue(descriptor);
+                            const shownValue =
+                              typeof currentValue === "string" &&
+                              descriptor.options.some((choice) => choice.id === currentValue)
+                                ? currentValue
+                                : (descriptor.options.find((choice) => choice.isDefault)?.id ??
+                                  descriptor.options[0]?.id ??
+                                  "");
+                            return (
+                              <select
+                                key={descriptor.id}
+                                className={cn(SELECT_CLASS, "max-w-28 shrink-0")}
+                                value={shownValue}
+                                aria-label={`${group.label} ${modelLabel} ${descriptor.label}`}
+                                title={descriptor.label}
+                                onChange={(event) =>
+                                  setMeetingComposerSeatOption(
+                                    seatId,
+                                    descriptor.id,
+                                    event.currentTarget.value,
+                                  )
+                                }
+                              >
+                                {descriptor.options.map((choice) => (
+                                  <option key={choice.id} value={choice.id}>
+                                    {choice.label}
+                                  </option>
+                                ))}
+                              </select>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
         {visibleEntries.length === 0 ? (
           <p className="rounded-md border border-dashed border-border/70 px-2 py-3 text-center text-xs text-muted-foreground">
             사용할 수 있는 제공자 계정이 없습니다.
