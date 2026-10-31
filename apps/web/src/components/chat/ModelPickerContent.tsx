@@ -281,11 +281,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return [...available, ...disabled];
   }, [instanceEntries, isLocked, matchesLockedProvider]);
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const selectedModelDriverKind = useMemo(() => {
+    if (selectedInstanceId === "favorites") return null;
+    return entryByInstanceId.get(selectedInstanceId)?.driverKind ?? null;
+  }, [entryByInstanceId, selectedInstanceId]);
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
     [instanceEntries],
   );
 
+  // Filter models by the visible driver group, not by its hidden account instance.
+  // Same-driver instances are intentionally one UI option; filtering by exact
+  // instance would make the deduplicated list disappear when a non-representative
+  // account is selected internally.
   // Filter models based on search query and selected instance
   const filteredModels = useMemo(() => {
     let result = flatModels;
@@ -368,8 +376,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       result = result.filter((m) => matchesLockedProvider(m));
       if (selectedInstanceId === "favorites") {
         result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
-      } else {
-        result = result.filter((m) => m.instanceId === selectedInstanceId);
+      } else if (selectedModelDriverKind !== null) {
+        result = result.filter((m) => m.driverKind === selectedModelDriverKind);
       }
     } else if (selectedInstanceId === "favorites") {
       result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
@@ -390,6 +398,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     props.lockedProvider,
     searchQuery,
     selectedInstanceId,
+    selectedModelDriverKind,
   ]);
 
   const legacySection = useMemo(() => {
