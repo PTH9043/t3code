@@ -208,11 +208,6 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                   />
                   <span className="min-w-0 flex-1 truncate text-xs font-medium">
                     {group.label}
-                    {group.entries.length > 1 && (
-                      <span className="ml-1 font-normal text-muted-foreground">
-                        · {group.entries.length}개 계정
-                      </span>
-                    )}
                     {!ready ? (
                       <span className="ml-1 font-normal text-muted-foreground">(사용 불가)</span>
                     ) : null}
