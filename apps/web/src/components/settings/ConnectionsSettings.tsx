@@ -54,6 +54,7 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { Input } from "../ui/input";
 import { GoogleAccountSection } from "./GoogleAccountSection";
+import { DriveBackupSection } from "../control-center/DriveBackupSection";
 import { TelegramChannelsSection } from "./TelegramChannelsSection";
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -3023,6 +3024,13 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer>
       <GoogleAccountSection />
+      {primaryEnvironment ? (
+        <SettingsSection {...searchableSetting("google-drive-backup")}>
+          <div className="p-3 sm:p-4">
+            <DriveBackupSection environmentId={primaryEnvironment.environmentId} />
+          </div>
+        </SettingsSection>
+      ) : null}
       <TelegramChannelsSection />
       {canManageLocalBackend ? (
         <>

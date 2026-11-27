@@ -9,6 +9,7 @@ import type {
   DriveBackupTransportMode,
   DriveBackupVerifyRestoreResult,
   EnrolledGoogleAccountSummary,
+  EnvironmentId,
   GoogleEnrollmentStatusResult,
 } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -124,14 +125,19 @@ function formatMs(ms: number | null): string {
   return new Date(ms).toLocaleString("ko-KR");
 }
 
-export function DriveBackupSection({ project }: { readonly project: EnvironmentProject }) {
+export type DriveBackupSectionProps =
+  | { readonly project: EnvironmentProject; readonly environmentId?: EnvironmentId }
+  | { readonly project?: undefined; readonly environmentId: EnvironmentId };
+
+export function DriveBackupSection({ project, environmentId }: DriveBackupSectionProps) {
+  const targetEnvironmentId = environmentId ?? project!.environmentId;
   const stateAtom = useMemo(
     () =>
       orchestrationEnvironment.driveBackupState({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {},
       }),
-    [project.environmentId],
+    [targetEnvironmentId],
   );
   const stateQuery = useEnvironmentQuery(stateAtom);
   const updateConfigCmd = useAtomCommand(orchestrationEnvironment.updateDriveBackupConfig);
@@ -349,7 +355,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     try {
       const parsedRetention = Math.max(1, Math.min(90, Number(retentionCount) || 7));
       const result = await updateConfigCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {
           transportMode,
           localDriveRoot: localDriveRoot.trim() || null,
@@ -406,7 +412,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction(`target:${target.id}`);
     try {
       const result = await upsertTargetCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {
           id: target.id,
           kind: target.kind,
@@ -437,7 +443,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction("add-target");
     try {
       const result = await upsertTargetCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {
           kind: newRepoKind,
           displayName: name,
@@ -465,7 +471,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction(`delete:${target.id}`);
     try {
       const result = await deleteTargetCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: { targetId: target.id },
       });
       if (result._tag !== "Success") {
@@ -483,7 +489,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction("dry-run");
     try {
       const result = await dryRunCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {},
       });
       if (result._tag !== "Success") {
@@ -504,7 +510,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction("run-now");
     try {
       const result = await runNowCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: { forceWhenBusy },
       });
       if (result._tag !== "Success") {
@@ -530,7 +536,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction("verify-restore");
     try {
       const result = await verifyRestoreCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: runId ? { runId } : {},
       });
       if (result._tag !== "Success") {
@@ -549,7 +555,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setBusyAction("sync-mirror");
     try {
       const result = await syncMirrorCmd({
-        environmentId: project.environmentId,
+        environmentId: targetEnvironmentId,
         input: {},
       });
       if (result._tag !== "Success") {
@@ -1143,7 +1149,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
         <div className="grid gap-4">
           <div className="grid gap-2">
             {(snapshot?.targets ?? []).map((target) => {
-              const isCurrentProject = target.projectId === project.id;
+              const isCurrentProject = project ? target.projectId === project.id : false;
               return (
                 <div
                   key={target.id}

@@ -247,6 +247,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/connections",
   },
   {
+    id: "google-drive-backup",
+    title: "Google Drive 및 백업",
+    to: "/settings/connections",
+  },
+  {
     id: "remote-environments",
     title: "원격 실행 환경",
     to: "/settings/connections",

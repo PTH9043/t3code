@@ -63,21 +63,23 @@ export function TaskDashboard() {
             .map((group) => (
               <section
                 key={group.id}
-                className="rounded-xl border border-border bg-background/40 p-3"
+                className="min-w-0 overflow-hidden rounded-xl border border-border bg-background/40 p-3"
               >
-                <h3 className="mb-2 text-xs font-semibold">
+                <h3 className="mb-2 truncate text-xs font-semibold">
                   {taskGroupLabels[group.id]} · {group.threads.length}
                 </h3>
                 <div
                   className={
-                    filter === "all" ? "grid gap-2" : "grid max-h-96 gap-2 overflow-y-auto"
+                    filter === "all"
+                      ? "grid min-w-0 gap-2"
+                      : "grid max-h-96 min-w-0 gap-2 overflow-y-auto"
                   }
                 >
                   {group.threads.slice(0, filter === "all" ? 5 : 100).map((thread) => (
                     <button
                       type="button"
                       key={`${thread.environmentId}:${thread.id}`}
-                      className="rounded-lg border border-border bg-card p-3 text-left hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                      className="block w-full min-w-0 overflow-hidden rounded-lg border border-border bg-card p-3 text-left hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
                       onClick={() =>
                         void navigate({
                           to: "/$environmentId/$threadId",
@@ -95,13 +97,13 @@ export function TaskDashboard() {
                         · {thread.modelSelection.instanceId}
                       </p>
                       {thread.planProgress ? (
-                        <p className="mt-2 text-xs text-primary">
+                        <p className="mt-2 truncate text-xs text-primary">
                           {thread.planProgress.completedSteps}/{thread.planProgress.totalSteps} ·{" "}
                           {thread.planProgress.step}
                         </p>
                       ) : null}
                       {thread.backgroundLiveness ? (
-                        <p className="mt-1 text-[11px] text-muted-foreground">
+                        <p className="mt-1 truncate text-[11px] text-muted-foreground">
                           {thread.backgroundLiveness === "working"
                             ? "백그라운드 작업 실행 중"
                             : "감시 작업 실행 중"}
