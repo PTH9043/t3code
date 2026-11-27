@@ -66,7 +66,9 @@ describe("Google authentication to T3", () => {
         authenticate,
       }),
     ).resolves.toEqual({ identity });
-    expect(authenticate).toHaveBeenCalledWith({ clientId: "client", nonce: "nonce" });
+    expect(authenticate).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: "client", nonce: "nonce" }),
+    );
     expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
       "/api/auth/google/enroll/challenge",
       "/api/auth/google/enroll",

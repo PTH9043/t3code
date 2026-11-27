@@ -4,6 +4,7 @@ import {
   authenticateGoogleToT3,
   bindDriveBackupAccountInT3,
   configureGoogleOAuthAppInT3,
+  createGoogleSignInController,
   listGoogleAccountsFromT3,
   removeGoogleFromT3,
   revokeGoogleDrivePermissionInT3,
@@ -220,7 +221,7 @@ describe("desktop googleSignIn multi-account & Drive backup bridge", () => {
 
     const receiveCode = vi.fn(async (codeInput) => {
       if (codeInput.accessType === "offline") {
-        expect(codeInput.prompt).toBe("consent");
+        expect(codeInput.prompt).toBe("select_account consent");
         expect(codeInput.loginHint).toBe("two@example.com");
         expect(codeInput.extraScopes).toEqual([GOOGLE_DRIVE_FILE_SCOPE]);
         expect(codeInput.includeGrantedScopes).toBe(true);
@@ -270,5 +271,48 @@ describe("desktop googleSignIn multi-account & Drive backup bridge", () => {
       "/api/auth/google/oauth/exchange",
       "/api/auth/google/accounts/drive-revoke",
     ]);
+  });
+
+  it("replaces an abandoned previous OAuth attempt automatically instead of deadlocking retries", async () => {
+    let callCount = 0;
+    const receiveAuthCode = vi.fn(async ({ signal }) => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First attempt never redirects back (e.g. user hit Google 403 access_denied and closed tab)
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted-first")), {
+            once: true,
+          });
+        });
+      }
+      return {
+        code: "fresh-code-2",
+        codeVerifier: "verifier-2",
+        redirectUri: "http://127.0.0.1:45679/oauth2/callback",
+        request: {
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          clientId: "cid-app",
+          redirectUri: "http://127.0.0.1:45679/oauth2/callback",
+          state: "st-2",
+          verifier: "verifier-2",
+          nonce: "n-2",
+        },
+      };
+    });
+
+    const controller = createGoogleSignInController(undefined, undefined, receiveAuthCode);
+    const first = controller.startAuthorizationCode({
+      clientId: "cid-app",
+      nonce: "n-1",
+      openExternal: async () => true,
+    });
+    // Second call (e.g. user clicked Drive 권한 허용) must abort first and succeed cleanly
+    const second = await controller.startAuthorizationCode({
+      clientId: "cid-app",
+      nonce: "n-2",
+      openExternal: async () => true,
+    });
+    expect(second.code).toBe("fresh-code-2");
+    await expect(first).rejects.toThrow("aborted-first");
   });
 });

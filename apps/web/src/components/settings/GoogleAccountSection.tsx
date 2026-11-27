@@ -450,6 +450,13 @@ function LocalMultiGoogleAccountsPanel() {
                 1회만 저장하면, 이후 계정 2개 이상 추가와 Drive 권한 허용이 모두 버튼 1클릭으로
                 동작합니다.
               </li>
+              <li>
+                <strong>403 access_denied (테스트 중 차단)</strong>가 뜨면 Google Cloud Console →{" "}
+                <strong>Google Auth Platform → 대상(Audience)</strong>에서{" "}
+                <strong>앱 게시(프로덕션)</strong>를 누르거나, 로그인할 Google 이메일을{" "}
+                <strong>테스트 사용자</strong>에 추가하세요. (프로덕션 게시 시 7일 토큰 만료도 함께
+                해제됩니다.)
+              </li>
             </ol>
           </details>
         </div>

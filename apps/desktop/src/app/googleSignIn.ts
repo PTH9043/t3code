@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- This controller runs outside Effect and uses a loopback OAuth callback.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off -- This controller runs outside Effect and uses a loopback OAuth callback.
 import * as NodeHttp from "node:http";
 
 import type {
@@ -33,6 +33,9 @@ export interface GoogleAuthorizationCodeResult {
 
 const CALLBACK_SUCCESS_HTML = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>T3 Google 인증 완료</title></head><body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f172a;color:#f8fafc"><div style="text-align:center;padding:32px;border-radius:16px;background:#1e293b;border:1px solid #334155"><h2 style="margin:0 0 8px">Google 인증이 완료되었습니다</h2><p style="margin:0;color:#cbd5e1;font-size:14px">이 브라우저 탭을 닫고 T3 앱으로 돌아가세요.</p></div></body></html>`;
 
+/** Default timeout (3 minutes) for waiting on the loopback OAuth callback so abandoned tabs never deadlock future logins. */
+const DEFAULT_OAUTH_CALLBACK_TIMEOUT_MS = 180_000;
+
 /** Opens the system browser and receives only the one-time OAuth authorization code on loopback. */
 export async function receiveGoogleAuthorizationCode(input: {
   readonly clientId: string;
@@ -44,6 +47,7 @@ export async function receiveGoogleAuthorizationCode(input: {
   readonly extraScopes?: ReadonlyArray<string>;
   readonly accessType?: "online" | "offline";
   readonly includeGrantedScopes?: boolean;
+  readonly timeoutMs?: number;
 }): Promise<GoogleAuthorizationCodeResult> {
   if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
 
@@ -63,6 +67,17 @@ export async function receiveGoogleAuthorizationCode(input: {
   };
   const onAbort = () => fail(new Error("Google 로그인이 취소되었습니다."));
   input.signal?.addEventListener("abort", onAbort, { once: true });
+  const timeoutMs = input.timeoutMs ?? DEFAULT_OAUTH_CALLBACK_TIMEOUT_MS;
+  const timeoutHandle =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          fail(
+            new Error(
+              "Google 인증 응답 시간이 초과되었습니다(3분). 브라우저에서 인증을 완료하거나 다시 시도해 주세요.",
+            ),
+          );
+        }, timeoutMs)
+      : undefined;
 
   const server = NodeHttp.createServer((incoming, response) => {
     response.setHeader("cache-control", "no-store");
@@ -98,6 +113,16 @@ export async function receiveGoogleAuthorizationCode(input: {
       return;
     }
     try {
+      const oauthError = url.searchParams.get("error");
+      if (oauthError === "access_denied") {
+        const msg =
+          "Google 인증이 거부되었습니다(403 access_denied). Google Cloud Console → OAuth 동의 화면(대상/Audience)에서 앱을 '프로덕션 게시'하거나 로그인할 이메일을 '테스트 사용자'에 추가한 뒤 다시 시도하세요.";
+        response.setHeader("content-type", "text/plain; charset=utf-8");
+        response.writeHead(400).end(msg);
+        fail(new Error(msg));
+        server.close();
+        return;
+      }
       const code = readGoogleOidcCallback(url.href, request);
       settled = true;
       response.setHeader("content-type", "text/html; charset=utf-8");
@@ -157,6 +182,7 @@ export async function receiveGoogleAuthorizationCode(input: {
       request,
     };
   } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     input.signal?.removeEventListener("abort", onAbort);
     if (server.listening) server.close();
     server.closeAllConnections();
@@ -274,8 +300,14 @@ export function createGoogleSignInController(
       readonly accessType?: "online" | "offline";
       readonly includeGrantedScopes?: boolean;
       readonly openExternal: (url: string) => Promise<boolean>;
+      readonly timeoutMs?: number;
     }): Promise<GoogleAuthorizationCodeResult> {
-      if (active) throw new Error("Google 인증이 이미 진행 중입니다. 취소 후 다시 시도하세요.");
+      // Automatically cancel any abandoned/stale previous OAuth loopback wait (e.g. closed browser tab
+      // or Google 403 access_denied screen that never redirected back) instead of permanently locking out retries.
+      if (active) {
+        active.abort();
+        active = undefined;
+      }
       const controller = new AbortController();
       active = controller;
       try {
@@ -346,11 +378,9 @@ export async function runServerManagedGoogleOAuthInT3(input: {
 
   const effectiveHint = input.loginHint?.trim() || started.loginHint?.trim() || undefined;
   const grantDrive = input.grantDrive === true;
-  const prompt: GoogleOidcPrompt = grantDrive
-    ? effectiveHint
-      ? "consent"
-      : "select_account consent"
-    : "select_account";
+  // Always include `select_account` so Chrome's default logged-in profile or a Testing-blocked
+  // hint never traps the user without letting them pick the right Google account.
+  const prompt: GoogleOidcPrompt = grantDrive ? "select_account consent" : "select_account";
 
   const codeResult = await input.receiveCode({
     clientId: started.clientId,
