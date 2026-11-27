@@ -54,14 +54,18 @@ import * as JasnaIpc from "./methods/jasna.ts";
 import * as AssistantIpc from "./methods/assistant.ts";
 import * as AssistantVoiceIpc from "./methods/assistantVoice.ts";
 import {
+  addGoogleAccountT3,
   bindDriveBackupAccountT3,
   cancelGoogleSignIn,
+  configureGoogleOAuthAppT3,
   enrollGoogleToT3,
   getGoogleSignInStatus,
   googleT3EnrollmentStatus,
+  grantGoogleDrivePermissionT3,
   listGoogleAccountsT3,
   loginGoogleToT3,
   logoutGoogleFromT3,
+  revokeGoogleDrivePermissionT3,
   setDefaultGoogleAccountT3,
   unenrollGoogleFromT3,
   signOutGoogle,
@@ -141,6 +145,10 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(listGoogleAccountsT3);
   yield* ipc.handle(setDefaultGoogleAccountT3);
   yield* ipc.handle(bindDriveBackupAccountT3);
+  yield* ipc.handle(configureGoogleOAuthAppT3);
+  yield* ipc.handle(addGoogleAccountT3);
+  yield* ipc.handle(grantGoogleDrivePermissionT3);
+  yield* ipc.handle(revokeGoogleDrivePermissionT3);
   yield* ipc.handle(cancelGoogleSignIn);
   yield* ipc.handle(getGoogleSignInStatus);
   yield* ipc.handle(signOutGoogle);

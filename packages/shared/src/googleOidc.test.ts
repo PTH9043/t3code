@@ -3,6 +3,7 @@ import {
   GOOGLE_DRIVE_FILE_SCOPE,
   createGoogleOidcRequest,
   exchangeGoogleOidcCodeDetailed,
+  revokeGoogleToken,
 } from "./googleOidc.ts";
 
 describe("googleOidc multi-account & Drive scope extensions", () => {
@@ -53,5 +54,34 @@ describe("googleOidc multi-account & Drive scope extensions", () => {
       idToken: "id-tok-abc",
       refreshToken: "1//refresh-xyz",
     });
+  });
+
+  it("sets include_granted_scopes=true for incremental Drive authorization and revokes tokens", async () => {
+    const req = await createGoogleOidcRequest({
+      clientId: "client-123.apps.googleusercontent.com",
+      redirectUri: "http://127.0.0.1:43210/oauth2/callback",
+      loginHint: "second@example.com",
+      extraScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+      accessType: "offline",
+      prompt: "consent",
+      includeGrantedScopes: true,
+    });
+    const parsed = new URL(req.authorizationUrl);
+    expect(parsed.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(parsed.searchParams.get("prompt")).toBe("consent");
+    expect(parsed.searchParams.get("login_hint")).toBe("second@example.com");
+
+    let revokedUrl = "";
+    let revokedBody = "";
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      revokedUrl = String(url);
+      revokedBody = String(init?.body ?? "");
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    expect(await revokeGoogleToken({ token: "1//revoke-me", fetcher })).toBe(true);
+    expect(revokedUrl).toBe("https://oauth2.googleapis.com/revoke");
+    expect(revokedBody).toBe("token=1%2F%2Frevoke-me");
+    expect(await revokeGoogleToken({ token: "   ", fetcher })).toBe(false);
   });
 });

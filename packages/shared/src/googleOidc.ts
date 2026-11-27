@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 
 const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const GOOGLE_KEYS_URL = new URL("https://www.googleapis.com/oauth2/v3/certs");
 const googleKeys = createRemoteJWKSet(GOOGLE_KEYS_URL);
 
@@ -66,6 +67,7 @@ export async function createGoogleOidcRequest(input: {
   readonly loginHint?: string;
   readonly extraScopes?: ReadonlyArray<string>;
   readonly accessType?: "online" | "offline";
+  readonly includeGrantedScopes?: boolean;
 }): Promise<GoogleOidcRequest> {
   const clientId = input.clientId.trim();
   if (!clientId) throw new Error("Google OAuth 클라이언트 ID가 필요합니다.");
@@ -100,6 +102,9 @@ export async function createGoogleOidcRequest(input: {
   }
   if (input.accessType === "offline") {
     params.access_type = "offline";
+  }
+  if (input.includeGrantedScopes === true) {
+    params.include_granted_scopes = "true";
   }
 
   const url = new URL(GOOGLE_AUTHORIZE_URL);
@@ -182,6 +187,23 @@ export async function exchangeGoogleOidcCode(input: {
 }): Promise<string> {
   const result = await exchangeGoogleOidcCodeDetailed(input);
   return result.idToken;
+}
+
+/** Revokes an issued Google OAuth refresh or access token (best-effort). */
+export async function revokeGoogleToken(input: {
+  readonly token: string;
+  readonly signal?: AbortSignal;
+  readonly fetcher?: typeof fetch;
+}): Promise<boolean> {
+  const token = input.token.trim();
+  if (!token) return false;
+  const response = await (input.fetcher ?? fetch)(GOOGLE_REVOKE_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token }),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  return response.ok;
 }
 
 /** Verifies Google's signature and binds the identity to this login request. */

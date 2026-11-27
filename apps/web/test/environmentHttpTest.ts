@@ -97,6 +97,12 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("googleBindDriveBackupAccount", () =>
               unexpectedEndpoint("auth.googleBindDriveBackupAccount"),
             )
+            .handle("googleOAuthConfig", () => unexpectedEndpoint("auth.googleOAuthConfig"))
+            .handle("googleOAuthStart", () => unexpectedEndpoint("auth.googleOAuthStart"))
+            .handle("googleOAuthExchange", () => unexpectedEndpoint("auth.googleOAuthExchange"))
+            .handle("googleRevokeDriveAccount", () =>
+              unexpectedEndpoint("auth.googleRevokeDriveAccount"),
+            )
             .handle(
               "session",
               Effect.fn("test.environment.auth.session")(function* () {

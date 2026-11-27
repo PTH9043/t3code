@@ -27,8 +27,10 @@ import {
   type EnrolledGoogleAccountSummary,
 } from "@t3tools/contracts";
 import type { AuthEnvironmentScope } from "@t3tools/contracts";
+import { exchangeGoogleOidcCodeDetailed, revokeGoogleToken } from "@t3tools/shared/googleOidc";
 import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -208,693 +210,1031 @@ export const environmentAuthenticatedAuthLayer = Layer.effect(
   }),
 );
 
-export const authHttpApiLayer = HttpApiBuilder.group(
-  EnvironmentHttpApi,
-  "auth",
-  Effect.fnUntraced(function* (handlers) {
-    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const sessions = yield* SessionStore.SessionStore;
-    const secrets = yield* ServerSecretStore.ServerSecretStore;
-    const google = createGoogleAccountAuth();
-    const legacyGoogleSecretName = "google-login-account";
-    const multiGoogleSecretName = "google-login-accounts";
-    const googleClientSecretName = "google-oauth-client-secret";
-    const driveOAuthPrimarySecretName = "drive_backup_gdrive_oauth";
-    const driveOAuthPerSubjectSecretName = (subject: string) =>
-      `drive_backup_gdrive_oauth_${subject.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64)}`;
+export interface AuthHttpApiDeps {
+  readonly createGoogleAuth?: typeof createGoogleAccountAuth;
+  readonly exchangeGoogleCode?: typeof exchangeGoogleOidcCodeDetailed;
+  readonly revokeGoogleToken?: typeof revokeGoogleToken;
+}
 
-    const legacyGoogleAccountSchema = Schema.Struct({
-      clientId: Schema.String,
-      subject: Schema.String,
-      scopes: AuthEnvironmentScopes,
-    });
-    const storedGoogleAccountSchema = Schema.Struct({
-      clientId: Schema.String,
-      subject: Schema.String,
-      scopes: AuthEnvironmentScopes,
-      email: Schema.optionalKey(Schema.String),
-      name: Schema.optionalKey(Schema.String),
-      label: Schema.optionalKey(Schema.String),
-      tier: Schema.optionalKey(GoogleAccountTier),
-      driveBackupLinked: Schema.optionalKey(Schema.Boolean),
-      addedAt: Schema.String,
-      lastUsedAt: Schema.optionalKey(Schema.String),
-      isDefault: Schema.Boolean,
-    });
-    type StoredGoogleAccount = typeof storedGoogleAccountSchema.Type;
-    const decodeLegacyGoogleAccount = Schema.decodeUnknownEffect(
-      Schema.fromJsonString(legacyGoogleAccountSchema),
+function isValidLoopbackRedirectUri(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "[::1]") &&
+      Boolean(url.port) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
     );
-    const decodeGoogleAccounts = Schema.decodeUnknownEffect(
-      Schema.fromJsonString(Schema.Array(storedGoogleAccountSchema)),
-    );
-    const encodeGoogleAccounts = Schema.encodeEffect(
-      Schema.fromJsonString(Schema.Array(storedGoogleAccountSchema)),
-    );
-    const driveOAuthPayloadSchema = Schema.Struct({
-      clientId: Schema.String,
-      clientSecret: Schema.String,
-      refreshToken: Schema.String,
-      connectedEmail: Schema.optionalKey(Schema.String),
-    });
-    const decodeDriveOAuthPayload = Schema.decodeUnknownEffect(
-      Schema.fromJsonString(driveOAuthPayloadSchema),
-    );
-    const encodeDriveOAuthPayload = Schema.encodeEffect(
-      Schema.fromJsonString(driveOAuthPayloadSchema),
-    );
+  } catch {
+    return false;
+  }
+}
 
-    const toAccountSummary = (account: StoredGoogleAccount): EnrolledGoogleAccountSummary => ({
-      subject: account.subject,
-      clientId: account.clientId,
-      ...(account.email ? { email: account.email } : {}),
-      ...(account.name ? { name: account.name } : {}),
-      ...(account.label ? { label: account.label } : {}),
-      ...(account.tier ? { tier: account.tier } : {}),
-      driveBackupLinked: Boolean(account.driveBackupLinked),
-      addedAt: account.addedAt,
-      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
-      isDefault: account.isDefault,
-    });
+export function makeAuthHttpApiLayer(deps?: AuthHttpApiDeps) {
+  return HttpApiBuilder.group(
+    EnvironmentHttpApi,
+    "auth",
+    Effect.fnUntraced(function* (handlers) {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const crypto = yield* Crypto.Crypto;
+      const google = (deps?.createGoogleAuth ?? createGoogleAccountAuth)();
+      const exchangeCode = deps?.exchangeGoogleCode ?? exchangeGoogleOidcCodeDetailed;
+      const revokeToken = deps?.revokeGoogleToken ?? revokeGoogleToken;
+      const legacyGoogleSecretName = "google-login-account";
+      const multiGoogleSecretName = "google-login-accounts";
+      const googleClientSecretName = "google-oauth-client-secret";
+      const googleOAuthAppConfigSecretName = "google-oauth-app-config";
+      const driveOAuthPrimarySecretName = "drive_backup_gdrive_oauth";
+      const driveOAuthPerSubjectSecretName = (subject: string) =>
+        `drive_backup_gdrive_oauth_${subject.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64)}`;
 
-    const saveGoogleAccounts = (accounts: ReadonlyArray<StoredGoogleAccount>) =>
-      encodeGoogleAccounts(accounts).pipe(
-        Effect.flatMap((serialized) =>
-          secrets.set(multiGoogleSecretName, new TextEncoder().encode(serialized)),
-        ),
-        Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+      const legacyGoogleAccountSchema = Schema.Struct({
+        clientId: Schema.String,
+        subject: Schema.String,
+        scopes: AuthEnvironmentScopes,
+      });
+      const storedGoogleAccountSchema = Schema.Struct({
+        clientId: Schema.String,
+        subject: Schema.String,
+        scopes: AuthEnvironmentScopes,
+        email: Schema.optionalKey(Schema.String),
+        name: Schema.optionalKey(Schema.String),
+        label: Schema.optionalKey(Schema.String),
+        tier: Schema.optionalKey(GoogleAccountTier),
+        driveBackupLinked: Schema.optionalKey(Schema.Boolean),
+        addedAt: Schema.String,
+        lastUsedAt: Schema.optionalKey(Schema.String),
+        isDefault: Schema.Boolean,
+      });
+      type StoredGoogleAccount = typeof storedGoogleAccountSchema.Type;
+      const decodeLegacyGoogleAccount = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(legacyGoogleAccountSchema),
+      );
+      const decodeGoogleAccounts = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Array(storedGoogleAccountSchema)),
+      );
+      const encodeGoogleAccounts = Schema.encodeEffect(
+        Schema.fromJsonString(Schema.Array(storedGoogleAccountSchema)),
+      );
+      const oauthAppConfigSchema = Schema.Struct({
+        clientId: Schema.String,
+        clientSecret: Schema.optionalKey(Schema.String),
+      });
+      const decodeOAuthAppConfig = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(oauthAppConfigSchema),
+      );
+      const encodeOAuthAppConfig = Schema.encodeEffect(Schema.fromJsonString(oauthAppConfigSchema));
+      const driveOAuthPayloadSchema = Schema.Struct({
+        clientId: Schema.String,
+        clientSecret: Schema.String,
+        refreshToken: Schema.String,
+        connectedEmail: Schema.optionalKey(Schema.String),
+        subject: Schema.optionalKey(Schema.String),
+      });
+      const decodeDriveOAuthPayload = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(driveOAuthPayloadSchema),
+      );
+      const encodeDriveOAuthPayload = Schema.encodeEffect(
+        Schema.fromJsonString(driveOAuthPayloadSchema),
       );
 
-    const loadGoogleAccounts = (): Effect.Effect<
-      ReadonlyArray<StoredGoogleAccount>,
-      EnvironmentInternalError
-    > =>
-      Effect.gen(function* () {
-        const multiVal = yield* secrets
-          .get(multiGoogleSecretName)
-          .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-        if (Option.isSome(multiVal)) {
-          return yield* decodeGoogleAccounts(new TextDecoder().decode(multiVal.value)).pipe(
-            Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
-          );
-        }
-        const legacyVal = yield* secrets
-          .get(legacyGoogleSecretName)
-          .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-        if (Option.isNone(legacyVal)) return [];
-        const legacy = yield* decodeLegacyGoogleAccount(
-          new TextDecoder().decode(legacyVal.value),
-        ).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-        const nowIso = DateTime.formatIso(yield* DateTime.now);
-        const migrated: ReadonlyArray<StoredGoogleAccount> = [
-          {
-            clientId: legacy.clientId,
-            subject: legacy.subject,
-            scopes: legacy.scopes,
-            driveBackupLinked: false,
-            addedAt: nowIso,
-            isDefault: true,
-          },
-        ];
-        yield* saveGoogleAccounts(migrated);
-        return migrated;
+      const toAccountSummary = (account: StoredGoogleAccount): EnrolledGoogleAccountSummary => ({
+        subject: account.subject,
+        clientId: account.clientId,
+        ...(account.email ? { email: account.email } : {}),
+        ...(account.name ? { name: account.name } : {}),
+        ...(account.label ? { label: account.label } : {}),
+        ...(account.tier ? { tier: account.tier } : {}),
+        driveBackupLinked: Boolean(account.driveBackupLinked),
+        addedAt: account.addedAt,
+        ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+        isDefault: account.isDefault,
       });
 
-    const readStoredClientSecret = () =>
-      secrets.get(googleClientSecretName).pipe(
-        Effect.map((opt) =>
-          Option.isSome(opt) ? new TextDecoder().decode(opt.value).trim() || null : null,
-        ),
-        Effect.orElseSucceed(() => null),
+      const saveGoogleAccounts = (accounts: ReadonlyArray<StoredGoogleAccount>) =>
+        encodeGoogleAccounts(accounts).pipe(
+          Effect.flatMap((serialized) =>
+            secrets.set(multiGoogleSecretName, new TextEncoder().encode(serialized)),
+          ),
+          Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+        );
+
+      const loadGoogleAccounts = (): Effect.Effect<
+        ReadonlyArray<StoredGoogleAccount>,
+        EnvironmentInternalError
+      > =>
+        Effect.gen(function* () {
+          const multiVal = yield* secrets
+            .get(multiGoogleSecretName)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          if (Option.isSome(multiVal)) {
+            return yield* decodeGoogleAccounts(new TextDecoder().decode(multiVal.value)).pipe(
+              Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+            );
+          }
+          const legacyVal = yield* secrets
+            .get(legacyGoogleSecretName)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          if (Option.isNone(legacyVal)) return [];
+          const legacy = yield* decodeLegacyGoogleAccount(
+            new TextDecoder().decode(legacyVal.value),
+          ).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          const nowIso = DateTime.formatIso(yield* DateTime.now);
+          const migrated: ReadonlyArray<StoredGoogleAccount> = [
+            {
+              clientId: legacy.clientId,
+              subject: legacy.subject,
+              scopes: legacy.scopes,
+              driveBackupLinked: false,
+              addedAt: nowIso,
+              isDefault: true,
+            },
+          ];
+          yield* saveGoogleAccounts(migrated);
+          return migrated;
+        });
+
+      const readStoredClientSecret = () =>
+        secrets.get(googleClientSecretName).pipe(
+          Effect.map((opt) =>
+            Option.isSome(opt) ? new TextDecoder().decode(opt.value).trim() || null : null,
+          ),
+          Effect.orElseSucceed(() => null),
+        );
+
+      const loadOAuthAppConfig = (): Effect.Effect<
+        { readonly clientId: string; readonly clientSecret: string | null } | null,
+        EnvironmentInternalError
+      > =>
+        Effect.gen(function* () {
+          const storedSecret = yield* readStoredClientSecret();
+          const cfgOpt = yield* secrets
+            .get(googleOAuthAppConfigSecretName)
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          if (Option.isSome(cfgOpt)) {
+            const parsed = yield* decodeOAuthAppConfig(new TextDecoder().decode(cfgOpt.value)).pipe(
+              Effect.orElseSucceed(() => null),
+            );
+            if (parsed?.clientId.trim()) {
+              return {
+                clientId: parsed.clientId.trim(),
+                clientSecret: parsed.clientSecret?.trim() || storedSecret,
+              };
+            }
+          }
+          const accounts = yield* loadGoogleAccounts();
+          const defaultAcc = accounts.find((a) => a.isDefault) ?? accounts[0] ?? null;
+          if (defaultAcc?.clientId.trim()) {
+            return {
+              clientId: defaultAcc.clientId.trim(),
+              clientSecret: storedSecret,
+            };
+          }
+          return null;
+        });
+
+      const readActiveDriveSubject = (
+        accounts: ReadonlyArray<StoredGoogleAccount>,
+      ): Effect.Effect<string | null, never> =>
+        Effect.gen(function* () {
+          const primaryOpt = yield* secrets
+            .get(driveOAuthPrimarySecretName)
+            .pipe(Effect.orElseSucceed(() => Option.none<Uint8Array>()));
+          if (Option.isNone(primaryOpt)) return null;
+          const parsed = yield* decodeDriveOAuthPayload(
+            new TextDecoder().decode(primaryOpt.value),
+          ).pipe(Effect.orElseSucceed(() => null));
+          if (!parsed) return null;
+          if (parsed.subject && accounts.some((a) => a.subject === parsed.subject)) {
+            return parsed.subject;
+          }
+          if (parsed.connectedEmail) {
+            const matched = accounts.find(
+              (a) => a.email === parsed.connectedEmail && Boolean(a.driveBackupLinked),
+            );
+            if (matched) return matched.subject;
+          }
+          return null;
+        });
+
+      const verifyGoogle = (input: {
+        challenge: string;
+        idToken: string;
+        ownerSessionId: string | null;
+        expectedSubject?: string;
+      }) =>
+        Effect.tryPromise({
+          try: () => google.verify(input),
+          catch: () => new GoogleVerificationError(),
+        }).pipe(Effect.catch(() => failEnvironmentAuthInvalid("invalid_credential")));
+      const issueGoogleChallenge = (clientId: string, ownerSessionId: string | null) =>
+        Effect.try({
+          try: () => google.challenge(clientId, ownerSessionId),
+          catch: () => new GoogleVerificationError(),
+        }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+      const authenticateGoogle = Effect.fn("environment.auth.authenticateGoogle")(
+        function* (payload: { readonly challenge: string; readonly idToken: string }) {
+          const accounts = yield* loadGoogleAccounts();
+          if (accounts.length === 0) return yield* failEnvironmentAuthInvalid("invalid_credential");
+          const { identity, clientId } = yield* verifyGoogle({
+            ...payload,
+            ownerSessionId: null,
+          });
+          const freshAccounts = yield* loadGoogleAccounts();
+          const matched = findEnrolledGoogleAccount(freshAccounts, clientId, identity.subject);
+          if (!matched) {
+            return yield* failEnvironmentAuthInvalid("invalid_credential");
+          }
+          const nowIso = DateTime.formatIso(yield* DateTime.now);
+          const updatedAccounts = freshAccounts.map((acc) =>
+            acc.subject === matched.subject && acc.clientId === matched.clientId
+              ? {
+                  ...acc,
+                  ...(identity.email ? { email: identity.email } : {}),
+                  ...(identity.name ? { name: identity.name } : {}),
+                  lastUsedAt: nowIso,
+                }
+              : acc,
+          );
+          yield* saveGoogleAccounts(updatedAccounts).pipe(Effect.ignore);
+          return { identity, account: matched };
+        },
       );
 
-    const verifyGoogle = (input: {
-      challenge: string;
-      idToken: string;
-      ownerSessionId: string | null;
-      expectedSubject?: string;
-    }) =>
-      Effect.tryPromise({
-        try: () => google.verify(input),
-        catch: () => new GoogleVerificationError(),
-      }).pipe(Effect.catch(() => failEnvironmentAuthInvalid("invalid_credential")));
-    const issueGoogleChallenge = (clientId: string, ownerSessionId: string | null) =>
-      Effect.try({
-        try: () => google.challenge(clientId, ownerSessionId),
-        catch: () => new GoogleVerificationError(),
-      }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-    const authenticateGoogle = Effect.fn("environment.auth.authenticateGoogle")(
-      function* (payload: { readonly challenge: string; readonly idToken: string }) {
-        const accounts = yield* loadGoogleAccounts();
-        if (accounts.length === 0) return yield* failEnvironmentAuthInvalid("invalid_credential");
-        const { identity, clientId } = yield* verifyGoogle({
-          ...payload,
-          ownerSessionId: null,
-        });
-        const freshAccounts = yield* loadGoogleAccounts();
-        const matched = findEnrolledGoogleAccount(freshAccounts, clientId, identity.subject);
-        if (!matched) {
-          return yield* failEnvironmentAuthInvalid("invalid_credential");
-        }
-        const nowIso = DateTime.formatIso(yield* DateTime.now);
-        const updatedAccounts = freshAccounts.map((acc) =>
-          acc.subject === matched.subject && acc.clientId === matched.clientId
-            ? {
-                ...acc,
-                ...(identity.email ? { email: identity.email } : {}),
-                ...(identity.name ? { name: identity.name } : {}),
-                lastUsedAt: nowIso,
-              }
-            : acc,
-        );
-        yield* saveGoogleAccounts(updatedAccounts).pipe(Effect.ignore);
-        return { identity, account: matched };
-      },
-    );
-
-    return handlers
-      .handle(
-        "googleEnrollment",
-        Effect.fn("environment.auth.googleEnrollment")(function* () {
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          const defaultAcc = accounts.find((a) => a.isDefault) ?? accounts[0] ?? null;
-          const storedSecret = yield* readStoredClientSecret();
-          yield* appendCredentialResponseHeaders;
-          return {
-            registered: accounts.length > 0,
-            accounts: accounts.map(toAccountSummary),
-            defaultSubject: defaultAcc?.subject ?? null,
-            defaultClientId: defaultAcc?.clientId ?? null,
-            hasClientSecret: storedSecret !== null,
-          };
-        }),
-      )
-      .handle(
-        "googleEnrollChallenge",
-        Effect.fn("environment.auth.googleEnrollChallenge")(function* (args) {
-          const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          const defaultAcc = accounts.find((a) => a.isDefault) ?? accounts[0] ?? null;
-          const clientId = args.payload.clientId?.trim() || defaultAcc?.clientId || "";
-          if (!clientId) {
-            return yield* failEnvironmentAuthInvalid("invalid_credential");
-          }
-          yield* appendCredentialResponseHeaders;
-          return yield* issueGoogleChallenge(clientId, principal.sessionId);
-        }),
-      )
-      .handle(
-        "googleEnroll",
-        Effect.fn("environment.auth.googleEnroll")(function* (args) {
-          const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const { identity, clientId } = yield* verifyGoogle({
-            challenge: args.payload.challenge,
-            idToken: args.payload.idToken,
-            ownerSessionId: principal.sessionId,
-          });
-          const existingAccounts = yield* loadGoogleAccounts();
-          const existingIdx = existingAccounts.findIndex(
-            (a) => a.subject === identity.subject && a.clientId === clientId,
-          );
-          const nowIso = DateTime.formatIso(yield* DateTime.now);
-
-          let effectiveClientSecret = args.payload.clientSecret?.trim() || "";
-          if (effectiveClientSecret) {
-            yield* secrets
-              .set(googleClientSecretName, new TextEncoder().encode(effectiveClientSecret))
-              .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-          } else {
-            effectiveClientSecret = (yield* readStoredClientSecret()) ?? "";
-          }
-
-          let driveBackupLinked =
-            existingIdx >= 0 ? Boolean(existingAccounts[existingIdx]!.driveBackupLinked) : false;
-          const driveRefreshToken = args.payload.driveRefreshToken?.trim() || "";
-          if (driveRefreshToken && effectiveClientSecret) {
-            const driveJson = yield* encodeDriveOAuthPayload({
+      return handlers
+        .handle(
+          "googleEnrollment",
+          Effect.fn("environment.auth.googleEnrollment")(function* () {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            const appConfig = yield* loadOAuthAppConfig();
+            const defaultAcc = accounts.find((a) => a.isDefault) ?? accounts[0] ?? null;
+            const effectiveClientId = appConfig?.clientId ?? defaultAcc?.clientId ?? null;
+            const storedSecret = appConfig?.clientSecret ?? (yield* readStoredClientSecret());
+            const activeDriveSubject = yield* readActiveDriveSubject(accounts);
+            yield* appendCredentialResponseHeaders;
+            return {
+              registered: accounts.length > 0,
+              oauthConfigured: Boolean(effectiveClientId),
+              activeDriveSubject,
+              accounts: accounts.map(toAccountSummary),
+              defaultSubject: defaultAcc?.subject ?? null,
+              defaultClientId: effectiveClientId,
+              hasClientSecret: storedSecret !== null,
+            };
+          }),
+        )
+        .handle(
+          "googleOAuthConfig",
+          Effect.fn("environment.auth.googleOAuthConfig")(function* (args) {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const clientId = args.payload.clientId.trim();
+            if (!clientId) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const prev = yield* loadOAuthAppConfig();
+            const incomingSecret = args.payload.clientSecret?.trim();
+            const effectiveSecret =
+              incomingSecret && incomingSecret.length > 0
+                ? incomingSecret
+                : (prev?.clientSecret ?? null);
+            const serialized = yield* encodeOAuthAppConfig({
               clientId,
-              clientSecret: effectiveClientSecret,
-              refreshToken: driveRefreshToken,
-              ...(identity.email ? { connectedEmail: identity.email } : {}),
+              ...(effectiveSecret ? { clientSecret: effectiveSecret } : {}),
             }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-            const encodedBytes = new TextEncoder().encode(driveJson);
             yield* secrets
-              .set(driveOAuthPerSubjectSecretName(identity.subject), encodedBytes)
+              .set(googleOAuthAppConfigSecretName, new TextEncoder().encode(serialized))
               .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-            yield* secrets
-              .set(driveOAuthPrimarySecretName, encodedBytes)
-              .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-            driveBackupLinked = true;
-          }
-
-          const prev = existingIdx >= 0 ? existingAccounts[existingIdx]! : null;
-          const nextEntry: StoredGoogleAccount = {
-            clientId,
-            subject: identity.subject,
-            scopes: [...principal.scopes],
-            ...(identity.email
-              ? { email: identity.email }
-              : prev?.email
-                ? { email: prev.email }
-                : {}),
-            ...(identity.name ? { name: identity.name } : prev?.name ? { name: prev.name } : {}),
-            ...(args.payload.label?.trim()
-              ? { label: args.payload.label.trim() }
-              : prev?.label
-                ? { label: prev.label }
-                : {}),
-            ...(args.payload.tier
-              ? { tier: args.payload.tier }
-              : prev?.tier
-                ? { tier: prev.tier }
-                : {}),
-            driveBackupLinked,
-            addedAt: prev?.addedAt ?? nowIso,
-            ...(prev?.lastUsedAt ? { lastUsedAt: prev.lastUsedAt } : {}),
-            isDefault: prev ? prev.isDefault : existingAccounts.length === 0,
-          };
-
-          const nextAccounts =
-            existingIdx >= 0
-              ? existingAccounts.map((a, idx) => (idx === existingIdx ? nextEntry : a))
-              : [...existingAccounts, nextEntry];
-
-          yield* saveGoogleAccounts(nextAccounts);
-          yield* appendCredentialResponseHeaders;
-          return { subject: identity.subject, account: toAccountSummary(nextEntry) };
-        }),
-      )
-      .handle(
-        "googleUnenroll",
-        Effect.fn("environment.auth.googleUnenroll")(function* () {
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          for (const acc of accounts) {
-            yield* secrets.remove(driveOAuthPerSubjectSecretName(acc.subject)).pipe(Effect.ignore);
-          }
-          yield* secrets.remove(multiGoogleSecretName).pipe(Effect.ignore);
-          yield* secrets.remove(legacyGoogleSecretName).pipe(Effect.ignore);
-          yield* appendCredentialResponseHeaders;
-          return { removed: accounts.length > 0 };
-        }),
-      )
-      .handle(
-        "googleRemoveAccount",
-        Effect.fn("environment.auth.googleRemoveAccount")(function* (args) {
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          const filtered = accounts.filter((a) => a.subject !== args.payload.subject);
-          const removed = filtered.length !== accounts.length;
-          if (removed) {
-            yield* secrets
-              .remove(driveOAuthPerSubjectSecretName(args.payload.subject))
-              .pipe(Effect.ignore);
-            const hasDefault = filtered.some((a) => a.isDefault);
-            const normalized =
-              !hasDefault && filtered.length > 0
-                ? filtered.map((a, idx) => (idx === 0 ? { ...a, isDefault: true } : a))
-                : filtered;
-            if (normalized.length === 0) {
-              yield* secrets.remove(multiGoogleSecretName).pipe(Effect.ignore);
-              yield* secrets.remove(legacyGoogleSecretName).pipe(Effect.ignore);
-            } else {
-              yield* saveGoogleAccounts(normalized);
+            if (effectiveSecret) {
+              yield* secrets
+                .set(googleClientSecretName, new TextEncoder().encode(effectiveSecret))
+                .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
             }
             yield* appendCredentialResponseHeaders;
-            return { removed: true, accounts: normalized.map(toAccountSummary) };
-          }
-          yield* appendCredentialResponseHeaders;
-          return { removed: false, accounts: accounts.map(toAccountSummary) };
-        }),
-      )
-      .handle(
-        "googleSetDefaultAccount",
-        Effect.fn("environment.auth.googleSetDefaultAccount")(function* (args) {
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          const found = accounts.find((a) => a.subject === args.payload.subject);
-          if (!found) {
-            return yield* failEnvironmentAuthInvalid("invalid_credential");
-          }
-          const updated = accounts.map((a) => {
-            if (a.subject !== args.payload.subject) {
-              return { ...a, isDefault: false };
-            }
-            const nextLabel =
-              args.payload.label !== undefined ? args.payload.label.trim() : a.label;
-            const nextTier = args.payload.tier ?? a.tier;
             return {
-              ...a,
-              isDefault: true,
-              ...(nextLabel ? { label: nextLabel } : {}),
-              ...(nextTier ? { tier: nextTier } : {}),
+              configured: true,
+              clientId,
+              hasClientSecret: Boolean(effectiveSecret),
             };
-          });
-          yield* saveGoogleAccounts(updated);
-          const target = updated.find((a) => a.subject === args.payload.subject)!;
-          yield* appendCredentialResponseHeaders;
-          return {
-            account: toAccountSummary(target),
-            accounts: updated.map(toAccountSummary),
-          };
-        }),
-      )
-      .handle(
-        "googleBindDriveBackupAccount",
-        Effect.fn("environment.auth.googleBindDriveBackupAccount")(function* (args) {
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
-          const accounts = yield* loadGoogleAccounts();
-          const target = accounts.find((a) => a.subject === args.payload.subject);
-          if (!target) {
-            return yield* failEnvironmentAuthInvalid("invalid_credential");
-          }
-          const perSubjectOpt = yield* secrets
-            .get(driveOAuthPerSubjectSecretName(target.subject))
-            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-          if (Option.isNone(perSubjectOpt)) {
-            return yield* failEnvironmentAuthInvalid("invalid_credential");
-          }
-          const parsed = yield* decodeDriveOAuthPayload(
-            new TextDecoder().decode(perSubjectOpt.value),
-          ).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-          yield* secrets
-            .set(driveOAuthPrimarySecretName, perSubjectOpt.value)
-            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-          yield* appendCredentialResponseHeaders;
-          return {
-            bound: true,
-            email: parsed.connectedEmail ?? target.email ?? null,
-          };
-        }),
-      )
-      .handle(
-        "googleChallenge",
-        Effect.fn("environment.auth.googleChallenge")(function* (args) {
-          const accounts = yield* loadGoogleAccounts();
-          if (accounts.length === 0) {
-            return yield* failEnvironmentAuthInvalid("invalid_credential");
-          }
-          const requested = args.query.subject
-            ? accounts.find((a) => a.subject === args.query.subject)
-            : (accounts.find((a) => a.isDefault) ?? accounts[0]);
-          const chosen = requested ?? accounts[0]!;
-          yield* appendCredentialResponseHeaders;
-          return yield* issueGoogleChallenge(chosen.clientId, null);
-        }),
-      )
-      .handle(
-        "googleSession",
-        Effect.fn("environment.auth.googleSession")(function* (args) {
-          const { identity, account } = yield* authenticateGoogle(args.payload);
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const session = yield* sessions
-            .issue({
-              method: "browser-session-cookie",
-              subject: `google:${identity.subject}`,
-              scopes: account.scopes,
-              client: deriveAuthClientMetadata({ request }),
-            })
-            .pipe(
-              Effect.catch((error) =>
-                failEnvironmentInternal("browser_session_issuance_failed", error),
-              ),
+          }),
+        )
+        .handle(
+          "googleOAuthStart",
+          Effect.fn("environment.auth.googleOAuthStart")(function* (args) {
+            const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const appConfig = yield* loadOAuthAppConfig();
+            const accounts = yield* loadGoogleAccounts();
+            const targetAccount = args.payload.subject
+              ? accounts.find((a) => a.subject === args.payload.subject)
+              : undefined;
+            const clientId = appConfig?.clientId || targetAccount?.clientId || "";
+            if (!clientId) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const issued = yield* issueGoogleChallenge(clientId, principal.sessionId);
+            yield* appendCredentialResponseHeaders;
+            return {
+              challenge: issued.challenge,
+              clientId: issued.clientId,
+              ...(targetAccount?.email ? { loginHint: targetAccount.email } : {}),
+            };
+          }),
+        )
+        .handle(
+          "googleOAuthExchange",
+          Effect.fn("environment.auth.googleOAuthExchange")(function* (args) {
+            const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            if (!isValidLoopbackRedirectUri(args.payload.redirectUri)) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const appConfig = yield* loadOAuthAppConfig();
+            const existingAccounts = yield* loadGoogleAccounts();
+            const defaultAcc =
+              existingAccounts.find((a) => a.isDefault) ?? existingAccounts[0] ?? null;
+            const clientId = appConfig?.clientId || defaultAcc?.clientId || "";
+            if (!clientId) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const effectiveClientSecret =
+              appConfig?.clientSecret ?? (yield* readStoredClientSecret()) ?? undefined;
+
+            const exchanged = yield* Effect.tryPromise({
+              try: () =>
+                exchangeCode({
+                  code: args.payload.code,
+                  request: {
+                    clientId,
+                    redirectUri: args.payload.redirectUri,
+                    state: "",
+                    nonce: args.payload.challenge,
+                    verifier: args.payload.codeVerifier,
+                    authorizationUrl: "",
+                  },
+                  ...(effectiveClientSecret ? { clientSecret: effectiveClientSecret } : {}),
+                }),
+              catch: () => new GoogleVerificationError(),
+            }).pipe(Effect.catch(() => failEnvironmentAuthInvalid("invalid_credential")));
+
+            const { identity, clientId: verifiedClientId } = yield* verifyGoogle({
+              challenge: args.payload.challenge,
+              idToken: exchanged.idToken,
+              ownerSessionId: principal.sessionId,
+            });
+
+            const existingIdx = existingAccounts.findIndex((a) => a.subject === identity.subject);
+            const prev = existingIdx >= 0 ? existingAccounts[existingIdx]! : null;
+            const nowIso = DateTime.formatIso(yield* DateTime.now);
+            let driveBackupLinked = Boolean(prev?.driveBackupLinked);
+
+            if (args.payload.grantDrive === true) {
+              if (exchanged.refreshToken && effectiveClientSecret) {
+                const driveJson = yield* encodeDriveOAuthPayload({
+                  clientId: verifiedClientId,
+                  clientSecret: effectiveClientSecret,
+                  refreshToken: exchanged.refreshToken,
+                  ...(identity.email ? { connectedEmail: identity.email } : {}),
+                  subject: identity.subject,
+                }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+                const encodedBytes = new TextEncoder().encode(driveJson);
+                yield* secrets
+                  .set(driveOAuthPerSubjectSecretName(identity.subject), encodedBytes)
+                  .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+                yield* secrets
+                  .set(driveOAuthPrimarySecretName, encodedBytes)
+                  .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+                driveBackupLinked = true;
+              } else {
+                const existingPerSubject = yield* secrets
+                  .get(driveOAuthPerSubjectSecretName(identity.subject))
+                  .pipe(Effect.orElseSucceed(() => Option.none<Uint8Array>()));
+                if (Option.isSome(existingPerSubject)) {
+                  yield* secrets
+                    .set(driveOAuthPrimarySecretName, existingPerSubject.value)
+                    .pipe(
+                      Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+                    );
+                  driveBackupLinked = true;
+                } else {
+                  return yield* failEnvironmentAuthInvalid("invalid_credential");
+                }
+              }
+            }
+
+            const nextEntry: StoredGoogleAccount = {
+              clientId: verifiedClientId,
+              subject: identity.subject,
+              scopes: [...principal.scopes],
+              ...(identity.email
+                ? { email: identity.email }
+                : prev?.email
+                  ? { email: prev.email }
+                  : {}),
+              ...(identity.name ? { name: identity.name } : prev?.name ? { name: prev.name } : {}),
+              ...(prev?.label ? { label: prev.label } : {}),
+              ...(prev?.tier ? { tier: prev.tier } : {}),
+              driveBackupLinked,
+              addedAt: prev?.addedAt ?? nowIso,
+              lastUsedAt: nowIso,
+              isDefault: prev ? prev.isDefault : existingAccounts.length === 0,
+            };
+
+            const nextAccounts =
+              existingIdx >= 0
+                ? existingAccounts.map((a, idx) => (idx === existingIdx ? nextEntry : a))
+                : [...existingAccounts, nextEntry];
+
+            yield* saveGoogleAccounts(nextAccounts);
+            yield* appendCredentialResponseHeaders;
+            return { subject: identity.subject, account: toAccountSummary(nextEntry) };
+          }),
+        )
+        .handle(
+          "googleEnrollChallenge",
+          Effect.fn("environment.auth.googleEnrollChallenge")(function* (args) {
+            const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const appConfig = yield* loadOAuthAppConfig();
+            const accounts = yield* loadGoogleAccounts();
+            const defaultAcc = accounts.find((a) => a.isDefault) ?? accounts[0] ?? null;
+            const clientId =
+              args.payload.clientId?.trim() || appConfig?.clientId || defaultAcc?.clientId || "";
+            if (!clientId) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            yield* appendCredentialResponseHeaders;
+            return yield* issueGoogleChallenge(clientId, principal.sessionId);
+          }),
+        )
+        .handle(
+          "googleEnroll",
+          Effect.fn("environment.auth.googleEnroll")(function* (args) {
+            const principal = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const { identity, clientId } = yield* verifyGoogle({
+              challenge: args.payload.challenge,
+              idToken: args.payload.idToken,
+              ownerSessionId: principal.sessionId,
+            });
+            const existingAccounts = yield* loadGoogleAccounts();
+            const existingIdx = existingAccounts.findIndex(
+              (a) => a.subject === identity.subject && a.clientId === clientId,
             );
-          const sessionCookies = yield* Effect.fromResult(
-            Cookies.set(Cookies.empty, sessions.cookieName, session.token, {
-              expires: DateTime.toDate(session.expiresAt),
-              httpOnly: true,
-              path: "/",
-              sameSite: "lax",
-            }),
-          ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
-          yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-            Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
-          );
-          yield* appendCredentialResponseHeaders;
-          return {
-            authenticated: true as const,
-            scopes: session.scopes,
-            sessionMethod: session.method,
-            expiresAt: DateTime.toUtc(session.expiresAt),
-          };
-        }),
-      )
-      .handle(
-        "googleToken",
-        Effect.fn("environment.auth.googleToken")(function* (args) {
-          const { identity, account } = yield* authenticateGoogle(args.payload);
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const session = yield* sessions
-            .issue({
-              method: "bearer-access-token",
-              subject: `google:${identity.subject}`,
-              scopes: account.scopes,
-              client: deriveAuthClientMetadata({ request }),
-            })
-            .pipe(
-              Effect.catch((error) =>
-                failEnvironmentInternal("access_token_issuance_failed", error),
-              ),
+            const nowIso = DateTime.formatIso(yield* DateTime.now);
+
+            let effectiveClientSecret = args.payload.clientSecret?.trim() || "";
+            if (effectiveClientSecret) {
+              yield* secrets
+                .set(googleClientSecretName, new TextEncoder().encode(effectiveClientSecret))
+                .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+            } else {
+              effectiveClientSecret = (yield* readStoredClientSecret()) ?? "";
+            }
+            const serializedCfg = yield* encodeOAuthAppConfig({
+              clientId,
+              ...(effectiveClientSecret ? { clientSecret: effectiveClientSecret } : {}),
+            }).pipe(Effect.orElseSucceed(() => null));
+            if (serializedCfg) {
+              yield* secrets
+                .set(googleOAuthAppConfigSecretName, new TextEncoder().encode(serializedCfg))
+                .pipe(Effect.ignore);
+            }
+
+            let driveBackupLinked =
+              existingIdx >= 0 ? Boolean(existingAccounts[existingIdx]!.driveBackupLinked) : false;
+            const driveRefreshToken = args.payload.driveRefreshToken?.trim() || "";
+            if (driveRefreshToken && effectiveClientSecret) {
+              const driveJson = yield* encodeDriveOAuthPayload({
+                clientId,
+                clientSecret: effectiveClientSecret,
+                refreshToken: driveRefreshToken,
+                ...(identity.email ? { connectedEmail: identity.email } : {}),
+                subject: identity.subject,
+              }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+              const encodedBytes = new TextEncoder().encode(driveJson);
+              yield* secrets
+                .set(driveOAuthPerSubjectSecretName(identity.subject), encodedBytes)
+                .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+              yield* secrets
+                .set(driveOAuthPrimarySecretName, encodedBytes)
+                .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+              driveBackupLinked = true;
+            }
+
+            const prev = existingIdx >= 0 ? existingAccounts[existingIdx]! : null;
+            const nextEntry: StoredGoogleAccount = {
+              clientId,
+              subject: identity.subject,
+              scopes: [...principal.scopes],
+              ...(identity.email
+                ? { email: identity.email }
+                : prev?.email
+                  ? { email: prev.email }
+                  : {}),
+              ...(identity.name ? { name: identity.name } : prev?.name ? { name: prev.name } : {}),
+              ...(args.payload.label?.trim()
+                ? { label: args.payload.label.trim() }
+                : prev?.label
+                  ? { label: prev.label }
+                  : {}),
+              ...(args.payload.tier
+                ? { tier: args.payload.tier }
+                : prev?.tier
+                  ? { tier: prev.tier }
+                  : {}),
+              driveBackupLinked,
+              addedAt: prev?.addedAt ?? nowIso,
+              ...(prev?.lastUsedAt ? { lastUsedAt: prev.lastUsedAt } : {}),
+              isDefault: prev ? prev.isDefault : existingAccounts.length === 0,
+            };
+
+            const nextAccounts =
+              existingIdx >= 0
+                ? existingAccounts.map((a, idx) => (idx === existingIdx ? nextEntry : a))
+                : [...existingAccounts, nextEntry];
+
+            yield* saveGoogleAccounts(nextAccounts);
+            yield* appendCredentialResponseHeaders;
+            return { subject: identity.subject, account: toAccountSummary(nextEntry) };
+          }),
+        )
+        .handle(
+          "googleUnenroll",
+          Effect.fn("environment.auth.googleUnenroll")(function* () {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            for (const acc of accounts) {
+              yield* secrets
+                .remove(driveOAuthPerSubjectSecretName(acc.subject))
+                .pipe(Effect.ignore);
+            }
+            yield* secrets.remove(driveOAuthPrimarySecretName).pipe(Effect.ignore);
+            yield* secrets.remove(multiGoogleSecretName).pipe(Effect.ignore);
+            yield* secrets.remove(legacyGoogleSecretName).pipe(Effect.ignore);
+            yield* appendCredentialResponseHeaders;
+            return { removed: accounts.length > 0 };
+          }),
+        )
+        .handle(
+          "googleRemoveAccount",
+          Effect.fn("environment.auth.googleRemoveAccount")(function* (args) {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            const target = accounts.find((a) => a.subject === args.payload.subject);
+            const filtered = accounts.filter((a) => a.subject !== args.payload.subject);
+            const removed = filtered.length !== accounts.length;
+            if (removed) {
+              yield* secrets
+                .remove(driveOAuthPerSubjectSecretName(args.payload.subject))
+                .pipe(Effect.ignore);
+              const activeDriveSubject = yield* readActiveDriveSubject(accounts);
+              if (activeDriveSubject === target?.subject) {
+                yield* secrets.remove(driveOAuthPrimarySecretName).pipe(Effect.ignore);
+              }
+              const hasDefault = filtered.some((a) => a.isDefault);
+              const normalized =
+                !hasDefault && filtered.length > 0
+                  ? filtered.map((a, idx) => (idx === 0 ? { ...a, isDefault: true } : a))
+                  : filtered;
+              if (normalized.length === 0) {
+                yield* secrets.remove(multiGoogleSecretName).pipe(Effect.ignore);
+                yield* secrets.remove(legacyGoogleSecretName).pipe(Effect.ignore);
+              } else {
+                yield* saveGoogleAccounts(normalized);
+              }
+              yield* appendCredentialResponseHeaders;
+              return { removed: true, accounts: normalized.map(toAccountSummary) };
+            }
+            yield* appendCredentialResponseHeaders;
+            return { removed: false, accounts: accounts.map(toAccountSummary) };
+          }),
+        )
+        .handle(
+          "googleSetDefaultAccount",
+          Effect.fn("environment.auth.googleSetDefaultAccount")(function* (args) {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            const found = accounts.find((a) => a.subject === args.payload.subject);
+            if (!found) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const updated = accounts.map((a) => {
+              if (a.subject !== args.payload.subject) {
+                return { ...a, isDefault: false };
+              }
+              const nextLabel =
+                args.payload.label !== undefined ? args.payload.label.trim() : a.label;
+              const nextTier = args.payload.tier ?? a.tier;
+              return {
+                ...a,
+                isDefault: true,
+                ...(nextLabel ? { label: nextLabel } : {}),
+                ...(nextTier ? { tier: nextTier } : {}),
+              };
+            });
+            yield* saveGoogleAccounts(updated);
+            const target = updated.find((a) => a.subject === args.payload.subject)!;
+            yield* appendCredentialResponseHeaders;
+            return {
+              account: toAccountSummary(target),
+              accounts: updated.map(toAccountSummary),
+            };
+          }),
+        )
+        .handle(
+          "googleBindDriveBackupAccount",
+          Effect.fn("environment.auth.googleBindDriveBackupAccount")(function* (args) {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            const target = accounts.find((a) => a.subject === args.payload.subject);
+            if (!target) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const perSubjectOpt = yield* secrets
+              .get(driveOAuthPerSubjectSecretName(target.subject))
+              .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+            if (Option.isNone(perSubjectOpt)) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const parsed = yield* decodeDriveOAuthPayload(
+              new TextDecoder().decode(perSubjectOpt.value),
+            ).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+            const normalizedJson = yield* encodeDriveOAuthPayload({
+              clientId: parsed.clientId,
+              clientSecret: parsed.clientSecret,
+              refreshToken: parsed.refreshToken,
+              ...(parsed.connectedEmail
+                ? { connectedEmail: parsed.connectedEmail }
+                : target.email
+                  ? { connectedEmail: target.email }
+                  : {}),
+              subject: target.subject,
+            }).pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+            yield* secrets
+              .set(driveOAuthPrimarySecretName, new TextEncoder().encode(normalizedJson))
+              .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+            yield* appendCredentialResponseHeaders;
+            return {
+              bound: true,
+              email: parsed.connectedEmail ?? target.email ?? null,
+            };
+          }),
+        )
+        .handle(
+          "googleRevokeDriveAccount",
+          Effect.fn("environment.auth.googleRevokeDriveAccount")(function* (args) {
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const accounts = yield* loadGoogleAccounts();
+            const target = accounts.find((a) => a.subject === args.payload.subject);
+            if (!target) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const perSubjectOpt = yield* secrets
+              .get(driveOAuthPerSubjectSecretName(target.subject))
+              .pipe(Effect.orElseSucceed(() => Option.none<Uint8Array>()));
+            if (Option.isSome(perSubjectOpt)) {
+              const parsed = yield* decodeDriveOAuthPayload(
+                new TextDecoder().decode(perSubjectOpt.value),
+              ).pipe(Effect.orElseSucceed(() => null));
+              if (parsed?.refreshToken) {
+                yield* Effect.tryPromise({
+                  try: () => revokeToken({ token: parsed.refreshToken }),
+                  catch: () => new GoogleVerificationError(),
+                }).pipe(Effect.ignore);
+              }
+              yield* secrets
+                .remove(driveOAuthPerSubjectSecretName(target.subject))
+                .pipe(Effect.ignore);
+            }
+            const activeDriveSubject = yield* readActiveDriveSubject(accounts);
+            if (activeDriveSubject === target.subject) {
+              yield* secrets.remove(driveOAuthPrimarySecretName).pipe(Effect.ignore);
+            }
+            const updated = accounts.map((a) =>
+              a.subject === target.subject ? { ...a, driveBackupLinked: false } : a,
             );
-          const now = yield* DateTime.now;
-          yield* appendCredentialResponseHeaders;
-          return {
-            access_token: session.token,
-            issued_token_type: AuthAccessTokenType,
-            token_type: "Bearer" as const,
-            expires_in: Math.max(
-              0,
-              Math.floor((session.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
-            ),
-            scope: session.scopes.join(" "),
-          };
-        }),
-      )
-      .handle(
-        "session",
-        Effect.fn("environment.auth.session")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
+            yield* saveGoogleAccounts(updated);
+            yield* appendCredentialResponseHeaders;
+            return {
+              revoked: true,
+              accounts: updated.map(toAccountSummary),
+            };
+          }),
+        )
+        .handle(
+          "googleChallenge",
+          Effect.fn("environment.auth.googleChallenge")(function* (args) {
+            const accounts = yield* loadGoogleAccounts();
+            if (accounts.length === 0) {
+              return yield* failEnvironmentAuthInvalid("invalid_credential");
+            }
+            const requested = args.query.subject
+              ? accounts.find((a) => a.subject === args.query.subject)
+              : (accounts.find((a) => a.isDefault) ?? accounts[0]);
+            const chosen = requested ?? accounts[0]!;
+            yield* appendCredentialResponseHeaders;
+            return yield* issueGoogleChallenge(chosen.clientId, null);
+          }),
+        )
+        .handle(
+          "googleSession",
+          Effect.fn("environment.auth.googleSession")(function* (args) {
+            const { identity, account } = yield* authenticateGoogle(args.payload);
             const request = yield* HttpServerRequest.HttpServerRequest;
-            return yield* serverAuth.getSessionState(request);
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("internal_error", error),
-          ),
-        ),
-      )
-      .handle(
-        "browserSession",
-        Effect.fn("environment.auth.browserSession")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const request = yield* HttpServerRequest.HttpServerRequest;
-            const result = yield* serverAuth.createBrowserSession(
-              args.payload.credential,
-              deriveAuthClientMetadata({ request }),
-            );
+            const session = yield* sessions
+              .issue({
+                method: "browser-session-cookie",
+                subject: `google:${identity.subject}`,
+                scopes: account.scopes,
+                client: deriveAuthClientMetadata({ request }),
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  failEnvironmentInternal("browser_session_issuance_failed", error),
+                ),
+              );
             const sessionCookies = yield* Effect.fromResult(
-              Cookies.set(Cookies.empty, sessions.cookieName, result.sessionToken, {
-                expires: DateTime.toDate(result.response.expiresAt),
+              Cookies.set(Cookies.empty, sessions.cookieName, session.token, {
+                expires: DateTime.toDate(session.expiresAt),
                 httpOnly: true,
                 path: "/",
                 sameSite: "lax",
               }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
-
             yield* HttpEffect.appendPreResponseHandler((_request, response) =>
               Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
             );
             yield* appendCredentialResponseHeaders;
-            return result.response;
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
-          ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("browser_session_issuance_failed", error),
-          ),
-        ),
-      )
-      .handle(
-        "token",
-        Effect.fn("environment.auth.token")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
+            return {
+              authenticated: true as const,
+              scopes: session.scopes,
+              sessionMethod: session.method,
+              expiresAt: DateTime.toUtc(session.expiresAt),
+            };
+          }),
+        )
+        .handle(
+          "googleToken",
+          Effect.fn("environment.auth.googleToken")(function* (args) {
+            const { identity, account } = yield* authenticateGoogle(args.payload);
             const request = yield* HttpServerRequest.HttpServerRequest;
-            const requestedScopes =
-              args.payload.scope === undefined
-                ? undefined
-                : parseAllowedOAuthScope({
-                    value: args.payload.scope,
-                    allowedScopes: new Set<AuthEnvironmentScope>([
-                      AuthOrchestrationReadScope,
-                      AuthOrchestrationOperateScope,
-                      AuthTerminalOperateScope,
-                      AuthReviewWriteScope,
-                      AuthAccessReadScope,
-                      AuthAccessWriteScope,
-                      AuthRelayReadScope,
-                      AuthRelayWriteScope,
-                    ]),
-                  });
-            if (requestedScopes === null) {
-              return yield* failEnvironmentInvalidRequest("invalid_scope");
-            }
-            const proofKeyThumbprint = args.headers.dpop
-              ? yield* verifyRequestDpopProof({ request }).pipe(
-                  Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
-                    appendDpopChallengeHeader.pipe(
-                      Effect.andThen(failEnvironmentAuthInvalid("invalid_credential")),
-                    ),
-                  ),
-                  Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-                    failEnvironmentInternal("access_token_issuance_failed", error),
-                  ),
-                )
-              : undefined;
+            const session = yield* sessions
+              .issue({
+                method: "bearer-access-token",
+                subject: `google:${identity.subject}`,
+                scopes: account.scopes,
+                client: deriveAuthClientMetadata({ request }),
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  failEnvironmentInternal("access_token_issuance_failed", error),
+                ),
+              );
+            const now = yield* DateTime.now;
             yield* appendCredentialResponseHeaders;
-            return yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
-              args.payload.subject_token,
-              requestedScopes,
-              deriveAuthClientMetadata({
-                request,
-                presented: {
-                  ...(args.payload.client_label ? { label: args.payload.client_label } : {}),
-                  ...(args.payload.client_device_type
-                    ? { deviceType: args.payload.client_device_type }
-                    : {}),
-                  ...(args.payload.client_os ? { os: args.payload.client_os } : {}),
-                },
-              }),
-              proofKeyThumbprint ? { proofKeyThumbprint } : undefined,
-            );
-          },
-          traceRelayRequest,
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            return {
+              access_token: session.token,
+              issued_token_type: AuthAccessTokenType,
+              token_type: "Bearer" as const,
+              expires_in: Math.max(
+                0,
+                Math.floor((session.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
+              ),
+              scope: session.scopes.join(" "),
+            };
+          }),
+        )
+        .handle(
+          "session",
+          Effect.fn("environment.auth.session")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              return yield* serverAuth.getSessionState(request);
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("internal_error", error),
+            ),
           ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInvalidRequestError, (error) =>
-            failEnvironmentInvalidRequest(EnvironmentAuth.serverAuthInvalidRequestReason(error)),
+        )
+        .handle(
+          "browserSession",
+          Effect.fn("environment.auth.browserSession")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              const result = yield* serverAuth.createBrowserSession(
+                args.payload.credential,
+                deriveAuthClientMetadata({ request }),
+              );
+              const sessionCookies = yield* Effect.fromResult(
+                Cookies.set(Cookies.empty, sessions.cookieName, result.sessionToken, {
+                  expires: DateTime.toDate(result.response.expiresAt),
+                  httpOnly: true,
+                  path: "/",
+                  sameSite: "lax",
+                }),
+              ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+
+              yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+                Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
+              );
+              yield* appendCredentialResponseHeaders;
+              return result.response;
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+              failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            ),
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("browser_session_issuance_failed", error),
+            ),
           ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("access_token_issuance_failed", error),
-          ),
-        ),
-      )
-      .handle(
-        "webSocketTicket",
-        Effect.fn("environment.auth.webSocketTicket")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* EnvironmentAuthenticatedPrincipal;
-            yield* appendCredentialResponseHeaders;
-            return yield* serverAuth.issueWebSocketTicket(session);
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("websocket_ticket_issuance_failed", error),
-          ),
-        ),
-      )
-      .handle(
-        "pairingCredential",
-        Effect.fn("environment.auth.pairingCredential")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const delegatedScopes = args.payload.scopes ?? AuthStandardClientScopes;
-            if (
-              delegatedScopes.length === 0 ||
-              new Set<AuthEnvironmentScope>(delegatedScopes).size !== delegatedScopes.length
-            ) {
-              return yield* failEnvironmentInvalidRequest("invalid_scope");
-            }
-            for (const delegatedScope of delegatedScopes) {
-              if (!session.scopes.has(delegatedScope)) {
-                return yield* failEnvironmentScopeRequired(delegatedScope);
+        )
+        .handle(
+          "token",
+          Effect.fn("environment.auth.token")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              const requestedScopes =
+                args.payload.scope === undefined
+                  ? undefined
+                  : parseAllowedOAuthScope({
+                      value: args.payload.scope,
+                      allowedScopes: new Set<AuthEnvironmentScope>([
+                        AuthOrchestrationReadScope,
+                        AuthOrchestrationOperateScope,
+                        AuthTerminalOperateScope,
+                        AuthReviewWriteScope,
+                        AuthAccessReadScope,
+                        AuthAccessWriteScope,
+                        AuthRelayReadScope,
+                        AuthRelayWriteScope,
+                      ]),
+                    });
+              if (requestedScopes === null) {
+                return yield* failEnvironmentInvalidRequest("invalid_scope");
               }
-            }
-            return yield* serverAuth.issuePairingCredential(args.payload);
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("pairing_credential_issuance_failed", error),
+              const proofKeyThumbprint = args.headers.dpop
+                ? yield* verifyRequestDpopProof({ request }).pipe(
+                    Effect.provideService(Crypto.Crypto, crypto),
+                    Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
+                    Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
+                      appendDpopChallengeHeader.pipe(
+                        Effect.andThen(failEnvironmentAuthInvalid("invalid_credential")),
+                      ),
+                    ),
+                    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+                      failEnvironmentInternal("access_token_issuance_failed", error),
+                    ),
+                  )
+                : undefined;
+              yield* appendCredentialResponseHeaders;
+              return yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
+                args.payload.subject_token,
+                requestedScopes,
+                deriveAuthClientMetadata({
+                  request,
+                  presented: {
+                    ...(args.payload.client_label ? { label: args.payload.client_label } : {}),
+                    ...(args.payload.client_device_type
+                      ? { deviceType: args.payload.client_device_type }
+                      : {}),
+                    ...(args.payload.client_os ? { os: args.payload.client_os } : {}),
+                  },
+                }),
+                proofKeyThumbprint ? { proofKeyThumbprint } : undefined,
+              );
+            },
+            traceRelayRequest,
+            Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+              failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            ),
+            Effect.catchIf(EnvironmentAuth.isServerAuthInvalidRequestError, (error) =>
+              failEnvironmentInvalidRequest(EnvironmentAuth.serverAuthInvalidRequestReason(error)),
+            ),
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("access_token_issuance_failed", error),
+            ),
           ),
-        ),
-      )
-      .handle(
-        "pairingLinks",
-        Effect.fn("environment.auth.pairingLinks")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessReadScope);
-            return yield* serverAuth.listPairingLinks();
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("pairing_links_load_failed", error),
+        )
+        .handle(
+          "webSocketTicket",
+          Effect.fn("environment.auth.webSocketTicket")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const session = yield* EnvironmentAuthenticatedPrincipal;
+              yield* appendCredentialResponseHeaders;
+              return yield* serverAuth.issueWebSocketTicket(session);
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("websocket_ticket_issuance_failed", error),
+            ),
           ),
-        ),
-      )
-      .handle(
-        "revokePairingLink",
-        Effect.fn("environment.auth.revokePairingLink")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revoked = yield* serverAuth.revokePairingLink(args.payload.id);
-            return { revoked };
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("pairing_link_revoke_failed", error),
+        )
+        .handle(
+          "pairingCredential",
+          Effect.fn("environment.auth.pairingCredential")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+              const delegatedScopes = args.payload.scopes ?? AuthStandardClientScopes;
+              if (
+                delegatedScopes.length === 0 ||
+                new Set<AuthEnvironmentScope>(delegatedScopes).size !== delegatedScopes.length
+              ) {
+                return yield* failEnvironmentInvalidRequest("invalid_scope");
+              }
+              for (const delegatedScope of delegatedScopes) {
+                if (!session.scopes.has(delegatedScope)) {
+                  return yield* failEnvironmentScopeRequired(delegatedScope);
+                }
+              }
+              return yield* serverAuth.issuePairingCredential(args.payload);
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("pairing_credential_issuance_failed", error),
+            ),
           ),
-        ),
-      )
-      .handle(
-        "clients",
-        Effect.fn("environment.auth.clients")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessReadScope);
-            return yield* serverAuth.listClientSessions(session.sessionId);
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("client_sessions_load_failed", error),
+        )
+        .handle(
+          "pairingLinks",
+          Effect.fn("environment.auth.pairingLinks")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              yield* requireEnvironmentScope(AuthAccessReadScope);
+              return yield* serverAuth.listPairingLinks();
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("pairing_links_load_failed", error),
+            ),
           ),
-        ),
-      )
-      .handle(
-        "revokeClient",
-        Effect.fn("environment.auth.revokeClient")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revoked = yield* serverAuth.revokeClientSession(
-              session.sessionId,
-              args.payload.sessionId,
-            );
-            return { revoked };
-          },
-          Effect.catchTag("ServerAuthForbiddenOperationError", () =>
-            failEnvironmentOperationForbidden("current_session_revoke_not_allowed"),
+        )
+        .handle(
+          "revokePairingLink",
+          Effect.fn("environment.auth.revokePairingLink")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              yield* requireEnvironmentScope(AuthAccessWriteScope);
+              const revoked = yield* serverAuth.revokePairingLink(args.payload.id);
+              return { revoked };
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("pairing_link_revoke_failed", error),
+            ),
           ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("client_session_revoke_failed", error),
+        )
+        .handle(
+          "clients",
+          Effect.fn("environment.auth.clients")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const session = yield* requireEnvironmentScope(AuthAccessReadScope);
+              return yield* serverAuth.listClientSessions(session.sessionId);
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("client_sessions_load_failed", error),
+            ),
           ),
-        ),
-      )
-      .handle(
-        "revokeOtherClients",
-        Effect.fn("environment.auth.revokeOtherClients")(
-          function* (args) {
-            yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revokedCount = yield* serverAuth.revokeOtherClientSessions(session.sessionId);
-            return { revokedCount };
-          },
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("client_session_revoke_failed", error),
+        )
+        .handle(
+          "revokeClient",
+          Effect.fn("environment.auth.revokeClient")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+              const revoked = yield* serverAuth.revokeClientSession(
+                session.sessionId,
+                args.payload.sessionId,
+              );
+              return { revoked };
+            },
+            Effect.catchTag("ServerAuthForbiddenOperationError", () =>
+              failEnvironmentOperationForbidden("current_session_revoke_not_allowed"),
+            ),
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("client_session_revoke_failed", error),
+            ),
           ),
-        ),
-      );
-  }),
-);
+        )
+        .handle(
+          "revokeOtherClients",
+          Effect.fn("environment.auth.revokeOtherClients")(
+            function* (args) {
+              yield* annotateEnvironmentRequest(args.endpoint.name);
+              const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+              const revokedCount = yield* serverAuth.revokeOtherClientSessions(session.sessionId);
+              return { revokedCount };
+            },
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+              failEnvironmentInternal("client_session_revoke_failed", error),
+            ),
+          ),
+        );
+    }),
+  );
+}
+
+export const authHttpApiLayer = makeAuthHttpApiLayer();

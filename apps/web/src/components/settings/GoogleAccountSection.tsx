@@ -36,52 +36,562 @@ export function isClerkSingleSessionMode(clerk: unknown): boolean {
   return true;
 }
 
-export function GoogleAccountSection() {
-  return hasClerkPublicConfig() ? <UnifiedGoogleAccountSection /> : <BrowserGoogleAccountSection />;
+/**
+ * 로그인된 Google 계정 목록의 Drive 백업 상태 요약을 계산한다.
+ */
+export function summarizeGoogleAccountsState(status: GoogleEnrollmentStatusResult | null): {
+  readonly accountCount: number;
+  readonly driveLinkedCount: number;
+  readonly activeDriveAccount: EnrolledGoogleAccountSummary | null;
+} {
+  const accounts = status?.accounts ?? [];
+  const driveLinkedCount = accounts.filter((a) => a.driveBackupLinked).length;
+  const activeDriveAccount =
+    (status?.activeDriveSubject
+      ? accounts.find((a) => a.subject === status.activeDriveSubject)
+      : undefined) ?? null;
+  return {
+    accountCount: accounts.length,
+    driveLinkedCount,
+    activeDriveAccount,
+  };
 }
 
-function UnifiedGoogleAccountSection() {
+export function GoogleAccountSection() {
+  const bridge = typeof window !== "undefined" ? window.desktopBridge?.googleSignIn : undefined;
+  const supportsLocalMultiAccount = Boolean(
+    bridge?.listAccountsT3 && bridge?.addAccountT3 && bridge?.configureOAuthAppT3,
+  );
+
+  return (
+    <SettingsSection {...searchableSetting("google-account")}>
+      {supportsLocalMultiAccount ? (
+        <LocalMultiGoogleAccountsPanel />
+      ) : (
+        <WebOnlyGoogleAccountNotice />
+      )}
+      {hasClerkPublicConfig() ? <T3ConnectClerkRelayCollapsible /> : null}
+    </SettingsSection>
+  );
+}
+
+function LocalMultiGoogleAccountsPanel() {
+  const bridge = window.desktopBridge?.googleSignIn;
+
+  const [status, setStatus] = useState<GoogleEnrollmentStatusResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [showOAuthConfig, setShowOAuthConfig] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const clientIdHydratedRef = useRef(false);
+
+  const refreshAccounts = useCallback(async () => {
+    if (!bridge?.listAccountsT3) return;
+    try {
+      const data = await bridge.listAccountsT3();
+      setStatus(data);
+      if (data.defaultClientId && !clientIdHydratedRef.current) {
+        clientIdHydratedRef.current = true;
+        setClientId(data.defaultClientId);
+      }
+    } catch {
+      // Ignore transient errors while local environment initializes
+    } finally {
+      setLoading(false);
+    }
+  }, [bridge]);
+
+  useEffect(() => {
+    void refreshAccounts();
+  }, [refreshAccounts]);
+
+  const isAuthInProgress =
+    busyAction === "add-account" || (busyAction !== null && busyAction.startsWith("grant-drive:"));
+
+  const handleSaveOAuthConfig = async (thenAddAccount = false) => {
+    if (!bridge?.configureOAuthAppT3) return;
+    const trimmedId = clientId.trim();
+    if (!trimmedId) {
+      toastManager.add({
+        type: "error",
+        title: "OAuth Client ID 필요",
+        description: "Google Cloud Console에서 발급한 데스크톱 앱 OAuth Client ID를 입력해 주세요.",
+      });
+      return;
+    }
+    setBusyAction("save-oauth-config");
+    try {
+      const saved = await bridge.configureOAuthAppT3({
+        clientId: trimmedId,
+        ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
+      });
+      setClientSecret("");
+      setShowOAuthConfig(false);
+      await refreshAccounts();
+      toastManager.add({
+        type: "success",
+        title: "Google OAuth 앱 설정 저장 완료",
+        description: saved.hasClientSecret
+          ? "Windows DPAPI에 안전 저장되었습니다. 이제 버튼 클릭만으로 계정을 추가하고 Drive 권한을 허용할 수 있습니다."
+          : "Client ID가 저장되었습니다. Drive 권한 허용을 사용하려면 Client Secret도 함께 입력해 주세요.",
+      });
+      if (thenAddAccount) {
+        setBusyAction(null);
+        await handleAddAccount(false);
+        return;
+      }
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "OAuth 앱 설정 저장 실패",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Client ID와 Client Secret 형식을 확인해 주세요.",
+      });
+    } finally {
+      setBusyAction((prev) => (prev === "save-oauth-config" ? null : prev));
+    }
+  };
+
+  const handleAddAccount = async (grantDrive = false) => {
+    if (!bridge?.addAccountT3) return;
+    if (!status?.oauthConfigured && !clientId.trim()) {
+      setShowOAuthConfig(true);
+      toastManager.add({
+        type: "error",
+        title: "최초 1회 OAuth 앱 설정 필요",
+        description: "아래에서 Google Cloud OAuth Client ID와 Secret을 1회만 저장해 주세요.",
+      });
+      return;
+    }
+    if (grantDrive && !status?.hasClientSecret) {
+      setShowOAuthConfig(true);
+      toastManager.add({
+        type: "error",
+        title: "Client Secret 필요",
+        description:
+          "Google Drive 백업 권한을 유지하려면 OAuth 앱 설정에 Client Secret을 1회 저장해 주세요.",
+      });
+      return;
+    }
+    setBusyAction("add-account");
+    try {
+      const added = await bridge.addAccountT3({ grantDrive });
+      toastManager.add({
+        type: "success",
+        title: "Google 계정 로그인 완료",
+        description: `${added.email ?? added.name ?? added.subject} 계정이 추가되었습니다.`,
+      });
+      await refreshAccounts();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Google 계정 추가 실패",
+        description:
+          error instanceof Error ? error.message : "브라우저 인증을 완료하지 못했습니다.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleGrantDrivePermission = async (account: EnrolledGoogleAccountSummary) => {
+    if (!bridge?.grantDrivePermissionT3) return;
+    if (!status?.hasClientSecret) {
+      setShowOAuthConfig(true);
+      toastManager.add({
+        type: "error",
+        title: "OAuth Client Secret 1회 입력 필요",
+        description:
+          "Google Drive 백업 토큰(Refresh Token)을 로컬 DPAPI에 보관하려면 OAuth 앱 설정에 Client Secret을 먼저 저장해 주세요.",
+      });
+      return;
+    }
+    setBusyAction(`grant-drive:${account.subject}`);
+    try {
+      const updated = await bridge.grantDrivePermissionT3({
+        subject: account.subject,
+        ...(account.email ? { loginHint: account.email } : {}),
+      });
+      toastManager.add({
+        type: "success",
+        title: "Google Drive 백업 권한 허용 완료",
+        description: `${updated.email ?? account.email ?? account.subject} 계정의 Drive 백업이 활성화되었습니다.`,
+      });
+      await refreshAccounts();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Google Drive 권한 허용 실패",
+        description:
+          error instanceof Error
+            ? error.message
+            : "브라우저에서 Google Drive 접근 권한을 허용해 주세요.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleBindDriveAccount = async (account: EnrolledGoogleAccountSummary) => {
+    if (!bridge?.bindDriveBackupAccountT3) return;
+    setBusyAction(`bind-drive:${account.subject}`);
+    try {
+      const res = await bridge.bindDriveBackupAccountT3(account.subject);
+      toastManager.add({
+        type: "success",
+        title: "Drive 백업 계정 전환 완료",
+        description: `${res.email ?? account.email ?? account.subject} 계정이 기본 Drive 백업 대상으로 지정되었습니다.`,
+      });
+      await refreshAccounts();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Drive 백업 계정 전환 실패",
+        description:
+          error instanceof Error ? error.message : "해당 계정의 Drive 권한을 먼저 허용해 주세요.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleRevokeDrivePermission = async (account: EnrolledGoogleAccountSummary) => {
+    if (!bridge?.revokeDrivePermissionT3) return;
+    setBusyAction(`revoke-drive:${account.subject}`);
+    try {
+      await bridge.revokeDrivePermissionT3(account.subject);
+      toastManager.add({
+        type: "success",
+        title: "Google Drive 권한 해제됨",
+        description: `${account.email ?? account.subject} 계정의 Drive 백업 권한만 해제했습니다. 계정 로그인은 유지됩니다.`,
+      });
+      await refreshAccounts();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Drive 권한 해제 실패",
+        description: error instanceof Error ? error.message : "권한 해제 중 오류가 발생했습니다.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleSetDefaultAccount = async (account: EnrolledGoogleAccountSummary) => {
+    if (!bridge?.setDefaultAccountT3) return;
+    setBusyAction(`default:${account.subject}`);
+    try {
+      await bridge.setDefaultAccountT3({ subject: account.subject });
+      toastManager.add({
+        type: "success",
+        title: "기본 Google 계정 변경됨",
+        description: `${account.email ?? account.subject} 계정을 기본 계정으로 지정했습니다.`,
+      });
+      await refreshAccounts();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleLogoutAccount = async (account: EnrolledGoogleAccountSummary) => {
+    if (!bridge?.unenrollT3) return;
+    setBusyAction(`remove:${account.subject}`);
+    try {
+      await bridge.unenrollT3(account.subject);
+      toastManager.add({
+        type: "success",
+        title: "Google 계정 로그아웃됨",
+        description: `${account.email ?? account.subject} 계정을 T3에서 제거했습니다.`,
+      });
+      await refreshAccounts();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCancelAuth = async () => {
+    try {
+      await bridge?.cancel?.();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const accounts = status?.accounts ?? [];
+  const summary = summarizeGoogleAccountsState(status);
+  const oauthConfigured = Boolean(status?.oauthConfigured);
+  const needsSetupBox = !loading && (!oauthConfigured || showOAuthConfig);
+
+  return (
+    <div className="grid gap-3">
+      <SettingsRow
+        title={
+          loading
+            ? "Google 계정 확인 중"
+            : summary.accountCount > 0
+              ? `Google 계정 (${summary.accountCount}개 로그인됨)`
+              : "Google 계정"
+        }
+        description={
+          loading
+            ? "로그인된 Google 계정과 Drive 백업 권한 상태를 불러오는 중입니다."
+            : isAuthInProgress
+              ? "브라우저에서 Google 계정 선택 또는 Drive 권한 허용을 완료해 주세요..."
+              : summary.accountCount > 0
+                ? "Google 계정을 2개 이상 동시에 로그인해 두고, 원하는 계정에서 'Drive 권한 허용'만 누르면 Google Drive 백업이 바로 연결됩니다."
+                : "여러 Google 계정을 동시에 로그인하고, 로그인된 계정에서 클릭 한 번으로 Google Drive 백업 권한을 허용할 수 있습니다."
+        }
+        control={
+          <div className="flex flex-wrap items-center gap-2">
+            {isAuthInProgress ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void handleCancelAuth()}
+              >
+                인증 취소
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                disabled={loading || busyAction !== null}
+                onClick={() => void handleAddAccount(false)}
+              >
+                + Google 계정 추가
+              </Button>
+            )}
+            {oauthConfigured ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={busyAction !== null}
+                onClick={() => setShowOAuthConfig((v) => !v)}
+              >
+                {showOAuthConfig ? "설정 닫기" : "OAuth 앱 설정"}
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+
+      {needsSetupBox ? (
+        <div className="grid gap-2.5 rounded-xl border border-border/70 bg-muted/20 p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-foreground">
+              {oauthConfigured
+                ? "Google OAuth 앱 설정 변경"
+                : "최초 1회 Google OAuth 앱 설정 (저장 후 재입력 불필요)"}
+            </span>
+            {status?.hasClientSecret ? (
+              <Badge variant="success" size="sm">
+                Client Secret DPAPI 보관 중
+              </Badge>
+            ) : null}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              placeholder="OAuth Client ID (xxxx.apps.googleusercontent.com)"
+            />
+            <Input
+              type="password"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+              placeholder={
+                status?.hasClientSecret
+                  ? "Client Secret 저장됨 (변경 시에만 입력)"
+                  : "Client Secret (GOCSPX-... · Drive 권한 허용에 필요)"
+              }
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busyAction !== null}
+              onClick={() => void handleSaveOAuthConfig(false)}
+            >
+              설정 저장
+            </Button>
+            {!oauthConfigured ? (
+              <Button
+                type="button"
+                size="sm"
+                disabled={busyAction !== null}
+                onClick={() => void handleSaveOAuthConfig(true)}
+              >
+                저장 후 Google 계정 로그인
+              </Button>
+            ) : null}
+          </div>
+          <details className="text-[11px] text-muted-foreground">
+            <summary className="cursor-pointer font-medium text-foreground/80">
+              1분 발급 가이드 (Google Cloud Console · 무료)
+            </summary>
+            <ol className="mt-1.5 list-decimal space-y-1 pl-4 leading-relaxed">
+              <li>
+                Google Cloud Console → <strong>API 및 서비스 → 라이브러리</strong>에서{" "}
+                <strong>Google Drive API</strong>를 사용 설정합니다.
+              </li>
+              <li>
+                <strong>사용자 인증 정보 → 사용자 인증 정보 만들기 → OAuth 클라이언트 ID</strong>
+                에서 애플리케이션 유형을 <strong>데스크톱 앱</strong>으로 선택해 생성합니다.
+              </li>
+              <li>
+                발급된 <strong>Client ID</strong>와 <strong>Client Secret</strong>을 위 입력칸에
+                1회만 저장하면, 이후 계정 2개 이상 추가와 Drive 권한 허용이 모두 버튼 1클릭으로
+                동작합니다.
+              </li>
+            </ol>
+          </details>
+        </div>
+      ) : null}
+
+      {accounts.length > 0 ? (
+        <div className="grid gap-2">
+          {accounts.map((acc) => {
+            const isActiveDrive =
+              acc.driveBackupLinked && status?.activeDriveSubject === acc.subject;
+            const displayLabel = acc.email ?? acc.name ?? acc.subject;
+            return (
+              <div
+                key={acc.subject}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/70 bg-background/70 px-3.5 py-2.5 text-xs"
+              >
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="truncate font-medium text-foreground">{displayLabel}</span>
+                  {acc.name && acc.email && acc.name !== acc.email ? (
+                    <span className="text-[11px] text-muted-foreground">({acc.name})</span>
+                  ) : null}
+                  {acc.isDefault ? (
+                    <Badge variant="outline" size="sm">
+                      기본
+                    </Badge>
+                  ) : null}
+                  {isActiveDrive ? (
+                    <Badge variant="success" size="sm">
+                      Drive 백업 활성 ✓
+                    </Badge>
+                  ) : acc.driveBackupLinked ? (
+                    <Badge variant="info" size="sm">
+                      Drive 권한 허용됨
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" size="sm">
+                      Drive 미허용
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {!acc.driveBackupLinked ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      disabled={busyAction !== null}
+                      onClick={() => void handleGrantDrivePermission(acc)}
+                    >
+                      Drive 권한 허용
+                    </Button>
+                  ) : (
+                    <>
+                      {!isActiveDrive ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={busyAction !== null}
+                          onClick={() => void handleBindDriveAccount(acc)}
+                        >
+                          이 계정 Drive로 백업
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        disabled={busyAction !== null}
+                        onClick={() => void handleRevokeDrivePermission(acc)}
+                      >
+                        Drive 권한 해제
+                      </Button>
+                    </>
+                  )}
+                  {!acc.isDefault ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={busyAction !== null}
+                      onClick={() => void handleSetDefaultAccount(acc)}
+                    >
+                      기본 지정
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleLogoutAccount(acc)}
+                  >
+                    로그아웃
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WebOnlyGoogleAccountNotice() {
+  return (
+    <SettingsRow
+      title="Google 계정"
+      description="다중 Google 계정 로그인과 1클릭 Google Drive 백업 권한 허용은 T3 데스크톱 앱에서 직접 관리합니다."
+      control={
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            window.desktopBridge?.openExternal(configuredHostedAppUrl()) ??
+            window.open(configuredHostedAppUrl(), "_blank")
+          }
+        >
+          웹 앱 열기
+        </Button>
+      }
+    />
+  );
+}
+
+function T3ConnectClerkRelayCollapsible() {
   const clerk = useClerk();
   const { isLoaded, isSignedIn, sessionId } = useAuth();
   const { user } = useUser();
   const { isLoaded: sessionsLoaded, sessions } = useSessionList();
 
+  const [expanded, setExpanded] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pendingAuthAction, setPendingAuthAction] = useState<"signIn" | "signUp" | null>(null);
-
-  // 선택적 Google Drive 백업 직접 연결 (같은 카드 하단 접힘 영역)
-  const bridge = typeof window !== "undefined" ? window.desktopBridge?.googleSignIn : undefined;
-  const [localStatus, setLocalStatus] = useState<GoogleEnrollmentStatusResult | null>(null);
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [showDriveConnect, setShowDriveConnect] = useState(false);
-  const clientIdHydratedRef = useRef(false);
 
   const authProps = resolveClerkAuthProps(window.location.href, isElectron);
   const singleSession = isClerkSingleSessionMode(clerk);
   const primaryAccount =
     user?.primaryEmailAddress?.emailAddress ?? user?.fullName ?? user?.username ?? null;
 
-  const refreshDriveAccounts = useCallback(async () => {
-    if (!bridge?.listAccountsT3) return;
-    try {
-      const data = await bridge.listAccountsT3();
-      setLocalStatus(data);
-      if (data.defaultClientId && !clientIdHydratedRef.current) {
-        clientIdHydratedRef.current = true;
-        setClientId(data.defaultClientId);
-      }
-    } catch {
-      // Ignore when unauthenticated or unavailable
-    }
-  }, [bridge]);
-
-  useEffect(() => {
-    void refreshDriveAccounts();
-  }, [refreshDriveAccounts]);
-
-  // single_session_mode에서 다른 Google 아이디로 전환/가입 시:
-  // signOut 완료로 !isSignedIn이 되는 정확한 순간에 openSignIn / openSignUp을 자동 실행해 멈춤을 방지한다.
   useEffect(() => {
     if (!isLoaded || isSignedIn || !pendingAuthAction) return;
     const action = pendingAuthAction;
@@ -95,10 +605,10 @@ function UnifiedGoogleAccountSection() {
     }
   }, [clerk, isLoaded, isSignedIn, pendingAuthAction]);
 
-  const handleOpenGoogleAuth = async (mode: "signIn" | "signUp") => {
+  const handleOpenClerkAuth = async (mode: "signIn" | "signUp") => {
     if (!isLoaded) return;
     if (isSignedIn && singleSession) {
-      setBusyAction(`switch:${mode}`);
+      setBusyAction(`clerk:${mode}`);
       setPendingAuthAction(mode);
       try {
         await clerk.signOut();
@@ -107,13 +617,12 @@ function UnifiedGoogleAccountSection() {
         setBusyAction(null);
         toastManager.add({
           type: "error",
-          title: "Google 계정 전환 준비 실패",
+          title: "T3 Connect 계정 전환 실패",
           description: "현재 세션을 종료하지 못했습니다. 로그아웃 후 다시 시도해 주세요.",
         });
       }
       return;
     }
-
     try {
       if (mode === "signUp") {
         clerk.openSignUp(authProps);
@@ -123,35 +632,23 @@ function UnifiedGoogleAccountSection() {
     } catch {
       toastManager.add({
         type: "error",
-        title: "Google 로그인 창 열기 실패",
-        description:
-          "이전 인증이 진행 중이거나 세션 충돌이 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        title: "T3 Connect 로그인 창 열기 실패",
+        description: "잠시 후 다시 시도해 주세요.",
       });
     }
   };
 
   const handleSwitchSession = async (targetSessionId: string) => {
-    setBusyAction(`session:${targetSessionId}`);
+    setBusyAction(`clerk-switch:${targetSessionId}`);
     try {
       await clerk.setActive({ session: targetSessionId });
-      toastManager.add({
-        type: "success",
-        title: "Google 계정 전환 완료",
-        description: "선택한 계정으로 전환되었습니다.",
-      });
-    } catch {
-      toastManager.add({
-        type: "error",
-        title: "계정 전환 실패",
-        description: "선택한 계정으로 전환하지 못했습니다.",
-      });
     } finally {
       setBusyAction(null);
     }
   };
 
-  const handleSignOutSession = async (targetSessionId?: string) => {
-    setBusyAction(`signout:${targetSessionId ?? "all"}`);
+  const handleSignOut = async (targetSessionId?: string) => {
+    setBusyAction(`clerk-signout:${targetSessionId ?? "all"}`);
     try {
       await clerk.signOut(targetSessionId ? { sessionId: targetSessionId } : undefined);
     } finally {
@@ -159,338 +656,139 @@ function UnifiedGoogleAccountSection() {
     }
   };
 
-  const handleConnectDriveOAuth = async () => {
-    if (!bridge?.enrollT3) return;
-    const effectiveClientId = clientId.trim() || localStatus?.defaultClientId || "";
-    if (!effectiveClientId) {
-      toastManager.add({
-        type: "error",
-        title: "OAuth Client ID 필요",
-        description: "Google Cloud OAuth Client ID를 입력해 주세요.",
-      });
-      return;
-    }
-    setBusyAction("drive-connect");
-    try {
-      const identity = await bridge.enrollT3({
-        clientId: effectiveClientId,
-        ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
-        linkDriveBackup: true,
-      });
-      setClientSecret("");
-      toastManager.add({
-        type: "success",
-        title: "Google Drive 백업 연결 완료",
-        description: `${identity.email ?? identity.name ?? identity.subject} 계정이 드라이브 백업에 연결되었습니다.`,
-      });
-      await refreshDriveAccounts();
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: "Google Drive 연결 실패",
-        description:
-          error instanceof Error ? error.message : "OAuth 설정과 브라우저 인증을 확인해 주세요.",
-      });
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const handleCancelDriveAuth = async () => {
-    try {
-      await bridge?.cancel?.();
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const handleBindDriveAccount = async (account: EnrolledGoogleAccountSummary) => {
-    if (!bridge?.bindDriveBackupAccountT3) return;
-    setBusyAction(`bind:${account.subject}`);
-    try {
-      const res = await bridge.bindDriveBackupAccountT3(account.subject);
-      toastManager.add({
-        type: "success",
-        title: "Drive 백업 계정 변경됨",
-        description: `${res.email ?? account.email ?? account.subject} 계정이 백업 대상으로 지정되었습니다.`,
-      });
-      await refreshDriveAccounts();
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const handleRemoveDriveAccount = async (account: EnrolledGoogleAccountSummary) => {
-    if (!bridge?.unenrollT3) return;
-    setBusyAction(`remove:${account.subject}`);
-    try {
-      await bridge.unenrollT3(account.subject);
-      toastManager.add({
-        type: "success",
-        title: "Drive 연결 해제됨",
-        description: `${account.email ?? account.subject} 계정의 Drive 연결을 해제했습니다.`,
-      });
-      await refreshDriveAccounts();
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const driveAccounts = localStatus?.accounts ?? [];
-  const hasSavedClientId = Boolean(localStatus?.defaultClientId);
-
   return (
-    <SettingsSection {...searchableSetting("google-account")}>
-      <SettingsRow
-        title={!isLoaded ? "확인 중" : isSignedIn ? "Google 계정 연결됨" : "Google 로그인 필요"}
-        description={
-          !isLoaded
-            ? "로그인 상태를 확인하는 중입니다."
-            : pendingAuthAction !== null
-              ? "기존 세션을 정리하고 새 Google 계정 선택 창을 여는 중입니다..."
-              : isSignedIn
-                ? `${primaryAccount ?? "계정"}(으)로 로그인되어 있습니다. 다른 Google 아이디로 바로 전환하거나 새 아이디를 가입·연결할 수 있습니다.`
-                : "처음 쓰는 Google 아이디는 '새 Google 계정 가입'을, 기존 아이디는 'Google로 로그인'을 누르세요."
-        }
-        control={
-          !isLoaded ? null : isSignedIn ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busyAction !== null}
-                onClick={() => void handleOpenGoogleAuth("signIn")}
-              >
-                {singleSession ? "다른 Google 계정으로 전환" : "+ 다른 Google 계정 추가"}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busyAction !== null}
-                onClick={() => void handleOpenGoogleAuth("signUp")}
-              >
-                새 Google 계정 가입·전환
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={busyAction !== null}
-                onClick={() => void handleSignOutSession(sessionId ?? undefined)}
-              >
-                로그아웃
-              </Button>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={busyAction !== null}
-                onClick={() => void handleOpenGoogleAuth("signIn")}
-              >
-                Google로 로그인
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busyAction !== null}
-                onClick={() => void handleOpenGoogleAuth("signUp")}
-              >
-                새 Google 계정 가입
-              </Button>
-            </div>
-          )
-        }
-      />
+    <div className="mt-3 rounded-xl border border-border/60 bg-muted/10 px-3.5 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-medium text-muted-foreground">
+            T3 Connect 원격 릴레이 로그인 (선택 · 외부 원격 접속용)
+          </span>
+          {isLoaded && isSignedIn ? (
+            <Badge variant="outline" size="sm">
+              {primaryAccount ?? "연결됨"}
+            </Badge>
+          ) : null}
+        </div>
+        <Button type="button" size="xs" variant="ghost" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? "접기" : "관리"}
+        </Button>
+      </div>
 
-      {isSignedIn && sessionsLoaded && sessions && sessions.length > 1 ? (
-        <div className="mt-3 grid gap-2 rounded-xl border border-border/70 bg-muted/20 p-3">
-          {sessions.map((session) => {
-            const isActive = session.id === sessionId;
-            const sessionEmail =
-              session.user?.primaryEmailAddress?.emailAddress ??
-              session.user?.fullName ??
-              session.user?.username ??
-              session.id;
-            return (
-              <div
-                key={session.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs"
-              >
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate font-medium">{sessionEmail}</span>
-                  {isActive ? (
-                    <Badge variant="success" size="sm">
-                      활성
-                    </Badge>
-                  ) : null}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {!isActive ? (
-                    <Button
-                      type="button"
-                      size="xs"
-                      variant="outline"
-                      disabled={busyAction !== null}
-                      onClick={() => void handleSwitchSession(session.id)}
-                    >
-                      이 계정으로 전환
-                    </Button>
-                  ) : null}
+      {expanded ? (
+        <div className="mt-2.5 grid gap-2 border-t border-border/60 pt-2.5 text-xs">
+          <p className="text-[11px] text-muted-foreground">
+            {!isLoaded
+              ? "T3 Connect 상태를 확인하는 중입니다."
+              : pendingAuthAction !== null
+                ? "기존 세션을 정리하고 새 로그인 창을 여는 중입니다..."
+                : isSignedIn
+                  ? `${primaryAccount ?? "계정"}(으)로 T3 Connect 원격 릴레이에 로그인되어 있습니다.`
+                  : "원격 터널/모바일 릴레이가 필요할 때만 T3 Connect에 로그인하세요. 로컬 다중 Google 계정과 Drive 백업은 위 섹션에서 독립적으로 동작합니다."}
+          </p>
+          {isLoaded ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {isSignedIn ? (
+                <>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleOpenClerkAuth("signIn")}
+                  >
+                    계정 전환
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleOpenClerkAuth("signUp")}
+                  >
+                    새 계정 가입
+                  </Button>
                   <Button
                     type="button"
                     size="xs"
                     variant="ghost"
                     disabled={busyAction !== null}
-                    onClick={() => void handleSignOutSession(session.id)}
+                    onClick={() => void handleSignOut(sessionId ?? undefined)}
                   >
                     로그아웃
                   </Button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-
-      {bridge?.listAccountsT3 ? (
-        <div className="mt-3 rounded-xl border border-border/60 bg-muted/10 px-3.5 py-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="font-medium text-muted-foreground">
-                Google Drive 백업 직접 연결 (선택)
-              </span>
-              {driveAccounts.length > 0 ? (
-                <Badge variant="success" size="sm">
-                  {driveAccounts[0]?.email ?? "연결됨"}
-                </Badge>
-              ) : null}
+                </>
+              ) : (
+                <>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleOpenClerkAuth("signIn")}
+                  >
+                    T3 Connect 로그인
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleOpenClerkAuth("signUp")}
+                  >
+                    새 계정 가입
+                  </Button>
+                </>
+              )}
             </div>
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost"
-              onClick={() => setShowDriveConnect((v) => !v)}
-            >
-              {showDriveConnect ? "접기" : driveAccounts.length > 0 ? "관리" : "연결 설정"}
-            </Button>
-          </div>
+          ) : null}
 
-          {showDriveConnect ? (
-            <div className="mt-3 grid gap-2.5 border-t border-border/60 pt-3">
-              {driveAccounts.map((acc) => (
-                <div
-                  key={acc.subject}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-xs"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-medium">{acc.email ?? acc.name ?? acc.subject}</span>
-                    {acc.driveBackupLinked ? (
-                      <Badge variant="success" size="sm">
-                        Drive 연결됨
-                      </Badge>
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {acc.driveBackupLinked && driveAccounts.length > 1 ? (
+          {isSignedIn && sessionsLoaded && sessions && sessions.length > 1 ? (
+            <div className="grid gap-1.5 pt-1">
+              {sessions.map((session) => {
+                const isActive = session.id === sessionId;
+                const label =
+                  session.user?.primaryEmailAddress?.emailAddress ??
+                  session.user?.fullName ??
+                  session.id;
+                return (
+                  <div
+                    key={session.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/70 px-2.5 py-1.5"
+                  >
+                    <span className="truncate font-medium">{label}</span>
+                    <div className="flex items-center gap-1.5">
+                      {!isActive ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={busyAction !== null}
+                          onClick={() => void handleSwitchSession(session.id)}
+                        >
+                          전환
+                        </Button>
+                      ) : (
+                        <Badge variant="success" size="sm">
+                          활성
+                        </Badge>
+                      )}
                       <Button
                         type="button"
                         size="xs"
-                        variant="outline"
+                        variant="ghost"
                         disabled={busyAction !== null}
-                        onClick={() => void handleBindDriveAccount(acc)}
+                        onClick={() => void handleSignOut(session.id)}
                       >
-                        백업에 사용
+                        로그아웃
                       </Button>
-                    ) : null}
-                    <Button
-                      type="button"
-                      size="xs"
-                      variant="ghost"
-                      disabled={busyAction !== null}
-                      onClick={() => void handleRemoveDriveAccount(acc)}
-                    >
-                      해제
-                    </Button>
+                    </div>
                   </div>
-                </div>
-              ))}
-
-              <div className="grid gap-2 sm:grid-cols-12">
-                {!hasSavedClientId ? (
-                  <>
-                    <Input
-                      className="sm:col-span-5"
-                      value={clientId}
-                      onChange={(e) => setClientId(e.target.value)}
-                      placeholder="Google Cloud OAuth Client ID"
-                    />
-                    <Input
-                      className="sm:col-span-4"
-                      type="password"
-                      value={clientSecret}
-                      onChange={(e) => setClientSecret(e.target.value)}
-                      placeholder="Client Secret (Desktop 앱)"
-                    />
-                  </>
-                ) : (
-                  <p className="flex items-center text-[11px] text-muted-foreground sm:col-span-9">
-                    저장된 OAuth 설정으로 Google Drive(`drive.file`) 권한을 연결합니다.
-                  </p>
-                )}
-                {busyAction === "drive-connect" ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="sm:col-span-3"
-                    onClick={() => void handleCancelDriveAuth()}
-                  >
-                    인증 취소
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="sm:col-span-3"
-                    disabled={busyAction !== null}
-                    onClick={() => void handleConnectDriveOAuth()}
-                  >
-                    Google Drive 연결
-                  </Button>
-                )}
-              </div>
+                );
+              })}
             </div>
           ) : null}
         </div>
       ) : null}
-    </SettingsSection>
-  );
-}
-
-function BrowserGoogleAccountSection() {
-  return (
-    <SettingsSection {...searchableSetting("google-account")}>
-      <SettingsRow
-        title="웹 앱 로그인"
-        description="이 빌드에는 T3 Connect 설정이 없어 앱 안에서 로그인 상태를 확인할 수 없습니다. 웹 앱에서 Google 계정으로 로그인합니다."
-        control={
-          <Button
-            type="button"
-            size="sm"
-            onClick={() =>
-              window.desktopBridge?.openExternal(configuredHostedAppUrl()) ??
-              window.open(configuredHostedAppUrl(), "_blank")
-            }
-          >
-            웹 앱에서 로그인
-          </Button>
-        }
-      />
-    </SettingsSection>
+    </div>
   );
 }

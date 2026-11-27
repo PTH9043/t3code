@@ -69,6 +69,13 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.invoke(IpcChannels.GOOGLE_SET_DEFAULT_ACCOUNT_T3_CHANNEL, input),
     bindDriveBackupAccountT3: (subject) =>
       ipcRenderer.invoke(IpcChannels.GOOGLE_BIND_DRIVE_BACKUP_T3_CHANNEL, subject),
+    configureOAuthAppT3: (input) =>
+      ipcRenderer.invoke(IpcChannels.GOOGLE_CONFIGURE_OAUTH_APP_T3_CHANNEL, input),
+    addAccountT3: (input) => ipcRenderer.invoke(IpcChannels.GOOGLE_ADD_ACCOUNT_T3_CHANNEL, input),
+    grantDrivePermissionT3: (input) =>
+      ipcRenderer.invoke(IpcChannels.GOOGLE_GRANT_DRIVE_T3_CHANNEL, input),
+    revokeDrivePermissionT3: (subject) =>
+      ipcRenderer.invoke(IpcChannels.GOOGLE_REVOKE_DRIVE_T3_CHANNEL, subject),
     logoutT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGOUT_T3_CHANNEL),
     cancel: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_CANCEL_CHANNEL),
     status: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_STATUS_CHANNEL),

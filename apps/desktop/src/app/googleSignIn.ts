@@ -5,6 +5,7 @@ import type {
   EnrolledGoogleAccountSummary,
   GoogleAccountTier,
   GoogleEnrollmentStatusResult,
+  GoogleOAuthAppConfigResult,
 } from "@t3tools/contracts";
 import {
   GOOGLE_DRIVE_FILE_SCOPE,
@@ -23,10 +24,18 @@ export interface GoogleServerSignInResult {
   readonly refreshToken?: string;
 }
 
-/** Opens the system browser and receives one Google login on loopback. */
-async function signInGoogle(input: {
+export interface GoogleAuthorizationCodeResult {
+  readonly code: string;
+  readonly codeVerifier: string;
+  readonly redirectUri: string;
+  readonly request: GoogleOidcRequest;
+}
+
+const CALLBACK_SUCCESS_HTML = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>T3 Google 인증 완료</title></head><body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f172a;color:#f8fafc"><div style="text-align:center;padding:32px;border-radius:16px;background:#1e293b;border:1px solid #334155"><h2 style="margin:0 0 8px">Google 인증이 완료되었습니다</h2><p style="margin:0;color:#cbd5e1;font-size:14px">이 브라우저 탭을 닫고 T3 앱으로 돌아가세요.</p></div></body></html>`;
+
+/** Opens the system browser and receives only the one-time OAuth authorization code on loopback. */
+export async function receiveGoogleAuthorizationCode(input: {
   readonly clientId: string;
-  readonly clientSecret?: string;
   readonly openExternal: (url: string) => Promise<boolean>;
   readonly signal?: AbortSignal;
   readonly nonce?: string;
@@ -34,7 +43,8 @@ async function signInGoogle(input: {
   readonly loginHint?: string;
   readonly extraScopes?: ReadonlyArray<string>;
   readonly accessType?: "online" | "offline";
-}): Promise<GoogleServerSignInResult> {
+  readonly includeGrantedScopes?: boolean;
+}): Promise<GoogleAuthorizationCodeResult> {
   if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
 
   let request: GoogleOidcRequest | undefined;
@@ -45,7 +55,6 @@ async function signInGoogle(input: {
     resolveCode = resolve;
     rejectCode = reject;
   });
-  // A cancellation or server failure may arrive while the system browser opens.
   void codeReceived.catch(() => undefined);
   const fail = (error: Error) => {
     if (settled) return;
@@ -56,16 +65,16 @@ async function signInGoogle(input: {
   input.signal?.addEventListener("abort", onAbort, { once: true });
 
   const server = NodeHttp.createServer((incoming, response) => {
-    response.setHeader("content-type", "text/plain; charset=utf-8");
     response.setHeader("cache-control", "no-store");
     response.setHeader("referrer-policy", "no-referrer");
-    response.setHeader("content-security-policy", "default-src 'none'");
     if (!request || settled || incoming.method !== "GET") {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
       response.writeHead(400).end("Google 로그인 요청을 확인할 수 없습니다.");
       return;
     }
     const expected = new URL(request.redirectUri);
     if (incoming.headers.host !== expected.host) {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
       response.writeHead(400).end("Google 로그인 요청을 확인할 수 없습니다.");
       return;
     }
@@ -73,6 +82,7 @@ async function signInGoogle(input: {
     try {
       url = new URL(incoming.url ?? "", request.redirectUri);
     } catch {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
       response.writeHead(400).end("Google 로그인 요청을 확인할 수 없습니다.");
       return;
     }
@@ -83,16 +93,19 @@ async function signInGoogle(input: {
       states.length !== 1 ||
       states[0] !== request.state
     ) {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
       response.writeHead(400).end("Google 로그인 요청을 확인할 수 없습니다.");
       return;
     }
     try {
       const code = readGoogleOidcCallback(url.href, request);
       settled = true;
-      response.writeHead(200).end("인증 응답을 받았습니다. T3로 돌아가세요.");
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.writeHead(200).end(CALLBACK_SUCCESS_HTML);
       server.close();
       resolveCode(code);
     } catch {
+      response.setHeader("content-type", "text/plain; charset=utf-8");
       response.writeHead(400).end("Google 로그인이 취소되었거나 응답을 확인할 수 없습니다.");
       fail(new Error("Google 로그인이 취소되었거나 응답을 확인할 수 없습니다."));
       server.close();
@@ -123,6 +136,9 @@ async function signInGoogle(input: {
       ...(input.loginHint ? { loginHint: input.loginHint } : {}),
       ...(input.extraScopes ? { extraScopes: input.extraScopes } : {}),
       ...(input.accessType ? { accessType: input.accessType } : {}),
+      ...(input.includeGrantedScopes !== undefined
+        ? { includeGrantedScopes: input.includeGrantedScopes }
+        : {}),
     });
     if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
     const opened = await Promise.race([
@@ -133,24 +149,47 @@ async function signInGoogle(input: {
       throw new Error("Google 로그인을 위한 브라우저를 열지 못했습니다.");
     }
     const code = await codeReceived;
-    const exchanged = await exchangeGoogleOidcCodeDetailed({
-      code,
-      request,
-      ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
-    const identity = await verifyGoogleOidcIdentity({ idToken: exchanged.idToken, request });
     if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
     return {
-      identity,
-      idToken: exchanged.idToken,
-      ...(exchanged.refreshToken ? { refreshToken: exchanged.refreshToken } : {}),
+      code,
+      codeVerifier: request.verifier,
+      redirectUri: request.redirectUri,
+      request,
     };
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     if (server.listening) server.close();
     server.closeAllConnections();
   }
+}
+
+/** Opens the system browser and receives one Google login on loopback. */
+async function signInGoogle(input: {
+  readonly clientId: string;
+  readonly clientSecret?: string;
+  readonly openExternal: (url: string) => Promise<boolean>;
+  readonly signal?: AbortSignal;
+  readonly nonce?: string;
+  readonly prompt?: GoogleOidcPrompt;
+  readonly loginHint?: string;
+  readonly extraScopes?: ReadonlyArray<string>;
+  readonly accessType?: "online" | "offline";
+  readonly includeGrantedScopes?: boolean;
+}): Promise<GoogleServerSignInResult> {
+  const { code, request } = await receiveGoogleAuthorizationCode(input);
+  const exchanged = await exchangeGoogleOidcCodeDetailed({
+    code,
+    request,
+    ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const identity = await verifyGoogleOidcIdentity({ idToken: exchanged.idToken, request });
+  if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
+  return {
+    identity,
+    idToken: exchanged.idToken,
+    ...(exchanged.refreshToken ? { refreshToken: exchanged.refreshToken } : {}),
+  };
 }
 
 export async function signInWithGoogle(input: {
@@ -171,6 +210,7 @@ export async function signInWithGoogleForServer(input: {
   readonly loginHint?: string;
   readonly extraScopes?: ReadonlyArray<string>;
   readonly accessType?: "online" | "offline";
+  readonly includeGrantedScopes?: boolean;
   readonly openExternal: (url: string) => Promise<boolean>;
   readonly signal?: AbortSignal;
 }): Promise<GoogleServerSignInResult> {
@@ -180,6 +220,7 @@ export async function signInWithGoogleForServer(input: {
 export function createGoogleSignInController(
   authenticate: typeof signInWithGoogle = signInWithGoogle,
   authenticateForServer: typeof signInWithGoogleForServer = signInWithGoogleForServer,
+  receiveAuthCode: typeof receiveGoogleAuthorizationCode = receiveGoogleAuthorizationCode,
 ) {
   let active: AbortController | undefined;
   let identity: GoogleIdentity | null = null;
@@ -209,6 +250,7 @@ export function createGoogleSignInController(
       readonly loginHint?: string;
       readonly extraScopes?: ReadonlyArray<string>;
       readonly accessType?: "online" | "offline";
+      readonly includeGrantedScopes?: boolean;
       readonly openExternal: (url: string) => Promise<boolean>;
     }): Promise<GoogleServerSignInResult> {
       if (active) throw new Error("Google 로그인이 이미 진행 중입니다.");
@@ -219,6 +261,27 @@ export function createGoogleSignInController(
         if (controller.signal.aborted) throw new Error("Google 로그인이 취소되었습니다.");
         identity = verified.identity;
         return verified;
+      } finally {
+        if (active === controller) active = undefined;
+      }
+    },
+    async startAuthorizationCode(input: {
+      readonly clientId: string;
+      readonly nonce: string;
+      readonly prompt?: GoogleOidcPrompt;
+      readonly loginHint?: string;
+      readonly extraScopes?: ReadonlyArray<string>;
+      readonly accessType?: "online" | "offline";
+      readonly includeGrantedScopes?: boolean;
+      readonly openExternal: (url: string) => Promise<boolean>;
+    }): Promise<GoogleAuthorizationCodeResult> {
+      if (active) throw new Error("Google 인증이 이미 진행 중입니다. 취소 후 다시 시도하세요.");
+      const controller = new AbortController();
+      active = controller;
+      try {
+        const codeResult = await receiveAuthCode({ ...input, signal: controller.signal });
+        if (controller.signal.aborted) throw new Error("Google 로그인이 취소되었습니다.");
+        return codeResult;
       } finally {
         if (active === controller) active = undefined;
       }
@@ -234,6 +297,142 @@ export function createGoogleSignInController(
       active?.abort();
       identity = null;
     },
+  };
+}
+
+/** Server-managed OAuth flow: Desktop receives only the code, and Server exchanges tokens using DPAPI clientSecret. */
+export async function runServerManagedGoogleOAuthInT3(input: {
+  readonly baseUrl: string;
+  readonly subject?: string;
+  readonly loginHint?: string;
+  readonly grantDrive?: boolean;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+  readonly receiveCode: (input: {
+    readonly clientId: string;
+    readonly nonce: string;
+    readonly prompt: GoogleOidcPrompt;
+    readonly loginHint?: string;
+    readonly extraScopes?: ReadonlyArray<string>;
+    readonly accessType?: "online" | "offline";
+    readonly includeGrantedScopes?: boolean;
+  }) => Promise<Pick<GoogleAuthorizationCodeResult, "code" | "codeVerifier" | "redirectUri">>;
+}): Promise<EnrolledGoogleAccountSummary> {
+  const postJson = async (path: string, body: Record<string, unknown>) => {
+    const response = await input.fetcher(new URL(path, input.baseUrl).href, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+      },
+      body: JSON.stringify(body),
+      credentials: "include",
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`T3 Google 인증 요청 실패 (${response.status})`);
+    }
+    return (await response.json()) as unknown;
+  };
+
+  const started = (await postJson("/api/auth/google/oauth/start", {
+    ...(input.subject ? { subject: input.subject } : {}),
+    ...(input.grantDrive !== undefined ? { grantDrive: input.grantDrive } : {}),
+  })) as { readonly challenge?: string; readonly clientId?: string; readonly loginHint?: string };
+
+  if (!started?.challenge || !started?.clientId) {
+    throw new Error("OAuth 앱(Client ID)이 설정되지 않았습니다. 먼저 1회 설정을 저장해 주세요.");
+  }
+
+  const effectiveHint = input.loginHint?.trim() || started.loginHint?.trim() || undefined;
+  const grantDrive = input.grantDrive === true;
+  const prompt: GoogleOidcPrompt = grantDrive
+    ? effectiveHint
+      ? "consent"
+      : "select_account consent"
+    : "select_account";
+
+  const codeResult = await input.receiveCode({
+    clientId: started.clientId,
+    nonce: started.challenge,
+    prompt,
+    ...(effectiveHint ? { loginHint: effectiveHint } : {}),
+    ...(grantDrive
+      ? {
+          extraScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+          accessType: "offline" as const,
+          includeGrantedScopes: true,
+        }
+      : { includeGrantedScopes: true }),
+  });
+
+  const exchanged = (await postJson("/api/auth/google/oauth/exchange", {
+    challenge: started.challenge,
+    code: codeResult.code,
+    codeVerifier: codeResult.codeVerifier,
+    redirectUri: codeResult.redirectUri,
+    ...(grantDrive ? { grantDrive: true } : {}),
+  })) as { readonly subject?: string; readonly account?: EnrolledGoogleAccountSummary };
+
+  if (!exchanged?.account?.subject) {
+    throw new Error("T3 Google 계정 저장 결과를 확인하지 못했습니다.");
+  }
+  return exchanged.account;
+}
+
+export async function configureGoogleOAuthAppInT3(input: {
+  readonly baseUrl: string;
+  readonly clientId: string;
+  readonly clientSecret?: string;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}): Promise<GoogleOAuthAppConfigResult> {
+  const response = await input.fetcher(
+    new URL("/api/auth/google/oauth/config", input.baseUrl).href,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+      },
+      body: JSON.stringify({
+        clientId: input.clientId.trim(),
+        ...(input.clientSecret !== undefined ? { clientSecret: input.clientSecret.trim() } : {}),
+      }),
+      credentials: "include",
+      redirect: "error",
+    },
+  );
+  if (!response.ok) throw new Error("Google OAuth 앱 설정을 저장하지 못했습니다.");
+  return (await response.json()) as GoogleOAuthAppConfigResult;
+}
+
+export async function revokeGoogleDrivePermissionInT3(input: {
+  readonly baseUrl: string;
+  readonly subject: string;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}): Promise<{
+  readonly revoked: boolean;
+  readonly accounts: ReadonlyArray<EnrolledGoogleAccountSummary>;
+}> {
+  const response = await input.fetcher(
+    new URL("/api/auth/google/accounts/drive-revoke", input.baseUrl).href,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+      },
+      body: JSON.stringify({ subject: input.subject }),
+      credentials: "include",
+      redirect: "error",
+    },
+  );
+  if (!response.ok) throw new Error("Google Drive 권한을 해제하지 못했습니다.");
+  return (await response.json()) as {
+    readonly revoked: boolean;
+    readonly accounts: ReadonlyArray<EnrolledGoogleAccountSummary>;
   };
 }
 
@@ -404,6 +603,9 @@ export async function listGoogleAccountsFromT3(input: {
   }
   return {
     registered: result.registered,
+    oauthConfigured: Boolean(result.oauthConfigured || result.defaultClientId),
+    activeDriveSubject:
+      typeof result.activeDriveSubject === "string" ? result.activeDriveSubject : null,
     accounts: Array.isArray(result.accounts) ? result.accounts : [],
     defaultSubject: typeof result.defaultSubject === "string" ? result.defaultSubject : null,
     defaultClientId: typeof result.defaultClientId === "string" ? result.defaultClientId : null,

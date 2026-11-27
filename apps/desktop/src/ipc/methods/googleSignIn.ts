@@ -2,6 +2,7 @@ import {
   EnrolledGoogleAccountSummary,
   GoogleAccountTier,
   GoogleEnrollmentStatusResult,
+  GoogleOAuthAppConfigResult,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -10,10 +11,13 @@ import * as Schema from "effect/Schema";
 import {
   authenticateGoogleToT3,
   bindDriveBackupAccountInT3,
+  configureGoogleOAuthAppInT3,
   createGoogleSignInController,
   googleEnrollmentStatus,
   listGoogleAccountsFromT3,
   removeGoogleFromT3,
+  revokeGoogleDrivePermissionInT3,
+  runServerManagedGoogleOAuthInT3,
   setDefaultGoogleAccountInT3,
 } from "../../app/googleSignIn.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
@@ -35,6 +39,12 @@ class DesktopGoogleSignInError extends Schema.TaggedErrorClass<DesktopGoogleSign
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
+    if (this.cause instanceof Error && this.cause.message.trim()) {
+      return this.cause.message;
+    }
+    if (typeof this.cause === "string" && this.cause.trim()) {
+      return this.cause;
+    }
     return "Google 로그인을 완료하지 못했습니다. 설정과 인증 상태를 확인하세요.";
   }
 }
@@ -334,6 +344,115 @@ export const bindDriveBackupAccountT3 = DesktopIpc.makeIpcMethod({
     return yield* Effect.tryPromise({
       try: () =>
         bindDriveBackupAccountInT3({
+          subject,
+          ...(ctx.bearerToken ? { bearerToken: ctx.bearerToken } : {}),
+          baseUrl: ctx.baseUrl,
+          fetcher: ctx.window.webContents.session.fetch.bind(ctx.window.webContents.session),
+        }),
+      catch: (cause) => new DesktopGoogleSignInError({ cause }),
+    });
+  }),
+});
+
+export const configureGoogleOAuthAppT3 = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GOOGLE_CONFIGURE_OAUTH_APP_T3_CHANNEL,
+  payload: Schema.Struct({
+    clientId: Schema.String,
+    clientSecret: Schema.optionalKey(Schema.String),
+  }),
+  result: GoogleOAuthAppConfigResult,
+  handler: Effect.fn("desktop.ipc.googleConfigureOAuthAppT3")(function* (payload) {
+    const ctx = yield* resolvePrimaryContext();
+    if (payload.clientSecret?.trim()) {
+      cachedClientSecret = payload.clientSecret.trim();
+    }
+    return yield* Effect.tryPromise({
+      try: () =>
+        configureGoogleOAuthAppInT3({
+          clientId: payload.clientId,
+          ...(payload.clientSecret !== undefined ? { clientSecret: payload.clientSecret } : {}),
+          ...(ctx.bearerToken ? { bearerToken: ctx.bearerToken } : {}),
+          baseUrl: ctx.baseUrl,
+          fetcher: ctx.window.webContents.session.fetch.bind(ctx.window.webContents.session),
+        }),
+      catch: (cause) => new DesktopGoogleSignInError({ cause }),
+    });
+  }),
+});
+
+export const addGoogleAccountT3 = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GOOGLE_ADD_ACCOUNT_T3_CHANNEL,
+  payload: Schema.UndefinedOr(
+    Schema.Struct({
+      grantDrive: Schema.optionalKey(Schema.Boolean),
+      loginHint: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  result: EnrolledGoogleAccountSummary,
+  handler: Effect.fn("desktop.ipc.googleAddAccountT3")(function* (payload) {
+    const shell = yield* ElectronShell.ElectronShell;
+    const ctx = yield* resolvePrimaryContext();
+    return yield* Effect.tryPromise({
+      try: () =>
+        runServerManagedGoogleOAuthInT3({
+          baseUrl: ctx.baseUrl,
+          ...(payload?.grantDrive !== undefined ? { grantDrive: payload.grantDrive } : {}),
+          ...(payload?.loginHint ? { loginHint: payload.loginHint } : {}),
+          ...(ctx.bearerToken ? { bearerToken: ctx.bearerToken } : {}),
+          fetcher: ctx.window.webContents.session.fetch.bind(ctx.window.webContents.session),
+          receiveCode: (codeInput) =>
+            controller.startAuthorizationCode({
+              ...codeInput,
+              openExternal: (url) => Effect.runPromise(shell.openExternal(url)),
+            }),
+        }),
+      catch: (cause) => new DesktopGoogleSignInError({ cause }),
+    });
+  }),
+});
+
+export const grantGoogleDrivePermissionT3 = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GOOGLE_GRANT_DRIVE_T3_CHANNEL,
+  payload: Schema.Struct({
+    subject: Schema.String,
+    loginHint: Schema.optionalKey(Schema.String),
+  }),
+  result: EnrolledGoogleAccountSummary,
+  handler: Effect.fn("desktop.ipc.googleGrantDriveT3")(function* (payload) {
+    const shell = yield* ElectronShell.ElectronShell;
+    const ctx = yield* resolvePrimaryContext();
+    return yield* Effect.tryPromise({
+      try: () =>
+        runServerManagedGoogleOAuthInT3({
+          baseUrl: ctx.baseUrl,
+          subject: payload.subject,
+          grantDrive: true,
+          ...(payload.loginHint ? { loginHint: payload.loginHint } : {}),
+          ...(ctx.bearerToken ? { bearerToken: ctx.bearerToken } : {}),
+          fetcher: ctx.window.webContents.session.fetch.bind(ctx.window.webContents.session),
+          receiveCode: (codeInput) =>
+            controller.startAuthorizationCode({
+              ...codeInput,
+              openExternal: (url) => Effect.runPromise(shell.openExternal(url)),
+            }),
+        }),
+      catch: (cause) => new DesktopGoogleSignInError({ cause }),
+    });
+  }),
+});
+
+export const revokeGoogleDrivePermissionT3 = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GOOGLE_REVOKE_DRIVE_T3_CHANNEL,
+  payload: Schema.String,
+  result: Schema.Struct({
+    revoked: Schema.Boolean,
+    accounts: Schema.Array(EnrolledGoogleAccountSummary),
+  }),
+  handler: Effect.fn("desktop.ipc.googleRevokeDriveT3")(function* (subject) {
+    const ctx = yield* resolvePrimaryContext();
+    return yield* Effect.tryPromise({
+      try: () =>
+        revokeGoogleDrivePermissionInT3({
           subject,
           ...(ctx.bearerToken ? { bearerToken: ctx.bearerToken } : {}),
           baseUrl: ctx.baseUrl,

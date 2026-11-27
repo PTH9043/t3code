@@ -1108,6 +1108,22 @@ export interface DesktopBridge {
       readonly bound: boolean;
       readonly email: string | null;
     }>;
+    readonly configureOAuthAppT3?: (input: {
+      readonly clientId: string;
+      readonly clientSecret?: string;
+    }) => Promise<import("./environmentHttp.ts").GoogleOAuthAppConfigResult>;
+    readonly addAccountT3?: (input?: {
+      readonly grantDrive?: boolean;
+      readonly loginHint?: string;
+    }) => Promise<import("./environmentHttp.ts").EnrolledGoogleAccountSummary>;
+    readonly grantDrivePermissionT3?: (input: {
+      readonly subject: string;
+      readonly loginHint?: string;
+    }) => Promise<import("./environmentHttp.ts").EnrolledGoogleAccountSummary>;
+    readonly revokeDrivePermissionT3?: (subject: string) => Promise<{
+      readonly revoked: boolean;
+      readonly accounts: ReadonlyArray<import("./environmentHttp.ts").EnrolledGoogleAccountSummary>;
+    }>;
     readonly logoutT3?: () => Promise<void>;
     readonly start: (clientId: string) => Promise<{
       readonly subject: string;

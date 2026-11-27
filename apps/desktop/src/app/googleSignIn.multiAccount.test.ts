@@ -3,8 +3,11 @@ import { GOOGLE_DRIVE_FILE_SCOPE } from "@t3tools/shared/googleOidc";
 import {
   authenticateGoogleToT3,
   bindDriveBackupAccountInT3,
+  configureGoogleOAuthAppInT3,
   listGoogleAccountsFromT3,
   removeGoogleFromT3,
+  revokeGoogleDrivePermissionInT3,
+  runServerManagedGoogleOAuthInT3,
   setDefaultGoogleAccountInT3,
 } from "./googleSignIn.ts";
 
@@ -140,6 +143,132 @@ describe("desktop googleSignIn multi-account & Drive backup bridge", () => {
       "/api/auth/google/accounts/drive-bind",
       "/api/auth/google/accounts/remove",
       "/api/auth/google/unenroll",
+    ]);
+  });
+
+  it("supports server-managed OAuth config, adding accounts, incremental Drive permission, and revoking Drive", async () => {
+    const requests: Array<{ path: string; body?: Record<string, unknown> }> = [];
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const path = new URL(url).pathname;
+      const body =
+        typeof init?.body === "string"
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : undefined;
+      requests.push({ path, ...(body ? { body } : {}) });
+
+      if (path === "/api/auth/google/oauth/config") {
+        return new Response(
+          JSON.stringify({ configured: true, clientId: "cid-app", hasClientSecret: true }),
+          { status: 200 },
+        );
+      }
+      if (path === "/api/auth/google/oauth/start") {
+        return new Response(
+          JSON.stringify({
+            challenge: "chal-2",
+            clientId: "cid-app",
+            ...(body?.subject === "sub-2" ? { loginHint: "two@example.com" } : {}),
+          }),
+          { status: 200 },
+        );
+      }
+      if (path === "/api/auth/google/oauth/exchange") {
+        return new Response(
+          JSON.stringify({
+            subject: "sub-2",
+            account: {
+              subject: "sub-2",
+              clientId: "cid-app",
+              email: "two@example.com",
+              driveBackupLinked: Boolean(body?.grantDrive),
+              addedAt: "2026-11-27T00:00:00Z",
+              isDefault: false,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (path === "/api/auth/google/accounts/drive-revoke") {
+        return new Response(
+          JSON.stringify({
+            revoked: true,
+            accounts: [
+              {
+                subject: "sub-2",
+                clientId: "cid-app",
+                email: "two@example.com",
+                driveBackupLinked: false,
+                addedAt: "2026-11-27T00:00:00Z",
+                isDefault: false,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const cfg = await configureGoogleOAuthAppInT3({
+      baseUrl: "http://127.0.0.1:13773/",
+      clientId: "cid-app",
+      clientSecret: "sec-app",
+      bearerToken: "tok-1",
+      fetcher,
+    });
+    expect(cfg).toEqual({ configured: true, clientId: "cid-app", hasClientSecret: true });
+
+    const receiveCode = vi.fn(async (codeInput) => {
+      if (codeInput.accessType === "offline") {
+        expect(codeInput.prompt).toBe("consent");
+        expect(codeInput.loginHint).toBe("two@example.com");
+        expect(codeInput.extraScopes).toEqual([GOOGLE_DRIVE_FILE_SCOPE]);
+        expect(codeInput.includeGrantedScopes).toBe(true);
+      } else {
+        expect(codeInput.prompt).toBe("select_account");
+        expect(codeInput.includeGrantedScopes).toBe(true);
+      }
+      return {
+        code: "auth-code-9",
+        codeVerifier: "verifier-9",
+        redirectUri: "http://127.0.0.1:45678/oauth2/callback",
+      };
+    });
+
+    const added = await runServerManagedGoogleOAuthInT3({
+      baseUrl: "http://127.0.0.1:13773/",
+      bearerToken: "tok-1",
+      fetcher,
+      receiveCode,
+    });
+    expect(added.subject).toBe("sub-2");
+    expect(added.driveBackupLinked).toBe(false);
+
+    const granted = await runServerManagedGoogleOAuthInT3({
+      baseUrl: "http://127.0.0.1:13773/",
+      subject: "sub-2",
+      grantDrive: true,
+      bearerToken: "tok-1",
+      fetcher,
+      receiveCode,
+    });
+    expect(granted.driveBackupLinked).toBe(true);
+
+    const revoked = await revokeGoogleDrivePermissionInT3({
+      baseUrl: "http://127.0.0.1:13773/",
+      subject: "sub-2",
+      bearerToken: "tok-1",
+      fetcher,
+    });
+    expect(revoked.revoked).toBe(true);
+    expect(revoked.accounts[0]?.driveBackupLinked).toBe(false);
+    expect(requests.map((r) => r.path)).toEqual([
+      "/api/auth/google/oauth/config",
+      "/api/auth/google/oauth/start",
+      "/api/auth/google/oauth/exchange",
+      "/api/auth/google/oauth/start",
+      "/api/auth/google/oauth/exchange",
+      "/api/auth/google/accounts/drive-revoke",
     ]);
   });
 });

@@ -9,6 +9,7 @@ import type {
   DriveBackupTransportMode,
   DriveBackupVerifyRestoreResult,
   EnrolledGoogleAccountSummary,
+  GoogleEnrollmentStatusResult,
 } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
@@ -162,9 +163,10 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
   const [dryRunResult, setDryRunResult] = useState<DriveBackupDryRunResult | null>(null);
   const [verifyResult, setVerifyResult] = useState<DriveBackupVerifyRestoreResult | null>(null);
   const [mirrorResult, setMirrorResult] = useState<DriveBackupSyncMirrorResult | null>(null);
-  const [linkedGoogleAccounts, setLinkedGoogleAccounts] = useState<
-    ReadonlyArray<EnrolledGoogleAccountSummary>
-  >([]);
+  const [linkedGoogleStatus, setLinkedGoogleStatus] = useState<GoogleEnrollmentStatusResult | null>(
+    null,
+  );
+  const linkedGoogleAccounts = linkedGoogleStatus?.accounts ?? [];
 
   const refreshLinkedAccounts = useCallback(async () => {
     const listAccounts =
@@ -174,7 +176,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     if (!listAccounts) return;
     try {
       const res = await listAccounts();
-      setLinkedGoogleAccounts(res.accounts);
+      setLinkedGoogleStatus(res);
     } catch {
       // ignore if unavailable
     }
@@ -197,13 +199,94 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
         "Google Drive 백업 계정 연결 완료",
         `${res.email ?? account.email ?? account.subject} 계정이 드라이브 백업 대상으로 활성화되었습니다.`,
       );
+      await refreshLinkedAccounts();
       stateQuery.refresh();
     } catch {
       toastManager.add({
         type: "error",
         title: "Google Drive 계정 연결 실패",
-        description: "설정 → Google 계정에서 Drive 백업 권한 체크 후 계정을 등록해 주세요.",
+        description: "해당 계정의 Drive 권한을 먼저 허용해 주세요.",
       });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleGrantDriveForAccount = async (account: EnrolledGoogleAccountSummary) => {
+    const grantFn =
+      typeof window !== "undefined"
+        ? window.desktopBridge?.googleSignIn?.grantDrivePermissionT3
+        : undefined;
+    if (!grantFn) return;
+    if (!linkedGoogleStatus?.hasClientSecret) {
+      toastManager.add({
+        type: "error",
+        title: "OAuth Client Secret 1회 설정 필요",
+        description: "설정 → Google 계정에서 OAuth Client Secret을 먼저 1회 저장해 주세요.",
+      });
+      return;
+    }
+    setBusyAction(`grant-google:${account.subject}`);
+    try {
+      const updated = await grantFn({
+        subject: account.subject,
+        ...(account.email ? { loginHint: account.email } : {}),
+      });
+      notifySuccess(
+        "Google Drive 권한 허용 완료",
+        `${updated.email ?? account.email ?? account.subject} 계정이 Drive 백업에 자동 연결되었습니다.`,
+      );
+      await refreshLinkedAccounts();
+      stateQuery.refresh();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Google Drive 권한 허용 실패",
+        description:
+          error instanceof Error ? error.message : "브라우저에서 Drive 권한을 허용해 주세요.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleAddAndGrantDrive = async () => {
+    const addFn =
+      typeof window !== "undefined" ? window.desktopBridge?.googleSignIn?.addAccountT3 : undefined;
+    if (!addFn) return;
+    if (!linkedGoogleStatus?.oauthConfigured || !linkedGoogleStatus.hasClientSecret) {
+      toastManager.add({
+        type: "error",
+        title: "최초 1회 OAuth 앱 설정 필요",
+        description:
+          "설정 → Google 계정에서 OAuth Client ID와 Client Secret을 먼저 1회 저장해 주세요.",
+      });
+      return;
+    }
+    setBusyAction("grant-google:new");
+    try {
+      const added = await addFn({ grantDrive: true });
+      notifySuccess(
+        "Google 계정 로그인 및 Drive 허용 완료",
+        `${added.email ?? added.name ?? added.subject} 계정이 Drive 백업에 연결되었습니다.`,
+      );
+      await refreshLinkedAccounts();
+      stateQuery.refresh();
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Google Drive 연결 실패",
+        description:
+          error instanceof Error ? error.message : "브라우저에서 권한 허용을 완료해 주세요.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCancelGoogleAuth = async () => {
+    try {
+      await window.desktopBridge?.googleSignIn?.cancel?.();
     } finally {
       setBusyAction(null);
     }
@@ -634,38 +717,99 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
             </div>
           ) : (
             <div className="grid gap-3 rounded-xl border border-border bg-muted/20 p-3.5">
-              {linkedGoogleAccounts.length > 0 ? (
-                <div className="grid gap-2 rounded-lg border border-primary/25 bg-primary/5 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="grid gap-2.5 rounded-lg border border-primary/25 bg-primary/5 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-foreground">
-                      등록된 T3 로컬 Google 계정에서 1클릭 연결
+                      Google 계정에서 Drive 권한 1클릭 허용 · 전환
                     </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      수동 토큰 입력 없이 DPAPI에 저장된 Drive 권한을 바로 사용합니다.
-                    </span>
+                    {config?.gdriveHasCredentials ? (
+                      <Badge variant="success" size="sm">
+                        {config.gdriveConnectedEmail ?? "Drive 권한 허용됨"}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" size="sm">
+                        미허용
+                      </Badge>
+                    )}
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {linkedGoogleAccounts.map((acc) => (
+                  {busyAction?.startsWith("grant-google:") ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => void handleCancelGoogleAuth()}
+                    >
+                      인증 취소
+                    </Button>
+                  ) : null}
+                </div>
+
+                {linkedGoogleAccounts.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {linkedGoogleAccounts.map((acc) => {
+                      const isActive =
+                        acc.driveBackupLinked &&
+                        (linkedGoogleStatus?.activeDriveSubject === acc.subject ||
+                          (!linkedGoogleStatus?.activeDriveSubject &&
+                            Boolean(config?.gdriveConnectedEmail) &&
+                            config?.gdriveConnectedEmail === acc.email));
+                      const label = acc.email ?? acc.name ?? acc.subject;
+                      return acc.driveBackupLinked ? (
+                        <Button
+                          key={acc.subject}
+                          type="button"
+                          size="xs"
+                          variant={isActive ? "default" : "outline"}
+                          disabled={busyAction !== null}
+                          onClick={() => void handleBindGoogleAccount(acc)}
+                        >
+                          {label}
+                          {isActive ? " ✓" : " (백업에 사용)"}
+                        </Button>
+                      ) : (
+                        <Button
+                          key={acc.subject}
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={busyAction !== null}
+                          onClick={() => void handleGrantDriveForAccount(acc)}
+                        >
+                          {label} · Drive 권한 허용
+                        </Button>
+                      );
+                    })}
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={busyAction !== null}
+                      onClick={() => void handleAddAndGrantDrive()}
+                    >
+                      + 다른 Google 계정 허용
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span>
+                      {linkedGoogleStatus?.oauthConfigured
+                        ? "버튼을 눌러 Google 계정에 로그인하고 Drive 권한을 허용하세요."
+                        : "설정 → Google 계정에서 OAuth Client ID/Secret을 1회 저장하면 여기서 1클릭으로 Drive 권한을 허용할 수 있습니다."}
+                    </span>
+                    {linkedGoogleStatus?.oauthConfigured ? (
                       <Button
-                        key={acc.subject}
                         type="button"
                         size="xs"
-                        variant={
-                          config?.gdriveConnectedEmail && config.gdriveConnectedEmail === acc.email
-                            ? "default"
-                            : "outline"
-                        }
-                        disabled={busyAction !== null || !acc.driveBackupLinked}
-                        onClick={() => void handleBindGoogleAccount(acc)}
+                        disabled={busyAction !== null}
+                        onClick={() => void handleAddAndGrantDrive()}
                       >
-                        {acc.label || acc.email || acc.subject}
-                        {acc.tier ? ` (${acc.tier.toUpperCase()})` : ""}
-                        {acc.driveBackupLinked ? "" : " · Drive 미연결"}
+                        Google 계정에서 Drive 권한 허용하기
                       </Button>
-                    ))}
+                    ) : null}
                   </div>
-                </div>
-              ) : null}
+                )}
+              </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-1.5">
@@ -686,55 +830,65 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
                     placeholder="T3-Knowledge"
                   />
                 </div>
-                <div className="grid gap-1.5">
-                  <label className="text-xs font-medium">연결 Google 계정 표시 이메일 (선택)</label>
-                  <Input
-                    value={gdriveEmail}
-                    onChange={(e) => setGdriveEmail(e.target.value)}
-                    placeholder="user@gmail.com"
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <label className="text-xs font-medium">
-                    OAuth2 Client ID (수동 입력 · 변경 시)
-                  </label>
-                  <Input
-                    value={gdriveClientId}
-                    onChange={(e) => setGdriveClientId(e.target.value)}
-                    placeholder={
-                      config?.gdriveHasCredentials
-                        ? "저장됨 (변경하려면 새 값 입력)"
-                        : "xxxx.apps.googleusercontent.com"
-                    }
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <label className="text-xs font-medium">OAuth2 Client Secret</label>
-                  <Input
-                    type="password"
-                    value={gdriveClientSecret}
-                    onChange={(e) => setGdriveClientSecret(e.target.value)}
-                    placeholder={
-                      config?.gdriveHasCredentials
-                        ? "•••••••• (DPAPI 암호화 보관 중)"
-                        : "GOCSPX-..."
-                    }
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <label className="text-xs font-medium">
-                    OAuth2 Refresh Token (`drive.file` 스코프)
-                  </label>
-                  <Input
-                    type="password"
-                    value={gdriveRefreshToken}
-                    onChange={(e) => setGdriveRefreshToken(e.target.value)}
-                    placeholder={
-                      config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "1//0..."
-                    }
-                  />
-                </div>
               </div>
+
+              <details className="rounded-lg border border-border/60 bg-background/50 p-3 text-xs">
+                <summary className="cursor-pointer font-medium text-muted-foreground">
+                  고급: 수동 OAuth 토큰 직접 입력 (직접 Refresh Token을 관리할 때만 사용)
+                </summary>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-1.5">
+                    <label className="text-xs font-medium">
+                      연결 Google 계정 표시 이메일 (선택)
+                    </label>
+                    <Input
+                      value={gdriveEmail}
+                      onChange={(e) => setGdriveEmail(e.target.value)}
+                      placeholder="user@gmail.com"
+                    />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <label className="text-xs font-medium">
+                      OAuth2 Client ID (수동 입력 · 변경 시)
+                    </label>
+                    <Input
+                      value={gdriveClientId}
+                      onChange={(e) => setGdriveClientId(e.target.value)}
+                      placeholder={
+                        config?.gdriveHasCredentials
+                          ? "저장됨 (변경하려면 새 값 입력)"
+                          : "xxxx.apps.googleusercontent.com"
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <label className="text-xs font-medium">OAuth2 Client Secret</label>
+                    <Input
+                      type="password"
+                      value={gdriveClientSecret}
+                      onChange={(e) => setGdriveClientSecret(e.target.value)}
+                      placeholder={
+                        config?.gdriveHasCredentials
+                          ? "•••••••• (DPAPI 암호화 보관 중)"
+                          : "GOCSPX-..."
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <label className="text-xs font-medium">
+                      OAuth2 Refresh Token (`drive.file` 스코프)
+                    </label>
+                    <Input
+                      type="password"
+                      value={gdriveRefreshToken}
+                      onChange={(e) => setGdriveRefreshToken(e.target.value)}
+                      placeholder={
+                        config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "1//0..."
+                      }
+                    />
+                  </div>
+                </div>
+              </details>
             </div>
           )}
 
