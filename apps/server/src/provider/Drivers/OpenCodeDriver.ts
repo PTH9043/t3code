@@ -41,6 +41,8 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { acquireAntseedCompatProxy } from "../antseedCompatProxy.ts";
+import { antseedApiBaseUrl } from "../antseedApiUrl.ts";
 import { openCodeApiEnvironment, openCodeContinuationKey } from "../OpenCodeApiConnection.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -121,9 +123,44 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
       const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
+      const antseedCompatUpstream =
+        effectiveConfig.enabled &&
+        !effectiveConfig.serverUrl.trim() &&
+        effectiveConfig.apiConnection?.providerId === "t3_antseed" &&
+        effectiveConfig.apiConnection.protocol === "chat-completions"
+          ? yield* Effect.try({
+              try: () => antseedApiBaseUrl(effectiveConfig.apiConnection!.baseUrl),
+              catch: (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail:
+                    cause instanceof Error ? cause.message : "Invalid Antseed API connection URL.",
+                  cause,
+                }),
+            })
+          : undefined;
+      const antseedProxy = antseedCompatUpstream
+        ? yield* acquireAntseedCompatProxy(antseedCompatUpstream).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: `Failed to start Antseed compatibility proxy: ${cause.message}`,
+                  cause,
+                }),
+            ),
+          )
+        : undefined;
       const processEnv = yield* Effect.try({
         try: () =>
-          openCodeApiEnvironment(effectiveConfig, mergeProviderInstanceEnvironment(environment)),
+          openCodeApiEnvironment(
+            effectiveConfig,
+            mergeProviderInstanceEnvironment(environment),
+            environment,
+            antseedProxy ? { baseUrlOverride: antseedProxy.baseUrl } : undefined,
+          ),
         catch: (cause) =>
           new ProviderDriverError({
             driver: DRIVER_KIND,

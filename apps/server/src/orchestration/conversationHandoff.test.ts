@@ -194,6 +194,33 @@ describe("conservative conversation handoff", () => {
     };
     expect(plan(thread).text).toBe(buildConversationHandoff(thread.messages));
   });
+  it("identifies a shortened source message and keeps the current request authoritative", () => {
+    const thread = {
+      ...fixture(),
+      messages: [
+        message("long-request", "user", `${"x".repeat(10_000)}LATE_CONDITION`),
+        ...Array.from({ length: 35 }, (_, index) =>
+          message(`progress-${index}`, "assistant", "Checking the previous step."),
+        ),
+        message("current", "user", "continue"),
+      ],
+    };
+    const handoff = buildConversationHandoff(thread.messages, MessageId.make("current"))!;
+    expect(handoff).toContain("[message:long-request]");
+    expect(handoff).toContain("원문의 처음과 끝을 발췌했습니다");
+    expect(handoff).toContain("최신 사용자 지시를 우선");
+    expect(handoff).toContain("LATE_CONDITION");
+    expect(handoff).toContain("[message:progress-34]");
+    expect(handoff).not.toContain("[message:progress-0]");
+    expect(handoff.match(/\[message:long-request\]/g)).toHaveLength(1);
+    expect(handoff).not.toContain("새 메시지에만 답하라");
+  });
+  it("does not use unbounded history when the current message is missing", () => {
+    const thread = fixture();
+    expect(
+      buildConversationHandoff(thread.messages, MessageId.make("not-in-window")),
+    ).toBeUndefined();
+  });
   it("excludes the turn's own message and later queued messages from the history block", () => {
     const thread = fixture();
     const bounded = buildConversationHandoff(thread.messages, MessageId.make("current"))!;

@@ -50,6 +50,10 @@ interface Deferred {
 const HIDDEN_UPDATE_TAP_COUNT = 5;
 let appUpdateCheckInFlight: AppUpdateCheckInFlight | undefined;
 
+function canCheckForUpdates(client: AppUpdateClient): boolean {
+  return client.isEnabled && !(client === Updates && typeof __DEV__ !== "undefined" && __DEV__);
+}
+
 /**
  * Keeps the manual update affordance discoverable only to someone deliberately
  * tapping the version row five times.
@@ -73,7 +77,12 @@ export function registerHiddenUpdateTap(count: number): {
 
 export async function runAppUpdateCheck(options: AppUpdateCheckOptions = {}): Promise<void> {
   const client = options.client ?? Updates;
-  if (!client.isEnabled) return;
+  if (!canCheckForUpdates(client)) {
+    if (client === Updates && typeof __DEV__ !== "undefined" && __DEV__) {
+      options.onFailure?.("Updates are not available in development builds.");
+    }
+    return;
+  }
 
   if (appUpdateCheckInFlight) {
     await observeAppUpdateCheck(appUpdateCheckInFlight, options);
@@ -219,7 +228,7 @@ export function createAppUpdateLaunchCheck(
   let started = false;
 
   return () => {
-    if (started || !client.isEnabled) return undefined;
+    if (started || !canCheckForUpdates(client)) return undefined;
     started = true;
     return runAppUpdateCheck({ client });
   };

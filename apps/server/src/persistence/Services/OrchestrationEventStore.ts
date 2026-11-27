@@ -46,6 +46,13 @@ export interface OrchestrationEventStoreShape {
     limit?: number,
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
 
+  /** Replay selected event types through an inclusive snapshot sequence. */
+  readonly readTypesThroughSequence?: (
+    sequenceExclusive: number,
+    sequenceInclusive: number,
+    types: ReadonlyArray<OrchestrationEvent["type"]>,
+  ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
+
   /**
    * Read all events from the beginning of the stream.
    *

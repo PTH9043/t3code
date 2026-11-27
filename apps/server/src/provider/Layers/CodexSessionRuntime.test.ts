@@ -141,6 +141,21 @@ describe("buildTurnStartParams", () => {
       NodeAssert.equal(params.approvalPolicy, "untrusted");
     }),
   );
+  it.effect("carries the subordinate roster in the turn's developer instructions", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "hello",
+        interactionMode: "default",
+        subordinateRoster: "<subordinate_models>\n- worker\n</subordinate_models>",
+      });
+      NodeAssert.match(
+        params.collaborationMode?.settings.developer_instructions ?? "",
+        /<subordinate_models>\n- worker\n<\/subordinate_models>$/,
+      );
+    }),
+  );
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(
@@ -369,6 +384,20 @@ describe("buildCodexDeveloperInstructions", () => {
     NodeAssert.match(instructions, /as gpt 5\.3 codex with high effort reasoning effort/);
     NodeAssert.doesNotMatch(instructions, /<runtime_info>[^<]*\n/);
   });
+
+  it("appends the subordinate roster only when the answering model has one", () => {
+    const roster = "<subordinate_models>\n- worker — Codex · gpt-6-sol\n</subordinate_models>";
+    const runtime = { model: "gpt-5.4", reasoningEffort: "high" };
+    const instructions = buildCodexDeveloperInstructions("default", {
+      ...runtime,
+      subordinateRoster: roster,
+    });
+    NodeAssert.ok(instructions.endsWith(`</runtime_info>\n\n${roster}`));
+    NodeAssert.doesNotMatch(
+      buildCodexDeveloperInstructions("default", runtime),
+      /subordinate_models/,
+    );
+  });
 });
 
 describe("T3 browser developer instructions", () => {
@@ -506,6 +535,49 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("overrides native spawn only for restricted starts and resumes", () =>
+    Effect.gen(function* () {
+      for (const restricted of [false, true]) {
+        for (const resumeThreadId of [undefined, "prior"]) {
+          const client = {
+            request: <M extends "thread/start" | "thread/resume">(
+              method: M,
+              payload: CodexRpc.ClientRequestParamsByMethod[M],
+            ) => {
+              NodeAssert.equal(method, resumeThreadId ? "thread/resume" : "thread/start");
+              NodeAssert.deepStrictEqual(
+                payload.config,
+                restricted
+                  ? {
+                      "agents.enabled": false,
+                      "features.multi_agent": false,
+                      "features.multi_agent_v2": false,
+                    }
+                  : undefined,
+              );
+              NodeAssert.equal(payload.model, "chosen-parent");
+              NodeAssert.equal(payload.approvalPolicy, "untrusted");
+              NodeAssert.equal(payload.sandbox, "read-only");
+              return Effect.succeed(
+                makeThreadOpenResponse("thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+              );
+            },
+          };
+          yield* openCodexThread({
+            client,
+            threadId: ThreadId.make("thread"),
+            runtimeMode: "approval-required",
+            cwd: "/project",
+            requestedModel: "chosen-parent",
+            serviceTier: undefined,
+            resumeThreadId,
+            restrictNativeSubagents: restricted,
+          });
+        }
+      }
+    }),
+  );
+
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];

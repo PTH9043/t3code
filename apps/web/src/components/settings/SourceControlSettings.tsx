@@ -1,7 +1,7 @@
 import { ChevronDownIcon, GitPullRequestIcon, InfoIcon, RefreshCwIcon } from "lucide-react";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   BackgroundActivitySettings,
   SourceControlProviderKind,
@@ -463,12 +463,16 @@ function SourceControlSectionSkeleton({
   );
 }
 
+export const SOURCE_CONTROL_DISCOVERY_TIMEOUT_MS = 3_000;
+
 function EmptySourceControlDiscovery({
   error,
+  timedOut,
   isPending,
   onScan,
 }: {
   readonly error: string | null;
+  readonly timedOut: boolean;
   readonly isPending: boolean;
   readonly onScan: () => void;
 }) {
@@ -482,12 +486,18 @@ function EmptySourceControlDiscovery({
         </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>
-            {hasError ? "서버 실행 환경을 검색하지 못했습니다" : "아직 감지된 항목이 없습니다"}
+            {timedOut
+              ? "서버 실행 환경 확인이 지연되고 있습니다"
+              : hasError
+                ? "서버 실행 환경을 검색하지 못했습니다"
+                : "아직 감지된 항목이 없습니다"}
           </EmptyTitle>
           <EmptyDescription>
-            {hasError
-              ? "서버 연결 상태를 확인한 뒤 다시 시도해 주세요."
-              : "서버에 Git을 설치하고 작업 공간에 필요한 호스팅 연동 또는 자격 증명을 설정한 뒤 다시 검색하세요."}
+            {timedOut
+              ? "Git 및 호스팅 CLI 상태 확인이 3초를 초과했습니다. 서버 응답 상태를 확인한 뒤 다시 시도하세요."
+              : hasError
+                ? "서버 연결 상태를 확인한 뒤 다시 시도해 주세요."
+                : "서버에 Git을 설치하고 작업 공간에 필요한 호스팅 연동 또는 자격 증명을 설정한 뒤 다시 검색하세요."}
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
@@ -496,10 +506,10 @@ function EmptySourceControlDiscovery({
             variant="outline"
             className="h-8 gap-1.5 px-3 text-xs"
             onClick={onScan}
-            disabled={isPending}
+            disabled={isPending && !timedOut}
           >
-            <RefreshCwIcon className={cn("size-3.5", isPending && "animate-spin")} />
-            검색
+            <RefreshCwIcon className={cn("size-3.5", isPending && !timedOut && "animate-spin")} />
+            {timedOut || hasError ? "다시 시도" : "검색"}
           </Button>
         </EmptyContent>
       </Empty>
@@ -517,11 +527,30 @@ export function SourceControlSettingsPanel() {
           input: {},
         }),
   );
+  const [timedOut, setTimedOut] = useState(false);
+  const [scanAttempt, setScanAttempt] = useState(0);
   const result = discovery.data ?? EMPTY_DISCOVERY_RESULT;
   const hasVersionControlSystems = result.versionControlSystems.length > 0;
   const hasDiscoveryItems = hasVersionControlSystems || result.sourceControlProviders.length > 0;
   const isInitialScanPending = discovery.isPending && discovery.data === null;
+
+  useEffect(() => {
+    if (!isInitialScanPending) {
+      setTimedOut(false);
+      return;
+    }
+    setTimedOut(false);
+    const timer = window.setTimeout(() => {
+      setTimedOut(true);
+    }, SOURCE_CONTROL_DISCOVERY_TIMEOUT_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [environmentId, isInitialScanPending, scanAttempt]);
+
   const handleScan = () => {
+    setTimedOut(false);
+    setScanAttempt((attempt) => attempt + 1);
     discovery.refresh();
   };
   const scanButton = (
@@ -533,10 +562,12 @@ export function SourceControlSettingsPanel() {
             variant="ghost"
             className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
             onClick={handleScan}
-            disabled={discovery.isPending}
+            disabled={discovery.isPending && !timedOut}
             aria-label="서버 실행 환경 다시 검색"
           >
-            <RefreshCwIcon className={cn("size-3", discovery.isPending && "animate-spin")} />
+            <RefreshCwIcon
+              className={cn("size-3", discovery.isPending && !timedOut && "animate-spin")}
+            />
           </Button>
         }
       />
@@ -546,7 +577,7 @@ export function SourceControlSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      {isInitialScanPending ? (
+      {isInitialScanPending && !timedOut ? (
         <>
           <SourceControlSectionSkeleton title="버전 관리" headerAction={scanButton} />
           <SourceControlSectionSkeleton title="소스 제어 제공자" />
@@ -582,6 +613,7 @@ export function SourceControlSettingsPanel() {
       ) : (
         <EmptySourceControlDiscovery
           error={discovery.error}
+          timedOut={timedOut}
           isPending={discovery.isPending}
           onScan={handleScan}
         />

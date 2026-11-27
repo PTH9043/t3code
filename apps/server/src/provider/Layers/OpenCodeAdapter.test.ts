@@ -13,7 +13,9 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { beforeEach } from "vite-plus/test";
+import { beforeEach, vi } from "vite-plus/test";
+import * as Ollama from "../localOllama.ts";
+import { openCodeApiEnvironment } from "../OpenCodeApiConnection.ts";
 
 import {
   OpenCodeSettings,
@@ -72,6 +74,8 @@ const runtimeMock = {
     missingSessionIds: new Set<string>(),
     transientErrorSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
+    sessionParentById: new Map<string, string>(),
+    permissionReplies: [] as Array<{ requestID: string; reply: string }>,
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
     eventSubscribeOverride: null as (() => Promise<{ stream: AsyncIterable<unknown> }>) | null,
@@ -93,6 +97,8 @@ const runtimeMock = {
     this.state.missingSessionIds.clear();
     this.state.transientErrorSessionIds.clear();
     this.state.sessionDirectoryById.clear();
+    this.state.sessionParentById.clear();
+    this.state.permissionReplies.length = 0;
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
     this.state.eventSubscribeOverride = null;
@@ -161,7 +167,14 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             });
           }
           const directory = runtimeMock.state.sessionDirectoryById.get(sessionID);
-          return { data: { id: sessionID, ...(directory ? { directory } : {}) } };
+          const parentID = runtimeMock.state.sessionParentById.get(sessionID);
+          return {
+            data: {
+              id: sessionID,
+              ...(directory ? { directory } : {}),
+              ...(parentID ? { parentID } : {}),
+            },
+          };
         },
         update: async ({ sessionID, permission }: { sessionID: string; permission: unknown }) => {
           runtimeMock.state.sessionUpdateCalls.push({ sessionID, permission });
@@ -203,6 +216,11 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             targetIndex >= 0
               ? runtimeMock.state.messages.slice(0, targetIndex + 1)
               : runtimeMock.state.messages;
+        },
+      },
+      permission: {
+        reply: async (input: { requestID: string; reply: string }) => {
+          runtimeMock.state.permissionReplies.push(input);
         },
       },
       event: {
@@ -284,6 +302,61 @@ const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect("passes the exact local Ollama worker model and loopback transport to OpenCode", () => {
+    const driver = ProviderDriverKind.make("opencode");
+    const tag = "Org/Model:Q4";
+    const instanceId = Ollama.LOCAL_OLLAMA_INSTANCE;
+    const envelope = Ollama.withLocalOllama(
+      { [ProviderInstanceId.make("opencode")]: { driver, config: {} } },
+      [tag],
+    )[instanceId]!;
+    const settings = Schema.decodeUnknownSync(OpenCodeSettings)(envelope.config);
+    const environment = openCodeApiEnvironment(settings, {});
+    const validate = Ollama.localOllamaSelectionError;
+    const layer = Layer.effect(
+      OpenCodeAdapter,
+      makeOpenCodeAdapter(settings, { instanceId, environment }),
+    ).pipe(
+      Layer.provideMerge(
+        Layer.succeed(OpenCodeRuntime, {
+          ...OpenCodeRuntimeTestDouble,
+          connectToOpenCodeServer: (input) => {
+            const inline = JSON.parse(input.environment!.OPENCODE_CONFIG_CONTENT!);
+            NodeAssert.deepEqual(inline.enabled_providers, ["t3_ollama"]);
+            NodeAssert.equal(
+              inline.provider.t3_ollama.options.baseURL,
+              "http://127.0.0.1:11434/v1",
+            );
+            return OpenCodeRuntimeTestDouble.connectToOpenCodeServer(input);
+          },
+        }),
+      ),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const metadata = vi
+        .spyOn(Ollama, "localOllamaSelectionError")
+        .mockImplementation((connection, model) => validate(connection, model, async () => [tag]));
+      yield* Effect.addFinalizer(() => Effect.sync(() => metadata.mockRestore()));
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("local-worker");
+      yield* adapter.startSession({ threadId, provider: driver, runtimeMode: "approval-required" });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "test",
+        modelSelection: { instanceId, model: "t3_ollama/" + tag },
+      });
+      NodeAssert.deepEqual((runtimeMock.state.promptCalls[0] as { model: unknown }).model, {
+        providerID: "t3_ollama",
+        modelID: tag,
+      });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -812,6 +885,57 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("sends only the chosen exact model on its OpenAI API account", () => {
+    const instanceId = ProviderInstanceId.make("openai_api_fixture");
+    const config = {
+      ...openCodeAdapterTestSettings,
+      apiConnection: {
+        providerId: "t3_openai",
+        baseUrl: "https://api.openai.com/v1",
+        protocol: "responses" as const,
+        models: ["fixture-A", "ft:fixture-B:exact"],
+      },
+    };
+    const adapterLayer = Layer.effect(
+      OpenCodeAdapter,
+      makeOpenCodeAdapter(config, { instanceId }),
+    ).pipe(
+      Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("openai-api-thread");
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("opencode"),
+        runtimeMode: "approval-required",
+      });
+      for (const [account, model] of [
+        [instanceId, "t3_openai/FT:FIXTURE-B:EXACT"],
+        [instanceId, "openai/fixture-A"],
+        [ProviderInstanceId.make("codex"), "t3_openai/fixture-A"],
+      ] as const) {
+        const rejected = yield* adapter
+          .sendTurn({ threadId, input: "fixture", modelSelection: { instanceId: account, model } })
+          .pipe(Effect.flip);
+        NodeAssert.equal(rejected._tag, "ProviderAdapterValidationError");
+      }
+      NodeAssert.equal(runtimeMock.state.promptCalls.length, 0);
+      yield* adapter.sendTurn({
+        threadId,
+        input: "fixture",
+        modelSelection: { instanceId, model: "t3_openai/ft:fixture-B:exact" },
+      });
+      const sent = runtimeMock.state.promptCalls.at(-1);
+      NodeAssert.ok(sent && typeof sent === "object" && "model" in sent);
+      NodeAssert.deepEqual(sent.model, { providerID: "t3_openai", modelID: "ft:fixture-B:exact" });
+    }).pipe(Effect.provide(adapterLayer));
+  });
+
   it.effect("passes agent and variant options for the adapter's bound custom instance id", () => {
     const instanceId = ProviderInstanceId.make("opencode_zen");
     const adapterLayer = Layer.effect(
@@ -1155,6 +1279,256 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("reports a finished todo list as the turn plan, not as a file change", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-todo-plan");
+      const todos = [
+        { content: "경로 확인", status: "completed", priority: "high" },
+        { content: "  전역 설정 반영  ", status: "in_progress", priority: "high" },
+        { content: "검증", status: "pending", priority: "high" },
+      ];
+      const part = {
+        id: "part-todo",
+        sessionID: "http://127.0.0.1:9999/session",
+        messageID: "msg-todo",
+        type: "tool",
+        callID: "call-todo",
+        tool: "todowrite",
+      };
+      const update = (state: Record<string, unknown>) => ({
+        type: "message.part.updated",
+        properties: {
+          sessionID: "http://127.0.0.1:9999/session",
+          part: { ...part, state },
+          time: 1,
+        },
+      });
+      runtimeMock.state.subscribedEvents = [
+        update({ status: "running", input: { todos }, time: { start: 1 } }),
+        update({
+          status: "completed",
+          input: { todos },
+          output: "[]",
+          title: "3 todos",
+          metadata: {},
+          time: { start: 1, end: 2 },
+        }),
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "turn.plan.updated" || event.type.startsWith("item.")),
+        ),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["item.updated", "item.completed", "turn.plan.updated"],
+      );
+      const [running, , plan] = events;
+      if (running?.type === "item.updated") {
+        NodeAssert.equal(running.payload.itemType, "dynamic_tool_call");
+      }
+      if (plan?.type === "turn.plan.updated") {
+        NodeAssert.deepEqual(plan.payload.plan, [
+          { step: "경로 확인", status: "completed" },
+          { step: "전역 설정 반영", status: "inProgress" },
+          { step: "검증", status: "pending" },
+        ]);
+      }
+    }),
+  );
+
+  it.effect("answers a sub-agent's permission prompt itself under full access", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-child-permission");
+      const main = "http://127.0.0.1:9999/session";
+      runtimeMock.state.sessionParentById.set("child", main);
+      runtimeMock.state.sessionParentById.set("grandchild", "child");
+      const ask = (id: string, sessionID: string) => ({
+        type: "permission.asked",
+        properties: {
+          id,
+          sessionID,
+          permission: "external_directory",
+          patterns: ["E:\data\*"],
+          metadata: {},
+          always: [],
+        },
+      });
+      runtimeMock.state.subscribedEvents = [
+        ask("per_stranger", "another-thread-session"),
+        ask("per_child", "child"),
+        ask("per_grandchild", "grandchild"),
+        // Events are handled in order, so this row's arrival means the prompts were handled.
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: main,
+            part: {
+              id: "part-marker",
+              sessionID: main,
+              messageID: "msg-marker",
+              type: "tool",
+              callID: "call-marker",
+              tool: "read",
+              state: { status: "running", input: {}, time: { start: 1 } },
+            },
+            time: 1,
+          },
+        },
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type.startsWith("item.")),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second"));
+      NodeAssert.deepEqual(runtimeMock.state.permissionReplies, [
+        { requestID: "per_child", reply: "always" },
+        { requestID: "per_grandchild", reply: "always" },
+      ]);
+    }),
+  );
+
+  it.effect(
+    "reports a sub-agent's tool calls under its own identity and keeps its todo list out of the plan",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-child-tools");
+        const main = "http://127.0.0.1:9999/session";
+        runtimeMock.state.sessionParentById.set("child", main);
+        const tool = (sessionID: string, callID: string, name: string, input: unknown) => ({
+          type: "message.part.updated",
+          properties: {
+            sessionID,
+            part: {
+              id: `part-${callID}`,
+              sessionID,
+              messageID: `msg-${callID}`,
+              type: "tool",
+              callID,
+              tool: name,
+              state: {
+                status: "completed",
+                input,
+                output: "",
+                title: name,
+                metadata: {},
+                time: { start: 1, end: 2 },
+              },
+            },
+            time: 2,
+          },
+        });
+        runtimeMock.state.subscribedEvents = [
+          tool("another-thread-session", "call-stranger", "read", {}),
+          tool("child", "call-child", "read", { filePath: "a.ts" }),
+          tool("child", "call-child-todo", "todowrite", {
+            todos: [{ content: "하위 단계", status: "pending" }],
+          }),
+          tool(main, "call-main", "read", {}),
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.threadId === threadId &&
+              (event.type === "turn.plan.updated" || event.type.startsWith("item.")),
+          ),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        NodeAssert.deepEqual(
+          events.map((event) =>
+            event.type === "item.completed"
+              ? [event.itemId, event.payload.agentId ?? null]
+              : [event.type],
+          ),
+          [
+            ["call-child", "child"],
+            ["call-child-todo", "child"],
+            ["call-main", null],
+          ],
+        );
+      }),
+  );
+
+  it.effect(
+    "shows a sub-agent's permission prompt as the thread's own request when approval is required",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-child-approval");
+        runtimeMock.state.sessionParentById.set("child", "http://127.0.0.1:9999/session");
+        runtimeMock.state.subscribedEvents = [
+          {
+            type: "permission.asked",
+            properties: {
+              id: "per_child",
+              sessionID: "child",
+              permission: "bash",
+              patterns: ["git status"],
+              metadata: {},
+              always: [],
+            },
+          },
+          {
+            type: "permission.replied",
+            properties: { sessionID: "child", requestID: "per_child", reply: "once" },
+          },
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.threadId === threadId && event.type.startsWith("request."),
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "approval-required",
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        NodeAssert.deepEqual(
+          events.map((event) => [event.type, event.requestId]),
+          [
+            ["request.opened", "per_child"],
+            ["request.resolved", "per_child"],
+          ],
+        );
+        NodeAssert.deepEqual(runtimeMock.state.permissionReplies, []);
+      }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -1437,5 +1811,57 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(subscribeCount >= 2, true);
       yield* adapter.stopSession(threadId);
     }),
+  );
+
+  it.effect(
+    "maps glob/grep/write/custom OpenCode permissions to actionable requestTypes (never unknown)",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-permission-mapping");
+        const main = "http://127.0.0.1:9999/session";
+        const ask = (id: string, permission: string) => ({
+          type: "permission.asked",
+          properties: {
+            id,
+            sessionID: main,
+            permission,
+            patterns: ["*"],
+            metadata: {},
+            always: [],
+          },
+        });
+        runtimeMock.state.subscribedEvents = [
+          ask("per_glob", "glob"),
+          ask("per_grep", "grep"),
+          ask("per_write", "write"),
+          ask("per_custom", "custom_tool"),
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId && event.type === "request.opened"),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "approval-required",
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        NodeAssert.deepEqual(
+          events.map((event) => [
+            event.requestId,
+            event.type === "request.opened" ? event.payload.requestType : null,
+          ]),
+          [
+            ["per_glob", "file_read_approval"],
+            ["per_grep", "file_read_approval"],
+            ["per_write", "file_change_approval"],
+            ["per_custom", "command_execution_approval"],
+          ],
+        );
+        yield* adapter.stopSession(threadId);
+      }),
   );
 });

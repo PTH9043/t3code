@@ -76,6 +76,39 @@ it("retains a free-text native question until its request is resolved", () => {
   expect(derivePendingUserInputs([question, resolved])).toEqual([]);
 });
 
+it("keeps a question visible when its delivery after restart is uncertain", () => {
+  const requestId = "async:delivery-unknown";
+  const detail = "답변이 전달됐는지 확인할 수 없습니다.";
+  const question = makeActivity({
+    id: EventId.make("uncertain-question"),
+    kind: "user-input.requested",
+    summary: "Question",
+    createdAt: "2026-10-26T00:00:00.000Z",
+    payload: {
+      requestId,
+      questions: [{ id: "q", header: "Q", question: "Which year?", options: [] }],
+    },
+  });
+  const warning = makeActivity({
+    id: EventId.make("uncertain-warning"),
+    kind: "provider.user-input.respond.failed",
+    summary: "질문 답변의 전달 여부를 확인해 주세요",
+    tone: "error",
+    createdAt: "2026-10-26T00:00:01.000Z",
+    payload: { requestId, code: "delivery-unknown-after-restart", detail },
+  });
+  expect(derivePendingUserInputs([question, warning]).map((entry) => entry.requestId)).toEqual([
+    requestId,
+  ]);
+  const thread = makeThread({
+    id: ThreadId.make("uncertain"),
+    projectId: ProjectId.make("uncertain"),
+    title: "Question",
+    activities: [question, warning],
+  });
+  expect(JSON.stringify(buildThreadFeed(thread))).toContain(detail);
+});
+
 function makeActivity(
   input: Partial<OrchestrationThreadActivity> &
     Pick<OrchestrationThreadActivity, "id" | "kind" | "summary" | "createdAt">,
@@ -114,6 +147,88 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("retains a legacy restart as a dated background task in the native history", () => {
+    const at = "2026-11-12T10:20:00+09:00";
+    const thread = makeThread({
+      id: ThreadId.make("restart-history"),
+      projectId: ProjectId.make("project"),
+      title: "History",
+      activities: [
+        makeActivity({
+          id: EventId.make("restart"),
+          kind: "session.recovered",
+          summary: "서버 재시작으로 백그라운드 감시 2개가 끊겼습니다",
+          createdAt: at,
+          payload: { interruptedTasks: [{ taskId: "one" }, { taskId: "two" }] },
+        }),
+      ],
+    });
+    expect(buildThreadFeed(thread)).toMatchObject([
+      {
+        type: "activity-group",
+        activities: [
+          {
+            id: "restart",
+            createdAt: at,
+            summary: "서버 재시작으로 중단된 항목 · 백그라운드 작업 2개",
+          },
+        ],
+      },
+    ]);
+  });
+  it("hides internal question delivery markers while keeping delivery failures visible", () => {
+    const thread = makeThread({
+      id: ThreadId.make("delivery-markers"),
+      projectId: ProjectId.make("delivery-markers"),
+      title: "Question",
+      activities: [
+        makeActivity({
+          id: EventId.make("queued"),
+          kind: "provider.user-input.recovery.queued",
+          summary: "Queued",
+          createdAt: "2026-04-01T00:00:01.000Z",
+        }),
+        makeActivity({
+          id: EventId.make("started"),
+          kind: "provider.user-input.delivery.started",
+          summary: "Sending",
+          createdAt: "2026-04-01T00:00:02.000Z",
+        }),
+        makeActivity({
+          id: EventId.make("failed"),
+          kind: "provider.turn.start.failed",
+          summary: "Failed",
+          tone: "error",
+          createdAt: "2026-04-01T00:00:03.000Z",
+        }),
+      ],
+    });
+    expect(buildThreadFeed(thread)).toMatchObject([
+      { type: "activity-group", activities: [{ id: "failed", summary: "Failed" }] },
+    ]);
+  });
+
+  it("keeps a failed conversation handoff in the conversation activity", () => {
+    const summary = "이전 대화 인계 준비에 실패해 AI에 누락을 알렸습니다.";
+    const thread = makeThread({
+      id: ThreadId.make("handoff-notice-thread"),
+      projectId: ProjectId.make("handoff-notice-project"),
+      title: "Handoff",
+      activities: [
+        makeActivity({
+          id: EventId.make("handoff-notice"),
+          kind: "conversation.handoff.unavailable",
+          summary,
+          tone: "error",
+          createdAt: "2026-04-01T00:00:01.000Z",
+        }),
+      ],
+    });
+    expect(buildThreadFeed(thread)).toMatchObject([
+      { type: "activity-group", activities: [{ id: "handoff-notice", summary }] },
+    ]);
+  });
+
   it("keeps historic work entries attributed to their turns", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-1"),
@@ -188,9 +303,10 @@ describe("buildThreadFeed", () => {
           createdAt: "2026-04-01T00:00:01.000Z",
           turnId: TurnId.make("turn-1"),
           payload: {
+            toolCallId: "shared-test-call",
             title: "Run tests",
             itemType: "command_execution",
-            detail: "/bin/zsh -lc 'bun run test'",
+            data: { item: { command: "node --test" } },
           },
         }),
         makeActivity({
@@ -201,9 +317,10 @@ describe("buildThreadFeed", () => {
           createdAt: "2026-04-01T00:00:02.000Z",
           turnId: TurnId.make("turn-1"),
           payload: {
+            toolCallId: "shared-test-call",
             title: "Run tests",
             itemType: "command_execution",
-            detail: "/bin/zsh -lc 'bun run test'",
+            data: { item: { command: "node --test" } },
           },
         }),
       ],
@@ -221,23 +338,25 @@ describe("buildThreadFeed", () => {
 
     expect(group.activities).toHaveLength(1);
     expect(group.activities[0]).toMatchObject({
-      id: "tool-completed",
-      createdAt: "2026-04-01T00:00:02.000Z",
+      id: "tool-updated",
+      createdAt: "2026-04-01T00:00:01.000Z",
       turnId: "turn-1",
-      summary: "Run tests",
-      detail: "bun run test",
+      summary: expect.stringContaining("테스트"),
+      detail: null,
       canExpand: true,
       icon: "command",
       toolLike: true,
       status: "success",
     });
-    expect(group.activities[0]?.getFullDetail()).toBe("/bin/zsh -lc 'bun run test'");
-    expect(group.activities[0]?.getCopyText()).toBe(
-      "Run tests\nbun run test\n/bin/zsh -lc 'bun run test'",
-    );
+    expect(group.activities[0]?.getFullDetail()).toContain("node --test");
+    expect(group.activities[0]?.getCopyText()).toContain("테스트");
+    expect(group.activities[0]?.presented?.toolActivity?.eventIds).toEqual([
+      "tool-updated",
+      "tool-completed",
+    ]);
   });
 
-  it("keeps MCP inputs available to expanded mobile work rows", () => {
+  it("keeps masked MCP input fields available to expanded mobile work rows", () => {
     const turnId = TurnId.make("turn-mcp");
     const thread = makeThread({
       id: ThreadId.make("thread-mcp"),
@@ -282,12 +401,12 @@ describe("buildThreadFeed", () => {
       return;
     }
 
-    expect(group.activities[0]?.icon).toBe("wrench");
-    expect(group.activities[0]?.getFullDetail()).toContain('"query": "work log"');
-    expect(group.activities[0]?.getFullDetail()).toContain("repository.search");
+    expect(group.activities[0]?.canExpand).toBe(true);
+    expect(group.activities[0]?.getFullDetail()).toContain("query=•••");
+    expect(group.activities[0]?.getFullDetail()).not.toContain("work log");
   });
 
-  it("defers large tool output expansion until a work row is opened or copied", () => {
+  it("keeps arbitrary large tool output out of technical previews and copied summaries", () => {
     let serializedToolOutputs = 0;
     const activities = Array.from({ length: 5_000 }, (_, index) =>
       makeActivity({
@@ -328,10 +447,9 @@ describe("buildThreadFeed", () => {
     }
 
     expect(group.activities).toHaveLength(5_000);
-    expect(group.activities[0]?.getFullDetail()).toContain('"output"');
-    expect(serializedToolOutputs).toBe(1);
-    expect(group.activities[0]?.getCopyText()).toContain('"output"');
-    expect(serializedToolOutputs).toBe(1);
+    expect(group.activities[0]?.getFullDetail()).not.toContain('"output"');
+    expect(group.activities[0]?.getCopyText()).not.toContain('"output"');
+    expect(serializedToolOutputs).toBe(0);
   });
 
   it("folds settled turn work while leaving the terminal answer visible", () => {

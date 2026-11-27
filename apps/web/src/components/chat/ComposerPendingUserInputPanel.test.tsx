@@ -33,6 +33,40 @@ describe("question choice confirmation", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+  it("renders a free-text answer inside the question card without inventing options", () => {
+    const onChangeCustomAnswer = vi.fn();
+    hooks.beginRender();
+    const element = ComposerPendingUserInputPanel({
+      pendingUserInputs: [
+        {
+          requestId: ApprovalRequestId.make("async:free-text"),
+          createdAt: "2026-09-30T00:00:00Z",
+          questions: [
+            {
+              id: "year",
+              header: "Question",
+              question: "어느 연도가 맞나요?",
+              options: [],
+              multiSelect: false,
+            },
+          ],
+        },
+      ],
+      respondingRequestIds: [],
+      answers: {},
+      questionIndex: 0,
+      onToggleOption: () => {},
+      onChangeCustomAnswer,
+    }) as ReactElement<Record<string, unknown>>;
+    const Card = element.type as (props: Record<string, unknown>) => ReactNode;
+    const tree = Card(element.props);
+    const textarea = visitElements(tree, (entry) => entry.type === "textarea");
+    expect(textarea).not.toBeNull();
+    expect(textarea?.props["aria-label"]).toBe("질문 답변");
+    (textarea!.props.onChange as (event: unknown) => void)({ target: { value: "2023년" } });
+    expect(onChangeCustomAnswer).toHaveBeenCalledWith("year", "2023년");
+    expect(visitElements(tree, (entry) => entry.type === "button")).toBeNull();
+  });
   it.each([false, true])(
     "keeps second-question selections editable until explicit submission (multiSelect=%s)",
     (multiSelect) => {
@@ -81,6 +115,7 @@ describe("question choice confirmation", () => {
               ),
             };
           },
+          onChangeCustomAnswer: () => {},
         }) as ReactElement<Record<string, unknown>>;
         const Card = element.type as (props: Record<string, unknown>) => ReactNode;
         return Card(element.props);

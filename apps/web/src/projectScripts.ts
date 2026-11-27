@@ -12,6 +12,8 @@ export interface ProjectScriptInput {
   readonly command: ProjectScript["command"];
   readonly icon: ProjectScript["icon"];
   readonly runOnWorktreeCreate: ProjectScript["runOnWorktreeCreate"];
+  readonly runOnWorktreeValidate?: ProjectScript["runOnWorktreeValidate"];
+  readonly runOnWorktreeCleanup?: ProjectScript["runOnWorktreeCleanup"];
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
 }
@@ -23,6 +25,8 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     command: input.command,
     icon: input.icon,
     runOnWorktreeCreate: input.runOnWorktreeCreate,
+    ...(input.runOnWorktreeValidate === true ? { runOnWorktreeValidate: true } : {}),
+    ...(input.runOnWorktreeCleanup === true ? { runOnWorktreeCleanup: true } : {}),
     ...(input.previewUrl === null
       ? {}
       : {

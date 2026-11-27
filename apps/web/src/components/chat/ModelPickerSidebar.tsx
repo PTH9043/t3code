@@ -1,7 +1,13 @@
-import { type ProviderInstanceId, PROVIDER_DISPLAY_NAMES } from "@t3tools/contracts";
+import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import {
+  isClaudeApiEntry,
+  isMuseCloudEntry,
+  modelPickerProviderGroupKey,
+  modelPickerProviderGroupLabel,
+} from "./modelPickerProviderGroups";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { isProviderInstancePickerReady, type ProviderInstanceEntry } from "../../providerInstances";
@@ -43,9 +49,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   selectedInstanceId: ProviderInstanceId | "favorites";
   onSelectInstance: (instanceId: ProviderInstanceId | "favorites") => void;
   /**
-   * Instance entries grouped by driver. Each driver gets one rail button;
-   * clicking it selects an actual `ProviderInstanceId`, preserving account-level
-   * model lists and dispatch identity.
+   * Subscription accounts share a driver button; separately billed API
+   * connections retain an individual button and dispatch identity.
    */
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   /** Render the favorites rail entry. Hidden for locked-provider instance switching. */
@@ -73,20 +78,13 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       (entry) => entry.instanceId === props.selectedInstanceId,
     );
     if (!selectedEntry) return null;
-    return selectedEntry.driverKind === "opencode"
-      ? `${selectedEntry.driverKind}:${PROVIDER_DISPLAY_NAMES[selectedEntry.driverKind] ?? selectedEntry.displayName}`
-      : selectedEntry.driverKind;
+    return modelPickerProviderGroupKey(selectedEntry);
   }, [props.instanceEntries, props.selectedInstanceId]);
   const driverGroups = useMemo(() => {
     const groups = new Map<string, ProviderInstanceEntry[]>();
     for (const entry of props.instanceEntries) {
-      // OpenCode API/gateway accounts are distinct selectable connections even
-      // though they share the opencode runtime driver; keep each labeled
-      // account in its own rail group.
-      const groupKey =
-        entry.driverKind === "opencode"
-          ? `${entry.driverKind}:${PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName}`
-          : entry.driverKind;
+      // Separately billed connections retain their own model picker group.
+      const groupKey = modelPickerProviderGroupKey(entry);
       const list = groups.get(groupKey) ?? [];
       list.push(entry);
       groups.set(groupKey, list);
@@ -186,7 +184,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
           {driverGroups.map((group) => {
             const entry = group.representative;
             if (!entry) return null;
-            const groupLabel = PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName;
+            const groupLabel = modelPickerProviderGroupLabel(entry);
             const groupUnavailable = group.readyCount === 0;
             const isDisabled = groupUnavailable || group.allContextDisabled;
             const isSelected = selectedGroupKey === group.groupKey;
@@ -226,11 +224,18 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 }
                 disabled={isDisabled}
                 type="button"
-                aria-label={isDisabled ? tooltip : groupLabel}
+                aria-label={
+                  entry.openAiAccountTag
+                    ? `${isDisabled ? tooltip : groupLabel} (${entry.instanceId})`
+                    : isDisabled
+                      ? tooltip
+                      : groupLabel
+                }
               >
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
                   displayName={groupLabel}
+                  instanceId={String(entry.instanceId)}
                   accentColor={entry.accentColor}
                   showBadge={showInstanceBadge}
                   className="size-6"
@@ -246,6 +251,23 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     ? { badgeClassName: "h-3 min-w-3 px-0.5 text-[7px]" }
                     : {})}
                 />
+                {entry.openAiAccountTag || isClaudeApiEntry(entry) ? (
+                  <span
+                    data-model-picker-api-badge="true"
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -bottom-0.5 -right-0.5 z-10 rounded bg-primary px-0.5 text-[9px] font-bold leading-3 text-primary-foreground"
+                  >
+                    API
+                  </span>
+                ) : isMuseCloudEntry(entry) ? (
+                  <span
+                    data-model-picker-cloud-badge="true"
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -bottom-0.5 -right-0.5 z-10 rounded bg-primary px-0.5 text-[8px] font-bold leading-3 text-primary-foreground"
+                  >
+                    Cloud
+                  </span>
+                ) : null}
                 {showNewBadge ? (
                   <span className={NEW_BADGE_CLASS} aria-hidden>
                     <SparklesIcon className="size-2" />
@@ -276,6 +298,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   >
                     <div className="grid gap-1">
                       <div className="font-medium">{groupLabel}</div>
+                      {entry.openAiAccountTag && (
+                        <div className="break-all">{entry.instanceId}</div>
+                      )}
                     </div>
                   </TooltipPopup>
                 </Tooltip>

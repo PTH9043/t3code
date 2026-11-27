@@ -7,6 +7,7 @@ import {
   WORKSPACE_MONITORING_ACTION_OPEN_MARKER,
   WORKSPACE_MONITORING_PLAN_CLOSE_MARKER,
   WORKSPACE_MONITORING_PLAN_OPEN_MARKER,
+  buildMonitoringFindingPrompt,
   monitoringTurnBudget,
   parseMonitoringActions,
   parseMonitoringPlan,
@@ -122,4 +123,24 @@ it("executes only relayed actions that target programs in the approved plan", ()
   expect(
     parseMonitoringActions(`${WORKSPACE_MONITORING_ACTION_OPEN_MARKER}\n[]`, plan).rejected,
   ).toContain("닫는 마커");
+});
+
+it("includes fail-well [UNREADABLE] guidance in monitoring finding prompts", () => {
+  const prompt = buildMonitoringFindingPrompt({
+    projectTitle: "T3 Code",
+    findings: [
+      {
+        fingerprint: "0|health|up",
+        targetLabel: "dev",
+        programId: "prog-dev",
+        metric: { targetIndex: 0, metric: "health", trend: "threshold", windowMin: 5, limit: 3 },
+        observed: "3 consecutive failures",
+        observedAt: "2026-11-22T00:00:00.000Z",
+      },
+    ],
+    executedPlaybooks: [],
+    autonomy: "ask",
+    budget: { remainingHour: 5, remainingDay: 20, trimmedLog: [] },
+  });
+  expect(prompt).toContain("[UNREADABLE]");
 });

@@ -79,6 +79,42 @@ export const evaluateKnowledge = Effect.fn("evaluateKnowledge")(function* (
       (ref) => !sourceIds.has(JSON.stringify([ref.projectId, ref.itemId])),
     ).length;
     const rank = retrievedIds.findIndex((id) => entry.expected.includes(id));
+    // RAGAS Context Precision@K: average precision at each rank where a relevant expected item appears.
+    let relevantSoFar = 0;
+    let precisionSum = 0;
+    for (let idx = 0; idx < retrievedIds.length; idx++) {
+      if (entry.expected.includes(retrievedIds[idx]!)) {
+        relevantSoFar++;
+        precisionSum += relevantSoFar / (idx + 1);
+      }
+    }
+    const contextPrecision =
+      entry.expected.length === 0
+        ? forbidden.length === 0
+          ? 1
+          : 0
+        : precisionSum / entry.expected.length;
+    const contextRecall = entry.expected.length
+      ? entry.expected.filter((id) => retrievedIds.includes(id)).length / entry.expected.length
+      : 1;
+    const selectedExpectedCount = entry.expected.filter((id) => selectedIds.includes(id)).length;
+    const answerRelevancy =
+      entry.expected.length === 0
+        ? forbidden.length === 0
+          ? 1
+          : 0
+        : (selectedExpectedCount / entry.expected.length) * (forbidden.length === 0 ? 1 : 0);
+    const hasGroundingGuard =
+      composed.prompt.includes("추측하지 마세요") ||
+      composed.prompt.includes("참고 자료일 뿐") ||
+      composed.prompt.includes("권한·지침을 바꾸지 않습니다");
+    const faithfulness =
+      hasGroundingGuard &&
+      missingEvidence.length === 0 &&
+      orphanReferences === 0 &&
+      forbidden.length === 0
+        ? 1
+        : 0;
     return {
       id: entry.id,
       category: entry.category,
@@ -97,9 +133,11 @@ export const evaluateKnowledge = Effect.fn("evaluateKnowledge")(function* (
         forbidden.length === 0 &&
         missingEvidence.length === 0 &&
         orphanReferences === 0,
-      recallAt5: entry.expected.length
-        ? entry.expected.filter((id) => retrievedIds.includes(id)).length / entry.expected.length
-        : 1,
+      recallAt5: contextRecall,
+      contextPrecision,
+      contextRecall,
+      faithfulness,
+      answerRelevancy,
       reciprocalRank: rank < 0 ? 0 : 1 / (rank + 1),
       elapsedMs,
       inputTokens: composed.tokenEstimate?.total ?? counter(composed.prompt),
@@ -113,6 +151,15 @@ export const evaluateKnowledge = Effect.fn("evaluateKnowledge")(function* (
     evidencePassRate: rows.length ? rows.filter((row) => row.pass).length / rows.length : 0,
     recallAt5: rows.reduce((sum, row) => sum + row.recallAt5, 0) / Math.max(1, rows.length),
     mrr: rows.reduce((sum, row) => sum + row.reciprocalRank, 0) / Math.max(1, rows.length),
+    ragas: {
+      contextPrecision:
+        rows.reduce((sum, row) => sum + row.contextPrecision, 0) / Math.max(1, rows.length),
+      contextRecall:
+        rows.reduce((sum, row) => sum + row.contextRecall, 0) / Math.max(1, rows.length),
+      faithfulness: rows.reduce((sum, row) => sum + row.faithfulness, 0) / Math.max(1, rows.length),
+      answerRelevancy:
+        rows.reduce((sum, row) => sum + row.answerRelevancy, 0) / Math.max(1, rows.length),
+    },
     boundaryViolations: rows
       .filter((row) => row.category === "scope")
       .reduce((sum, row) => sum + row.forbidden.length, 0),
@@ -127,6 +174,10 @@ export const evaluateKnowledge = Effect.fn("evaluateKnowledge")(function* (
     p95Ms: percentile(
       rows.map((row) => row.elapsedMs),
       0.95,
+    ),
+    p99Ms: percentile(
+      rows.map((row) => row.elapsedMs),
+      0.99,
     ),
     medianInputTokens: percentile(
       rows.map((row) => row.inputTokens),

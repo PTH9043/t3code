@@ -4,6 +4,7 @@ import type {
   ServerProviderUsage,
   ServerProviderUsageCredits,
   ServerProviderUsageWindow,
+  TokenUsageObservation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
@@ -17,14 +18,23 @@ export interface ProviderRateLimitUsage {
   readonly planType?: string;
   readonly primary?: ServerProviderUsageWindow;
   readonly secondary?: ServerProviderUsageWindow;
+  readonly extraWindows?: ReadonlyArray<ServerProviderUsageWindow>;
   readonly credits?: ServerProviderUsageCredits;
 }
 
 export interface ProviderAccountUsageState {
+  /** Context-snapshot fallback per thread, for providers that report no consumption. */
   readonly threadTokens: ReadonlyMap<string, number>;
+  /** Native spend per thread, including provider subagents when the provider reports them. */
+  readonly threadConsumedTokens?: ReadonlyMap<string, number>;
+  /** Last total of each cumulative consumption source, keyed by thread, provider and source. */
+  readonly consumptionCursors?: ReadonlyMap<string, number>;
   readonly sessions: ReadonlySet<string>;
   readonly activeSessions: ReadonlySet<string>;
   readonly rateLimits?: ProviderRateLimitUsage;
+  readonly rateLimitsUpdatedAt?: string;
+  readonly primaryUpdatedAt?: string;
+  readonly secondaryUpdatedAt?: string;
   readonly updatedAt?: string;
 }
 
@@ -97,7 +107,10 @@ function normalizeUsedPercent(value: unknown): number | undefined {
   }
 
   const remaining = finiteNumber(readFirst(value, ["remainingPercent", "remaining_percent"]));
-  return remaining === undefined ? undefined : Math.min(100, Math.max(0, 100 - remaining));
+  if (remaining !== undefined) return Math.min(100, Math.max(0, 100 - remaining));
+
+  // Claude omits utilization on most events, but a rejected window is exhausted.
+  return trimmedString(readProperty(value, "status")) === "rejected" ? 100 : undefined;
 }
 
 function normalizeRateLimitWindow(
@@ -165,8 +178,10 @@ export function normalizeProviderRateLimits(value: unknown): ProviderRateLimitUs
   let primary = normalizeRateLimitWindow(readProperty(snapshot, "primary"));
   let secondary = normalizeRateLimitWindow(readProperty(snapshot, "secondary"));
   if (!primary && !secondary) {
-    const singleWindow = normalizeRateLimitWindow(snapshot);
     const rateLimitType = trimmedString(readFirst(snapshot, ["rateLimitType", "rate_limit_type"]));
+    // Pay-as-you-go overage is not a quota window; it must not replace the 5-hour one.
+    const singleWindow =
+      rateLimitType === "overage" ? undefined : normalizeRateLimitWindow(snapshot);
     if (rateLimitType?.startsWith("seven_day")) {
       secondary = singleWindow;
     } else {
@@ -200,6 +215,48 @@ function mergeRateLimits(
   };
 }
 
+function consumptionKey(threadId: string, observation: TokenUsageObservation): string {
+  return `${threadId}\u0000${observation.provider}\u0000${observation.sourceId}`;
+}
+
+/**
+ * Adds native spend for one thread. Execution totals are one-off spend; cumulative
+ * counters only add their growth, and a counter that goes backwards adds nothing.
+ */
+function addThreadConsumption(
+  state: ProviderAccountUsageState,
+  threadId: string,
+  consumption: ReadonlyArray<TokenUsageObservation>,
+  updatedAt: string,
+): ProviderAccountUsageState {
+  const measured = consumption.filter((observation) => observation.counts.total !== null);
+  if (measured.length === 0) return state;
+  const cursors = new Map(state.consumptionCursors ?? []);
+  let added = 0;
+  for (const observation of measured) {
+    const total = observation.counts.total ?? 0;
+    if (observation.mode === "execution-total") {
+      added += total;
+      continue;
+    }
+    const key = consumptionKey(threadId, observation);
+    const previous = cursors.get(key);
+    cursors.set(key, Math.max(previous ?? 0, total));
+    added += previous === undefined ? total : Math.max(0, total - previous);
+  }
+  const threadConsumedTokens = new Map(state.threadConsumedTokens ?? []);
+  threadConsumedTokens.set(threadId, (threadConsumedTokens.get(threadId) ?? 0) + added);
+  const sessions = new Set(state.sessions);
+  sessions.add(threadId);
+  return {
+    ...state,
+    threadConsumedTokens,
+    consumptionCursors: cursors,
+    sessions,
+    updatedAt,
+  };
+}
+
 export function reduceProviderAccountUsage(
   state: ProviderAccountUsageState,
   event: ProviderRuntimeEvent,
@@ -218,17 +275,26 @@ export function reduceProviderAccountUsage(
     return { ...state, activeSessions, updatedAt: event.createdAt };
   }
 
-  if (event.type === "thread.token-usage.updated" && event.payload.usage !== undefined) {
-    const threadTokens = new Map(state.threadTokens);
-    const sessions = new Set(state.sessions);
-    const observedTokens =
-      event.payload.usage.totalProcessedTokens ?? event.payload.usage.usedTokens;
-    threadTokens.set(
+  if (event.type === "thread.token-usage.updated") {
+    let next = state;
+    if (event.payload.usage !== undefined) {
+      const threadTokens = new Map(state.threadTokens);
+      const sessions = new Set(state.sessions);
+      const observedTokens =
+        event.payload.usage.totalProcessedTokens ?? event.payload.usage.usedTokens;
+      threadTokens.set(
+        event.threadId,
+        Math.max(threadTokens.get(event.threadId) ?? 0, observedTokens),
+      );
+      sessions.add(event.threadId);
+      next = { ...state, threadTokens, sessions, updatedAt: event.createdAt };
+    }
+    return addThreadConsumption(
+      next,
       event.threadId,
-      Math.max(threadTokens.get(event.threadId) ?? 0, observedTokens),
+      event.payload.consumption ?? [],
+      event.createdAt,
     );
-    sessions.add(event.threadId);
-    return { ...state, threadTokens, sessions, updatedAt: event.createdAt };
   }
 
   if (event.type === "account.rate-limits.updated") {
@@ -237,6 +303,9 @@ export function reduceProviderAccountUsage(
       ? {
           ...state,
           rateLimits: mergeRateLimits(state.rateLimits, rateLimits),
+          rateLimitsUpdatedAt: event.createdAt,
+          ...(rateLimits.primary ? { primaryUpdatedAt: event.createdAt } : {}),
+          ...(rateLimits.secondary ? { secondaryUpdatedAt: event.createdAt } : {}),
           updatedAt: event.createdAt,
         }
       : state;
@@ -249,8 +318,12 @@ export function providerAccountUsageFromState(
   state: ProviderAccountUsageState,
 ): ServerProviderUsage | undefined {
   if (!state.updatedAt) return undefined;
+  // Prefer measured spend (it includes subagents); fall back to the context counter.
+  const consumed = state.threadConsumedTokens ?? new Map<string, number>();
   let sessionTokens = 0;
-  for (const tokens of state.threadTokens.values()) sessionTokens += tokens;
+  for (const threadId of new Set([...state.threadTokens.keys(), ...consumed.keys()])) {
+    sessionTokens += consumed.get(threadId) ?? state.threadTokens.get(threadId) ?? 0;
+  }
   return {
     source: "runtime",
     updatedAt: state.updatedAt,
@@ -260,8 +333,32 @@ export function providerAccountUsageFromState(
     ...(state.rateLimits?.planType ? { planType: state.rateLimits.planType } : {}),
     ...(state.rateLimits?.primary ? { primary: state.rateLimits.primary } : {}),
     ...(state.rateLimits?.secondary ? { secondary: state.rateLimits.secondary } : {}),
+    ...(state.rateLimits?.extraWindows?.length
+      ? { extraWindows: state.rateLimits.extraWindows }
+      : {}),
     ...(state.rateLimits?.credits ? { credits: state.rateLimits.credits } : {}),
   };
+}
+
+function isAtLeastAsFresh(candidate: string, baseline: string): boolean {
+  const candidateMs = Date.parse(candidate);
+  const baselineMs = Date.parse(baseline);
+  if (Number.isFinite(candidateMs) && Number.isFinite(baselineMs)) {
+    return candidateMs >= baselineMs;
+  }
+  return candidate >= baseline;
+}
+
+function pickFresher<T>(
+  providerValue: T | undefined,
+  providerAt: string,
+  runtimeValue: T | undefined,
+  runtimeAt: string | undefined,
+): T | undefined {
+  if (providerValue === undefined) return runtimeValue;
+  if (runtimeValue === undefined) return providerValue;
+  if (runtimeAt === undefined) return providerValue;
+  return isAtLeastAsFresh(runtimeAt, providerAt) ? runtimeValue : providerValue;
 }
 
 export function mergeProviderAccountUsage(
@@ -271,14 +368,48 @@ export function mergeProviderAccountUsage(
   const runtimeUsage = providerAccountUsageFromState(state);
   if (!runtimeUsage) return providerUsage;
   if (!providerUsage) return runtimeUsage;
+  const primary = pickFresher(
+    providerUsage.primary,
+    providerUsage.updatedAt,
+    runtimeUsage.primary,
+    state.primaryUpdatedAt ?? state.rateLimitsUpdatedAt,
+  );
+  const secondary = pickFresher(
+    providerUsage.secondary,
+    providerUsage.updatedAt,
+    runtimeUsage.secondary,
+    state.secondaryUpdatedAt ?? state.rateLimitsUpdatedAt,
+  );
+  const credits = pickFresher(
+    providerUsage.credits,
+    providerUsage.updatedAt,
+    runtimeUsage.credits,
+    state.rateLimitsUpdatedAt,
+  );
+  const planType = pickFresher(
+    providerUsage.planType,
+    providerUsage.updatedAt,
+    runtimeUsage.planType,
+    state.rateLimitsUpdatedAt,
+  );
+  const extraWindows = pickFresher(
+    providerUsage.extraWindows,
+    providerUsage.updatedAt,
+    runtimeUsage.extraWindows,
+    state.rateLimitsUpdatedAt,
+  );
   return {
     ...providerUsage,
     ...runtimeUsage,
     source: providerUsage.source === "runtime" ? "runtime" : "combined",
-    updatedAt:
-      providerUsage.updatedAt > runtimeUsage.updatedAt
-        ? providerUsage.updatedAt
-        : runtimeUsage.updatedAt,
+    updatedAt: isAtLeastAsFresh(providerUsage.updatedAt, runtimeUsage.updatedAt)
+      ? providerUsage.updatedAt
+      : runtimeUsage.updatedAt,
+    ...(primary ? { primary } : {}),
+    ...(secondary ? { secondary } : {}),
+    ...(extraWindows?.length ? { extraWindows } : {}),
+    ...(credits ? { credits } : {}),
+    ...(planType ? { planType } : {}),
   };
 }
 

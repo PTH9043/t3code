@@ -12,6 +12,7 @@ import {
   useComposerDraftStore,
 } from "../../composerDraftStore";
 import { waitForDraftHeroTransition } from "../chat/draftHeroTransition";
+import { promoteMeetingComposerConfig } from "../../meetingComposerStore";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { resolveThreadSyncPhase } from "../../threadSync";
 import {
@@ -33,6 +34,7 @@ import {
 } from "../../workspaceTabStore";
 import { ControlCenterDisplayControls } from "../control-center/ControlCenterDisplayControls";
 import { WorkspaceControlCenter } from "../control-center/WorkspaceControlCenter";
+import { UpgradeRoomTabPane } from "./UpgradeRoomTabPane";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -53,7 +55,9 @@ export function WorkspaceTabPane({ tab, active }: { tab: WorkspaceTab; active: b
   return (
     <Activity mode={active ? "visible" : "hidden"}>
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-        {view.kind === "thread" ? (
+        {view.kind === "upgrade-room" ? (
+          <UpgradeRoomTabPane />
+        ) : view.kind === "thread" ? (
           <ThreadTabPane
             key={`${view.environmentId}:${view.threadId}`}
             environmentId={view.environmentId as EnvironmentId}
@@ -110,9 +114,16 @@ function ThreadTabPane(props: {
   });
   const serverThreadStarted = threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
+  // An immediate reload can restore a cached snapshot from before the first turn.
+  const confirmedMissing =
+    renderState === "missing" &&
+    (serverThreadStatus === "deleted" ||
+      (shell.data?.status === "live" &&
+        shell.data.snapshot._tag === "Some" &&
+        !shell.data.snapshot.value.threads.some((entry) => entry.id === props.threadId)));
 
   useEffect(() => {
-    if (!bootstrapComplete || renderState !== "missing" || !environmentHasAnyThreads) {
+    if (!confirmedMissing || !environmentHasAnyThreads) {
       return;
     }
     if (props.active) {
@@ -128,13 +139,12 @@ function ThreadTabPane(props: {
       }),
     );
   }, [
-    bootstrapComplete,
+    confirmedMissing,
     environmentHasAnyThreads,
     navigate,
     props.active,
     props.environmentId,
     props.threadId,
-    renderState,
   ]);
 
   useEffect(() => {
@@ -187,6 +197,14 @@ function DraftTabPane(props: { draftId: DraftId; active: boolean }) {
       return;
     }
     const draftViewKey = workspaceTabViewKey({ kind: "draft", draftId: props.draftId });
+    promoteMeetingComposerConfig(
+      draftViewKey,
+      workspaceTabViewKey({
+        kind: "thread",
+        environmentId: canonicalThreadRef.environmentId,
+        threadId: canonicalThreadRef.threadId,
+      }),
+    );
     if (!props.active) {
       // Promotion in a background tab retargets the tab without navigating.
       useWorkspaceTabStore.getState().retargetTabView(draftViewKey, {

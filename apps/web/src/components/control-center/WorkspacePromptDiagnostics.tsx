@@ -1,11 +1,13 @@
 import { useState } from "react";
 import type {
+  EnvironmentId,
   WorkspaceKnowledgeItem,
   WorkspacePromptDecision,
   WorkspacePromptDiagnostics as Diagnostics,
   WorkspacePromptTokenEstimate,
 } from "@t3tools/contracts";
 import { Button } from "../ui/button";
+import { StoredKnowledgeOriginal } from "../knowledge/StoredKnowledgeOriginal";
 
 const REASONS: Record<WorkspacePromptDecision["reason"], string> = {
   mandatory: "필수 사용자 지침",
@@ -38,9 +40,11 @@ const VERIFICATION: Record<WorkspacePromptDecision["verification"], string> = {
 export function WorkspacePromptDiagnostics({
   diagnostics,
   items,
+  environmentId,
 }: {
   diagnostics: Diagnostics;
   items: readonly WorkspaceKnowledgeItem[];
+  environmentId: EnvironmentId;
 }) {
   const [expandedSource, setExpandedSource] = useState<string | null>(null);
   const selected = diagnostics.decisions.filter((decision) => decision.selected).length;
@@ -102,9 +106,11 @@ export function WorkspacePromptDiagnostics({
                 <p className="mt-1 text-muted-foreground">원문 항목: {decision.itemId}</p>
               )}
               {expandedSource === expandedKey && original ? (
-                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-sans">
-                  {original.content}
-                </pre>
+                <StoredKnowledgeOriginal
+                  environmentId={environmentId}
+                  projectId={original.projectId}
+                  itemId={original.id}
+                />
               ) : null}
             </div>
           );

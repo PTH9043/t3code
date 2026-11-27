@@ -7,7 +7,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProjectionWorkspaceRagRepositoryLive } from "../persistence/Layers/ProjectionWorkspaceRag.ts";
 import { ProjectionWorkspaceKnowledgeRepositoryLive } from "../persistence/Layers/ProjectionWorkspaceKnowledge.ts";
 import { evaluateKnowledge } from "./knowledgeEvaluation.ts";
-import { knowledgeCases } from "./knowledgeDataset.ts";
+import { knowledgeCases, nextGenRagCases } from "./knowledgeDataset.ts";
 const decodeRequest = Schema.decodeUnknownSync(WorkspacePromptComposeInput);
 const decodeItem = Schema.decodeUnknownSync(WorkspaceKnowledgeItem);
 
@@ -48,8 +48,25 @@ it.effect(
       expect(result.warm.passed).toBe(90);
       expect(result.warm.boundaryViolations).toBe(0);
       expect(result.warm.provenanceFailures).toBe(0);
+      expect(result.warm.p99Ms).toBeGreaterThanOrEqual(result.warm.p95Ms);
+      expect(result.warm.ragas).toEqual({
+        contextPrecision: 1,
+        contextRecall: 1,
+        faithfulness: 1,
+        answerRelevancy: 1,
+      });
       expect(result.answerGenerationEvaluated).toBe(false);
       expect(result.modelInvocationsForAnswers).toBe(0);
+
+      const nextGenResult = yield* evaluateKnowledge(nextGenRagCases, (text) => text.length);
+      expect(nextGenResult.warm.cases).toBe(3);
+      expect(nextGenResult.warm.passed).toBe(3);
+      expect(nextGenResult.warm.ragas).toEqual({
+        contextPrecision: 1,
+        contextRecall: 1,
+        faithfulness: 1,
+        answerRelevancy: 1,
+      });
     }).pipe(
       Effect.provide(
         Layer.merge(

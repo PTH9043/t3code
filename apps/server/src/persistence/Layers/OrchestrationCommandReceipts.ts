@@ -26,7 +26,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at,
           result_sequence,
           status,
-          error
+          error,
+          request_fingerprint
         )
         VALUES (
           ${receipt.commandId},
@@ -35,7 +36,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           ${receipt.acceptedAt},
           ${receipt.resultSequence},
           ${receipt.status},
-          ${receipt.error}
+          ${receipt.error},
+          ${receipt.requestFingerprint ?? null}
         )
         ON CONFLICT (command_id)
         DO UPDATE SET
@@ -44,7 +46,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at = excluded.accepted_at,
           result_sequence = excluded.result_sequence,
           status = excluded.status,
-          error = excluded.error
+          error = excluded.error,
+          request_fingerprint = excluded.request_fingerprint
       `,
   });
 
@@ -60,7 +63,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at AS "acceptedAt",
           result_sequence AS "resultSequence",
           status,
-          error
+          error,
+          request_fingerprint AS "requestFingerprint"
         FROM orchestration_command_receipts
         WHERE command_id = ${commandId}
       `,

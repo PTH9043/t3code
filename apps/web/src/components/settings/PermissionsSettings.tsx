@@ -21,15 +21,8 @@ const DEFAULT_UPDATE_AUTOMATION_PERMISSIONS: DesktopUpdateAutomationPermissions 
 type UpdateAutomationPermission = keyof DesktopUpdateAutomationPermissions;
 type ProgramPermission = keyof WorkspaceProgramPermissions;
 
-export function PermissionsSettingsPanel() {
+export function DesktopUpdatePermissionsSection() {
   const updateState = useDesktopUpdateState();
-  const programPermissions = usePrimarySettings((settings) => settings.workspaceProgramPermissions);
-  const selfMonitoring = usePrimarySettings((settings) => settings.selfMonitoring);
-  const projects = useProjects();
-  const monitoredProjects = projects.filter(
-    (project) => project.workspaceControl?.monitoring.enabled === true,
-  );
-  const updateSettings = useUpdatePrimarySettings();
   const bridge = typeof window === "undefined" ? undefined : window.desktopBridge;
   const supportsUpdateAutomation =
     typeof bridge?.getUpdateAutomationPermissions === "function" &&
@@ -113,6 +106,71 @@ export function PermissionsSettingsPanel() {
       ? "현재 개발 빌드에서는 업데이트 기능이 비활성화되어 있지만 권한은 저장됩니다."
       : null;
 
+  return (
+    <SettingsSection title="애플리케이션 업데이트">
+      <SettingsRow
+        {...searchableSetting("automatic-update-download")}
+        description="새 버전을 발견하면 별도의 확인 없이 설치 파일을 백그라운드에서 내려받도록 허용합니다. 앱은 재시작되지 않습니다."
+        status={
+          desktopOnlyStatus ??
+          buildStatus ??
+          (savingPermission === "autoDownload"
+            ? "권한 저장 중…"
+            : permissions.autoDownload
+              ? "허용됨"
+              : "허용 안 함")
+        }
+        control={
+          <Switch
+            aria-label="자동 다운로드 권한"
+            checked={permissions.autoDownload}
+            disabled={controlsDisabled}
+            onCheckedChange={(checked) => updatePermission("autoDownload", checked)}
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("automatic-update-install")}
+        description="다운로드가 완료되면 앱을 자동으로 종료하고 업데이트를 설치한 뒤 다시 시작하도록 허용합니다."
+        status={
+          desktopOnlyStatus ??
+          buildStatus ??
+          (savingPermission === "autoInstall"
+            ? "권한 저장 중…"
+            : permissions.autoInstall
+              ? "허용됨 · 자동 재시작 포함"
+              : "허용 안 함")
+        }
+        control={
+          <Switch
+            aria-label="자동 설치 및 재시작 권한"
+            checked={permissions.autoInstall}
+            disabled={controlsDisabled}
+            onCheckedChange={(checked) => updatePermission("autoInstall", checked)}
+          />
+        }
+      />
+      <div className="mx-3 mt-2 flex gap-3 rounded-xl border border-amber-500/25 bg-amber-500/8 px-4 py-3 text-sm text-amber-800 sm:mx-4 dark:text-amber-100/90">
+        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-amber-400" />
+        <p className="leading-relaxed">
+          자동 설치 전 서버 연결을 하나씩 정리하며, 설치 인계가 실패하면 사용 중이던 백엔드를 다시
+          시작합니다. 진행 중인 에이전트 턴과 터미널 명령은 중단될 수 있으므로 중요한 작업이 끝난
+          뒤에만 허용하는 것을 권장합니다.
+        </p>
+      </div>
+    </SettingsSection>
+  );
+}
+
+export function PermissionsSettingsPanel() {
+  const programPermissions = usePrimarySettings((settings) => settings.workspaceProgramPermissions);
+  const selfMonitoring = usePrimarySettings((settings) => settings.selfMonitoring);
+  const projects = useProjects();
+  const monitoredProjects = projects.filter(
+    (project) => project.workspaceControl?.monitoring.enabled === true,
+  );
+  const updateSettings = useUpdatePrimarySettings();
+
   const updateProgramPermission = (permission: ProgramPermission, enabled: boolean) => {
     if (
       enabled &&
@@ -139,58 +197,6 @@ export function PermissionsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="애플리케이션 업데이트">
-        <SettingsRow
-          {...searchableSetting("automatic-update-download")}
-          description="새 버전을 발견하면 별도의 확인 없이 설치 파일을 백그라운드에서 내려받도록 허용합니다. 앱은 재시작되지 않습니다."
-          status={
-            desktopOnlyStatus ??
-            buildStatus ??
-            (savingPermission === "autoDownload"
-              ? "권한 저장 중…"
-              : permissions.autoDownload
-                ? "허용됨"
-                : "허용 안 함")
-          }
-          control={
-            <Switch
-              aria-label="자동 다운로드 권한"
-              checked={permissions.autoDownload}
-              disabled={controlsDisabled}
-              onCheckedChange={(checked) => updatePermission("autoDownload", checked)}
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("automatic-update-install")}
-          description="다운로드가 완료되면 앱을 자동으로 종료하고 업데이트를 설치한 뒤 다시 시작하도록 허용합니다."
-          status={
-            desktopOnlyStatus ??
-            buildStatus ??
-            (savingPermission === "autoInstall"
-              ? "권한 저장 중…"
-              : permissions.autoInstall
-                ? "허용됨 · 자동 재시작 포함"
-                : "허용 안 함")
-          }
-          control={
-            <Switch
-              aria-label="자동 설치 및 재시작 권한"
-              checked={permissions.autoInstall}
-              disabled={controlsDisabled}
-              onCheckedChange={(checked) => updatePermission("autoInstall", checked)}
-            />
-          }
-        />
-        <div className="mx-3 mt-2 flex gap-3 rounded-xl border border-amber-500/25 bg-amber-500/8 px-4 py-3 text-sm text-amber-800 sm:mx-4 dark:text-amber-100/90">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-amber-400" />
-          <p className="leading-relaxed">
-            자동 설치 전 서버 연결을 하나씩 정리하며, 설치 인계가 실패하면 사용 중이던 백엔드를 다시
-            시작합니다. 진행 중인 에이전트 턴과 터미널 명령은 중단될 수 있으므로 중요한 작업이 끝난
-            뒤에만 허용하는 것을 권장합니다.
-          </p>
-        </div>
-      </SettingsSection>
       <SettingsSection title="프로젝트 프로그램 운영">
         <SettingsRow
           {...searchableSetting("workspace-program-manual-control")}

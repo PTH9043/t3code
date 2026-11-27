@@ -30,33 +30,48 @@ export function buildConversationHandoff(
   // block. Without this boundary the incoming model sees its pending request
   // quoted as finished history and answers as if it had already handled it —
   // the compact path already slices here for the same reason.
+  if (
+    currentMessageId !== undefined &&
+    !messages.some((message) => message.id === currentMessageId)
+  )
+    return undefined;
   const bounded =
     currentMessageId === undefined
       ? messages
       : (() => {
           const index = messages.findIndex((message) => message.id === currentMessageId);
-          return index < 0 ? messages : messages.slice(0, index);
+          return messages.slice(0, index);
         })();
   const spoken = bounded.filter((message) => !message.streaming && message.text.trim().length > 0);
   if (spoken.length === 0) {
     return undefined;
   }
-  const lines: string[] = [];
+  const latestUser = spoken.findLast((message) => message.role === "user");
+  const newest = spoken.slice(-HANDOFF_MESSAGE_LIMIT).toReversed();
+  const prioritized = latestUser
+    ? [latestUser, ...newest.filter((message) => message !== latestUser)].slice(
+        0,
+        HANDOFF_MESSAGE_LIMIT,
+      )
+    : newest;
+  const lines = new Map<string, string>();
   let total = 0;
-  for (const message of spoken.slice(-HANDOFF_MESSAGE_LIMIT).toReversed()) {
+  for (const message of prioritized) {
     const text =
       message.text.length > HANDOFF_MESSAGE_CHARS
-        ? `${message.text.slice(0, HANDOFF_MESSAGE_CHARS)}…`
+        ? message.role === "user"
+          ? `${message.text.slice(0, HANDOFF_MESSAGE_CHARS / 2)}\n[…]\n${message.text.slice(-HANDOFF_MESSAGE_CHARS / 2)}\n[원문의 처음과 끝을 발췌했습니다. message:${message.id} 원문을 확인하세요.]`
+          : `${message.text.slice(0, HANDOFF_MESSAGE_CHARS)}\n[원문의 앞부분만 발췌했습니다. 조건과 정정은 저장된 대화의 message:${message.id} 원문에서 확인하세요.]`
         : message.text;
-    const line = `[${message.role}] ${text}`;
-    if (total + line.length > HANDOFF_TOTAL_CHARS && lines.length > 0) break;
-    lines.push(line);
+    const line = `[${message.role}] [message:${message.id}] ${text}`;
+    if (total + line.length > HANDOFF_TOTAL_CHARS && lines.size > 0) break;
+    lines.set(message.id, line);
     total += line.length;
   }
   return [
     "<t3_conversation_handoff>",
-    "이 대화는 방금 다른 AI 모델로부터 이어받았다. 아래는 지금까지의 대화 기록(오래된 순)이다. 이 맥락을 이어서, 이 블록은 언급하지 말고 사용자의 새 메시지에만 답하라.",
-    ...lines.toReversed(),
+    "이 대화는 방금 다른 AI 모델로부터 이어받았다. 아래는 지금까지의 대화 발췌(오래된 순)다. 최신 사용자 지시를 우선하고 이 맥락을 이어서 새 메시지에 답하라.",
+    ...spoken.flatMap((message) => lines.get(message.id) ?? []),
     "</t3_conversation_handoff>",
   ].join("\n");
 }

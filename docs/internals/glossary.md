@@ -11,6 +11,7 @@ T3 Code를 위해 계속 갱신되는 용어집입니다. 이 코드베이스에
 - [오케스트레이션](#오케스트레이션)
 - [제공자 런타임](#제공자-런타임)
 - [체크포인트 관리](#체크포인트-관리)
+- [맥락 보존형 장기기억 (Memory v3)](#맥락-보존형-장기기억-memory-v3)
 
 ## 개념
 
@@ -164,6 +165,20 @@ T3 Code를 위해 계속 갱신되는 용어집입니다. 이 코드베이스에
 
 턴 하나의 파일 패치와 변경 파일 요약입니다. 보통 [CheckpointDiffQuery.ts][20]에서 계산하고, [컨트랙트][1]에 표현되며, [projector.ts][4]가 대화 상태에 기록합니다.
 
+### 맥락 보존형 장기기억 (Memory v3)
+
+#### 기억 2계층 (`fact` / `observation`)
+
+단일 SQLite 테이블 `workspace_memory_v2` 안에서 불변 원문 사실(`memory_layer = 'fact'`)과 통합 의사결정 관찰(`memory_layer = 'observation'`)을 분리해 관리하는 구조입니다. 원본 `fact` 행은 덮어쓰지 않고 보존하며, 통합 `observation` 행은 결정 당시의 이유(`rationale`)와 근거 사실 ID 배열(`proof_fact_ids`)을 함께 유지합니다. [WorkspaceMemory.ts][29]와 [memoryConsolidatorV3.ts][30]을 참고하세요.
+
+#### 결정 이유 우선 보호 (Rationale Precedence)
+
+명시적 이유(`rationale`)가 기록된 확정 관찰(`observation`)이 있을 때, 이유 없는 후속 질문이나 가벼운 언급(예: `"그냥 A안으로 할까?"`)이 기존 결정을 덮어쓰지(`SUPERSEDE`) 못하도록 보호하고 재검토 질문 발생 사실만 병기(`AUGMENT`)하는 규칙입니다. 새로운 사유가 동반된 명시적 변경 결정이 내려질 때만 이전 관찰을 닫고 `[구 결정(이유)] → [변경 사유] → [현 결정]` 전환 서술을 합성합니다. [memoryConsolidatorV3.ts][30]을 참고하세요.
+
+#### 성찰 사다리 (Reflect Ladder)
+
+모델이 과거 문맥이나 결정 이유를 판단할 때 부분 발췌만 보고 단정하지 않도록 ① 필수 지침·절차(`LESSONS.md`) 대조 → ② 통합 관찰(`observation`) 및 `rationale` 확인 → ③ 맥락 부족 시 `workspace_memory`의 `action: "reflect"` 또는 `action: "read"`로 원본 `fact`를 조회하도록 강제하는 3단계 추론 절차입니다. [WorkspaceMemory.ts][29]를 참고하세요.
+
 ## 실무 요령
 
 - `requested`가 보이면 "의도가 기록됨"으로 생각하세요.
@@ -208,3 +223,5 @@ T3 Code를 위해 계속 갱신되는 용어집입니다. 이 코드베이스에
 [26]: ../../apps/server/src/orchestration/workspaceTaskGraph.ts
 [27]: ./workspace-collaboration.md
 [28]: ./workspace-monitoring.md
+[29]: ../../apps/server/src/orchestration/WorkspaceMemory.ts
+[30]: ../../apps/server/src/orchestration/memoryConsolidatorV3.ts

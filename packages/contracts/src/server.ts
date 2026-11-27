@@ -21,6 +21,7 @@ import { EditorId } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
+import { ExecutionLedgerSummary } from "./executionLedger.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -163,6 +164,7 @@ export type ServerProviderUsageSource = typeof ServerProviderUsageSource.Type;
 
 export const ServerProviderUsageWindow = Schema.Struct({
   label: Schema.optional(TrimmedNonEmptyString),
+  bucket: Schema.optional(TrimmedNonEmptyString),
   usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
   resetsAt: Schema.optional(NonNegativeInt),
   windowDurationMinutes: Schema.optional(PositiveInt),
@@ -193,6 +195,7 @@ export const ServerProviderUsage = Schema.Struct({
   planType: Schema.optional(TrimmedNonEmptyString),
   primary: Schema.optionalKey(ServerProviderUsageWindow),
   secondary: Schema.optionalKey(ServerProviderUsageWindow),
+  extraWindows: Schema.optionalKey(Schema.Array(ServerProviderUsageWindow)),
   credits: Schema.optionalKey(ServerProviderUsageCredits),
 });
 export type ServerProviderUsage = typeof ServerProviderUsage.Type;
@@ -308,6 +311,18 @@ export const ServerTraceDiagnosticsSpanOccurrence = Schema.Struct({
 });
 export type ServerTraceDiagnosticsSpanOccurrence = typeof ServerTraceDiagnosticsSpanOccurrence.Type;
 
+export const ServerTraceDiagnosticsSubscriptionOccurrence = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  durationMs: Schema.Number,
+  endedAt: Schema.DateTimeUtc,
+  traceId: TrimmedNonEmptyString,
+  spanId: TrimmedNonEmptyString,
+  ttfbMs: Schema.optionalKey(Schema.Number),
+  bufferOverflow: Schema.optionalKey(Schema.Boolean),
+});
+export type ServerTraceDiagnosticsSubscriptionOccurrence =
+  typeof ServerTraceDiagnosticsSubscriptionOccurrence.Type;
+
 export const ServerTraceDiagnosticsLogEvent = Schema.Struct({
   spanName: TrimmedNonEmptyString,
   level: TrimmedNonEmptyString,
@@ -333,6 +348,14 @@ export const ServerTraceDiagnosticsResult = Schema.Struct({
   logLevelCounts: Schema.Record(TrimmedNonEmptyString, NonNegativeInt),
   topSpansByCount: Schema.Array(ServerTraceDiagnosticsSpanSummary),
   slowestSpans: Schema.Array(ServerTraceDiagnosticsSpanOccurrence),
+  longLivedSubscriptionCount: Schema.optionalKey(NonNegativeInt),
+  longLivedSubscriptions: Schema.optionalKey(
+    Schema.Array(ServerTraceDiagnosticsSubscriptionOccurrence),
+  ),
+  longRunningTurnCount: Schema.optionalKey(NonNegativeInt),
+  longRunningTurns: Schema.optionalKey(Schema.Array(ServerTraceDiagnosticsSpanOccurrence)),
+  subscriptionBufferOverflowCount: Schema.optionalKey(NonNegativeInt),
+  executionLedger: Schema.optionalKey(ExecutionLedgerSummary),
   commonFailures: Schema.Array(ServerTraceDiagnosticsFailureSummary),
   latestFailures: Schema.Array(ServerTraceDiagnosticsRecentFailure),
   latestWarningAndErrorLogs: Schema.Array(ServerTraceDiagnosticsLogEvent),
@@ -458,6 +481,7 @@ export const ServerSignalProcessResult = Schema.Struct({
 export type ServerSignalProcessResult = typeof ServerSignalProcessResult.Type;
 
 export const ServerConfig = Schema.Struct({
+  upgradeRoom: Schema.optionalKey(Schema.Struct({ projectId: ProjectId, threadId: ThreadId })),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

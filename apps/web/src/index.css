@@ -182,7 +182,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    the variables and Settings -> Appearance can override them at runtime. The
    default stacks are mirrored in `appearanceFonts.ts`. */
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-sans:
+    "Pretendard Variable", "Pretendard", "Inter", "Noto Sans KR", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", system-ui, sans-serif;
   --font-mono:
     ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -200,6 +202,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-error-foreground: var(--error-foreground);
   --color-error: var(--error);
   --color-error-surface: var(--error-surface);
+  --color-status-danger: var(--status-danger);
+  --color-status-danger-fg: var(--status-danger-fg);
+  --color-status-danger-surface: var(--status-danger-surface);
+  --color-status-danger-border: var(--status-danger-border);
+  --color-status-warning: var(--status-warning);
+  --color-status-warning-fg: var(--status-warning-fg);
+  --color-status-warning-surface: var(--status-warning-surface);
+  --color-status-warning-border: var(--status-warning-border);
+  --color-status-success: var(--status-success);
+  --color-status-success-fg: var(--status-success-fg);
+  --color-status-success-surface: var(--status-success-surface);
+  --color-status-success-border: var(--status-success-border);
+  --color-status-info: var(--status-info);
+  --color-status-info-fg: var(--status-info-fg);
+  --color-status-info-surface: var(--status-info-surface);
+  --color-status-info-border: var(--status-info-border);
+  --color-border-subtle: var(--border-subtle);
   --color-update-foreground: var(--update-foreground);
   --color-update: var(--update);
   --color-update-surface: var(--update-surface);
@@ -862,9 +881,19 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       --topbar-scroll-fade-height: 3rem;
     }
 
+    /*
+     * The composer spans the chat pane like the message column above it. A pane of 54rem or
+     * more steps the inset to the 3rem gutter the timeline keeps for its minimap (see
+     * TIMELINE_HORIZONTAL_INSET_CLASS_NAME): the percentage resolves against the pane, so the
+     * product is far below 1.25rem under that width and far above 3rem from it on.
+     */
     .chat-composer-horizontal-inset {
-      padding-inline-start: calc(env(safe-area-inset-left) + 1.25rem);
-      padding-inline-end: calc(env(safe-area-inset-right) + 1.25rem);
+      padding-inline-start: calc(
+        env(safe-area-inset-left) + max(1.25rem, min(3rem, (100% - 54rem + 1px) * 9999))
+      );
+      padding-inline-end: calc(
+        env(safe-area-inset-right) + max(1.25rem, min(3rem, (100% - 54rem + 1px) * 9999))
+      );
     }
   }
 
@@ -882,6 +911,25 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     .dropdown-glass {
       background: var(--popover) !important;
     }
+  }
+}
+
+/*
+ * User-configured horizontal inset between the chat column and the pane dividers.
+ * Placed outside `@layer` so it cleanly overrides both component defaults and
+ * Tailwind utility padding classes on the timeline and composer in unison.
+ */
+:root[data-chat-custom-inset="true"] .chat-timeline-horizontal-inset,
+:root[data-chat-custom-inset="true"] .chat-composer-horizontal-inset {
+  padding-inline-start: calc(env(safe-area-inset-left) + var(--chat-horizontal-inset-mobile, 12px));
+  padding-inline-end: calc(env(safe-area-inset-right) + var(--chat-horizontal-inset-mobile, 12px));
+}
+
+@media (min-width: 40rem) {
+  :root[data-chat-custom-inset="true"] .chat-timeline-horizontal-inset,
+  :root[data-chat-custom-inset="true"] .chat-composer-horizontal-inset {
+    padding-inline-start: calc(env(safe-area-inset-left) + var(--chat-horizontal-inset, 48px));
+    padding-inline-end: calc(env(safe-area-inset-right) + var(--chat-horizontal-inset, 48px));
   }
 }
 
@@ -952,21 +1000,43 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --message-action-hover: color-mix(in srgb, var(--primary) 90%, var(--background));
   --accent: var(--color-zinc-100);
   --accent-foreground: var(--color-zinc-900);
-  --error: var(--color-red-500);
-  --error-foreground: var(--color-red-700);
-  --error-surface: color-mix(in srgb, var(--error) 8%, transparent);
-  --destructive: var(--error);
-  --border: var(--color-zinc-200);
-  --input: var(--color-zinc-300);
+  /* Brand-independent semantic status tokens (ERR-11):
+     isolated from --primary/--accent across all 6 built-in and custom themes. */
+  --status-danger: #dc2626;
+  --status-danger-fg: #b91c1c;
+  --status-danger-surface: #fef2f2;
+  --status-danger-border: #f87171;
+  --status-warning: #d97706;
+  --status-warning-fg: #92400e;
+  --status-warning-surface: #fffbeb;
+  --status-warning-border: #fbbf24;
+  --status-success: #059669;
+  --status-success-fg: #047857;
+  --status-success-surface: #ecfdf5;
+  --status-success-border: #34d399;
+  --status-info: #2563eb;
+  --status-info-fg: #1d4ed8;
+  --status-info-surface: #eff6ff;
+  --status-info-border: #60a5fa;
+  --error: var(--status-danger);
+  --error-foreground: var(--status-danger-fg);
+  --error-surface: color-mix(in srgb, var(--status-danger) 10%, var(--card));
+  --destructive: var(--status-danger);
+  /* Light mode border hierarchy using #cbd5e1/#94a3b8 tuned for >= 3.2:1 contrast (ERR-22). */
+  --border-subtle: #cbd5e1;
+  --border: color-mix(in srgb, #94a3b8 72%, #475569);
+  --input: color-mix(in srgb, #94a3b8 62%, #475569);
+  --redact-surface: oklch(0.93 0.008 252);
+  --redact-border: oklch(0.84 0.012 252);
   --ring: oklch(0.488 0.217 264);
-  --destructive-foreground: var(--error-foreground);
-  --info: var(--color-blue-500);
-  --info-foreground: var(--color-blue-700);
-  --success: var(--color-emerald-500);
-  --success-foreground: var(--color-emerald-700);
-  --warning: var(--color-amber-500);
-  --warning-foreground: var(--color-amber-700);
-  --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+  --destructive-foreground: var(--status-danger-fg);
+  --info: var(--status-info);
+  --info-foreground: var(--status-info-fg);
+  --success: var(--status-success);
+  --success-foreground: var(--status-success-fg);
+  --warning: var(--status-warning);
+  --warning-foreground: var(--status-warning-fg);
+  --warning-surface: color-mix(in srgb, var(--status-warning) 10%, var(--card));
   --update: var(--primary);
   --update-foreground: var(--primary);
   --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
@@ -1018,21 +1088,38 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --message-action-hover: color-mix(in srgb, var(--primary) 90%, var(--background));
     --accent: #303746;
     --accent-foreground: #f4f7fb;
-    --error: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
-    --error-foreground: var(--color-red-400);
-    --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
-    --destructive: var(--error);
-    --border: rgb(203 213 225 / 14%);
-    --input: rgb(203 213 225 / 20%);
+    --status-danger: #ef4444;
+    --status-danger-fg: #fca5a5;
+    --status-danger-surface: color-mix(in srgb, #ef4444 18%, #1b1f27);
+    --status-danger-border: color-mix(in srgb, #ef4444 48%, transparent);
+    --status-warning: #f59e0b;
+    --status-warning-fg: #fcd34d;
+    --status-warning-surface: color-mix(in srgb, #f59e0b 18%, #1b1f27);
+    --status-warning-border: color-mix(in srgb, #f59e0b 48%, transparent);
+    --status-success: #10b981;
+    --status-success-fg: #6ee7b7;
+    --status-success-surface: color-mix(in srgb, #10b981 18%, #1b1f27);
+    --status-success-border: color-mix(in srgb, #10b981 48%, transparent);
+    --status-info: #3b82f6;
+    --status-info-fg: #93c5fd;
+    --status-info-surface: color-mix(in srgb, #3b82f6 18%, #1b1f27);
+    --status-info-border: color-mix(in srgb, #3b82f6 48%, transparent);
+    --error: var(--status-danger);
+    --error-foreground: var(--status-danger-fg);
+    --error-surface: color-mix(in srgb, var(--status-danger) 18%, transparent);
+    --destructive: var(--status-danger);
+    --border-subtle: rgb(203 213 225 / 12%);
+    --border: rgb(203 213 225 / 18%);
+    --input: rgb(203 213 225 / 26%);
     --ring: oklch(0.68 0.17 264);
-    --destructive-foreground: var(--error-foreground);
-    --info: var(--color-blue-500);
-    --info-foreground: var(--color-blue-400);
-    --success: var(--color-emerald-500);
-    --success-foreground: var(--color-emerald-400);
-    --warning: var(--color-amber-500);
-    --warning-foreground: var(--color-amber-400);
-    --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+    --destructive-foreground: var(--status-danger-fg);
+    --info: var(--status-info);
+    --info-foreground: var(--status-info-fg);
+    --success: var(--status-success);
+    --success-foreground: var(--status-success-fg);
+    --warning: var(--status-warning);
+    --warning-foreground: var(--status-warning-fg);
+    --warning-surface: color-mix(in srgb, var(--status-warning) 18%, transparent);
     --update: var(--primary);
     --update-foreground: var(--primary);
     --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
@@ -1066,8 +1153,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --accent-foreground: var(--color-zinc-900);
   --muted: var(--color-zinc-50);
   --muted-foreground: var(--color-zinc-500);
-  --border: var(--color-zinc-200);
-  --input: var(--color-zinc-300);
+  --border-subtle: #cbd5e1;
+  --border: color-mix(in srgb, #94a3b8 72%, #475569);
+  --input: color-mix(in srgb, #94a3b8 62%, #475569);
+  --redact-surface: oklch(0.93 0.008 252);
+  --redact-border: oklch(0.84 0.012 252);
   --sidebar: var(--color-zinc-50);
   --sidebar-foreground: var(--color-zinc-800);
   --sidebar-muted-foreground: var(--color-zinc-500);
@@ -1075,7 +1165,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-row-hover: var(--color-zinc-25);
   --sidebar-row-active: var(--color-white);
   --sidebar-row-selected: var(--color-white);
-  --sidebar-border: var(--color-zinc-200);
+  --sidebar-border: var(--border);
   --sidebar-stage-fade: var(--sidebar);
   background-color: var(--sidebar);
 }
@@ -1146,14 +1236,21 @@ html.dark[data-theme-id] {
   --message-action: var(--app-theme-message-action);
   --message-action-foreground: var(--app-theme-message-action-foreground);
   --message-action-hover: var(--app-theme-message-action-hover);
-  --error: var(--app-theme-error);
-  --error-foreground: var(--app-theme-error-foreground);
-  --error-surface: var(--app-theme-error-surface);
-  --destructive: var(--error);
-  --destructive-foreground: var(--error-foreground);
-  --warning: var(--app-theme-warning);
-  --warning-foreground: var(--app-theme-warning-foreground);
-  --warning-surface: var(--app-theme-warning-surface);
+  /* Semantic status roles stay decoupled from brand --primary/--accent across
+     all 6 themes (Light, Dark, T3 Chat, Ocean, Ember, Iris, Grove) so error
+     badges always keep red danger contrast (ERR-11). */
+  --error: var(--status-danger);
+  --error-foreground: var(--status-danger-fg);
+  --error-surface: var(--status-danger-surface);
+  --destructive: var(--status-danger);
+  --destructive-foreground: var(--status-danger-fg);
+  --warning: var(--status-warning);
+  --warning-foreground: var(--status-warning-fg);
+  --warning-surface: var(--status-warning-surface);
+  --success: var(--status-success);
+  --success-foreground: var(--status-success-fg);
+  --info: var(--status-info);
+  --info-foreground: var(--status-info-fg);
   --update: var(--app-theme-update);
   --update-foreground: var(--app-theme-update-foreground);
   --update-surface: var(--app-theme-update-surface);
@@ -1204,15 +1301,117 @@ html.dark[data-theme-id="t3-chat"] .chat-composer-glass-shell {
 
 html[data-theme-id]:not(.dark) {
   color-scheme: light;
+  /* Light themed presets reinforce border contrast (#cbd5e1/#94a3b8, >= 3.2:1)
+     and maintain neutral card-over-canvas lightness separation (delta-L >= 8, ERR-22/ERR-53). */
+  --border-subtle: #cbd5e1;
+  --border: color-mix(in srgb, #94a3b8 72%, #475569);
+  --input: color-mix(in srgb, #94a3b8 62%, #475569);
+  --redact-surface: oklch(0.93 0.008 252);
+  --redact-border: oklch(0.84 0.012 252);
+  --status-danger: #dc2626;
+  --status-danger-fg: #b91c1c;
+  --status-danger-surface: color-mix(in srgb, #dc2626 10%, var(--card));
+  --status-danger-border: color-mix(in srgb, #dc2626 45%, var(--border));
+  --status-warning: #d97706;
+  --status-warning-fg: #92400e;
+  --status-warning-surface: color-mix(in srgb, #d97706 12%, var(--card));
+  --status-warning-border: color-mix(in srgb, #d97706 45%, var(--border));
+  --status-success: #059669;
+  --status-success-fg: #047857;
+  --status-success-surface: color-mix(in srgb, #059669 10%, var(--card));
+  --status-success-border: color-mix(in srgb, #059669 42%, var(--border));
+  --status-info: #2563eb;
+  --status-info-fg: #1d4ed8;
+  --status-info-surface: color-mix(in srgb, #2563eb 10%, var(--card));
+  --status-info-border: color-mix(in srgb, #2563eb 42%, var(--border));
+}
+
+html[data-theme-id="ocean"]:not(.dark),
+html[data-theme-id="grove"]:not(.dark),
+html[data-theme-id="ember"]:not(.dark),
+html[data-theme-id="iris"]:not(.dark) {
+  --background: color-mix(in oklab, var(--app-theme-canvas) 88%, #94a3b8);
+  --app-chrome-background: var(--background);
+  --card: #ffffff;
+  --surface-raised: #ffffff;
+  --popover: #ffffff;
+  --muted: color-mix(in oklab, var(--app-theme-canvas) 82%, #94a3b8);
 }
 
 html.dark[data-theme-id] {
   color-scheme: dark;
+  --redact-surface: oklch(0.27 0.018 252);
+  --redact-border: oklch(0.36 0.022 252);
+  --status-danger: #ef4444;
+  --status-danger-fg: #fca5a5;
+  --status-danger-surface: color-mix(in srgb, #ef4444 18%, var(--card));
+  --status-danger-border: color-mix(in srgb, #ef4444 50%, transparent);
+  --status-warning: #f59e0b;
+  --status-warning-fg: #fcd34d;
+  --status-warning-surface: color-mix(in srgb, #f59e0b 18%, var(--card));
+  --status-warning-border: color-mix(in srgb, #f59e0b 50%, transparent);
+  --status-success: #10b981;
+  --status-success-fg: #6ee7b7;
+  --status-success-surface: color-mix(in srgb, #10b981 18%, var(--card));
+  --status-success-border: color-mix(in srgb, #10b981 50%, transparent);
+  --status-info: #3b82f6;
+  --status-info-fg: #93c5fd;
+  --status-info-surface: color-mix(in srgb, #3b82f6 18%, var(--card));
+  --status-info-border: color-mix(in srgb, #3b82f6 50%, transparent);
+}
+
+html.dark[data-theme-id="ocean"],
+html.dark[data-theme-id="grove"],
+html.dark[data-theme-id="ember"],
+html.dark[data-theme-id="iris"] {
+  /* Maintain delta-L >= 8 between neutral canvas and elevated card/popover surfaces (ERR-53). */
+  --background: color-mix(in oklab, var(--app-theme-canvas) 90%, #090d14);
+  --app-chrome-background: var(--background);
+  --card: color-mix(in oklab, var(--app-theme-canvas) 80%, #ffffff);
+  --surface-raised: color-mix(in oklab, var(--app-theme-canvas) 76%, #ffffff);
+  --popover: color-mix(in oklab, var(--app-theme-canvas) 72%, #ffffff);
+  --border: color-mix(in srgb, var(--app-theme-text) 20%, transparent);
+  --input: color-mix(in srgb, var(--app-theme-text) 28%, transparent);
+}
+
+/* Prevent collapsed long-text preview fade masks from slicing the last line in half (ERR-51). */
+[data-user-message-fade="true"] {
+  max-height: none;
+  padding-bottom: 1.5rem;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 1.5rem),
+    transparent 100%
+  ) !important;
+  mask-image: linear-gradient(to bottom, black calc(100% - 1.5rem), transparent 100%) !important;
+}
+
+[data-user-message-fade="true"] > * {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
 }
 
 html[data-theme-id] body {
   background-color: var(--app-chrome-background);
   color: var(--foreground);
+}
+
+:root {
+  --redact-surface: oklch(0.93 0.008 252);
+  --redact-border: oklch(0.84 0.012 252);
+}
+
+.dark {
+  --redact-surface: oklch(0.27 0.018 252);
+  --redact-border: oklch(0.36 0.022 252);
+}
+
+.redacted-project-pill {
+  background: var(--redact-surface);
+  border: 1px dashed var(--redact-border);
+  border-radius: 5px;
 }
 
 /* Theme-token dependency probes are restored synchronously, before paint. Keep

@@ -2,6 +2,7 @@ import {
   type GrokSettings,
   type ModelCapabilities,
   type ServerProvider,
+  type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -10,7 +11,9 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -30,6 +33,11 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  hasGrokApiKeyInEnv,
+  readGrokAuthSummary,
+  resolveGrokHomePath,
+} from "../Drivers/GrokHome.ts";
 
 const GROK_PRESENTATION = {
   displayName: "Grok",
@@ -164,7 +172,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = grokModelsFromSettings(grokSettings.customModels);
@@ -251,6 +259,46 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     });
   }
 
+  const grokHomePath = yield* resolveGrokHomePath(grokSettings, environment);
+  const authSummary = yield* readGrokAuthSummary(grokHomePath);
+  const hasApiKey = hasGrokApiKeyInEnv(environment);
+  const auth: ServerProviderAuth = authSummary.authenticated
+    ? {
+        status: "authenticated",
+        type: "oauth",
+        label: "Grok OAuth",
+        ...(authSummary.email ? { email: authSummary.email } : {}),
+      }
+    : hasApiKey
+      ? {
+          status: "authenticated",
+          type: "apiKey",
+          label: "xAI API 키",
+        }
+      : {
+          status: "unauthenticated",
+          ...(authSummary.email ? { email: authSummary.email } : {}),
+        };
+
+  if (auth.status === "unauthenticated") {
+    return buildServerProvider({
+      presentation: GROK_PRESENTATION,
+      enabled: grokSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "warning",
+        auth,
+        message:
+          authSummary.exists && authSummary.expired
+            ? "Grok 로그인 세션이 만료되었습니다. 'Grok 로그인' 버튼으로 다시 로그인하세요."
+            : "Grok 계정에 로그인되지 않았습니다. 'Grok 로그인' 버튼으로 로그인하거나 XAI_API_KEY를 설정하세요.",
+      },
+    });
+  }
+
   const discoveryExit = yield* discoverGrokModelsViaAcp(grokSettings, environment).pipe(
     Effect.timeoutOption(GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
     Effect.exit,
@@ -268,7 +316,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
         installed: true,
         version,
         status: "error",
-        auth: { status: "unknown" },
+        auth,
         message: "Grok CLI is installed but ACP startup failed. Check server logs for details.",
       },
     });
@@ -286,7 +334,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
         installed: true,
         version,
         status: "error",
-        auth: { status: "unknown" },
+        auth,
         message: `Grok CLI is installed but ACP startup timed out after ${GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
       },
     });
@@ -306,7 +354,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       installed: true,
       version,
       status: "ready",
-      auth: { status: "unknown" },
+      auth,
     },
   });
 });

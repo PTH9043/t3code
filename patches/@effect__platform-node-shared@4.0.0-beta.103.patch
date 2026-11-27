@@ -2,6 +2,15 @@ diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
 index 29b0231..bad323f 100644
 --- a/dist/NodeChildProcessSpawner.js
 +++ b/dist/NodeChildProcessSpawner.js
+@@ -256,7 +256,7 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+   const killProcessGroup = (command, childProcess, signal) => {
+     if (globalThis.process.platform === "win32") {
+       return Effect.callback(resume => {
+-        NodeChildProcess.exec(`taskkill /pid ${childProcess.pid} /T /F`, error => {
++        NodeChildProcess.execFile("taskkill.exe", ["/pid", String(childProcess.pid), "/T", "/F"], { windowsHide: true }, error => {
+           if (error) {
+             resume(Effect.fail(toPlatformError("kill", toError(error), command)));
+           } else {
 @@ -274,9 +274,11 @@ const make = /*#__PURE__*/Effect.gen(function* () {
    };
    const killProcessGroupOnExit = (childProcess, signal) => {

@@ -3,6 +3,74 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./classifierTelemetry": {
+      "types": "./src/classifierTelemetry.ts",
+      "import": "./src/classifierTelemetry.ts"
+    },
+    "./compactA11ySnapshot": {
+      "types": "./src/compactA11ySnapshot.ts",
+      "import": "./src/compactA11ySnapshot.ts"
+    },
+    "./llamaModchipPreset": {
+      "types": "./src/llamaModchipPreset.ts",
+      "import": "./src/llamaModchipPreset.ts"
+    },
+    "./smartModelRouter": {
+      "types": "./src/smartModelRouter.ts",
+      "import": "./src/smartModelRouter.ts"
+    },
+    "./obsidianVaultExport": {
+      "types": "./src/obsidianVaultExport.ts",
+      "import": "./src/obsidianVaultExport.ts"
+    },
+    "./botReadyContract": {
+      "types": "./src/botReadyContract.ts",
+      "import": "./src/botReadyContract.ts"
+    },
+    "./livingPersonaAvatarBridge": {
+      "types": "./src/livingPersonaAvatarBridge.ts",
+      "import": "./src/livingPersonaAvatarBridge.ts"
+    },
+    "./assistantPresenceController": {
+      "types": "./src/assistantPresenceController.ts",
+      "import": "./src/assistantPresenceController.ts"
+    },
+    "./speechSanitizer": {
+      "types": "./src/speechSanitizer.ts",
+      "import": "./src/speechSanitizer.ts"
+    },
+    "./userSpeechProfile": {
+      "types": "./src/userSpeechProfile.ts",
+      "import": "./src/userSpeechProfile.ts"
+    },
+    "./proactivePresence": {
+      "types": "./src/proactivePresence.ts",
+      "import": "./src/proactivePresence.ts"
+    },
+    "./livingPersonaCompiler": {
+      "types": "./src/livingPersonaCompiler.ts",
+      "import": "./src/livingPersonaCompiler.ts"
+    },
+    "./agencyPersonaTemplates": {
+      "types": "./src/agencyPersonaTemplates.ts",
+      "import": "./src/agencyPersonaTemplates.ts"
+    },
+    "./workspaceWikiLinks": {
+      "types": "./src/workspaceWikiLinks.ts",
+      "import": "./src/workspaceWikiLinks.ts"
+    },
+    "./turnRequestFingerprint": {
+      "types": "./src/turnRequestFingerprint.ts",
+      "import": "./src/turnRequestFingerprint.ts"
+    },
+    "./researchErrors": {
+      "types": "./src/researchErrors.ts",
+      "import": "./src/researchErrors.ts"
+    },
+    "./researchCitations": {
+      "types": "./src/researchCitations.ts",
+      "import": "./src/researchCitations.ts"
+    },
     "./workflow": {
       "types": "./src/workflow.ts",
       "import": "./src/workflow.ts"
@@ -234,6 +302,10 @@
     "./generatedResults": {
       "types": "./src/generatedResults.ts",
       "import": "./src/generatedResults.ts"
+    },
+    "./globalAssistantPrompt": {
+      "types": "./src/globalAssistantPrompt.ts",
+      "import": "./src/globalAssistantPrompt.ts"
     }
   },
   "scripts": {

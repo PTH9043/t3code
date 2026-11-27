@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 
@@ -95,6 +95,42 @@ it.effect("builds MCP endpoints from the bound server host", () =>
       });
       expect(issued.config.endpoint).toBe(expectedEndpoint);
     }
+  }),
+);
+
+it.effect("keeps the submitted roster on steers and replaces it for a fresh turn", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("room");
+    const providerInstanceId = ProviderInstanceId.make("grok");
+    const { config } = yield* registry.issue({ threadId, providerInstanceId });
+    const token = config.authorizationHeader.slice("Bearer ".length);
+    const team = {
+      threadId,
+      answeringInstanceId: providerInstanceId,
+      forModel: "first",
+      source: "room",
+      members: [
+        { instanceId: providerInstanceId, account: "Grok", role: "worker", model: "worker" },
+      ],
+    } as const;
+    const policy = {
+      providerSessionId: config.providerSessionId,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      activeDelegateTurnId: Effect.succeed(TurnId.make("active-turn")),
+    } as const;
+    const next = { ...team, forModel: "second", members: [] };
+    yield* registry.setExecutionPolicy(threadId, { ...policy, delegateTeam: team });
+    yield* registry.setExecutionPolicy(threadId, { ...policy, delegateTeam: next, steering: true });
+    expect((yield* registry.resolve(token))?.delegateTeam).toEqual(team);
+    yield* registry.setExecutionPolicy(threadId, { ...policy, delegateTeam: next });
+    expect((yield* registry.resolve(token))?.delegateTeam).toEqual(next);
+    yield* registry.setExecutionPolicy(threadId, {
+      ...policy,
+      delegateTeam: { ...team, answeringInstanceId: ProviderInstanceId.make("other") },
+    });
+    expect((yield* registry.resolve(token))?.delegateTeam).toBeUndefined();
   }),
 );
 

@@ -1,9 +1,15 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
+import {
+  interruptedWork,
+  isConfirmedMonitor,
+  recoveryHistoryLabel,
+} from "@t3tools/client-runtime/state/presentation";
 import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
 import { isCompactedActivityPayload } from "@t3tools/client-runtime/state/threads";
 import {
   ApprovalRequestId,
+  includeDeferredExaoneQuestions,
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
@@ -54,8 +60,14 @@ export const PROVIDER_OPTIONS: Array<{
     pickerSidebarBadge: "new",
   },
   {
+    value: ProviderDriverKind.make("muse"),
+    label: "Muse",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
     value: ProviderDriverKind.make("gemini"),
-    label: "Gemini",
+    label: "Antigravity CLI",
     available: true,
     pickerSidebarBadge: "new",
   },
@@ -69,6 +81,8 @@ export type WorkLogToolLifecycleStatus =
   | "stopped";
 
 export interface WorkLogEntry {
+  toolActivity?: import("@t3tools/client-runtime/state/thread-tool-activity").ThreadToolActivity;
+  unlinkedToolSignals?: readonly import("@t3tools/client-runtime/state/thread-tool-activity").ThreadToolActivity[];
   id: string;
   /** The owning task result for inline orchestra tool records. */
   orchestraMessageId?: string;
@@ -287,7 +301,11 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
   // Spawn CTA rows are never neutral-hidden: mid-run they derive from
   // task.progress (tone "thinking") and the neutral filter was swallowing
   // them exactly while the fleet ran — the one moment they matter most.
-  if (entry.agentSpawn !== undefined) {
+  if (
+    entry.agentSpawn !== undefined ||
+    entry.toolActivity !== undefined ||
+    entry.unlinkedToolSignals !== undefined
+  ) {
     return false;
   }
   if (!workLogEntryIsToolLike(entry)) {
@@ -365,6 +383,7 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
     case "command_execution_approval":
     case "exec_command_approval":
     case "dynamic_tool_call":
+    case "unknown":
       return "command";
     case "file_read_approval":
       return "file-read";
@@ -388,7 +407,12 @@ function isStalePendingRequestFailureDetail(detail: string | undefined): boolean
     normalized.includes("unknown pending permission request") ||
     normalized.includes("unknown pending user-input request") ||
     normalized.includes("unknown pending user input request") ||
-    normalized.includes("unknown pending codex user input request")
+    normalized.includes("unknown pending codex user input request") ||
+    normalized.includes("이미 종료된 질문입니다") ||
+    normalized.includes("이전 답변이 이미 전달됐을 수 있습니다") ||
+    normalized.includes("이미 처리됐거나 전달 결과를 확인할 수 없는 답변입니다") ||
+    normalized.includes("이 네이티브 질문은 이미 종료됐습니다") ||
+    normalized.includes("이미 제출한 답변의 처리 상태를 확인하고 있습니다")
   );
 }
 
@@ -418,10 +442,10 @@ export function derivePendingApprovals(
           : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
 
-    if (activity.kind === "approval.requested" && requestId && requestKind) {
+    if (activity.kind === "approval.requested" && requestId) {
       openByRequestId.set(requestId, {
         requestId,
-        requestKind,
+        requestKind: requestKind ?? "command",
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
       });
@@ -497,6 +521,7 @@ function parseUserInputQuestions(
 
 export interface BackgroundWatchMonitor {
   readonly taskId: string;
+  readonly isMonitor: boolean;
   readonly title: string | null;
   readonly startedAt: string;
 }
@@ -519,7 +544,9 @@ export interface BackgroundWatchStatus {
   readonly nextWakeReason: string | null;
   /** Set when a restart cut monitors/wakeups and nothing new has been armed since. */
   readonly interrupted: {
+    readonly eventId: string;
     readonly at: string;
+    readonly taskCount: number;
     readonly monitorCount: number;
     readonly lostWakeup: boolean;
   } | null;
@@ -553,12 +580,18 @@ export function deriveBackgroundWatchStatus(
     if (payload === null) continue;
 
     if (activity.kind === "session.recovered") {
-      const tasks = Array.isArray(payload.interruptedTasks) ? payload.interruptedTasks : [];
-      interrupted = {
-        at: activity.createdAt,
-        monitorCount: tasks.length,
-        lostWakeup: typeof payload.wakeupScheduledFor === "string",
-      };
+      const work = interruptedWork(payload);
+      interrupted =
+        work.taskCount > 0 || work.lostWakeup
+          ? {
+              eventId: activity.id,
+              at:
+                typeof payload.interruptedAt === "string"
+                  ? payload.interruptedAt
+                  : activity.createdAt,
+              ...work,
+            }
+          : null;
       monitors.clear();
       nextWakeAt = null;
       nextWakeReason = null;
@@ -573,6 +606,7 @@ export function deriveBackgroundWatchStatus(
       if (activity.kind === "task.started" && payload.agentKind === "background") {
         monitors.set(taskId, {
           taskId,
+          isMonitor: isConfirmedMonitor(payload.taskType),
           title: typeof payload.title === "string" ? payload.title : null,
           startedAt: activity.createdAt,
         });
@@ -666,7 +700,12 @@ export function derivePendingUserInputs(
       continue;
     }
 
-    if (activity.kind === "user-input.resolved" && requestId) {
+    if (
+      (activity.kind === "user-input.resolved" ||
+        (activity.kind === "provider.user-input.delivery.finished" &&
+          payload?.outcome === "accepted")) &&
+      requestId
+    ) {
       openByRequestId.delete(requestId);
       continue;
     }
@@ -680,8 +719,11 @@ export function derivePendingUserInputs(
     }
   }
 
-  return [...openByRequestId.values()].toSorted((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
+  return includeDeferredExaoneQuestions(
+    ordered,
+    [...openByRequestId.values()].toSorted((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    ),
   );
 }
 
@@ -901,6 +943,8 @@ export function deriveWorkLogEntries(
   const ordered = orderedActivities(activities);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
+    if (activity.kind.startsWith("provider.user-input.delivery.")) continue;
+    if (activity.kind.startsWith("provider.user-input.recovery.")) continue;
     if (activity.kind === "tool.started") continue;
     // Agent task.started rows are CTA seeds: they carry the true spawn turn,
     // which is the batch key (completions of background subagents arrive
@@ -1006,7 +1050,14 @@ function toDerivedWorkLogEntryUncached(activity: OrchestrationThreadActivity): D
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
-    label: taskLabel || activity.summary,
+    label:
+      taskLabel ||
+      (activity.kind === "runtime.error" &&
+      activity.summary === "Runtime error" &&
+      typeof payload?.message === "string" &&
+      payload.message.trim()
+        ? payload.message.trim().slice(0, 120)
+        : recoveryHistoryLabel(activity.kind, activity.summary, payload)),
     tone:
       activity.kind === "task.progress"
         ? "thinking"

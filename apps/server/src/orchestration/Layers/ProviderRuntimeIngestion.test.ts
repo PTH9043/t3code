@@ -30,8 +30,10 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import { makeRecoveryDeliveryJournal } from "../recoveryDeliveryJournal.ts";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -211,7 +213,8 @@ describe("ProviderRuntimeIngestion", () => {
     | OrchestrationEngineService
     | ProviderRuntimeIngestionService
     | ProjectionSnapshotQuery
-    | ServerConfig,
+    | ServerConfig
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -352,6 +355,31 @@ describe("ProviderRuntimeIngestion", () => {
       setProviderSession: provider.setSession,
       drain,
     };
+  }
+
+  function requestInitialTurn(
+    engine: Awaited<ReturnType<typeof createHarness>>["engine"],
+    threadId: ThreadId,
+    createdAt: string,
+  ) {
+    // A real running turn has an accepted request with the user's model and modes.
+    return Effect.runPromise(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-initial-active-turn"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-initial-active"),
+          role: "user",
+          text: "start",
+          attachments: [],
+        },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
   }
 
   it("maps turn started/completed events into thread session updates", async () => {
@@ -1413,6 +1441,7 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
     );
+    await requestInitialTurn(harness.engine, targetThreadId, createdAt);
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
       status: "running",
@@ -1532,6 +1561,7 @@ describe("ProviderRuntimeIngestion", () => {
     const oldTurnId = asTurnId("turn-steered-over");
     const newTurnId = asTurnId("turn-from-steer");
     const createdAt = "2026-01-01T00:00:00.000Z";
+    await requestInitialTurn(harness.engine, threadId, createdAt);
 
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
@@ -2678,7 +2708,7 @@ describe("ProviderRuntimeIngestion", () => {
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-runtime-error-activity"),
       payload: {
-        message: "runtime activity exploded",
+        message: "You've hit your 5-hour limit · resets 10:30am (Asia/Seoul)",
       },
     });
 
@@ -2694,7 +2724,10 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
 
     expect(activity?.kind).toBe("runtime.error");
-    expect(activityPayload?.message).toBe("runtime activity exploded");
+    expect(activity?.summary).toBe("You've hit your 5-hour limit · resets 10:30am (Asia/Seoul)");
+    expect(activityPayload?.message).toBe(
+      "You've hit your 5-hour limit · resets 10:30am (Asia/Seoul)",
+    );
   });
 
   it("keeps the session running when a runtime.warning arrives during an active turn", async () => {
@@ -2764,12 +2797,14 @@ describe("ProviderRuntimeIngestion", () => {
       type: "item.started",
       eventId: asEventId("evt-tool-started"),
       provider: ProviderDriverKind.make("codex"),
+      itemId: asItemId("call-evidence"),
       createdAt: now,
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-9"),
       payload: {
         itemType: "command_execution",
         status: "in_progress",
+        reportedModel: "fixture-model",
         title: "Read file",
         detail: "/tmp/file.ts",
       },
@@ -2787,10 +2822,50 @@ describe("ProviderRuntimeIngestion", () => {
 
     expect(thread.session?.status).toBe("ready");
     expect(
-      thread.activities.some(
+      thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.started",
+      )?.payload,
+    ).toMatchObject({
+      toolCallId: "call-evidence",
+      provider: "codex",
+      reportedModel: "fixture-model",
+    });
+  });
+
+  it("records conversation.turn-assigned immediately when turn.started carries a model", async () => {
+    const harness = await createHarness();
+    const now = "2026-11-20T00:00:00.000Z";
+    const turnId = asTurnId("turn-gemini-live");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-gemini-turn-started"),
+      provider: ProviderDriverKind.make("gemini"),
+      providerInstanceId: ProviderInstanceId.make("gemini"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { model: "gemini-4-neon" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.kind === "conversation.turn-assigned" && activity.turnId === turnId,
       ),
-    ).toBe(true);
+    );
+
+    expect(
+      thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.kind === "conversation.turn-assigned" && activity.turnId === turnId,
+      ),
+    ).toMatchObject({
+      id: `turn-assigned:${turnId}`,
+      kind: "conversation.turn-assigned",
+      turnId,
+      payload: { instanceId: "gemini", model: "gemini-4-neon" },
+    });
   });
 
   it("consumes P1 runtime events into thread metadata, diff checkpoints, and activities", async () => {
@@ -3612,5 +3687,83 @@ describe("ProviderRuntimeIngestion", () => {
       type: "image",
       result: { width: 1, height: 1 },
     });
+  });
+
+  it("confirms sending recovery delivery journal rows immediately on turn.started so mid-turn restarts never strand them as unknown", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const recoveryMessageId = asMessageId("recovery-blocking-msg");
+    const turnId = asTurnId("turn-blocking-gemini");
+    const now = "2026-01-01T00:01:00.000Z";
+
+    const dispatched = await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-blocking-recovery-start"),
+        threadId,
+        message: {
+          messageId: recoveryMessageId,
+          role: "user",
+          text: "[자동 복구] 서버가 재시작되면서 직전 턴이 중단되었습니다.",
+          attachments: [],
+        },
+        inputOrigin: "automation",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("gemini"),
+          model: "gemini-4-neon",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+    const journal = makeRecoveryDeliveryJournal(sql);
+    const turnStartEvent = await runtime!.runPromise(
+      sql<{ event_id: string; sequence: number }>`
+        SELECT event_id, sequence
+        FROM orchestration_events
+        WHERE stream_id = ${threadId}
+          AND event_type = 'thread.turn-start-requested'
+          AND sequence <= ${dispatched.sequence}
+        ORDER BY sequence DESC
+        LIMIT 1
+      `,
+    );
+    expect(turnStartEvent).toHaveLength(1);
+    const eventId = turnStartEvent[0]!.event_id;
+    await runtime!.runPromise(
+      journal.enqueue(
+        {
+          eventId,
+          threadId,
+          messageId: recoveryMessageId,
+          eventSequence: turnStartEvent[0]!.sequence,
+        },
+        now,
+      ),
+    );
+    expect(await runtime!.runPromise(journal.claim(eventId, now))).toBe(true);
+    expect(await runtime!.runPromise(journal.state(eventId))).toBe("sending");
+
+    // Blocking adapter (e.g. Antigravity ACP) emits turn.started while sendTurn() is still awaiting completion.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-blocking-turn-started"),
+      provider: ProviderDriverKind.make("gemini"),
+      providerInstanceId: ProviderInstanceId.make("gemini"),
+      threadId,
+      turnId,
+      createdAt: "2026-01-01T00:01:02.000Z",
+    });
+    await harness.drain();
+
+    expect(await runtime!.runPromise(journal.state(eventId))).toBe("accepted");
+    // Simulating a server restart mid-turn must not flip the confirmed row to 'unknown'
+    // or block future automatic recovery via activeThreads().
+    expect(await runtime!.runPromise(journal.markUnknown("2026-01-01T00:02:00.000Z"))).toEqual([]);
+    expect(await runtime!.runPromise(journal.state(eventId))).toBe("accepted");
+    expect((await runtime!.runPromise(journal.activeThreads())).has(threadId)).toBe(false);
   });
 });

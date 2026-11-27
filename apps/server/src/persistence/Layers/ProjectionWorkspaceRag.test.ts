@@ -1,5 +1,10 @@
 import {
+  OPENAI_API_CONNECTION,
+  OPENAI_API_CREDENTIAL_ENV,
+  OPENCODE_API_KEY_ENV,
   ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   WorkspaceKnowledgeItemId,
   type WorkspaceKnowledgeItem,
 } from "@t3tools/contracts";
@@ -31,32 +36,153 @@ const layer = it.layer(
 const decodeEmbeddingInput = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ input: Schema.Array(Schema.String) })),
 );
-const semanticLayer = ProjectionWorkspaceRagRepositoryLive.pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
-  Layer.provide(ServerSettingsService.layerTest({ aiSearch: { semanticEnabled: true } })),
-  Layer.provide(
-    Layer.succeed(
-      HttpClient.HttpClient,
-      HttpClient.make((request) =>
-        Effect.sync(() => {
-          if (request.body._tag !== "Uint8Array") throw new Error("Expected embedding JSON");
-          const texts = decodeEmbeddingInput(new TextDecoder().decode(request.body.body)).input;
-          return HttpClientResponse.fromWeb(
-            request,
-            Response.json({
-              embeddings: texts.map((text) =>
-                text.includes("task: search") || text.includes("historic cancellation")
-                  ? [1, 0]
-                  : [0, 1],
-              ),
-            }),
-          );
+const semanticLayerWith = (embed: (text: string) => number[]) =>
+  ProjectionWorkspaceRagRepositoryLive.pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provide(ServerSettingsService.layerTest({ aiSearch: { semanticEnabled: true } })),
+    Layer.provide(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            if (request.body._tag !== "Uint8Array") throw new Error("Expected embedding JSON");
+            const texts = decodeEmbeddingInput(new TextDecoder().decode(request.body.body)).input;
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({ embeddings: texts.map(embed) }),
+            );
+          }),
+        ),
+      ),
+    ),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "rag-full-coverage-" })),
+    Layer.provide(NodeServices.layer),
+  );
+const semanticLayer = semanticLayerWith((text) =>
+  text.includes("task: search") || text.includes("historic cancellation") ? [1, 0] : [0, 1],
+);
+
+// The query vector is [1, 0]. Scaling the document vector keeps its measured
+// cosine exactly 0.56 at the inclusive boundary in double precision.
+function documentVector(similarity: number) {
+  const x = similarity * 1000;
+  return [x, Math.sqrt(1000 ** 2 - x ** 2)];
+}
+
+it.effect("drops weak semantic-only hits for opaque queries and preserves exact identifiers", () =>
+  Effect.gen(function* () {
+    const rag = yield* ProjectionWorkspaceRagRepository;
+    const projectId = ProjectId.make("literal-evidence");
+    for (const [id, content] of [
+      ["booking", "Passengers may cancel reservations before departure."],
+      ["billing", "Invoices are payable upon receipt."],
+    ] as const) {
+      yield* rag.replaceItem({
+        ...item({ projectId, content }),
+        id: WorkspaceKnowledgeItemId.make(id),
+      });
+    }
+    if (!rag.drainSemanticIndex) throw new Error("Expected semantic indexing");
+    yield* rag.drainSemanticIndex;
+
+    for (const query of ["qzxvjkwpfbmq", "jvbnxkztrpwl", "zxv_84QK"]) {
+      const result = yield* rag.search({ projectId, query });
+      expect
+        .soft(
+          result.matches.map((row) => row.itemId),
+          query,
+        )
+        .toEqual([]);
+    }
+
+    const reference = item({
+      projectId,
+      content: "Receipt qzxvjkwpfbmq was recorded by InvoiceLedger.",
+    });
+    yield* rag.replaceItem(reference);
+    yield* rag.drainSemanticIndex;
+    for (const query of ["qzxvjkwpfbmq", "InvoiceLedger"]) {
+      const result = yield* rag.search({ projectId, query });
+      expect
+        .soft(
+          result.matches.map((row) => row.itemId),
+          query,
+        )
+        .toEqual([reference.id]);
+    }
+  }).pipe(
+    Effect.provide(
+      semanticLayerWith((text) => {
+        if (text.includes("Passengers may cancel")) return documentVector(0.51);
+        if (text.includes("Invoices are payable")) return documentVector(0.552);
+        if (text.includes("was recorded by")) return [0, 1];
+        return [1, 0];
+      }),
+    ),
+  ),
+);
+
+it.effect(
+  "retrieves a paraphrase at 0.56 but excludes a weaker hit and a private project copy",
+  () =>
+    Effect.gen(function* () {
+      const rag = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("paraphrase");
+      const policy = item({
+        projectId,
+        content: "The historic cancellation rule permits passengers to withdraw before departure.",
+      });
+      yield* rag.replaceItem(policy);
+      yield* rag.replaceItem({ ...policy, projectId: ProjectId.make("private-paraphrase") });
+      yield* rag.replaceItem({
+        ...item({ projectId, content: "Invoices are payable upon receipt." }),
+        id: WorkspaceKnowledgeItemId.make("billing"),
+      });
+      if (!rag.drainSemanticIndex) throw new Error("Expected semantic indexing");
+      yield* rag.drainSemanticIndex;
+
+      const result = yield* rag.search({ projectId, query: "When may I call off my trip?" });
+      expect(
+        result.matches.map((row) => [row.projectId, row.itemId, row.semanticSimilarity]),
+      ).toEqual([[projectId, policy.id, 0.56]]);
+    }).pipe(
+      Effect.provide(
+        semanticLayerWith((text) => {
+          if (text.includes("historic cancellation")) return documentVector(0.56);
+          if (text.includes("Invoices are payable")) return documentVector(0.5599);
+          return [1, 0];
         }),
       ),
     ),
-  ),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "rag-full-coverage-" })),
-  Layer.provide(NodeServices.layer),
+);
+it.effect("filters forgotten automatic conversation sources before semantic retrieval", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rag = yield* ProjectionWorkspaceRagRepository;
+    const projectId = ProjectId.make("semantic-forgotten");
+    yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+      VALUES (${projectId},'Project','/project','[]','t','t')`;
+    yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+      VALUES ('thread',${projectId},'Thread','t','t')`;
+    for (const id of ["hidden", "kept"]) {
+      yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+        VALUES (${id},'thread','user','historic cancellation rule',0,'t','t')`;
+      yield* sql`INSERT INTO projection_workspace_rag_chunks(project_id,item_id,kind,chunk_index,title,content,updated_at,tags_text,search_title,search_tags,search_body,scope)
+        VALUES (${projectId},${`conversation-${id}`},'rag-source','0','Evidence','historic cancellation rule','2026-10-19','auto-conversation','','','','project')`;
+      yield* sql`INSERT INTO workspace_conversation_rag_sources(project_id,thread_id,item_id,source_kind,source_id)
+        VALUES (${projectId},'thread',${`conversation-${id}`},'message',${id})`;
+    }
+    const request = { projectId, query: "취소 기한", limit: 4 };
+    yield* rag.search(request);
+    if (!rag.drainSemanticIndex) throw new Error("Expected semantic indexing");
+    yield* rag.drainSemanticIndex;
+    expect((yield* rag.search(request)).matches).toHaveLength(2);
+    yield* sql`INSERT INTO workspace_memory_v2(id,project_id,scope,topic,text,source_json,source_hash,origin,verification,status,created_at,updated_at)
+      VALUES ('hidden-memory',${projectId},'project','test','','{"kind":"message","id":"hidden"}','x','user','user-statement','forgotten','t','t')`;
+    const result = yield* rag.search(request);
+    expect(result.retrieval?.method).toBe("hybrid");
+    expect(result.matches.map((row) => row.itemId)).toEqual(["conversation-kept"]);
+  }).pipe(Effect.provide(semanticLayer)),
 );
 it.effect(
   "retrieves an old semantic-only decision beyond 1000 recent chunks while prefiltering scope and exclusions",
@@ -581,4 +707,262 @@ layer("ProjectionWorkspaceRagRepository", (it) => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.every((chunk) => chunk.length <= 1_200)).toBe(true);
   });
+
+  it.effect(
+    "reranks exact clause and hyphenated error-code matches above same-topic distractors and preserves parent heading context",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ProjectionWorkspaceRagRepository;
+        const projectId = ProjectId.make("workspace-nextgen-rerank");
+        yield* repository.replaceItem({
+          ...item({
+            projectId,
+            content:
+              "2026년 국내 출장 시 제1조 목적과 숙박비 한도 조정 기준 및 에러 코드 TS-100 제품 B-1000 안내.",
+          }),
+          id: WorkspaceKnowledgeItemId.make("distractor-clause-1"),
+          title: "일반 출장 안내",
+        });
+        yield* repository.replaceItem({
+          ...item({
+            projectId,
+            content: [
+              "# 2026년 국내 출장 규정",
+              "## 제1조 목적",
+              "임직원 국내 출장 기본 총칙 안내문. ".repeat(80),
+              "## 제3조 숙박비 한도",
+              "본 한도는 직전 분기 대비 10% 이내로 조정한다. 에러 코드 TS-999 및 제품 A-2201 적용.",
+            ].join("\n\n"),
+          }),
+          id: WorkspaceKnowledgeItemId.make("target-clause-3"),
+          title: "여비 규정집",
+        });
+        const result = yield* repository.search({
+          projectId,
+          query: "2026년 국내 출장 시 제3조 숙박비 한도 조정과 TS-999 A-2201 기준",
+          limit: 2,
+          maxChunksPerItem: 1,
+        });
+        expect(result.matches[0]?.itemId).toBe("target-clause-3");
+        expect(result.matches[0]?.content).toContain("# 2026년 국내 출장 규정");
+        expect(result.matches[0]?.content).toContain("## 제3조 숙박비 한도");
+        expect(result.matches[0]?.content).toContain("직전 분기 대비 10% 이내로 조정한다");
+      }),
+  );
+
+  it.effect(
+    "increments prompt_uses and updates last_used_at for documents retrieved by RAG search",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const knowledge = yield* ProjectionWorkspaceKnowledgeRepository;
+        const repository = yield* ProjectionWorkspaceRagRepository;
+        const projectId = ProjectId.make("workspace-rag-usage-recovery");
+        yield* sql`
+          INSERT INTO projection_projects (
+            project_id, title, workspace_root, default_model_selection_json,
+            scripts_json, workspace_control_json, created_at, updated_at, deleted_at
+          ) VALUES (
+            ${projectId}, 'RAG Usage', 'D:/rag-usage', NULL, '[]',
+            '{"isolationMode":"strict","longTermMemoryRoot":null}',
+            '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', NULL
+          )
+        `;
+        const hitItem: WorkspaceKnowledgeItem = {
+          ...item({
+            projectId,
+            content: "Kubernetes ingress TLS renewal procedure for production cluster.",
+          }),
+          id: WorkspaceKnowledgeItemId.make("rag-hit-item"),
+          title: "TLS Renewal Guide",
+        };
+        const missItem: WorkspaceKnowledgeItem = {
+          ...item({
+            projectId,
+            content: "Weekly cafeteria lunch menu notes.",
+          }),
+          id: WorkspaceKnowledgeItemId.make("rag-miss-item"),
+          title: "Lunch Menu",
+        };
+        yield* knowledge.upsert(hitItem);
+        yield* knowledge.upsert(missItem);
+        yield* repository.replaceItem(hitItem);
+        yield* repository.replaceItem(missItem);
+
+        const first = yield* repository.search({
+          projectId,
+          query: "Kubernetes TLS renewal",
+          limit: 5,
+        });
+        expect(first.matches.map((m) => m.itemId)).toEqual([hitItem.id]);
+
+        const afterFirst = yield* knowledge.listByProjectId({ projectId });
+        const hitAfterFirst = afterFirst.find((row) => row.id === hitItem.id);
+        const missAfterFirst = afterFirst.find((row) => row.id === missItem.id);
+        expect(hitAfterFirst?.promptUses).toBe(1);
+        expect(hitAfterFirst?.lastUsedAt).not.toBeNull();
+        expect(missAfterFirst?.promptUses).toBe(0);
+        expect(missAfterFirst?.lastUsedAt).toBeNull();
+
+        yield* repository.search({
+          projectId,
+          query: "Kubernetes TLS renewal",
+          limit: 5,
+        });
+        const afterSecond = yield* knowledge.listByProjectId({ projectId });
+        expect(afterSecond.find((row) => row.id === hitItem.id)?.promptUses).toBe(2);
+      }),
+  );
 });
+
+it.effect(
+  "indexes and searches with a registered OpenAI-compatible API account (/embeddings)",
+  () =>
+    Effect.gen(function* () {
+      const rag = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("registered-openai-embed");
+      const policy = item({
+        projectId,
+        content: "Passengers may withdraw reservations prior to departure.",
+      });
+      yield* rag.replaceItem(policy);
+      if (!rag.drainSemanticIndex) throw new Error("Expected semantic indexing");
+      yield* rag.drainSemanticIndex;
+
+      const result = yield* rag.search({ projectId, query: "cancel my trip" });
+      expect(result.retrieval?.method).toBe("hybrid");
+      expect(result.matches.map((row) => row.itemId)).toEqual([policy.id]);
+    }).pipe(
+      Effect.provide(
+        ProjectionWorkspaceRagRepositoryLive.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(
+            ServerSettingsService.layerTest({
+              aiSearch: {
+                semanticEnabled: true,
+                embeddingInstanceId: ProviderInstanceId.make("openai_api_rag"),
+                embeddingMode: "embedding",
+                embeddingModel: "text-embedding-3-small",
+              },
+              providerInstances: {
+                [ProviderInstanceId.make("openai_api_rag")]: {
+                  driver: ProviderDriverKind.make("opencode"),
+                  displayName: "OpenAI API",
+                  enabled: true,
+                  config: {
+                    apiConnection: {
+                      ...OPENAI_API_CONNECTION,
+                      models: ["gpt-5-mini"],
+                    },
+                  },
+                  environment: [
+                    { name: OPENAI_API_CREDENTIAL_ENV, value: "sk-rag-test", sensitive: true },
+                  ],
+                },
+              },
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.sync(() => {
+                  expect(request.url).toBe("https://api.openai.com/v1/embeddings");
+                  expect(request.headers.authorization).toBe("Bearer sk-rag-test");
+                  if (request.body._tag !== "Uint8Array") throw new Error("Expected JSON body");
+                  const texts = decodeEmbeddingInput(
+                    new TextDecoder().decode(request.body.body),
+                  ).input;
+                  return HttpClientResponse.fromWeb(
+                    request,
+                    Response.json({
+                      data: texts.map((_, index) => ({ index, embedding: [1, 0] })),
+                    }),
+                  );
+                }),
+              ),
+            ),
+          ),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "rag-openai-embed-" })),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "uses a registered chat API model for LLM semantic reranking without background embedding",
+  () =>
+    Effect.gen(function* () {
+      const rag = yield* ProjectionWorkspaceRagRepository;
+      const projectId = ProjectId.make("registered-deepseek-rerank");
+      const policy = item({
+        projectId,
+        content: "Passengers may withdraw reservations prior to departure.",
+      });
+      const lunch = {
+        ...item({ projectId, content: "Cafeteria menu serves noodles on Friday." }),
+        id: WorkspaceKnowledgeItemId.make("lunch-menu"),
+      };
+      yield* rag.replaceItem(policy);
+      yield* rag.replaceItem(lunch);
+
+      const result = yield* rag.search({ projectId, query: "How can I cancel my trip?" });
+      expect(result.retrieval?.method).toBe("hybrid");
+      expect(result.matches.map((row) => row.itemId)).toEqual([policy.id]);
+      expect(result.matches[0]?.semanticSimilarity).toBe(0.92);
+    }).pipe(
+      Effect.provide(
+        ProjectionWorkspaceRagRepositoryLive.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provide(
+            ServerSettingsService.layerTest({
+              aiSearch: {
+                semanticEnabled: true,
+                embeddingInstanceId: ProviderInstanceId.make("deepseek_rag"),
+                embeddingMode: "rerank",
+                embeddingModel: "deepseek-flash",
+              },
+              providerInstances: {
+                [ProviderInstanceId.make("deepseek_rag")]: {
+                  driver: ProviderDriverKind.make("opencode"),
+                  displayName: "DeepSeek",
+                  enabled: true,
+                  config: {
+                    apiConnection: {
+                      providerId: "t3_deepseek",
+                      baseUrl: "https://api.deepseek.com",
+                      protocol: "chat-completions",
+                      models: ["deepseek-flash"],
+                    },
+                  },
+                  environment: [
+                    { name: OPENCODE_API_KEY_ENV, value: "sk-deepseek-test", sensitive: true },
+                  ],
+                },
+              },
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.sync(() => {
+                  expect(request.url).toBe("https://api.deepseek.com/chat/completions");
+                  expect(request.headers.authorization).toBe("Bearer sk-deepseek-test");
+                  return HttpClientResponse.fromWeb(
+                    request,
+                    Response.json({
+                      choices: [{ message: { content: '{"scores":[{"id":1,"score":0.92}]}' } }],
+                    }),
+                  );
+                }),
+              ),
+            ),
+          ),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "rag-deepseek-rerank-" })),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);

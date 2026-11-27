@@ -1,6 +1,6 @@
 import type { ContextMenuItem, PreviewSessionSnapshot } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
-import { Bot, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
+import { Bot, FileDiff, Files, Globe2, Plus, TerminalSquare, Workflow, X } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
@@ -46,6 +46,7 @@ interface RightPanelTabsProps {
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddAgents: () => void;
+  onAddWorkers: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -94,6 +95,7 @@ function RightPanelEmptyState(props: {
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddAgents: () => void;
+  onAddWorkers: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -132,12 +134,20 @@ function RightPanelEmptyState(props: {
       onClick: props.onAddDiff,
     },
     {
-      label: "에이전트",
-      description: "하위 에이전트와 워크플로 실행을 확인합니다.",
+      label: "대화 뷰어",
+      description: "최근 턴과 작업 배정, 하위 에이전트 활동을 확인합니다.",
       icon: Bot,
       available: true,
       disabledReason: null,
       onClick: props.onAddAgents,
+    },
+    {
+      label: "작업자 엔진",
+      description: "실행 중 작업자·메일박스·승인 게이트·Worktree Diff를 제어합니다.",
+      icon: Workflow,
+      available: true,
+      disabledReason: null,
+      onClick: props.onAddWorkers,
     },
   ] as const;
 
@@ -215,7 +225,9 @@ function surfaceTitle(
           getTerminalLabel(surface.activeTerminalId),
       );
     case "agents":
-      return "에이전트";
+      return "대화 뷰어";
+    case "workers":
+      return "작업자 엔진";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "브라우저";
@@ -277,6 +289,8 @@ function SurfaceIcon({
       return <TerminalSquare className="size-3 shrink-0" />;
     case "agents":
       return <Bot className="size-3 shrink-0" />;
+    case "workers":
+      return <Workflow className="size-3 shrink-0" />;
   }
 }
 
@@ -368,10 +382,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     >
       <div
         className={cn(
-          "workspace-topbar gap-1 pl-2",
+          "workspace-topbar gap-1 pl-2 pr-3",
           props.mode !== "inline" && "[--workspace-topbar-height:--spacing(11)]",
-          props.mode === "inline" ? "pr-28" : "pr-3",
-          ownsDesktopTitleBar && "wco:pr-[calc(var(--workspace-native-controls-inset)+6rem)]",
+          ownsDesktopTitleBar && "wco:pr-[var(--workspace-native-controls-inset)]",
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
         )}
         data-right-panel-tabbar
@@ -440,52 +453,56 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                 </div>
               );
             })}
-            {props.surfaces.length > 0 ? (
-              <Menu>
-                <MenuTrigger
-                  className="relative inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-                  aria-label="패널 화면 추가"
-                >
-                  <Plus className="size-3.5" />
-                </MenuTrigger>
-                <MenuPopup align="start" side="bottom" sideOffset={6} className="min-w-44">
-                  <SurfaceMenuItem
-                    available={props.browserAvailable}
-                    disabledReason={SURFACE_DISABLED_REASONS.browser}
-                    onClick={props.onAddBrowser}
-                  >
-                    <Globe2 />
-                    브라우저
-                  </SurfaceMenuItem>
-                  <SurfaceMenuItem available onClick={props.onAddTerminal}>
-                    <TerminalSquare />
-                    터미널
-                  </SurfaceMenuItem>
-                  <SurfaceMenuItem
-                    available={props.filesAvailable}
-                    disabledReason={SURFACE_DISABLED_REASONS.files}
-                    onClick={props.onAddFiles}
-                  >
-                    <Files />
-                    파일
-                  </SurfaceMenuItem>
-                  <SurfaceMenuItem
-                    available={props.diffAvailable}
-                    disabledReason={SURFACE_DISABLED_REASONS.diff}
-                    onClick={props.onAddDiff}
-                  >
-                    <FileDiff />
-                    차이
-                  </SurfaceMenuItem>
-                  <SurfaceMenuItem available onClick={props.onAddAgents}>
-                    <Bot />
-                    에이전트
-                  </SurfaceMenuItem>
-                </MenuPopup>
-              </Menu>
-            ) : null}
           </div>
         </ScrollArea>
+        {props.surfaces.length > 0 ? (
+          <Menu>
+            <MenuTrigger
+              className="relative inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="패널 화면 추가"
+            >
+              <Plus className="size-3.5" />
+            </MenuTrigger>
+            <MenuPopup align="start" side="bottom" sideOffset={6} className="min-w-44">
+              <SurfaceMenuItem
+                available={props.browserAvailable}
+                disabledReason={SURFACE_DISABLED_REASONS.browser}
+                onClick={props.onAddBrowser}
+              >
+                <Globe2 />
+                브라우저
+              </SurfaceMenuItem>
+              <SurfaceMenuItem available onClick={props.onAddTerminal}>
+                <TerminalSquare />
+                터미널
+              </SurfaceMenuItem>
+              <SurfaceMenuItem
+                available={props.filesAvailable}
+                disabledReason={SURFACE_DISABLED_REASONS.files}
+                onClick={props.onAddFiles}
+              >
+                <Files />
+                파일
+              </SurfaceMenuItem>
+              <SurfaceMenuItem
+                available={props.diffAvailable}
+                disabledReason={SURFACE_DISABLED_REASONS.diff}
+                onClick={props.onAddDiff}
+              >
+                <FileDiff />
+                차이
+              </SurfaceMenuItem>
+              <SurfaceMenuItem available onClick={props.onAddAgents}>
+                <Bot />
+                대화 뷰어
+              </SurfaceMenuItem>
+              <SurfaceMenuItem available onClick={props.onAddWorkers}>
+                <Workflow />
+                작업자 엔진
+              </SurfaceMenuItem>
+            </MenuPopup>
+          </Menu>
+        ) : null}
         {props.layoutControls}
       </div>
       <div className="flex min-h-0 flex-1 flex-col" data-right-panel-surface-content>
@@ -496,6 +513,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
             onAddAgents={props.onAddAgents}
+            onAddWorkers={props.onAddWorkers}
             browserAvailable={props.browserAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}

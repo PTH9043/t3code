@@ -15,13 +15,14 @@ export function FileTagChipContent(props: {
   path: string;
   label: string;
   theme: "light" | "dark";
+  kind?: "file" | "directory" | undefined;
   selectable?: boolean;
 }) {
   return (
     <>
       <PierreEntryIcon
         pathValue={props.path}
-        kind={inferEntryKindFromPath(props.path)}
+        kind={props.kind ?? inferEntryKindFromPath(props.path)}
         theme={props.theme}
         className={COMPOSER_INLINE_CHIP_ICON_CLASS_NAME}
       />

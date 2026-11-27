@@ -65,7 +65,7 @@ export function HandoffSettings(props: {
       ) : null}
       {latest ? (
         <>
-          <p>최근 준비 · {new Date(latest.createdAt).toLocaleString("ko-KR")}</p>
+          <p>최근 인계 비교 · {new Date(latest.createdAt).toLocaleString("ko-KR")}</p>
           <p>{handoffReportText(latest.report)}</p>
         </>
       ) : (

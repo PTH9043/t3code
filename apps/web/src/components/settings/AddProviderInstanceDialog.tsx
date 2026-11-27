@@ -40,8 +40,14 @@ import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps
 import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
 import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
 import { GlmConnectionDialog } from "./GlmConnectionDialog";
+import { ExaoneConnectionDialog } from "./ExaoneConnectionDialog";
+import { QianfanConnectionDialog } from "./QianfanConnectionDialog";
+import { OpenAiApiConnectionDialog } from "./OpenAiApiAccount";
+import { ClaudeApiConnectionDialog } from "./ClaudeApiConnectionDialog";
 import { AntseedConnectionDialog } from "./AntseedConnectionDialog";
 import { CliAccountLoginDialog } from "./CliAccountLoginDialog";
+import { GrokAccountDialog, type GrokAccountAuthTab } from "./GrokAccountDialog";
+import { MuseAccountDialog, type MuseAccountAuthTab } from "./MuseAccountDialog";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -135,10 +141,14 @@ export function AddProviderInstanceDialog({
   const [wizardStep, setWizardStep] = useState(0);
   const [isDeepSeekSelected, setIsDeepSeekSelected] = useState(false);
   const [isGlmSelected, setIsGlmSelected] = useState(false);
+  const [isExaoneSelected, setIsExaoneSelected] = useState(false);
+  const [isQianfanSelected, setIsQianfanSelected] = useState(false);
+  const [isOpenAiApiSelected, setIsOpenAiApiSelected] = useState(false);
+  const [isClaudeApiSelected, setIsClaudeApiSelected] = useState(false);
   const [isAntseedSelected, setIsAntseedSelected] = useState(false);
-  const [loginDriver, setLoginDriver] = useState<
-    "codex" | "claudeAgent" | "cursor" | "grok" | "gemini" | null
-  >(null);
+  const [grokAccountTab, setGrokAccountTab] = useState<GrokAccountAuthTab | null>(null);
+  const [museAccountTab, setMuseAccountTab] = useState<MuseAccountAuthTab | null>(null);
+  const [loginDriver, setLoginDriver] = useState<"codex" | "claudeAgent" | "cursor" | null>(null);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
   const [accentColor, setAccentColor] = useState<string>("");
@@ -201,7 +211,7 @@ export function AddProviderInstanceDialog({
     value === "claudeAgent" ||
     value === "cursor" ||
     value === "grok" ||
-    value === "gemini";
+    value === "muse";
 
   const navigateToStep = (requestedStep: number) => {
     applyWizardNavigation(
@@ -273,6 +283,46 @@ export function AddProviderInstanceDialog({
       />
     );
 
+  if (isExaoneSelected)
+    return (
+      <ExaoneConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsExaoneSelected(false)}
+      />
+    );
+
+  if (isQianfanSelected)
+    return (
+      <QianfanConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsQianfanSelected(false)}
+      />
+    );
+
+  if (isOpenAiApiSelected)
+    return (
+      <OpenAiApiConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsOpenAiApiSelected(false)}
+      />
+    );
+
+  if (isClaudeApiSelected)
+    return (
+      <ClaudeApiConnectionDialog
+        open={open}
+        environmentId={environmentId}
+        onOpenChange={onOpenChange}
+        onBack={() => setIsClaudeApiSelected(false)}
+      />
+    );
+
   if (isAntseedSelected)
     return (
       <AntseedConnectionDialog
@@ -280,6 +330,42 @@ export function AddProviderInstanceDialog({
         environmentId={environmentId}
         onOpenChange={onOpenChange}
         onBack={() => setIsAntseedSelected(false)}
+      />
+    );
+
+  if (grokAccountTab !== null)
+    return (
+      <GrokAccountDialog
+        open={open}
+        environmentId={environmentId}
+        mode="add"
+        initialTab={grokAccountTab}
+        defaultBinaryPath={settings.providers?.grok?.binaryPath}
+        onOpenChange={onOpenChange}
+        onBack={() => setGrokAccountTab(null)}
+        onOpenManualWizard={() => {
+          setDriver(ProviderDriverKind.make("grok"));
+          setGrokAccountTab(null);
+          setWizardStep(1);
+        }}
+      />
+    );
+
+  if (museAccountTab !== null)
+    return (
+      <MuseAccountDialog
+        open={open}
+        environmentId={environmentId}
+        mode="add"
+        initialTab={museAccountTab}
+        defaultBinaryPath={settings.providers?.muse?.binaryPath}
+        onOpenChange={onOpenChange}
+        onBack={() => setMuseAccountTab(null)}
+        onOpenManualWizard={() => {
+          setDriver(ProviderDriverKind.make("muse"));
+          setMuseAccountTab(null);
+          setWizardStep(1);
+        }}
       />
     );
 
@@ -314,7 +400,7 @@ export function AddProviderInstanceDialog({
 
           <div
             data-slot="dialog-panel"
-            className="space-y-4 bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"
+            className="max-h-[70vh] space-y-4 overflow-y-auto bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"
           >
             <AnimatedHeight>
               <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
@@ -378,11 +464,32 @@ export function AddProviderInstanceDialog({
                     );
                   })}
                 </RadioGroup>
+                <Button variant="outline" onClick={() => setIsOpenAiApiSelected(true)}>
+                  OpenAI API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setIsClaudeApiSelected(true)}>
+                  Claude API 크레딧 연결
+                </Button>
+                <Button variant="outline" onClick={() => setGrokAccountTab("api-key")}>
+                  Grok (xAI) API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setMuseAccountTab("browser")}>
+                  Muse Code (Meta) · muse.ai (Google) 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setMuseAccountTab("cloud")}>
+                  muse.ai 클라우드 (Google 로그인) 바로 연결
+                </Button>
                 <Button variant="outline" onClick={() => setIsDeepSeekSelected(true)}>
                   DeepSeek API 계정 연결
                 </Button>
                 <Button variant="outline" onClick={() => setIsGlmSelected(true)}>
                   GLM API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setIsExaoneSelected(true)}>
+                  EXAONE API 계정 연결
+                </Button>
+                <Button variant="outline" onClick={() => setIsQianfanSelected(true)}>
+                  바이두 Qianfan API 계정 연결
                 </Button>
                 <Button variant="outline" onClick={() => setIsAntseedSelected(true)}>
                   Antseed 게이트웨이 연결
@@ -509,10 +616,16 @@ export function AddProviderInstanceDialog({
               <Button
                 size="sm"
                 onClick={() => {
+                  if (wizardStep === 0 && driver === ProviderDriverKind.make("grok")) {
+                    setGrokAccountTab("device-auth");
+                    return;
+                  }
+                  if (wizardStep === 0 && driver === ProviderDriverKind.make("muse")) {
+                    setMuseAccountTab("browser");
+                    return;
+                  }
                   if (wizardStep === 0 && isBrowserLoginUiDriver(driver)) {
-                    setLoginDriver(
-                      driver as "codex" | "claudeAgent" | "cursor" | "grok" | "gemini",
-                    );
+                    setLoginDriver(driver as "codex" | "claudeAgent" | "cursor");
                     return;
                   }
                   navigateToStep(wizardStep + 1);

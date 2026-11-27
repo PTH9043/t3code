@@ -1,6 +1,9 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  resolveEffectiveGlobalAssistant,
   type EditorId,
+  type EnvironmentId,
+  type GlobalAssistantConfig,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -98,3 +101,42 @@ export const primaryServerObservabilityAtom = Atom.make(
   (get): ServerConfig["observability"] | null =>
     get(primaryServerConfigAtom)?.observability ?? null,
 ).pipe(Atom.withLabel("web-primary-server-observability"));
+
+const globalAssistantAtomCache = new Map<string, Atom.Atom<GlobalAssistantConfig | null>>();
+
+/**
+ * Narrow derived selector for `globalAssistant` with structural memoization.
+ * Unrelated `serverSettings` updates (e.g. 620-model provider snapshot churn)
+ * keep the exact same object reference so assistant message bubbles do not re-render.
+ */
+export function globalAssistantForEnvironmentAtom(
+  environmentId: EnvironmentId | null,
+): Atom.Atom<GlobalAssistantConfig | null> {
+  const key = environmentId ?? "__primary__";
+  const cached = globalAssistantAtomCache.get(key);
+  if (cached) return cached;
+
+  const sourceAtom =
+    environmentId !== null
+      ? serverEnvironment.settingsValueAtom(environmentId)
+      : primaryServerSettingsAtom;
+
+  let previousSignature: string | undefined;
+  let previousValue: GlobalAssistantConfig | null = null;
+
+  const derived = Atom.make((get): GlobalAssistantConfig | null => {
+    const settings = get(sourceAtom);
+    const signature = settings
+      ? JSON.stringify([settings.globalAssistant ?? null, settings.globalResponseStyle ?? null])
+      : "null";
+    if (signature === previousSignature) {
+      return previousValue;
+    }
+    previousSignature = signature;
+    previousValue = settings ? resolveEffectiveGlobalAssistant(settings) : null;
+    return previousValue;
+  }).pipe(Atom.withLabel(`web-global-assistant:${key}`));
+
+  globalAssistantAtomCache.set(key, derived);
+  return derived;
+}

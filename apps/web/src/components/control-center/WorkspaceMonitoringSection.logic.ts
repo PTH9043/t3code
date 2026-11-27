@@ -111,6 +111,7 @@ const METRIC_LABELS: Readonly<Record<WorkspaceMonitoringMetric["metric"], string
   memory: "메모리",
   latency: "응답 지연",
   "slow-spans": "느린 span",
+  "failed-spans": "실패한 내부 처리(span)",
   health: "상태검사",
   regression: "회귀",
   "log-matches": "로그 패턴",
@@ -156,6 +157,7 @@ function formatLimit(metric: WorkspaceMonitoringMetric): string {
     case "latency":
       return `${metric.limit}ms`;
     case "slow-spans":
+    case "failed-spans":
       return `분당 ${metric.limit}건`;
     case "health":
       return `연속 ${metric.limit}회 실패`;

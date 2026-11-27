@@ -39,6 +39,16 @@ if (hostPlatform === "win32") {
   if (nativeBuild.status !== 0) throw new Error("Windows file-drop receiver build failed.");
 }
 
+// A previous run may have left valid-looking but stale bundles on disk.
+// Complete the first desktop build before the launcher can load them.
+const initialDesktopBuild = NodeChildProcess.spawnSync(
+  process.execPath,
+  [vpBin, "pack", "--no-clean"],
+  { cwd: desktopDir, stdio: "inherit", windowsHide: true, timeout: 120_000 },
+);
+if (initialDesktopBuild.error) throw initialDesktopBuild.error;
+if (initialDesktopBuild.status !== 0) throw new Error("Initial desktop bundle build failed.");
+
 let shuttingDown = false;
 const watcherRetryMs = 5_000;
 const children = [

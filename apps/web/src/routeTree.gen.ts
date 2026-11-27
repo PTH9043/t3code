@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UpgradeRoomRouteImport } from './routes/upgrade-room'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as ControlCenterRouteImport } from './routes/control-center'
@@ -29,7 +30,14 @@ import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
 import { Route as ControlCenterEnvironmentIdProjectIdRouteImport } from './routes/control-center.$environmentId.$projectId'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
+import { Route as ControlCenterEnvironmentIdProjectIdKnowledgeManageRouteImport } from './routes/control-center.$environmentId.$projectId_.knowledge.manage'
+import { Route as ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRouteImport } from './routes/control-center.$environmentId.$projectId_.knowledge.docs.$itemId'
 
+const UpgradeRoomRoute = UpgradeRoomRouteImport.update({
+  id: '/upgrade-room',
+  path: '/upgrade-room',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -131,6 +139,18 @@ const ChatEnvironmentIdThreadIdRoute =
     path: '/$environmentId/$threadId',
     getParentRoute: () => ChatRoute,
   } as any)
+const ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute =
+  ControlCenterEnvironmentIdProjectIdKnowledgeManageRouteImport.update({
+    id: '/$environmentId/$projectId_/knowledge/manage',
+    path: '/$environmentId/$projectId/knowledge/manage',
+    getParentRoute: () => ControlCenterRoute,
+  } as any)
+const ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute =
+  ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRouteImport.update({
+    id: '/$environmentId/$projectId_/knowledge/docs/$itemId',
+    path: '/$environmentId/$projectId/knowledge/docs/$itemId',
+    getParentRoute: () => ControlCenterRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -138,6 +158,7 @@ export interface FileRoutesByFullPath {
   '/control-center': typeof ControlCenterRouteWithChildren
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/upgrade-room': typeof UpgradeRoomRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
@@ -152,11 +173,14 @@ export interface FileRoutesByFullPath {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/control-center/$environmentId/$projectId': typeof ControlCenterEnvironmentIdProjectIdRoute
+  '/control-center/$environmentId/$projectId/knowledge/manage': typeof ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute
+  '/control-center/$environmentId/$projectId/knowledge/docs/$itemId': typeof ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/upgrade-room': typeof UpgradeRoomRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
@@ -172,6 +196,8 @@ export interface FileRoutesByTo {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/control-center/$environmentId/$projectId': typeof ControlCenterEnvironmentIdProjectIdRoute
+  '/control-center/$environmentId/$projectId/knowledge/manage': typeof ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute
+  '/control-center/$environmentId/$projectId/knowledge/docs/$itemId': typeof ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -180,6 +206,7 @@ export interface FileRoutesById {
   '/control-center': typeof ControlCenterRouteWithChildren
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/upgrade-room': typeof UpgradeRoomRoute
   '/connect_/callback': typeof ConnectCallbackRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
@@ -195,6 +222,8 @@ export interface FileRoutesById {
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/control-center/$environmentId/$projectId': typeof ControlCenterEnvironmentIdProjectIdRoute
+  '/control-center/$environmentId/$projectId_/knowledge/manage': typeof ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute
+  '/control-center/$environmentId/$projectId_/knowledge/docs/$itemId': typeof ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -204,6 +233,7 @@ export interface FileRouteTypes {
     | '/control-center'
     | '/pair'
     | '/settings'
+    | '/upgrade-room'
     | '/connect/callback'
     | '/settings/appearance'
     | '/settings/archived'
@@ -218,11 +248,14 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/control-center/$environmentId/$projectId'
+    | '/control-center/$environmentId/$projectId/knowledge/manage'
+    | '/control-center/$environmentId/$projectId/knowledge/docs/$itemId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
     | '/pair'
     | '/settings'
+    | '/upgrade-room'
     | '/connect/callback'
     | '/settings/appearance'
     | '/settings/archived'
@@ -238,6 +271,8 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/control-center/$environmentId/$projectId'
+    | '/control-center/$environmentId/$projectId/knowledge/manage'
+    | '/control-center/$environmentId/$projectId/knowledge/docs/$itemId'
   id:
     | '__root__'
     | '/_chat'
@@ -245,6 +280,7 @@ export interface FileRouteTypes {
     | '/control-center'
     | '/pair'
     | '/settings'
+    | '/upgrade-room'
     | '/connect_/callback'
     | '/settings/appearance'
     | '/settings/archived'
@@ -260,6 +296,8 @@ export interface FileRouteTypes {
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
     | '/control-center/$environmentId/$projectId'
+    | '/control-center/$environmentId/$projectId_/knowledge/manage'
+    | '/control-center/$environmentId/$projectId_/knowledge/docs/$itemId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -268,11 +306,19 @@ export interface RootRouteChildren {
   ControlCenterRoute: typeof ControlCenterRouteWithChildren
   PairRoute: typeof PairRoute
   SettingsRoute: typeof SettingsRouteWithChildren
+  UpgradeRoomRoute: typeof UpgradeRoomRoute
   ConnectCallbackRoute: typeof ConnectCallbackRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/upgrade-room': {
+      id: '/upgrade-room'
+      path: '/upgrade-room'
+      fullPath: '/upgrade-room'
+      preLoaderRoute: typeof UpgradeRoomRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -413,6 +459,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatEnvironmentIdThreadIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/control-center/$environmentId/$projectId_/knowledge/manage': {
+      id: '/control-center/$environmentId/$projectId_/knowledge/manage'
+      path: '/$environmentId/$projectId/knowledge/manage'
+      fullPath: '/control-center/$environmentId/$projectId/knowledge/manage'
+      preLoaderRoute: typeof ControlCenterEnvironmentIdProjectIdKnowledgeManageRouteImport
+      parentRoute: typeof ControlCenterRoute
+    }
+    '/control-center/$environmentId/$projectId_/knowledge/docs/$itemId': {
+      id: '/control-center/$environmentId/$projectId_/knowledge/docs/$itemId'
+      path: '/$environmentId/$projectId/knowledge/docs/$itemId'
+      fullPath: '/control-center/$environmentId/$projectId/knowledge/docs/$itemId'
+      preLoaderRoute: typeof ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRouteImport
+      parentRoute: typeof ControlCenterRoute
+    }
   }
 }
 
@@ -433,12 +493,18 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 interface ControlCenterRouteChildren {
   ControlCenterIndexRoute: typeof ControlCenterIndexRoute
   ControlCenterEnvironmentIdProjectIdRoute: typeof ControlCenterEnvironmentIdProjectIdRoute
+  ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute: typeof ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute
+  ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute: typeof ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute
 }
 
 const ControlCenterRouteChildren: ControlCenterRouteChildren = {
   ControlCenterIndexRoute: ControlCenterIndexRoute,
   ControlCenterEnvironmentIdProjectIdRoute:
     ControlCenterEnvironmentIdProjectIdRoute,
+  ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute:
+    ControlCenterEnvironmentIdProjectIdKnowledgeManageRoute,
+  ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute:
+    ControlCenterEnvironmentIdProjectIdKnowledgeDocsItemIdRoute,
 }
 
 const ControlCenterRouteWithChildren = ControlCenterRoute._addFileChildren(
@@ -479,6 +545,7 @@ const rootRouteChildren: RootRouteChildren = {
   ControlCenterRoute: ControlCenterRouteWithChildren,
   PairRoute: PairRoute,
   SettingsRoute: SettingsRouteWithChildren,
+  UpgradeRoomRoute: UpgradeRoomRoute,
   ConnectCallbackRoute: ConnectCallbackRoute,
 }
 export const routeTree = rootRouteImport

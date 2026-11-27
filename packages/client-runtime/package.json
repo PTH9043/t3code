@@ -3,6 +3,18 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/thread-tool-activity": {
+      "types": "./src/state/threadToolActivity.ts",
+      "default": "./src/state/threadToolActivity.ts"
+    },
+    "./state/account-auto-switch": {
+      "types": "./src/state/accountAutoSwitch.ts",
+      "default": "./src/state/accountAutoSwitch.ts"
+    },
+    "./state/chat-project-skills": {
+      "types": "./src/state/chatProjectSkills.ts",
+      "default": "./src/state/chatProjectSkills.ts"
+    },
     "./state/task-inbox": {
       "types": "./src/state/taskInbox.ts",
       "default": "./src/state/taskInbox.ts"
@@ -90,6 +102,10 @@
     "./state/presentation": {
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"
+    },
+    "./state/response-style-presentation": {
+      "types": "./src/state/responseStylePresentation.ts",
+      "default": "./src/state/responseStylePresentation.ts"
     },
     "./state/preview": {
       "types": "./src/state/preview.ts",

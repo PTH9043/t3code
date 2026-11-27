@@ -10,18 +10,38 @@
  *
  * @module OrchestrationEngineService
  */
-import type { OrchestrationCommand, OrchestrationEvent } from "@t3tools/contracts";
+import type {
+  CommandId,
+  ThreadId,
+  OrchestrationCommand,
+  OrchestrationEvent,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
+import type {
+  BootstrapIdentity,
+  BootstrapJournalEntry,
+  BootstrapTransition,
+} from "../bootstrapWorktreeJournal.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
 
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
  */
 export interface OrchestrationEngineShape {
+  readonly supportsOwnedBootstrapResume?: true;
+  readonly bootstrapWorktreeJournal?: {
+    readonly begin: (
+      identity: BootstrapIdentity,
+    ) => Effect.Effect<BootstrapJournalEntry, OrchestrationDispatchError>;
+    readonly advance: (
+      identity: BootstrapIdentity,
+      transition: BootstrapTransition,
+    ) => Effect.Effect<BootstrapJournalEntry, OrchestrationDispatchError>;
+  };
   /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
    *
@@ -48,7 +68,16 @@ export interface OrchestrationEngineShape {
    */
   readonly dispatch: (
     command: OrchestrationCommand,
-  ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
+  ) => Effect.Effect<{ sequence: number; replayed?: true }, OrchestrationDispatchError, never>;
+
+  readonly checkTurnReceipt?: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly requestFingerprint: string;
+  }) => Effect.Effect<
+    { readonly status: "accepted" | "unconfirmed" | "mismatch" | "rejected" },
+    OrchestrationDispatchError
+  >;
 
   /**
    * Stream persisted domain events in dispatch order.

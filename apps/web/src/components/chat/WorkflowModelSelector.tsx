@@ -1,10 +1,12 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { EnvironmentId, ModelSelection } from "@t3tools/contracts";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { getAppModelOptionsForInstance } from "~/modelSelection";
 import { deriveProviderInstanceEntries } from "~/providerInstances";
 import { useServerConfigs } from "~/state/entities";
 import type { WorkflowModelDraft, WorkflowModelMode, WorkflowModelRole } from "./chatWorkflow";
+
+import { WorkerFamilyFilter, workerModelFamily } from "./WorkerFamilyFilter";
 
 const labels: Record<WorkflowModelRole, string> = {
   coordinator: "총괄",
@@ -32,6 +34,7 @@ export function WorkflowModelSelector(props: {
         .filter((entry) => entry.enabled && entry.isAvailable)
         .flatMap((entry) =>
           getAppModelOptionsForInstance(settings, entry).map((model) => ({
+            family: workerModelFamily(entry.driverKind, entry.instanceId, model.slug),
             key: JSON.stringify([entry.instanceId, model.slug]),
             label: `${entry.displayName} · ${model.name}`,
             selection: { instanceId: entry.instanceId, model: model.slug },
@@ -39,6 +42,8 @@ export function WorkflowModelSelector(props: {
         ),
     [snapshots, settings],
   );
+  const [family, setFamily] = useState("all");
+  const visibleFamily = options.some((option) => option.family === family) ? family : "all";
   const renderPicker = (
     label: string,
     selection: ModelSelection | null | undefined,
@@ -57,11 +62,19 @@ export function WorkflowModelSelector(props: {
         }}
       >
         <option value="">모델을 선택하세요</option>
-        {options.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
+        {options
+          .filter(
+            (option) =>
+              visibleFamily === "all" ||
+              option.family === visibleFamily ||
+              (option.selection.instanceId === selection?.instanceId &&
+                option.selection.model === selection?.model),
+          )
+          .map((option) => (
+            <option key={option.key} value={option.key}>
+              {option.label}
+            </option>
+          ))}
       </select>
     </label>
   );
@@ -83,6 +96,9 @@ export function WorkflowModelSelector(props: {
           <option value="roles">역할별로 모델 선택</option>
         </select>
       </label>
+      {(props.mode === "single" || props.mode === "roles") && (
+        <WorkerFamilyFilter options={options} value={visibleFamily} onChange={setFamily} />
+      )}
       {props.mode === "current" ? (
         <p className="text-xs text-muted-foreground">
           {props.current

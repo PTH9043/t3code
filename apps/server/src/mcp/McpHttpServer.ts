@@ -11,10 +11,15 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 
 import packageJson from "../../package.json" with { type: "json" };
 import {
+  formatCompactA11ySnapshot,
+  type A11yElementLike,
+} from "@t3tools/shared/compactA11ySnapshot";
+import {
   WorkspaceDevelopmentToolkit,
   handlersLayer as DevelopmentHandlers,
 } from "./toolkits/workspaceDevelopment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { UpgradeRoomMemory } from "../orchestration/UpgradeRoomMemory.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import {
@@ -179,8 +184,8 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const built = yield* PreviewSnapshotToolkit;
   const tool = PreviewSnapshotTool;
-  yield* server.addTool({
-    tool: new McpSchema.Tool({
+  const normalizedSnapshotTool = normalizeDevelopmentToolSchema(
+    new McpSchema.Tool({
       name: tool.name,
       description: Tool.getDescription(tool),
       inputSchema: Tool.getJsonSchema(tool),
@@ -195,6 +200,10 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
         openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
       },
     }),
+  );
+  const snapshotDeclaredKeys = extractDeclaredPropertyKeys(normalizedSnapshotTool.inputSchema);
+  yield* server.addTool({
+    tool: normalizedSnapshotTool,
     annotations: tool.annotations,
     handle: (payload) =>
       Effect.withFiber((fiber) => {
@@ -202,65 +211,98 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
           fiber.context,
           McpInvocationContext.McpInvocationContext,
         );
-        return built.handle("preview_snapshot", payload).pipe(
-          Stream.unwrap,
-          Stream.run(Sink.last()),
-          Effect.flatMap(Effect.fromOption),
-          Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, broker),
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-          Effect.matchCauseEffect({
-            onFailure: previewSnapshotFailure,
-            onSuccess: ({ encodedResult }) => {
-              const snapshot = encodedResult as {
-                readonly screenshot?: {
-                  readonly mimeType: "image/png";
-                  readonly data: string;
-                  readonly width: number;
-                  readonly height: number;
+        return built
+          .handle("preview_snapshot", stripMcpClientMetaFields(payload, snapshotDeclaredKeys))
+          .pipe(
+            Stream.unwrap,
+            Stream.run(Sink.last()),
+            Effect.flatMap(Effect.fromOption),
+            Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, broker),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.matchCauseEffect({
+              onFailure: previewSnapshotFailure,
+              onSuccess: ({ encodedResult }) => {
+                const snapshot = encodedResult as {
+                  readonly screenshot?: {
+                    readonly mimeType: "image/png";
+                    readonly data: string;
+                    readonly width: number;
+                    readonly height: number;
+                  };
+                  readonly [key: string]: unknown;
                 };
-                readonly [key: string]: unknown;
-              };
-              const { screenshot, ...page } = snapshot;
-              const metadata = {
-                ...page,
-                ...(screenshot === undefined
-                  ? {}
-                  : {
-                      screenshot: {
-                        mimeType: screenshot.mimeType,
-                        width: screenshot.width,
-                        height: screenshot.height,
-                      },
-                    }),
-              };
-              return Effect.succeed(
-                new McpSchema.CallToolResult({
-                  isError: false,
-                  structuredContent: metadata,
-                  content: [
-                    { type: "text", text: JSON.stringify(metadata) },
-                    ...(screenshot === undefined
-                      ? []
-                      : [
-                          {
-                            type: "image" as const,
-                            data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
-                            mimeType: screenshot.mimeType,
-                          },
-                        ]),
-                  ],
-                }),
-              );
-            },
-          }),
-        );
+                const { screenshot, ...page } = snapshot;
+                const rawElements = Array.isArray(page.elements)
+                  ? (page.elements as ReadonlyArray<A11yElementLike>)
+                  : Array.isArray(page.interactiveElements)
+                    ? (page.interactiveElements as ReadonlyArray<A11yElementLike>)
+                    : undefined;
+                const compactA11y =
+                  rawElements && rawElements.length > 0
+                    ? formatCompactA11ySnapshot({
+                        url: typeof page.url === "string" ? page.url : null,
+                        title: typeof page.title === "string" ? page.title : null,
+                        elements: rawElements,
+                      })
+                    : undefined;
+                const metadata = {
+                  ...page,
+                  ...(compactA11y !== undefined ? { compactA11y } : {}),
+                  ...(screenshot === undefined
+                    ? {}
+                    : {
+                        screenshot: {
+                          mimeType: screenshot.mimeType,
+                          width: screenshot.width,
+                          height: screenshot.height,
+                        },
+                      }),
+                };
+                return Effect.succeed(
+                  new McpSchema.CallToolResult({
+                    isError: false,
+                    structuredContent: metadata,
+                    content: [
+                      { type: "text", text: JSON.stringify(metadata) },
+                      ...(screenshot === undefined
+                        ? []
+                        : [
+                            {
+                              type: "image" as const,
+                              data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
+                              mimeType: screenshot.mimeType,
+                            },
+                          ]),
+                    ],
+                  }),
+                );
+              },
+            }),
+          );
       }),
   });
 });
 
-const PreviewStandardToolkitRegistrationLive = McpServer.toolkit(PreviewStandardToolkit).pipe(
-  Layer.provide(PreviewStandardToolkitHandlersLive),
-);
+const PreviewStandardToolkitRegistrationLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const registry = McpServer.McpServer.of({
+      ...server,
+      addTool: (options) => {
+        const normalizedTool = normalizeDevelopmentToolSchema(options.tool);
+        const declaredKeys = extractDeclaredPropertyKeys(normalizedTool.inputSchema);
+        return server.addTool({
+          ...options,
+          tool: normalizedTool,
+          handle: (payload) => options.handle(stripMcpClientMetaFields(payload, declaredKeys)),
+        });
+      },
+    });
+    yield* McpServer.registerToolkit(PreviewStandardToolkit).pipe(
+      Effect.provideService(McpServer.McpServer, registry),
+    );
+  }),
+).pipe(Layer.provide(PreviewStandardToolkitHandlersLive));
 
 const PreviewSnapshotRegistrationLive = Layer.effectDiscard(registerPreviewSnapshot()).pipe(
   Layer.provide(PreviewSnapshotToolkitHandlersLive),
@@ -271,6 +313,263 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+const MCP_CLIENT_WRAPPER_KEYS: ReadonlySet<string> = new Set([
+  "toolSummary",
+  "waitForPreviousTools",
+  "_meta",
+]);
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const jsonValueEquals = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((item, index) => jsonValueEquals(item, right[index]))
+    );
+  }
+  if (isPlainRecord(left) && isPlainRecord(right)) {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(
+      (key) => Object.hasOwn(right, key) && jsonValueEquals(left[key], right[key]),
+    );
+  }
+  return false;
+};
+
+const collectUnionObjectBranches = (
+  node: unknown,
+): ReadonlyArray<Record<string, unknown>> | null => {
+  if (!isPlainRecord(node)) return null;
+  const unionBranches = Array.isArray(node.anyOf)
+    ? node.anyOf
+    : Array.isArray(node.oneOf)
+      ? node.oneOf
+      : null;
+  if (unionBranches !== null && !isPlainRecord(node.properties)) {
+    const out: Array<Record<string, unknown>> = [];
+    for (const item of unionBranches) {
+      const nested = collectUnionObjectBranches(item);
+      if (nested === null) return null;
+      out.push(...nested);
+    }
+    return out.length > 0 ? out : null;
+  }
+  if (node.type === "object" || isPlainRecord(node.properties)) {
+    return [node];
+  }
+  return null;
+};
+
+const isStringEnumProperty = (
+  schema: Record<string, unknown>,
+): schema is {
+  readonly type: "string";
+  readonly enum: ReadonlyArray<string>;
+  readonly description?: string;
+} => {
+  if (schema.type !== "string" || !Array.isArray(schema.enum)) return false;
+  const allowedKeys = new Set(["type", "enum", "description"]);
+  return (
+    Object.keys(schema).every((key) => allowedKeys.has(key)) &&
+    schema.enum.every((item): item is string => typeof item === "string")
+  );
+};
+
+const mergeUnionPropertySchemas = (
+  schemas: ReadonlyArray<Record<string, unknown>>,
+): Record<string, unknown> => {
+  const unique: Array<Record<string, unknown>> = [];
+  for (const candidate of schemas) {
+    if (!unique.some((existing) => jsonValueEquals(existing, candidate))) {
+      unique.push(candidate);
+    }
+  }
+  if (unique.length === 1) return unique[0]!;
+  if (unique.every(isStringEnumProperty)) {
+    const mergedEnum = Array.from(new Set(unique.flatMap((entry) => entry.enum)));
+    const description = unique.find((entry) => typeof entry.description === "string")?.description;
+    return {
+      type: "string",
+      enum: mergedEnum,
+      ...(description !== undefined ? { description } : {}),
+    };
+  }
+  return { anyOf: unique };
+};
+
+/**
+ * Effect emits a root `anyOf` with `additionalProperties: false` inside every
+ * branch for `Schema.Union` tool inputs. MCP hosts such as Antigravity CLI
+ * (`agy acp`) inject client-side wrapper fields (`toolSummary`) into the root
+ * `properties` + `required` and validate before calling the server — causing
+ * every `anyOf` branch to reject `toolSummary` as an additional property.
+ *
+ * Flattening root object unions into a single `type: "object"` schema with
+ * merged `properties` and intersected `required` keeps client validators happy
+ * while Effect's server-side `Schema.Union` continues to enforce exact per-action
+ * parameter rules on execution.
+ */
+export const flattenMcpRootUnionObjectSchema = (inputSchema: unknown): Record<string, unknown> => {
+  if (!isPlainRecord(inputSchema)) return {};
+  if (!Array.isArray(inputSchema.anyOf) && !Array.isArray(inputSchema.oneOf)) {
+    return inputSchema;
+  }
+  const branches = collectUnionObjectBranches(inputSchema);
+  if (branches === null || branches.length === 0) {
+    return { ...inputSchema, type: "object" };
+  }
+
+  const mergedDefs: Record<string, unknown> = {};
+  if (isPlainRecord(inputSchema.$defs)) Object.assign(mergedDefs, inputSchema.$defs);
+  const mergedDefinitions: Record<string, unknown> = {};
+  if (isPlainRecord(inputSchema.definitions))
+    Object.assign(mergedDefinitions, inputSchema.definitions);
+
+  const propertyBuckets = new Map<string, Array<Record<string, unknown>>>();
+  for (const branch of branches) {
+    if (isPlainRecord(branch.$defs)) Object.assign(mergedDefs, branch.$defs);
+    if (isPlainRecord(branch.definitions)) Object.assign(mergedDefinitions, branch.definitions);
+    const props = isPlainRecord(branch.properties) ? branch.properties : {};
+    for (const [key, propSchema] of Object.entries(props)) {
+      const normalizedProp = isPlainRecord(propSchema) ? propSchema : {};
+      const bucket = propertyBuckets.get(key);
+      if (bucket) bucket.push(normalizedProp);
+      else propertyBuckets.set(key, [normalizedProp]);
+    }
+  }
+
+  const mergedProperties: Record<string, unknown> = {};
+  for (const [key, schemas] of propertyBuckets.entries()) {
+    mergedProperties[key] = mergeUnionPropertySchemas(schemas);
+  }
+
+  const firstRequired = Array.isArray(branches[0]?.required)
+    ? branches[0].required.filter((item): item is string => typeof item === "string")
+    : [];
+  const commonRequired = firstRequired.filter((reqKey) =>
+    branches.every((branch) => Array.isArray(branch.required) && branch.required.includes(reqKey)),
+  );
+
+  return {
+    ...(Object.keys(mergedDefs).length > 0 ? { $defs: mergedDefs } : {}),
+    ...(Object.keys(mergedDefinitions).length > 0 ? { definitions: mergedDefinitions } : {}),
+    type: "object",
+    properties: mergedProperties,
+    ...(commonRequired.length > 0 ? { required: commonRequired } : {}),
+    additionalProperties: false,
+  };
+};
+
+export const extractDeclaredPropertyKeys = (inputSchema: unknown): ReadonlySet<string> => {
+  if (!isPlainRecord(inputSchema) || !isPlainRecord(inputSchema.properties)) {
+    return new Set();
+  }
+  return new Set(Object.keys(inputSchema.properties));
+};
+
+export const stripMcpClientMetaFields = <T>(
+  payload: T,
+  declaredPropertyKeys?: ReadonlySet<string>,
+): T => {
+  if (!isPlainRecord(payload)) return payload;
+  let copied: Record<string, unknown> | null = null;
+  for (const key of Object.keys(payload)) {
+    if (MCP_CLIENT_WRAPPER_KEYS.has(key) && !(declaredPropertyKeys?.has(key) ?? false)) {
+      copied ??= { ...payload };
+      delete copied[key];
+    }
+  }
+  return (copied ?? payload) as T;
+};
+
+export const normalizeDevelopmentToolSchema = (tool: McpSchema.Tool): McpSchema.Tool => {
+  const flattened = flattenMcpRootUnionObjectSchema(tool.inputSchema);
+  return flattened === tool.inputSchema
+    ? tool
+    : new McpSchema.Tool({
+        ...tool,
+        inputSchema: flattened as typeof tool.inputSchema,
+      });
+};
+
+/** Keep image bytes out of text/structured output and deliver them as MCP image content. */
+export const normalizeDevelopmentToolResult = (name: string, result: McpSchema.CallToolResult) => {
+  if (
+    name !== "workspace_document" ||
+    result.isError ||
+    !result.structuredContent ||
+    typeof result.structuredContent !== "object"
+  )
+    return result;
+  const value = result.structuredContent as Record<string, unknown>;
+  const raw = value.image;
+  if (
+    !raw ||
+    typeof raw !== "object" ||
+    !("mimeType" in raw) ||
+    raw.mimeType !== "image/png" ||
+    !("data" in raw) ||
+    typeof raw.data !== "string"
+  )
+    return result;
+  const { image: _omit, ...metadata } = value;
+  return new McpSchema.CallToolResult({
+    isError: false,
+    structuredContent: metadata,
+    content: [
+      { type: "text", text: JSON.stringify(metadata) },
+      {
+        type: "image",
+        data: new Uint8Array(Buffer.from(raw.data, "base64")),
+        mimeType: "image/png",
+      },
+    ],
+  });
+};
+
+export const DevelopmentToolkitRegistrationLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const upgrade = yield* UpgradeRoomMemory;
+    const server = yield* McpServer.McpServer;
+    // Buffer and register tools in canonical alphabetical order so the 0-index
+    // MCP tool schema array stays byte-deterministic across restarts for KV caching.
+    const pendingTools: Array<Parameters<typeof server.addTool>[0]> = [];
+    const registry = McpServer.McpServer.of({
+      ...server,
+      addTool: (options) => {
+        if (upgrade && !["workspace_memory", "workspace_document"].includes(options.tool.name)) {
+          return Effect.void;
+        }
+        const normalizedTool = normalizeDevelopmentToolSchema(options.tool);
+        const declaredKeys = extractDeclaredPropertyKeys(normalizedTool.inputSchema);
+        pendingTools.push({
+          ...options,
+          tool: normalizedTool,
+          handle: (payload) =>
+            options
+              .handle(stripMcpClientMetaFields(payload, declaredKeys))
+              .pipe(
+                Effect.map((result) => normalizeDevelopmentToolResult(options.tool.name, result)),
+              ),
+        });
+        return Effect.void;
+      },
+    });
+    yield* McpServer.registerToolkit(WorkspaceDevelopmentToolkit).pipe(
+      Effect.provideService(McpServer.McpServer, registry),
+    );
+    pendingTools.sort((left, right) => left.tool.name.localeCompare(right.tool.name));
+    for (const entry of pendingTools) {
+      yield* server.addTool(entry);
+    }
+  }),
+).pipe(Layer.provide(DevelopmentHandlers));
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -280,5 +579,5 @@ const McpTransportLive = McpServer.layerHttp({
 
 export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
-  McpServer.toolkit(WorkspaceDevelopmentToolkit).pipe(Layer.provide(DevelopmentHandlers)),
+  DevelopmentToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));

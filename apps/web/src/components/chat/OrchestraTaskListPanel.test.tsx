@@ -58,6 +58,58 @@ const render = (state: OrchestraListState = DEFAULT_ORCHESTRA_LIST_STATE) =>
   );
 
 describe("OrchestraTaskListPanel", () => {
+  it("shows the failure category, recovery action and recorded validation evidence", () => {
+    const list = fixture();
+    const markup = renderToStaticMarkup(
+      <OrchestraTaskListPanel
+        list={{
+          ...list,
+          tasks: list.tasks.map((task) => ({
+            ...task,
+            diagnostic: {
+              kind: "validation-rejected",
+              label: "검증 반려",
+              phase: "검증",
+              recovery: "정정 후 재검증",
+              action: "근거 정정",
+              evidence: ["stop_loss_engine.py:26"],
+            },
+          })),
+        }}
+        state={{ ...DEFAULT_ORCHESTRA_LIST_STATE, expanded: { compute: true, report: true } }}
+        onChange={() => {}}
+        renderAttempt={() => null}
+      />,
+    );
+    expect(markup).toContain("검증 반려");
+    expect(markup).toContain("정정 후 재검증");
+    expect(markup).toContain("근거 정정");
+    expect(markup).toContain("stop_loss_engine.py:26");
+  });
+  it("shows the recorded provider preflight warning as a historical check", () => {
+    const list = fixture();
+    const warning = {
+      role: "researcher",
+      modelSelection: { instanceId: "missing", model: "test" },
+      message: "연구 연결이 등록되어 있지 않습니다.",
+    };
+    const markup = renderToStaticMarkup(
+      <OrchestraTaskListPanel
+        list={{
+          ...list,
+          run: { runContext: { providerWarnings: [warning] } } as unknown as NonNullable<
+            typeof list.run
+          >,
+        }}
+        state={DEFAULT_ORCHESTRA_LIST_STATE}
+        onChange={() => {}}
+        renderAttempt={() => null}
+      />,
+    );
+    expect(markup).toContain("시작 전 확인한 연결 경고");
+    expect(markup).toContain("시작 시점의 상태");
+    expect(markup).toContain(warning.message);
+  });
   it("keeps wait reasons visible and mounts usage only for expanded tasks", () => {
     const list = fixture();
     const markup = renderToStaticMarkup(
@@ -118,6 +170,7 @@ describe("OrchestraTaskListPanel", () => {
   it("renders one task row per node, defaults completed work closed, and leaves the current output visible", () => {
     const markup = render();
     expect(markup.match(/data-orchestra-task=/g)).toHaveLength(2);
+    expect(markup).toContain("배정 모델 · codex · gpt-5.6-sol");
     expect(markup).toContain("재시도 1회");
     expect(markup).not.toContain("completed output");
     expect(markup).toContain("live report output");
@@ -166,4 +219,21 @@ it("shows cancellation progress separately from a confirmed stop, including runs
     expect(markup).toContain(label);
     if (status === "cancelled") expect(markup).not.toContain("배정을 기다리는");
   }
+});
+
+it("includes cancelled task count in the summary bar so totals add up", () => {
+  const list = fixture();
+  const markup = renderToStaticMarkup(
+    <OrchestraTaskListPanel
+      list={{
+        ...list,
+        tasks: list.tasks.map((task) => ({ ...task, status: "cancelled" })),
+      }}
+      state={DEFAULT_ORCHESTRA_LIST_STATE}
+      onChange={() => {}}
+      renderAttempt={() => null}
+    />,
+  );
+  expect(markup).toContain("전체 2");
+  expect(markup).toContain("취소 2");
 });

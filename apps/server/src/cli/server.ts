@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import { Command, GlobalFlag } from "effect/unstable/cli";
 
 import { ServerConfig, type StartupPresentation } from "../config.ts";
+import { readServerIntegrityRid } from "../ServerIntegrity.ts";
 import { runServer } from "../server.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
@@ -13,6 +14,10 @@ export const runServerCommand = (
   },
 ) =>
   Effect.gen(function* () {
+    if (process.platform === "win32") {
+      const rid = yield* Effect.promise(readServerIntegrityRid);
+      yield* Effect.logInfo(`[server-integrity] pid=${process.pid} rid=${rid ?? "unknown"}`);
+    }
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, options);
     return yield* runServer.pipe(Effect.provideService(ServerConfig, config));

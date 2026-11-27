@@ -37,6 +37,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { makeCodexManagedWatches } from "./CodexManagedWatches.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
@@ -104,6 +105,8 @@ type CodexThreadItem =
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
 
 export interface CodexSessionRuntimeOptions {
+  readonly watchAllowed?: Effect.Effect<boolean>;
+  readonly restrictNativeSubagents?: boolean;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -119,6 +122,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly nativePolicySteerTurnId?: TurnId;
   readonly skills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
@@ -129,6 +133,12 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
   readonly interactionMode?: ProviderInteractionMode;
+  /** Sub-agent model to name in this turn's instructions; see `CodexRuntimeInfo.subagentModel`. */
+  readonly subagentModel?: string | undefined;
+  /** Models placed under the answering model; see `CodexRuntimeInfo.subordinateRoster`. */
+  readonly subordinateRoster?: string | undefined;
+  /** Mandatory unified global assistant contract elevated into Codex developer instructions. */
+  readonly globalSystemInstructions?: string | undefined;
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -142,6 +152,7 @@ export interface CodexThreadSnapshot {
 }
 
 export interface CodexSessionRuntimeShape {
+  readonly stopBackgroundWatches?: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
@@ -361,6 +372,7 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
 }
 
 function buildThreadStartParams(input: {
+  readonly restrictNativeSubagents?: boolean | undefined;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
@@ -368,6 +380,15 @@ function buildThreadStartParams(input: {
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
+    ...(input.restrictNativeSubagents
+      ? {
+          config: {
+            "agents.enabled": false,
+            "features.multi_agent": false,
+            "features.multi_agent_v2": false,
+          },
+        }
+      : {}),
     cwd: input.cwd,
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
@@ -402,6 +423,9 @@ function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
+  readonly subagentModel?: string | undefined;
+  readonly subordinateRoster?: string | undefined;
+  readonly globalSystemInstructions?: string | undefined;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -416,6 +440,9 @@ function buildCodexCollaborationMode(input: {
       developer_instructions: buildCodexDeveloperInstructions(input.interactionMode, {
         model,
         reasoningEffort,
+        subagentModel: input.subagentModel,
+        subordinateRoster: input.subordinateRoster,
+        globalInstructions: input.globalSystemInstructions,
       }),
     },
   };
@@ -434,6 +461,9 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly subagentModel?: string | undefined;
+  readonly subordinateRoster?: string | undefined;
+  readonly globalSystemInstructions?: string | undefined;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -456,6 +486,9 @@ export function buildTurnStartParams(input: {
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
+    subagentModel: input.subagentModel,
+    subordinateRoster: input.subordinateRoster,
+    globalSystemInstructions: input.globalSystemInstructions,
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -521,6 +554,7 @@ interface CodexThreadOpenClient {
 }
 
 export const openCodexThread = (input: {
+  readonly restrictNativeSubagents?: boolean | undefined;
   readonly client: CodexThreadOpenClient;
   readonly threadId: ThreadId;
   readonly runtimeMode: RuntimeMode;
@@ -531,6 +565,7 @@ export const openCodexThread = (input: {
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
+    restrictNativeSubagents: input.restrictNativeSubagents,
     cwd: input.cwd,
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
@@ -1379,8 +1414,29 @@ export const makeCodexSessionRuntime = (
         }
       });
 
+    const watches = options.watchAllowed
+      ? makeCodexManagedWatches(
+          (params) => client.request("mcpServer/tool/call", params),
+          options.watchAllowed,
+        )
+      : undefined;
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        if (
+          watches &&
+          (notification.method === "item/started" || notification.method === "item/completed") &&
+          notification.params.item.type === "mcpToolCall"
+        ) {
+          yield* watches
+            .observe(notification.params.threadId, notification.params.item, notification.method)
+            .pipe(
+              Effect.catch(() =>
+                Effect.logWarning("Managed MCP watch cancellation was not confirmed.", {
+                  threadId: options.threadId,
+                }),
+              ),
+            );
+        }
         let payload: ProviderEvent["payload"] = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
@@ -1867,6 +1923,7 @@ export const makeCodexSessionRuntime = (
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({
+        restrictNativeSubagents: options.restrictNativeSubagents,
         client,
         threadId: options.threadId,
         runtimeMode: options.runtimeMode,
@@ -1969,7 +2026,22 @@ export const makeCodexSessionRuntime = (
           ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
           ...(input.effort ? { effort: input.effort } : {}),
           ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+          subagentModel: input.subagentModel,
+          subordinateRoster: input.subordinateRoster,
+          globalSystemInstructions: input.globalSystemInstructions,
         });
+        if (input.nativePolicySteerTurnId) {
+          yield* client.request("turn/steer", {
+            threadId: providerThreadId,
+            expectedTurnId: input.nativePolicySteerTurnId,
+            input: params.input,
+          });
+          return {
+            threadId: options.threadId,
+            turnId: input.nativePolicySteerTurnId,
+            resumeCursor: { threadId: providerThreadId },
+          };
+        }
         yield* Ref.set(lastTurnInput, input);
         const rawResponse = yield* client.raw.request("turn/start", params);
         const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
@@ -1998,6 +2070,7 @@ export const makeCodexSessionRuntime = (
       });
     return {
       start,
+      ...(watches ? { stopBackgroundWatches: watches.stop } : {}),
       getSession: Ref.get(sessionRef),
       sendTurn,
       interruptTurn: (turnId, questionRequestId) =>

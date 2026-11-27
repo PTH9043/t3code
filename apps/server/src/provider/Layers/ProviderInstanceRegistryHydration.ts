@@ -45,11 +45,25 @@ import {
   defaultInstanceIdForDriver,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
+  type ProviderInstanceId,
   ServerSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as Semaphore from "effect/Semaphore";
+import * as Option from "effect/Option";
+import * as Equal from "effect/Equal";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { discoverLocalOllama, withLocalOllama } from "../localOllama.ts";
+import { ServerConfig } from "../../config.ts";
+import {
+  readUpgradeInstances,
+  materializeUpgradeInstance,
+  isUpgradeInstanceEnabled,
+  watchUpgradeCatalog,
+} from "../upgradeCatalog.ts";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
@@ -114,24 +128,74 @@ export const deriveProviderInstanceConfigMap = (
  * configs, so the only way the watcher could fail is a settings stream
  * tear-down, which logs and exits cleanly.
  */
-const SettingsWatcherLive = Layer.effectDiscard(
-  Effect.gen(function* () {
-    const mutator = yield* ProviderInstanceRegistryMutator;
-    const serverSettings = yield* ServerSettingsService;
-    yield* serverSettings.streamChanges.pipe(
-      Stream.runForEach((next) =>
-        mutator
-          .reconcile(deriveProviderInstanceConfigMap(next))
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
+const settingsWatcherLayer = (localModels: string[]) =>
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const mutator = yield* ProviderInstanceRegistryMutator;
+      const serverSettings = yield* ServerSettingsService;
+      yield* serverSettings.streamChanges.pipe(
+        Stream.runForEach((next) =>
+          mutator
+            .reconcile(withLocalOllama(deriveProviderInstanceConfigMap(next), localModels))
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
+              ),
             ),
+        ),
+        Effect.forkScoped,
+      );
+    }),
+  );
+
+// Opening the picker never starts provider CLIs. Only an explicit lookup materializes an adapter.
+export const upgradeInstanceRegistryLayer = (home: string) =>
+  Layer.effect(
+    ProviderInstanceRegistry,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const registry = yield* ProviderInstanceRegistry;
+      const mutator = yield* ProviderInstanceRegistryMutator;
+      const lock = yield* Semaphore.make(1);
+      const loaded = new Map<
+        ProviderInstanceId,
+        { configured: ProviderInstanceConfig; resolved: ProviderInstanceConfig }
+      >();
+      const synchronize = (id?: ProviderInstanceId) =>
+        lock.withPermits(1)(
+          Effect.gen(function* () {
+            const settings = yield* readUpgradeInstances(home).pipe(Effect.option);
+            if (Option.isNone(settings)) return undefined;
+            for (const [key, active] of loaded) {
+              if (!Equal.equals(active.configured, settings.value[key])) loaded.delete(key);
+            }
+            const entry = id && Object.hasOwn(settings.value, id) ? settings.value[id] : undefined;
+            if (id && entry && isUpgradeInstanceEnabled(entry)) {
+              // Re-read an invoked adapter's protected input even when only its secret changed.
+              const result = yield* materializeUpgradeInstance(home, id, entry).pipe(Effect.option);
+              if (Option.isSome(result))
+                loaded.set(id, { configured: entry, resolved: result.value });
+              else loaded.delete(id);
+            }
+            yield* mutator.reconcile(
+              Object.fromEntries(
+                [...loaded].map(([key, item]) => [key, item.resolved]),
+              ) as ProviderInstanceConfigMap,
+            );
+            return id && loaded.has(id) ? yield* registry.getInstance(id) : undefined;
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
           ),
-      ),
-      Effect.forkScoped,
-    );
-  }),
-);
+        );
+      yield* watchUpgradeCatalog(home).pipe(
+        Stream.runForEach(() => synchronize()),
+        Effect.forkScoped,
+      );
+      return ProviderInstanceRegistry.of({ ...registry, getInstance: (id) => synchronize(id) });
+    }),
+  );
 
 /**
  * Hydrate `ProviderInstanceRegistry` from `ServerSettings` and keep it in
@@ -155,20 +219,30 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
   BuiltInDriversEnv | ServerSettingsService
 > = Layer.unwrap(
   Effect.gen(function* () {
+    const config = Option.getOrUndefined(yield* Effect.serviceOption(ServerConfig));
+    if (config?.upgradeRoom) {
+      const home = config.upgradeRoom.primaryHome;
+      return upgradeInstanceRegistryLayer(home).pipe(
+        Layer.provide(
+          ProviderInstanceRegistryMutableLayer({ drivers: BUILT_IN_DRIVERS, configMap: {} }),
+        ),
+      );
+    }
     const serverSettings = yield* ServerSettingsService;
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
+    const localModels = initialSettings ? yield* Effect.promise(discoverLocalOllama) : [];
     const initialConfigMap =
       initialSettings === undefined
         ? ({} as ProviderInstanceConfigMap)
-        : deriveProviderInstanceConfigMap(initialSettings);
+        : withLocalOllama(deriveProviderInstanceConfigMap(initialSettings), localModels);
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
       drivers: BUILT_IN_DRIVERS,
       configMap: initialConfigMap,
     });
 
-    return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));
+    return settingsWatcherLayer(localModels).pipe(Layer.provideMerge(mutableLayer));
   }),
 ) as Layer.Layer<ProviderInstanceRegistry, never, BuiltInDriversEnv | ServerSettingsService>;

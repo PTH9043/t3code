@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   ProviderDriverKind,
   OPENCODE_API_KEY_ENV,
   type ProviderInstanceConfig,
@@ -16,6 +17,13 @@ vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return { c: reactHookHarness.useMemoCache };
 });
+vi.mock("../../state/use-atom-command", () => ({
+  useAtomCommand: () => async () => ({ _tag: "Success", value: { connected: true } }),
+}));
+vi.mock("../ui/toast", () => ({
+  toastManager: { add: vi.fn() },
+  stackedThreadToast: vi.fn(),
+}));
 import { OpenCodeApiSettings, withOpenCodeApiConnection } from "./OpenCodeApiSettings";
 
 const instance: ProviderInstanceConfig = {
@@ -27,6 +35,7 @@ const instance: ProviderInstanceConfig = {
     { name: "EXISTING", value: "retained", sensitive: false },
   ],
 };
+const environmentId = EnvironmentId.make("test-env");
 const connection = {
   providerId: "my_api",
   baseUrl: "https://example.com/v1",
@@ -40,14 +49,20 @@ describe("API settings credential updates", () => {
     const update = vi.fn();
     const render = () => {
       hooks.beginRender();
-      return OpenCodeApiSettings({ instance, onUpdate: update });
+      return OpenCodeApiSettings({ instance, environmentId, onUpdate: update });
     };
     const preset = visitElements(
       render(),
       (element) => element.props.children === "DeepSeek 기본값",
     );
     (preset!.props.onClick as () => void)();
-    const key = visitElements(render(), (element) => element.props.type === "password");
+    const key = visitElements(
+      render(),
+      (element) =>
+        element.props.type === "password" &&
+        typeof element.props.placeholder === "string" &&
+        !element.props.placeholder.includes("opencode.ai/auth"),
+    );
     (key!.props.onChange as (event: { target: { value: string } }) => void)({
       target: { value: "typed-key" },
     });

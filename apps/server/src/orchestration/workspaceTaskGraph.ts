@@ -4,6 +4,7 @@ import {
   type WorkspaceAgentRoleBinding,
   type WorkspaceFailureClassification,
   type WorkspaceMeetingParticipantId,
+  type WorkspaceMeeting,
   type WorkspaceMemoryCandidate,
   type WorkspaceOrchestrationAgent,
   type WorkspaceTaskGraph,
@@ -80,6 +81,43 @@ export interface WorkspaceTaskPlanProposal {
   readonly summary: string;
   readonly nextAction: string;
   readonly nodes: ReadonlyArray<WorkspaceTaskPlanNodeProposal>;
+}
+
+export const STOPPED_RECOVERY_CONSTRAINT =
+  "사용자가 중단한 추가 조사와 질문을 수행하지 않는다. 기존 결과와 미확인 사실만 기록한다.";
+
+/** Turn a record-only recovery into an executable, separately checked handoff. */
+export function normalizeStoppedRecoveryPlan(input: {
+  readonly proposal: WorkspaceTaskPlanProposal;
+  readonly meeting: WorkspaceMeeting | null;
+}): WorkspaceTaskPlanProposal | null {
+  if (input.meeting === null || input.proposal.nodes.length !== 1) return null;
+  const node = input.proposal.nodes[0]!;
+  if (node.kind !== "orchestration" || node.participantId === null) return null;
+  const instructions = [
+    ...input.meeting.answers
+      .filter((answer) => answer.nodeId === null)
+      .map((answer) => ({ text: answer.answer, at: answer.answeredAt })),
+    ...input.meeting.interjections.map((entry) => ({ text: entry.text, at: entry.saidAt })),
+  ].toSorted((a, b) => a.at.localeCompare(b.at));
+  const latest = instructions.at(-1)?.text ?? "";
+  if (
+    !/(?:조사|질문|오류\s*확인).{0,40}(?:중단|그만|멈춰)/su.test(latest) ||
+    /(?:중단|멈추|그만두)(?:하지|하지\s*말|지\s*마)/u.test(latest) ||
+    !/(?:기록|정리|보고)/u.test(`${node.title} ${node.task} ${node.expectedOutput}`)
+  )
+    return null;
+  return {
+    ...input.proposal,
+    nodes: [
+      {
+        ...node,
+        kind: "research",
+        agent: "grok",
+        constraints: [...node.constraints, STOPPED_RECOVERY_CONSTRAINT],
+      },
+    ],
+  };
 }
 
 export interface WorkspaceValidationDecision {
@@ -184,6 +222,36 @@ function nullableFailureClassification(
 function extractTaggedJson(output: string, tag: string): unknown {
   const startToken = `<${tag}>`;
   const endToken = `</${tag}>`;
+  const thinkEnd =
+    tag === "t3_validation" && !output.includes(startToken) && !output.includes(endToken)
+      ? /(?:^|\n)[ \t]*<\/think>[ \t]*(?:\r?\n|$)/u.exec(output)
+      : null;
+  if (thinkEnd) {
+    if (output.indexOf("</think>") !== output.lastIndexOf("</think>"))
+      return fail(`Ambiguous ${startToken} JSON payload.`);
+    const body = output.slice(thinkEnd.index + thinkEnd[0].length).trim();
+    if (!body.startsWith("{") || !body.endsWith("}"))
+      return fail(`Missing ${startToken} JSON payload.`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body) as unknown;
+    } catch (error) {
+      return fail(`${startToken} payload is invalid JSON: ${String(error)}`);
+    }
+    const validation = record(parsed, "validation");
+    for (const field of [
+      "verdict",
+      "confidence",
+      "summary",
+      "evidence",
+      "failureClassification",
+      "nextAction",
+      "followUpNodes",
+    ]) {
+      if (!Object.hasOwn(validation, field)) return fail(`validation.${field} is missing.`);
+    }
+    return validation;
+  }
   const start = output.indexOf(startToken);
   const end = output.indexOf(endToken, start + startToken.length);
   if (start >= 0 && end < 0) return fail(`Missing ${startToken} JSON payload.`);
@@ -807,6 +875,12 @@ export function materializeWorkspaceTaskGraphPlan(input: {
       requireBinding(input.bindings, agent);
     }
     requireBinding(input.bindings, "fable");
+  } else {
+    for (const node of input.proposal.nodes) {
+      if (node.participantId === null || !meeting.participantIds.includes(node.participantId)) {
+        return fail(`Task graph node '${node.id}' must use a selected meeting participant.`);
+      }
+    }
   }
 
   const existingIds = new Set(input.graph.nodes.map((node) => String(node.id)));

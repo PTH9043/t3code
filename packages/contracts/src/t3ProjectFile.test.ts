@@ -47,6 +47,26 @@ describe("T3ProjectFile", () => {
     expect(() => decode({ scripts: [{ name: "Dev" }] })).toThrow();
   });
 
+  it("decodes Orca-style worktree validate and cleanup lifecycle hooks", () => {
+    const decoded = decode({
+      scripts: [
+        {
+          name: "Validate",
+          command: "vp test run",
+          icon: "test",
+          runOnWorktreeValidate: true,
+        },
+        {
+          name: "Cleanup",
+          command: "node scripts/cleanup.mjs",
+          runOnWorktreeCleanup: true,
+        },
+      ],
+    });
+    expect(decoded.scripts?.[0]?.runOnWorktreeValidate).toBe(true);
+    expect(decoded.scripts?.[1]?.runOnWorktreeCleanup).toBe(true);
+  });
+
   it("rejects unknown script icons", () => {
     expect(() =>
       decode({ scripts: [{ name: "Dev", command: "pnpm dev", icon: "rocket" }] }),

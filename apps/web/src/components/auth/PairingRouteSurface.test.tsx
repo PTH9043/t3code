@@ -70,4 +70,29 @@ describe("Google login before pairing", () => {
     await vi.waitFor(() => expect(mocks.fetchSession).toHaveBeenCalledOnce());
     expect(onAuthenticated).not.toHaveBeenCalled();
   });
+
+  it("renders CLI token command guidance, password mask toggle, and 44px touch targets", () => {
+    const onAuthenticated = vi.fn();
+    const auth = { bootstrapMethods: ["one-time-token"] } as never;
+    hooks.beginRender();
+    const tree = PairingRouteSurface({ auth, onAuthenticated });
+
+    const tokenInput = visitElements(tree, (element) => element.props.id === "pairing-token");
+    expect(tokenInput).not.toBeNull();
+    expect(tokenInput!.props.type).toBe("password");
+    expect(String(tokenInput!.props.className)).toContain("min-h-11");
+
+    const toggleButton = visitElements(
+      tree,
+      (element) => element.props["aria-label"] === "토큰 표시",
+    );
+    expect(toggleButton).not.toBeNull();
+    expect(String(toggleButton!.props.className)).toContain("min-h-11");
+
+    const cliHint = visitElements(
+      tree,
+      (element) => element.type === "code" && element.props.children === "t3 pair --token",
+    );
+    expect(cliHint).not.toBeNull();
+  });
 });

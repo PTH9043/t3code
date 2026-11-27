@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -15,8 +16,11 @@ import {
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
+  ProviderExecutionId,
   ThreadId,
   TurnId,
+  WorkspaceCollaborationRunId,
+  WorkspaceTaskNodeId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -38,7 +42,9 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import { ServerConfig } from "../../config.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
+import type { SubordinateRow } from "../subagentSelection.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
@@ -365,6 +371,30 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
     }),
   );
+
+  it.effect("disables native spawn in the runtime created for a delegated Codex child", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("delegated-codex");
+      yield* adapter.startSession({
+        threadId,
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "chosen-worker"),
+        runtimeMode: "approval-required",
+        execution: {
+          executionId: ProviderExecutionId.make(threadId),
+          ownerThreadId: asThreadId("owner"),
+          runId: WorkspaceCollaborationRunId.make("run"),
+          nodeId: WorkspaceTaskNodeId.make("delegate-scout"),
+          attempt: 1,
+        },
+      });
+      const options = validationRuntimeFactory.factory.mock.lastCall?.[0];
+      NodeAssert.equal(options?.restrictNativeSubagents, true);
+      NodeAssert.equal(options?.model, "chosen-worker");
+      NodeAssert.equal(options?.runtimeMode, "approval-required");
+      NodeAssert.equal(adapter.capabilities.nativeSubagentPolicy?.(threadId)?.restricted, true);
+    }),
+  );
 });
 
 const sessionRuntimeFactory = makeRuntimeFactory();
@@ -468,6 +498,110 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect(
+    "guards the managed Claude MCP server only for ordinary chats and reads the current room setting",
+    () => {
+      const factory = makeRuntimeFactory();
+      const room = asThreadId("opt-in-room");
+      const settings = ServerSettingsService.layerTest({
+        providers: { claudeAgent: { binaryPath: process.execPath } },
+        mcpTools: { claudeTools: true },
+      });
+      const layer = Layer.effect(
+        CodexAdapter,
+        makeCodexAdapter(decodeCodexSettings({}), {
+          makeRuntime: factory.factory,
+        }),
+      ).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-codex-watch-" })),
+        Layer.provideMerge(settings),
+        Layer.provideMerge(NodeServices.layer),
+      );
+      return Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const service = yield* ServerSettingsService;
+        yield* adapter.startSession({ threadId: room, runtimeMode: "approval-required" });
+        const ordinary = factory.lastRuntime!.options;
+        NodeAssert.ok(ordinary.appServerArgs?.some((arg) => arg.includes("codex-watch-stdio")));
+        NodeAssert.equal(ordinary.runtimeMode, "approval-required");
+        NodeAssert.ok(ordinary.watchAllowed);
+        NodeAssert.equal(yield* ordinary.watchAllowed, false);
+        yield* service.updateSettings({
+          backgroundWatchThreadUpdate: { threadId: room, enabled: true },
+        });
+        NodeAssert.equal(yield* ordinary.watchAllowed, true);
+        const child = asThreadId("execution-room");
+        yield* adapter.startSession({
+          threadId: child,
+          runtimeMode: "full-access",
+          execution: {
+            executionId: ProviderExecutionId.make(child),
+            ownerThreadId: room,
+            runId: WorkspaceCollaborationRunId.make("run"),
+            nodeId: WorkspaceTaskNodeId.make("node"),
+            attempt: 1,
+          },
+        });
+        const execution = factory.lastRuntime!.options;
+        NodeAssert.equal(execution.watchAllowed, undefined);
+        NodeAssert.ok(
+          execution.appServerArgs?.some((arg) => arg.includes("mcp_servers.t3-claude-tools")),
+        );
+        NodeAssert.ok(!execution.appServerArgs?.some((arg) => arg.includes("codex-watch-stdio")));
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("passes managed HTTP credentials through the session environment", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        return yield* makeCodexAdapter(decodeCodexSettings({}), {
+          environment: { EXISTING_OPTION: "preserved" },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest({
+          customMcpServers: {
+            apps: {
+              name: "apps",
+              label: "Apps",
+              enabled: true,
+              providers: ["codex"],
+              workspaceRoot: null,
+              transport: "http",
+              url: "https://example.com/mcp",
+              headers: { Authorization: "Bearer fixture-secret" },
+            },
+          },
+        }),
+      ),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-http-credential"),
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.environment?.EXISTING_OPTION, "preserved");
+      NodeAssert.equal(
+        runtime.options.environment?.T3_MCP_HTTP_HEADER_0_0,
+        "Bearer fixture-secret",
+      );
+      NodeAssert.ok(runtime.options.appServerArgs?.some((arg) => arg.includes("env_http_headers")));
+      NodeAssert.ok(!runtime.options.appServerArgs?.join(" ").includes("fixture-secret"));
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("uses T3CODE_CODEX_LAUNCH_ARGS for the session runtime", () => {
     const runtimeFactory = makeRuntimeFactory();
     const layer = Layer.effect(
@@ -553,6 +687,164 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         serviceTier: "flex",
       });
     }).pipe(Effect.provide(customLayer));
+  });
+
+  it.effect("runs sub-agents on the model assigned to the answering model", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        return yield* makeCodexAdapter(
+          decodeCodexSettings({
+            subagentModel: "gpt-5.6-luna",
+            subagentModelByModel: "gpt-6-sol=gpt-6-luna, terra=inherit",
+          }),
+          { makeRuntime: runtimeFactory.factory },
+        );
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const threadId = asThreadId("sess-subagent-model");
+    const selection = (model: string) =>
+      createModelSelection(ProviderInstanceId.make("codex"), model);
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+        modelSelection: selection("gpt-6-sol"),
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const args = runtime.options.appServerArgs ?? [];
+      NodeAssert.equal(args[args.indexOf('agents.default_subagent_model="gpt-6-luna"') - 1], "-c");
+
+      const turnSubagentModel = (model: string) =>
+        Effect.gen(function* () {
+          runtime.sendTurnImpl.mockClear();
+          yield* Effect.ignore(
+            adapter.sendTurn({
+              threadId,
+              input: "hello",
+              modelSelection: selection(model),
+              attachments: [],
+            }),
+          );
+          return runtime.sendTurnImpl.mock.calls[0]?.[0].subagentModel;
+        });
+      // Same answering model: the session default already covers it.
+      NodeAssert.equal(yield* turnSubagentModel("gpt-6-sol"), undefined);
+      // Switched mid-session: the turn names the newly assigned model.
+      NodeAssert.equal(yield* turnSubagentModel("gpt-6-astra"), "gpt-5.6-luna");
+      NodeAssert.equal(yield* turnSubagentModel("gpt-6.1-terra"), "gpt-6.1-terra");
+      // Back on the first model: keep naming it, or the earlier instruction would linger.
+      NodeAssert.equal(yield* turnSubagentModel("gpt-6-sol"), "gpt-6-luna");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("names the answering model's subordinates each turn, never for an execution", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const codex = ProviderInstanceId.make("codex");
+    const assigned: ReadonlyArray<SubordinateRow> = [
+      { role: "worker", account: "Codex", instanceId: codex, model: "gpt-6-luna" },
+      {
+        forModel: "gpt-6-sol",
+        role: "advisor",
+        account: "Codex",
+        instanceId: codex,
+        model: "gpt-6-astra",
+      },
+    ];
+    let rows = assigned;
+    const layer = Layer.effect(
+      CodexAdapter,
+      makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: runtimeFactory.factory,
+        subordinates: Effect.sync(() => rows),
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const threadId = asThreadId("sess-subordinates");
+    const executionThreadId = asThreadId("sess-subordinate-execution");
+    const selection = (model: string) => createModelSelection(codex, model);
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("test-environment"),
+        threadId,
+        providerSessionId: "session",
+        providerInstanceId: codex,
+        endpoint: "http://127.0.0.1:2345/mcp",
+        authorizationHeader: "Bearer synthetic-session-secret",
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => clearMcpProviderSession(threadId)));
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+        modelSelection: selection("gpt-6-sol"),
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      // workspace_delegate holds a call for minutes; Codex must not cut it at its default.
+      const args = runtime.options.appServerArgs ?? [];
+      NodeAssert.equal(args[args.indexOf("mcp_servers.t3-code.tool_timeout_sec=300") - 1], "-c");
+
+      const turnRoster = (target: typeof runtime, id: ThreadId, model?: string) =>
+        Effect.gen(function* () {
+          target.sendTurnImpl.mockClear();
+          yield* Effect.ignore(
+            adapter.sendTurn({
+              threadId: id,
+              input: "hello",
+              ...(model ? { modelSelection: selection(model) } : {}),
+              attachments: [],
+            }),
+          );
+          return target.sendTurnImpl.mock.calls[0]?.[0].subordinateRoster;
+        });
+      // The session's model applies when the turn does not name one.
+      const first = (yield* turnRoster(runtime, threadId)) ?? "";
+      NodeAssert.match(first, /- worker — Codex · gpt-6-luna — /);
+      NodeAssert.match(first, /- advisor — Codex · gpt-6-astra — /);
+      // The advisor is assigned to gpt-6-sol only.
+      const switched = (yield* turnRoster(runtime, threadId, "gpt-6.1-terra")) ?? "";
+      NodeAssert.match(switched, /- worker — Codex · gpt-6-luna — /);
+      NodeAssert.doesNotMatch(switched, /gpt-6-astra/);
+      // Assignments are read per turn; removing them removes the roster.
+      rows = [];
+      NodeAssert.equal(yield* turnRoster(runtime, threadId), undefined);
+      rows = assigned;
+
+      // A subordinate or orchestra participant never gets subordinates of its own.
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: executionThreadId,
+        runtimeMode: "full-access",
+        modelSelection: selection("gpt-6-sol"),
+        execution: {
+          executionId: ProviderExecutionId.make(executionThreadId),
+          ownerThreadId: threadId,
+          runId: WorkspaceCollaborationRunId.make("run-1"),
+          nodeId: WorkspaceTaskNodeId.make("delegate-worker"),
+          attempt: 1,
+        },
+      });
+      const executionRuntime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(executionRuntime && executionRuntime !== runtime);
+      NodeAssert.equal(yield* turnRoster(executionRuntime, executionThreadId), undefined);
+    }).pipe(Effect.provide(layer));
   });
 });
 
@@ -1413,6 +1705,61 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       NodeAssert.equal(firstEvent.value.turnId, "turn-1");
       NodeAssert.equal(firstEvent.value.payload.consumption?.[0]?.counts.total, 210);
+    }),
+  );
+
+  it.effect("counts a child agent's own usage and confirms it when the child finishes", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+      const child = { agentThreadId: "child-thread-1", agentName: "worker" };
+      const total = {
+        inputTokens: 900,
+        cachedInputTokens: 100,
+        outputTokens: 50,
+        reasoningOutputTokens: 0,
+        totalTokens: 950,
+      };
+
+      // A child is its own app-server thread: the parent's counter never
+      // includes this spend, so it must reach the turn as a separate source.
+      yield* runtime.emit({
+        id: asEventId("evt-child-usage"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "collabAgent/tokenUsage",
+        payload: { ...child, tokenUsage: { total, last: total } },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-child-done"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "collabAgent/turnCompleted",
+        payload: { ...child, status: "completed" },
+      } satisfies ProviderEvent);
+
+      const usage = Array.from(yield* Fiber.join(eventsFiber)).filter(
+        (event) => event.type === "thread.token-usage.updated",
+      );
+      NodeAssert.equal(usage.length, 2);
+      const [live, final] = usage.map((event) => event.payload.consumption?.[0]);
+      NodeAssert.equal(live?.sourceId, "codex:child-thread-1");
+      NodeAssert.equal(live?.counts.total, 950);
+      NodeAssert.equal(live?.startsAtZero, true);
+      NodeAssert.equal(live?.includesNativeChildren, true);
+      NodeAssert.equal(live?.isFinal, undefined);
+      NodeAssert.equal(final?.sourceId, "codex:child-thread-1");
+      NodeAssert.equal(final?.counts.total, 950);
+      NodeAssert.equal(final?.isFinal, true);
+      NodeAssert.equal(usage[0]?.turnId, "turn-1");
     }),
   );
 

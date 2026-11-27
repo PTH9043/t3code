@@ -19,8 +19,11 @@
 
 const BIGRAM_SCRIPT = /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const HANGUL = /\p{Script=Hangul}/u;
-const WORD = /[\p{L}\p{N}]+/gu;
+const WORD = /[a-z]{1,8}-\d{1,8}(?:-[a-z0-9]+)?|[\p{L}\p{N}]+/giu;
 const DIGITS = /^\p{N}+$/u;
+const HYPHEN_CODE_TERM = /^[a-z]{1,8}-\d{1,8}(?:-[a-z0-9]+)?$/iu;
+const KOREAN_CLAUSE_PREFIX = /^(제\d+(?:조(?:의\d+)?|항|호|장|절))(.*)$/u;
+const KOREAN_CLAUSE_TERM = /^제\d+(?:조(?:의\d+)?|항|호|장|절)$/u;
 
 const normalize = (text: string): string => text.normalize("NFKC").toLowerCase();
 
@@ -31,6 +34,16 @@ interface Run {
 
 /** Split a word into maximal runs of bigram-script and other characters. */
 function splitRuns(word: string): ReadonlyArray<Run> {
+  if (HYPHEN_CODE_TERM.test(word)) {
+    return [{ bigram: false, text: word }];
+  }
+  const clauseMatch = KOREAN_CLAUSE_PREFIX.exec(word);
+  if (clauseMatch) {
+    const [, clause, rest] = clauseMatch;
+    if (clause && (!rest || KOREAN_SUFFIXES.includes(rest))) {
+      return [{ bigram: false, text: clause }];
+    }
+  }
   const runs: Run[] = [];
   let current = "";
   let currentBigram = false;
@@ -61,6 +74,10 @@ function bigramsOf(run: string): ReadonlyArray<string> {
 export function analyzeSearchText(text: string): string {
   const tokens: string[] = [];
   for (const word of normalize(text).match(WORD) ?? []) {
+    if (HYPHEN_CODE_TERM.test(word)) {
+      tokens.push(...word.split("-"));
+      continue;
+    }
     for (const run of splitRuns(word)) {
       if (run.bigram) tokens.push(...bigramsOf(run.text));
       else tokens.push(run.text);
@@ -272,6 +289,12 @@ export interface SearchQuery {
 export const MAX_QUERY_TERMS = 16;
 
 function termClause(term: string): string {
+  if (HYPHEN_CODE_TERM.test(term)) {
+    return `"${term.split("-").join(" ")}"`;
+  }
+  if (KOREAN_CLAUSE_TERM.test(term)) {
+    return `"${term}"`;
+  }
   const chars = Array.from(term);
   if (BIGRAM_SCRIPT.test(chars[0] ?? "")) {
     // A lone syllable is only ever the head of an indexed bigram.
@@ -280,21 +303,42 @@ function termClause(term: string): string {
   return term.length >= 3 && !DIGITS.test(term) ? `"${term}"*` : `"${term}"`;
 }
 
+function isPriorityIdentifierTerm(term: string): boolean {
+  return HYPHEN_CODE_TERM.test(term) || KOREAN_CLAUSE_TERM.test(term);
+}
+
 function collectQueryTerms(text: string, maxTerms: number): ReadonlyArray<string> {
-  const terms: string[] = [];
+  const allTerms: string[] = [];
   const seen = new Set<string>();
-  for (const word of normalize(text).match(WORD) ?? []) {
+  const normalizedText = normalize(text).replace(
+    /제\s+(\d+)\s+(조(?:\s*의\s*\d+)?|항|호|장|절)/gu,
+    (_m, num: string, unit: string) => `제${num}${unit.replace(/\s+/gu, "")}`,
+  );
+  for (const word of normalizedText.match(WORD) ?? []) {
     for (const run of splitRuns(word)) {
       const term = run.bigram && HANGUL.test(run.text) ? stripKoreanSuffix(run.text) : run.text;
       if (STOPWORDS.has(term)) continue;
       if (!run.bigram && term.length < 2 && !DIGITS.test(term)) continue;
       if (seen.has(term)) continue;
       seen.add(term);
-      terms.push(term);
-      if (terms.length >= maxTerms) return terms;
+      allTerms.push(term);
     }
   }
-  return terms;
+  if (allTerms.length <= maxTerms) return allTerms;
+  const kept = allTerms.slice(0, maxTerms);
+  const overflowPriority = allTerms.slice(maxTerms).filter(isPriorityIdentifierTerm);
+  for (const priorityTerm of overflowPriority) {
+    let replaceIndex = -1;
+    for (let i = kept.length - 1; i >= 0; i--) {
+      if (!isPriorityIdentifierTerm(kept[i]!)) {
+        replaceIndex = i;
+        break;
+      }
+    }
+    if (replaceIndex < 0) break;
+    kept[replaceIndex] = priorityTerm;
+  }
+  return kept;
 }
 
 /**
@@ -317,12 +361,93 @@ export function buildSearchQuery(
  * is the re-ranking signal that favours covering more of it.
  */
 export function termCoverage(terms: ReadonlyArray<string>, text: string): number {
-  const haystack = normalize(text);
+  const haystack = normalize(text).replace(
+    /제\s+(\d+)\s+(조(?:\s*의\s*\d+)?|항|호|장|절)/gu,
+    (_m, num: string, unit: string) => `제${num}${unit.replace(/\s+/gu, "")}`,
+  );
   let covered = 0;
   for (const term of terms) {
     if (haystack.includes(term)) covered += 1;
   }
   return covered;
+}
+
+/**
+ * Cross-interaction (late-interaction) query-document pair scoring for Stage-2
+ * reranking: evaluates exact identifier/clause alignment, term coverage ratio,
+ * minimum window token proximity,ordered bigram adjacency, and heading matches.
+ */
+export function scoreQueryDocumentInteraction(input: {
+  readonly query: string;
+  readonly terms: ReadonlyArray<string>;
+  readonly title: string;
+  readonly tagsText?: string;
+  readonly content: string;
+}): number {
+  const { query, terms, title, tagsText = "", content } = input;
+  if (terms.length === 0) return 0;
+  const normTitle = normalize(title);
+  const normTags = normalize(tagsText);
+  const normContent = normalize(content).replace(
+    /제\s+(\d+)\s+(조(?:\s*의\s*\d+)?|항|호|장|절)/gu,
+    (_m, num: string, unit: string) => `제${num}${unit.replace(/\s+/gu, "")}`,
+  );
+  const fullText = `${normTitle} ${normTags} ${normContent}`;
+
+  // 1. Exact identifier / error code / Korean clause number match
+  const normQuery = normalize(query).replace(
+    /제\s+(\d+)\s+(조(?:\s*의\s*\d+)?|항|호|장|절)/gu,
+    (_m, num: string, unit: string) => `제${num}${unit.replace(/\s+/gu, "")}`,
+  );
+  const queryCodes = [
+    ...(normQuery.match(/\b[a-z]{1,8}-\d{1,8}(?:-[a-z0-9]+)?\b/gu) ?? []),
+    ...(normQuery.match(/제\d+(?:조(?:의\d+)?|항|호|장|절)/gu) ?? []),
+  ];
+  let exactCodeScore = 0;
+  if (queryCodes.length > 0) {
+    let matchedCodes = 0;
+    for (const code of queryCodes) {
+      if (fullText.includes(code)) matchedCodes++;
+    }
+    exactCodeScore = matchedCodes / queryCodes.length;
+  }
+
+  // 2. Term coverage ratio & heading/title alignment
+  const positions: number[] = [];
+  let coveredCount = 0;
+  let headingHits = 0;
+  const headingZone = `${normTitle}\n${normContent.split("\n").slice(0, 3).join("\n")}`;
+  for (const term of terms) {
+    if (fullText.includes(term)) {
+      coveredCount++;
+      const pos = normContent.indexOf(term);
+      if (pos >= 0) positions.push(pos);
+    }
+    if (headingZone.includes(term)) {
+      headingHits++;
+    }
+  }
+  if (coveredCount === 0 && exactCodeScore === 0) return 0;
+  const coverageRatio = coveredCount / terms.length;
+  const headingRatio = headingHits / terms.length;
+
+  // 3. Ordered pair & proximity window density
+  let proximityScore = 0;
+  if (positions.length >= 2) {
+    let orderedPairs = 0;
+    for (let i = 0; i < positions.length - 1; i++) {
+      if (positions[i]! <= positions[i + 1]!) orderedPairs++;
+    }
+    const orderRatio = orderedPairs / (positions.length - 1);
+    const sortedPos = positions.toSorted((a, b) => a - b);
+    const span = Math.max(1, sortedPos.at(-1)! - sortedPos[0]!);
+    const density = Math.min(1, (positions.length * 40) / (span + 40));
+    proximityScore = 0.6 * density + 0.4 * orderRatio;
+  } else if (positions.length === 1 && terms.length === 1) {
+    proximityScore = 1;
+  }
+
+  return 0.35 * coverageRatio + 0.35 * exactCodeScore + 0.15 * proximityScore + 0.15 * headingRatio;
 }
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -355,7 +480,34 @@ export function makeSnippet(content: string, terms: ReadonlyArray<string>, maxCh
 export const CHUNK_SIZE = 1_200;
 export const CHUNK_OVERLAP = 200;
 
-/** Split a paragraph or oversized section without splitting surrogate pairs. */
+const TABLE_ROW_LINE = /^\s*\|.*\|\s*$/u;
+const TABLE_SEPARATOR_LINE = /^\s*\|[\s:|-]+\|\s*$/u;
+
+/** Extract active Markdown table header (header row + separator row) before `offset`. */
+function findActiveTableHeader(text: string, offset: number): string {
+  if (offset <= 0) return "";
+  const firstLineEnd = text.indexOf("\n", offset);
+  const firstLine = (
+    firstLineEnd < 0 ? text.slice(offset) : text.slice(offset, firstLineEnd)
+  ).trim();
+  if (!TABLE_ROW_LINE.test(firstLine) || TABLE_SEPARATOR_LINE.test(firstLine)) return "";
+  const beforeLines = text.slice(0, offset).trimEnd().split("\n");
+  for (let i = beforeLines.length - 1; i >= 1; i--) {
+    const line = beforeLines[i]!.trim();
+    if (!TABLE_ROW_LINE.test(line)) return "";
+    if (TABLE_SEPARATOR_LINE.test(line)) {
+      const headerLine = beforeLines[i - 1]!.trim();
+      if (TABLE_ROW_LINE.test(headerLine) && !TABLE_SEPARATOR_LINE.test(headerLine)) {
+        const candidate = `${headerLine}\n${line}`;
+        return candidate.length <= 240 ? candidate : "";
+      }
+      return "";
+    }
+  }
+  return "";
+}
+
+/** Split a paragraph or oversized section without splitting surrogate pairs, preserving Markdown table headers across chunk boundaries. */
 function chunkPlainContent(content: string, size = CHUNK_SIZE): ReadonlyArray<string> {
   const normalized = content.replaceAll("\r\n", "\n").trim();
   if (normalized.length === 0) return [];
@@ -364,50 +516,94 @@ function chunkPlainContent(content: string, size = CHUNK_SIZE): ReadonlyArray<st
   const chunks: string[] = [];
   let start = 0;
   while (start < normalized.length) {
-    const hardEnd = Math.min(normalized.length, start + size);
+    const tableHeader = start > 0 ? findActiveTableHeader(normalized, start) : "";
+    const effectiveSize = tableHeader ? Math.max(200, size - tableHeader.length - 1) : size;
+    const hardEnd = Math.min(normalized.length, start + effectiveSize);
     let end = hardEnd;
     if (hardEnd < normalized.length) {
-      const candidate = normalized.slice(start + Math.floor(size / 2), hardEnd);
+      const halfOffset = Math.floor(effectiveSize / 2);
+      const candidate = normalized.slice(start + halfOffset, hardEnd);
       const paragraph = candidate.lastIndexOf("\n\n");
       const newline = candidate.lastIndexOf("\n");
       const space = candidate.lastIndexOf(" ");
       const boundary = paragraph >= 0 ? paragraph + 1 : newline >= 0 ? newline : space;
-      if (boundary >= 0) end = start + Math.floor(size / 2) + boundary + 1;
+      if (boundary >= 0) end = start + halfOffset + boundary + 1;
     }
     if (end < normalized.length && /[\uD800-\uDBFF]/u.test(normalized[end - 1] ?? "")) end--;
-    const chunk = normalized.slice(start, end).trim();
+    const rawSlice = normalized.slice(start, end).trim();
+    const chunk =
+      tableHeader && rawSlice.length > 0 && !rawSlice.startsWith(tableHeader)
+        ? `${tableHeader}\n${rawSlice}`
+        : rawSlice;
     if (chunk.length > 0) chunks.push(chunk);
     if (end >= normalized.length) break;
-    start = Math.max(start + 1, end - CHUNK_OVERLAP);
+    if (tableHeader || findActiveTableHeader(normalized, end)) {
+      start = end;
+    } else {
+      start = Math.max(start + 1, end - CHUNK_OVERLAP);
+    }
     if (/[\uDC00-\uDFFF]/u.test(normalized[start] ?? "")) start++;
   }
   return chunks;
 }
 
-/** Keep Markdown sections and conversation role headings together before applying bounded overlap. */
+/**
+ * Keep Markdown sections, Parent-Child heading hierarchies (H1~H6 and Korean
+ * clause headers), and Markdown table headers intact before applying bounded overlap.
+ */
 export function chunkSearchableContent(content: string): ReadonlyArray<string> {
   const normalized = content.replaceAll("\r\n", "\n").trim();
   if (normalized.length <= CHUNK_SIZE) return normalized ? [normalized] : [];
-  const sections: { heading: string; text: string }[] = [];
+  const sections: { heading: string; ancestorPrefix: string; text: string }[] = [];
+  const headingStack: { level: number; text: string }[] = [];
   let heading = "",
+    ancestorPrefix = "",
     lines: string[] = [],
     fenced = false;
   for (const line of normalized.split("\n")) {
     if (/^\s*(```|~~~)/u.test(line)) fenced = !fenced;
-    if (!fenced && /^#{1,6}\s+\S/u.test(line)) {
-      if (lines.length) sections.push({ heading, text: lines.join("\n") });
+    const mdMatch = !fenced ? /^(#{1,6})\s+\S/u.exec(line) : null;
+    const clauseMatch =
+      !fenced && !mdMatch && line.trim().length <= 80
+        ? /^제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?(?:\s+\S.*)?$/u.exec(line.trim())
+        : null;
+    if (mdMatch || clauseMatch) {
+      if (lines.length) sections.push({ heading, ancestorPrefix, text: lines.join("\n") });
+      const level = mdMatch ? mdMatch[1]!.length : 7;
+      while (headingStack.length > 0 && headingStack.at(-1)!.level >= level) {
+        headingStack.pop();
+      }
+      headingStack.push({ level, text: line.trim() });
       heading = line;
+      ancestorPrefix =
+        headingStack.length > 1
+          ? headingStack
+              .slice(0, -1)
+              .map((entry) => entry.text)
+              .join(" > ")
+              .slice(0, 120)
+          : "";
       lines = [];
     }
     lines.push(line);
   }
-  if (lines.length) sections.push({ heading, text: lines.join("\n") });
+  if (lines.length) sections.push({ heading, ancestorPrefix, text: lines.join("\n") });
   return sections.flatMap((section) => {
-    const prefix = section.heading.slice(0, 160);
-    // Leave room for the section heading on continuation chunks.
-    if (!prefix) return chunkPlainContent(section.text);
-    const chunks = chunkPlainContent(section.text, CHUNK_SIZE - prefix.length - 1);
-    return chunks.map((chunk, index) => (index === 0 ? chunk : `${prefix}\n${chunk}`));
+    const continuationPrefix = (
+      section.ancestorPrefix ? `${section.ancestorPrefix}\n${section.heading}` : section.heading
+    ).slice(0, 160);
+    const firstChunkPrefix = section.ancestorPrefix;
+    if (!continuationPrefix) return chunkPlainContent(section.text);
+    const maxPrefixLen = Math.max(continuationPrefix.length, firstChunkPrefix.length);
+    const chunks = chunkPlainContent(section.text, CHUNK_SIZE - maxPrefixLen - 1);
+    return chunks.map((chunk, index) => {
+      if (index === 0) {
+        return firstChunkPrefix && !chunk.startsWith(firstChunkPrefix)
+          ? `${firstChunkPrefix}\n${chunk}`
+          : chunk;
+      }
+      return `${continuationPrefix}\n${chunk}`;
+    });
   });
 }
 
@@ -427,23 +623,28 @@ export interface AnalyzedChunk {
   readonly searchBody: string;
 }
 
-/** Every row a knowledge item contributes to the RAG index. */
+/** Every row a knowledge item contributes to the RAG index (Contextual BM25 + hierarchical chunks). */
 export function analyzeChunks(input: {
   readonly chunks?: ReadonlyArray<string>;
   readonly title: string;
   readonly content: string;
   readonly tags: ReadonlyArray<string>;
+  readonly contextSummary?: string;
 }): ReadonlyArray<AnalyzedChunk> {
   const tags = searchableTags(input.tags);
   const tagsText = tags.join(" ");
   const searchTitle = analyzeSearchText(input.title);
   const searchTags = analyzeSearchText(tagsText);
-  return (input.chunks ?? chunkSearchableContent(input.content)).map((content, chunkIndex) => ({
-    chunkIndex,
-    content,
-    tagsText,
-    searchTitle,
-    searchTags,
-    searchBody: analyzeSearchText(content),
-  }));
+  const contextTokens = input.contextSummary ? analyzeSearchText(input.contextSummary) : "";
+  return (input.chunks ?? chunkSearchableContent(input.content)).map((content, chunkIndex) => {
+    const bodyTokens = analyzeSearchText(content);
+    return {
+      chunkIndex,
+      content,
+      tagsText,
+      searchTitle,
+      searchTags,
+      searchBody: contextTokens ? `${contextTokens} ${bodyTokens}` : bodyTokens,
+    };
+  });
 }

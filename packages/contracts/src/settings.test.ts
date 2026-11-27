@@ -16,6 +16,64 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("ordinary chat background watch settings", () => {
+  it("defaults legacy settings and round-trips explicit rooms and banner duration", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      backgroundWatchThreadIds: [],
+      backgroundWatchNoticeSeconds: 30,
+    });
+    for (const seconds of [0, 90, Number.MAX_SAFE_INTEGER]) {
+      const stored = {
+        backgroundWatchThreadIds: ["room-a", "room-b"],
+        backgroundWatchNoticeSeconds: seconds,
+      };
+      const encoded = encodeServerSettings(decodeServerSettings(stored));
+      expect(decodeServerSettings(encoded)).toMatchObject(stored);
+      expect(decodeServerSettingsPatch({ backgroundWatchNoticeSeconds: seconds })).toEqual({
+        backgroundWatchNoticeSeconds: seconds,
+      });
+    }
+  });
+
+  it("accepts a single room update and omits the persisted list from client patches", () => {
+    expect(decodeServerSettingsPatch({ backgroundWatchThreadIds: ["room-b"] })).toEqual({});
+    for (const enabled of [true, false]) {
+      const patch = { backgroundWatchThreadUpdate: { threadId: "room-a", enabled } };
+      expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    }
+    for (const update of [
+      { threadId: " ", enabled: true },
+      { enabled: true },
+      { threadId: "a" },
+      { threadId: "a", enabled: "false" },
+    ]) {
+      expect(() => decodeServerSettingsPatch({ backgroundWatchThreadUpdate: update })).toThrow();
+    }
+  });
+
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "30"])(
+    "rejects invalid notice seconds %s in stored settings and patches",
+    (value) => {
+      const input = { backgroundWatchNoticeSeconds: value };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    },
+  );
+});
+
+describe("upgrade room settings", () => {
+  it("defaults to showing the summary and deciding alone, and patches each field", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      upgradeRoomDowntimeSummary: true,
+      upgradeRoomOfflineQuestions: "decide",
+    });
+    const patch = { upgradeRoomDowntimeSummary: false, upgradeRoomOfflineQuestions: "wait" };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(() => decodeServerSettingsPatch({ upgradeRoomOfflineQuestions: "ask" })).toThrow();
+    expect(() => decodeServerSettings({ upgradeRoomDowntimeSummary: "true" })).toThrow();
+  });
+});
+
 describe("AI search settings", () => {
   it("supplies defaults for existing settings and keeps partial updates partial", () => {
     expect(decodeServerSettings({}).aiSearch).toMatchObject({
@@ -51,6 +109,22 @@ describe("account auto switch settings", () => {
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
     expect(decodeClientSettings({}).wordWrap).toBe(true);
+  });
+
+  it("defaults chatHorizontalInsetPx to null and validates 0..160 integer range", () => {
+    expect(decodeClientSettings({}).chatHorizontalInsetPx).toBeNull();
+    for (const value of [null, 0, 12, 48, 96, 160]) {
+      expect(decodeClientSettings({ chatHorizontalInsetPx: value }).chatHorizontalInsetPx).toBe(
+        value,
+      );
+      expect(decodeClientSettingsPatch({ chatHorizontalInsetPx: value })).toEqual({
+        chatHorizontalInsetPx: value,
+      });
+    }
+    for (const invalid of [-1, 161, 12.5, "48", NaN]) {
+      expect(() => decodeClientSettings({ chatHorizontalInsetPx: invalid })).toThrow();
+      expect(() => decodeClientSettingsPatch({ chatHorizontalInsetPx: invalid })).toThrow();
+    }
   });
 
   it("ignores obsolete wrapping preferences", () => {
@@ -155,10 +229,14 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     // so existing call sites keep working through the migration.
     expect(decoded.providers.codex.enabled).toBe(true);
     expect(decoded.providers.gemini).toMatchObject({
-      enabled: false,
-      binaryPath: "gemini",
+      enabled: true,
+      binaryPath: "agy",
       homePath: "",
-      googleCloudProject: "",
+    });
+    expect(decoded.providers.grok).toMatchObject({
+      enabled: true,
+      binaryPath: "grok",
+      homePath: "",
     });
   });
 
@@ -313,9 +391,12 @@ describe("ServerSettingsPatch string normalization", () => {
           launchArgs: "  --strict-config --enable foo  ",
         },
         gemini: {
-          binaryPath: "  /opt/homebrew/bin/gemini  ",
+          binaryPath: "  /opt/homebrew/bin/agy  ",
           homePath: "  ~/.gemini-personal  ",
-          googleCloudProject: "  personal-project  ",
+        },
+        grok: {
+          binaryPath: "  /opt/homebrew/bin/grok  ",
+          homePath: "  ~/.grok-work  ",
         },
       },
       providerInstances: {
@@ -334,9 +415,12 @@ describe("ServerSettingsPatch string normalization", () => {
     expect(patch.providers?.codex?.homePath).toBe("~/.codex");
     expect(patch.providers?.codex?.launchArgs).toBe("--strict-config --enable foo");
     expect(patch.providers?.gemini).toMatchObject({
-      binaryPath: "/opt/homebrew/bin/gemini",
+      binaryPath: "/opt/homebrew/bin/agy",
       homePath: "~/.gemini-personal",
-      googleCloudProject: "personal-project",
+    });
+    expect(patch.providers?.grok).toMatchObject({
+      binaryPath: "/opt/homebrew/bin/grok",
+      homePath: "~/.grok-work",
     });
     expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
       "codex",

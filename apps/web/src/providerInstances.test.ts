@@ -66,6 +66,22 @@ describe("isProviderInstancePickerReady", () => {
 
     expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
   });
+
+  it("keeps an installed Codex selectable when its status probe is inconclusive", () => {
+    const base = provider({
+      provider: ProviderDriverKind.make("codex"),
+      instanceId: "codex",
+      status: "warning",
+    });
+    const [unknown, unauthenticated, missing] = deriveProviderInstanceEntries([
+      { ...base, auth: { status: "unknown" } },
+      { ...base, auth: { status: "unauthenticated" } },
+      { ...base, installed: false, auth: { status: "unknown" } },
+    ]);
+    expect(unknown && isProviderInstancePickerReady(unknown)).toBe(true);
+    expect(unauthenticated && isProviderInstancePickerReady(unauthenticated)).toBe(false);
+    expect(missing && isProviderInstancePickerReady(missing)).toBe(false);
+  });
 });
 
 describe("isProviderInstancePickerVisible", () => {
@@ -100,6 +116,32 @@ describe("applyProviderInstanceSettings", () => {
     });
 
     expect(entry?.enabled).toBe(false);
+  });
+
+  it("keeps the discovered Ollama worker selectable without a stored account", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("opencode"),
+        instanceId: "ollama-local",
+        models: [model("t3_ollama/Exact:Q4")],
+      }),
+    ]);
+    const [available] = applyProviderInstanceSettings(entries, {
+      providerInstances: {},
+      providers: {} as never,
+    });
+    expect(available?.enabled).toBe(true);
+    expect(available?.models.map((item) => item.slug)).toEqual(["t3_ollama/Exact:Q4"]);
+    const [disabled] = applyProviderInstanceSettings(entries, {
+      providerInstances: {
+        [ProviderInstanceId.make("ollama-local")]: {
+          driver: ProviderDriverKind.make("opencode"),
+          enabled: false,
+        },
+      },
+      providers: {} as never,
+    });
+    expect(disabled?.enabled).toBe(false);
   });
 
   it("treats a removed custom instance snapshot as disabled", () => {

@@ -6,18 +6,18 @@ import { mapAtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   ThreadId,
   type ModelSelection,
+  type ThreadResponseStyle,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 
 import { threadEnvironment } from "../../state/threads";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
-import { makeTurnCommandMetadata, type TurnCommandMetadata } from "../../lib/commandMetadata";
+import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
-import { randomHex } from "../../lib/uuid";
+import type { NewTaskModelTeam } from "../../lib/newTaskModelTeam";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { setPendingConnectionError } from "../../state/use-remote-environment-registry";
 import { validateProjectThreadCreation } from "./projectThreadCreationValidation";
@@ -37,10 +37,12 @@ export function useCreateProjectThread() {
       readonly interactionMode: ProviderInteractionMode;
       readonly initialMessageText: string;
       readonly initialAttachments: ReadonlyArray<DraftComposerImageAttachment>;
-      /** Reuse identifiers from a queued pending task instead of minting new ones. */
-      readonly turnMetadata?: TurnCommandMetadata;
+      readonly turnMetadata: TurnCommandMetadata;
+      readonly responseStyle?: ThreadResponseStyle | undefined;
+      readonly modelTeams?: readonly NewTaskModelTeam[];
+      readonly attemptedWorktree?: { projectCwd: string; worktreeBranchName: string };
     }) => {
-      const metadata = input.turnMetadata ?? makeTurnCommandMetadata();
+      const metadata = input.turnMetadata;
       const threadId = ThreadId.make(metadata.threadId);
       const initialMessageText = input.initialMessageText.trim();
 
@@ -60,7 +62,7 @@ export function useCreateProjectThread() {
         environmentId: input.project.environmentId,
         input: buildProjectThreadStartTurnInput({
           projectId: input.project.id,
-          projectCwd: input.project.workspaceRoot,
+          projectCwd: input.attemptedWorktree?.projectCwd ?? input.project.workspaceRoot,
           threadId: metadata.threadId,
           commandId: metadata.commandId,
           messageId: metadata.messageId,
@@ -74,7 +76,9 @@ export function useCreateProjectThread() {
           branch: input.branch,
           worktreePath: input.worktreePath,
           startFromOrigin: input.startFromOrigin ?? false,
-          worktreeBranchName: buildTemporaryWorktreeBranchName(randomHex),
+          worktreeBranchName: input.attemptedWorktree?.worktreeBranchName,
+          modelTeams: input.modelTeams,
+          responseStyle: input.responseStyle,
         }),
       });
       if (AsyncResult.isFailure(result)) {

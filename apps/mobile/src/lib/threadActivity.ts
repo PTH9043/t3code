@@ -1,7 +1,17 @@
-import { ApprovalRequestId, isToolLifecycleItemType } from "@t3tools/contracts";
+import {
+  maskedActivityRecord,
+  separateThreadToolActivities,
+  type PresentedToolWork,
+} from "@t3tools/client-runtime/state/thread-tool-activity";
+import {
+  ApprovalRequestId,
+  includeDeferredExaoneQuestions,
+  isToolLifecycleItemType,
+} from "@t3tools/contracts";
 import {
   orchestraBlocksByMessage,
   formatMeetingProtocolText,
+  recoveryHistoryLabel,
 } from "@t3tools/client-runtime/state/presentation";
 import type {
   OrchestrationLatestTurn,
@@ -32,6 +42,7 @@ export interface PendingUserInput {
 
 export interface PendingUserInputDraftAnswer {
   readonly selectedOptionLabel?: string;
+  readonly selectedOptionLabels?: ReadonlyArray<string>;
   readonly customAnswer?: string;
   readonly images?: ReadonlyArray<import("./composerImages").DraftComposerImageAttachment>;
 }
@@ -52,6 +63,7 @@ export function buildPendingUserInputImages(drafts: Record<string, PendingUserIn
 }
 
 export interface ThreadFeedActivity {
+  readonly presented?: PresentedToolWork;
   readonly id: string;
   readonly createdAt: string;
   readonly turnId: TurnId | null;
@@ -184,7 +196,14 @@ function isStalePendingRequestFailureDetail(detail: string | undefined): boolean
     normalized.includes("stale pending user-input request") ||
     normalized.includes("unknown pending approval request") ||
     normalized.includes("unknown pending permission request") ||
-    normalized.includes("unknown pending user-input request")
+    normalized.includes("unknown pending user-input request") ||
+    normalized.includes("unknown pending user input request") ||
+    normalized.includes("unknown pending codex user input request") ||
+    normalized.includes("이미 종료된 질문입니다") ||
+    normalized.includes("이전 답변이 이미 전달됐을 수 있습니다") ||
+    normalized.includes("이미 처리됐거나 전달 결과를 확인할 수 없는 답변입니다") ||
+    normalized.includes("이 네이티브 질문은 이미 종료됐습니다") ||
+    normalized.includes("이미 제출한 답변의 처리 상태를 확인하고 있습니다")
   );
 }
 
@@ -247,11 +266,20 @@ function normalizeDraftAnswer(value: string | undefined): string | null {
 }
 
 function resolvePendingUserInputAnswer(
+  question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
-): string | null {
+): string | string[] | null {
   const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer) {
     return customAnswer;
+  }
+  if (question.multiSelect) {
+    const selected = (
+      draft?.selectedOptionLabels ?? (draft?.selectedOptionLabel ? [draft.selectedOptionLabel] : [])
+    )
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (selected.length) return [...new Set(selected)];
   }
   return (
     normalizeDraftAnswer(draft?.selectedOptionLabel) ??
@@ -316,12 +344,88 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
   return !(isTerminalTaskRow && payload.agentKind === "agent");
 }
 
+/** Main-turn actions in the room viewer, including tools that have just started. */
+export function viewerWorkEntries(
+  activities: readonly OrchestrationThreadActivity[],
+  turnId: TurnId,
+  latest?: OrchestrationLatestTurn | null,
+  checkpoints?: OrchestrationThread["checkpoints"],
+  activeTurnId?: OrchestrationThreadActivity["turnId"],
+) {
+  const { tools, otherActivities } = separateThreadToolActivities(
+    activities,
+    latest,
+    checkpoints,
+    activeTurnId,
+  );
+  const recordText = mobileTechnicalReader(activities);
+  const mainActions = otherActivities.filter((activity) => {
+    if (activity.turnId !== turnId || isAgentInternalActivity(activity)) return false;
+    const payload = asRecord(activity.payload);
+    if (payload?.executionId || payload?.parentToolUseId || payload?.agentId) return false;
+    return (
+      activity.tone === "approval" ||
+      activity.tone === "error" ||
+      activity.kind.startsWith("tool.") ||
+      activity.kind.startsWith("user-input.")
+    );
+  });
+  const entries = sortThreadActivities(mainActions).map(toDerivedWorkLogEntry);
+  const actions = collapseDerivedWorkLogEntries(entries).map((entry) => ({
+    id: entry.id,
+    createdAt: entry.createdAt,
+    title: workEntryHeading(entry),
+    detail: entry.command ?? workEntryPreview(entry),
+    files: entry.changedFiles ?? [],
+    presented: undefined as PresentedToolWork | undefined,
+    technical: undefined as (() => string | null) | undefined,
+  }));
+  for (const row of tools)
+    if (row.turnId === turnId && !row.orchestraMessageId) {
+      actions.push({
+        id: row.id,
+        createdAt: row.createdAt,
+        title: mobileToolLabel(row),
+        detail: null,
+        files: [],
+        presented: row,
+        technical: () => recordText(row),
+      });
+    }
+  return actions.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+function mobileTechnicalReader(activities: readonly OrchestrationThreadActivity[]) {
+  let byId: Map<string, OrchestrationThreadActivity> | undefined;
+  return (row: PresentedToolWork) => {
+    byId ??= new Map(activities.map((e) => [e.id, e]));
+    return (
+      (row.toolActivity ? [row.toolActivity] : (row.unlinkedToolSignals ?? []))
+        .flatMap((g) =>
+          g.events.flatMap((e) => {
+            const event = byId!.get(e.id);
+            return event ? [maskedActivityRecord(event, g)] : [];
+          }),
+        )
+        .filter(Boolean)
+        .join("\n") || null
+    );
+  };
+}
+function mobileToolLabel(row: PresentedToolWork) {
+  return row.toolActivity
+    ? `${row.toolActivity.executorLabel} · ${row.toolActivity.summary}`
+    : `${row.label} ${row.unlinkedToolSignals?.reduce((n, g) => n + g.events.length, 0) ?? 0}건`;
+}
+
 function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): DerivedWorkLogEntry[] {
   const ordered = Arr.sort(activities, activityOrder);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
+    if (activity.kind.startsWith("provider.user-input.delivery.")) continue;
+    if (activity.kind.startsWith("provider.user-input.recovery.")) continue;
     if (activity.kind === "tool.started") continue;
     if (activity.kind === "task.started") continue;
     // Terminal bypassed updates pass: Codex children's only terminal signal.
@@ -384,7 +488,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     createdAt: activity.createdAt,
     turnId: activity.turnId,
     ...(taskId ? { taskId } : {}),
-    label: taskLabel || activity.summary,
+    label: taskLabel || recoveryHistoryLabel(activity.kind, activity.summary, payload),
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -1428,7 +1532,12 @@ export function derivePendingUserInputs(
       continue;
     }
 
-    if (activity.kind === "user-input.resolved" && requestId) {
+    if (
+      (activity.kind === "user-input.resolved" ||
+        (activity.kind === "provider.user-input.delivery.finished" &&
+          payload?.outcome === "accepted")) &&
+      requestId
+    ) {
       openByRequestId.delete(requestId);
       continue;
     }
@@ -1442,7 +1551,10 @@ export function derivePendingUserInputs(
     }
   }
 
-  return Arr.sortWith(openByRequestId.values(), (s) => new Date(s.createdAt), Order.Date);
+  return includeDeferredExaoneQuestions(
+    sortedActivities,
+    Arr.sortWith(openByRequestId.values(), (s) => new Date(s.createdAt), Order.Date),
+  );
 }
 
 export function setPendingUserInputCustomAnswer(
@@ -1455,17 +1567,37 @@ export function setPendingUserInputCustomAnswer(
     customAnswer,
     ...(draft?.images?.length ? { images: draft.images } : {}),
     ...(selectedOptionLabel ? { selectedOptionLabel } : {}),
+    ...(!customAnswer.trim() && draft?.selectedOptionLabels?.length
+      ? { selectedOptionLabels: draft.selectedOptionLabels }
+      : {}),
+  };
+}
+
+export function togglePendingUserInputOptionSelection(
+  question: UserInputQuestion,
+  draft: PendingUserInputDraftAnswer | undefined,
+  label: string,
+): PendingUserInputDraftAnswer {
+  const images = draft?.images?.length ? { images: draft.images } : {};
+  if (!question.multiSelect) return { selectedOptionLabel: label, ...images };
+  const selected =
+    draft?.selectedOptionLabels ?? (draft?.selectedOptionLabel ? [draft.selectedOptionLabel] : []);
+  return {
+    selectedOptionLabels: selected.includes(label)
+      ? selected.filter((option) => option !== label)
+      : [...selected, label],
+    ...images,
   };
 }
 
 export function buildPendingUserInputAnswers(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
-): Record<string, string> | null {
-  const answers: Record<string, string> = {};
+): Record<string, string | string[]> | null {
+  const answers: Record<string, string | string[]> = {};
 
   for (const question of questions) {
-    const answer = resolvePendingUserInputAnswer(draftAnswers[question.id]);
+    const answer = resolvePendingUserInputAnswer(question, draftAnswers[question.id]);
     if (!answer) {
       return null;
     }
@@ -1485,8 +1617,15 @@ export function buildThreadFeed(
   const oldestLoadedMessageCreatedAt =
     options?.loadedMessages !== undefined ? (loadedMessages[0]?.createdAt ?? null) : null;
   const blocks = orchestraBlocksByMessage(thread.activities);
+  const { tools, otherActivities } = separateThreadToolActivities(
+    thread.activities,
+    thread.latestTurn,
+    thread.checkpoints,
+    thread.session?.status === "running" ? thread.session.activeTurnId : null,
+  );
+  const recordText = mobileTechnicalReader(thread.activities);
   const workLogEntries = deriveWorkLogEntries(
-    thread.activities.filter((activity) => activity.kind !== "orchestra.block"),
+    otherActivities.filter((activity) => activity.kind !== "orchestra.block"),
   );
   const entries = Arr.sortWith(
     [
@@ -1500,6 +1639,38 @@ export function buildThreadFeed(
             : message,
         ...(blocks.has(message.id) ? { orchestraBlock: blocks.get(message.id)! } : {}),
       })),
+      ...tools
+        .filter(
+          (row) => !oldestLoadedMessageCreatedAt || row.createdAt >= oldestLoadedMessageCreatedAt,
+        )
+        .map<RawThreadFeedEntry>((row) => {
+          const title = (row.orchestraMessageId ? "오케스트라 · " : "") + mobileToolLabel(row);
+          return {
+            type: "activity",
+            id: row.id,
+            createdAt: row.createdAt,
+            turnId: row.turnId,
+            activity: {
+              id: row.id,
+              createdAt: row.createdAt,
+              turnId: row.turnId,
+              presented: row,
+              summary: title,
+              detail: null,
+              canExpand: true,
+              getFullDetail: () => recordText(row),
+              getCopyText: () => title,
+              icon: row.toolActivity?.action === "edit" ? "edit" : "command",
+              toolLike: !!row.toolActivity,
+              status:
+                row.toolActivity?.phase === "failed"
+                  ? "failure"
+                  : row.toolActivity?.phase === "completed"
+                    ? "success"
+                    : null,
+            },
+          };
+        }),
       ...workLogEntries
         .filter((entry) => {
           if (options?.loadedMessages === undefined) {

@@ -11,13 +11,11 @@ import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import type { DraftId } from "./composerDraftStore";
-import { useWorkspaceTabStore } from "./workspaceTabStore";
+import { useWorkspaceTabStore, workspaceTabViewKey } from "./workspaceTabStore";
 import { randomUUID } from "./lib/utils";
 
 /**
- * The composer surface a meeting send goes out from. The value does not scope
- * the settings — those live per FOLDER — but pickers still pass it so only
- * the chat composer's picker (never a settings picker) shows the meeting UI.
+ * The composer surface a meeting send goes out from.
  */
 export type MeetingComposerTarget = ScopedThreadRef | DraftId;
 
@@ -27,6 +25,7 @@ export interface MeetingComposerSeat {
   readonly instanceId: ProviderInstanceId;
   readonly model: string;
   readonly displayName: string;
+  readonly roleDescription?: string;
   /**
    * Provider option selections for this seat's turns — effort above all.
    * Same shape ModelSelection.options carries, so the server forwards them
@@ -40,6 +39,7 @@ export type MeetingComposerStyle = "meeting" | "collaboration";
 
 export interface MeetingComposerConfig {
   readonly enabled: boolean;
+  readonly executionMode?: "once" | "persistent";
   readonly style: MeetingComposerStyle;
   readonly mode: WorkspaceMeetingMode;
   readonly maxRounds: number;
@@ -63,8 +63,9 @@ export interface MeetingComposerConfig {
   readonly resumeAfterLimit?: boolean;
   readonly verificationCommands?: ReadonlyArray<string>;
   readonly maxWorkerTurns?: number;
+  readonly watchdogIntervalSeconds?: number | undefined;
   readonly userInLoop: boolean;
-  /** Null elects the first seat, mirroring the server's chair election. */
+  /** Null means the user has not selected a supervisor. */
   readonly chairSeatId: string | null;
   readonly seats: ReadonlyArray<MeetingComposerSeat>;
   readonly executionProfile?: WorkspaceExecutionProfile;
@@ -74,6 +75,7 @@ const EMPTY_VERIFICATION_COMMANDS: ReadonlyArray<string> = [];
 
 export const DEFAULT_MEETING_COMPOSER_CONFIG: MeetingComposerConfig = {
   enabled: false,
+  executionMode: "once",
   style: "collaboration",
   mode: "fixed-rounds",
   maxRounds: 2,
@@ -118,6 +120,7 @@ function normalizeMeetingComposerConfig(
         : "meeting";
   return {
     ...config,
+    executionMode: config.executionMode === "persistent" ? "persistent" : "once",
     style,
     allowAdditionalWorkers: config.allowAdditionalWorkers ?? true,
     maxRounds:
@@ -134,6 +137,12 @@ function normalizeMeetingComposerConfig(
     isolateWorktrees: config.isolateWorktrees === true,
     reviewPlan: config.reviewPlan === true,
     resumeAfterLimit: config.resumeAfterLimit === true,
+    watchdogIntervalSeconds:
+      typeof config.watchdogIntervalSeconds === "number" &&
+      Number.isSafeInteger(config.watchdogIntervalSeconds) &&
+      config.watchdogIntervalSeconds > 0
+        ? config.watchdogIntervalSeconds
+        : undefined,
     verificationCommands: config.verificationCommands ?? EMPTY_VERIFICATION_COMMANDS,
     maxParallel:
       typeof config.maxParallel === "number" &&
@@ -169,6 +178,32 @@ function activeFolderKey(): string {
   return active?.projectKey ?? NO_FOLDER_KEY;
 }
 
+export function activeMeetingConversationKey(): string {
+  const state = useWorkspaceTabStore.getState();
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+  return active && active.view.kind !== "control-center"
+    ? workspaceTabViewKey(active.view)
+    : activeFolderKey();
+}
+
+export function meetingConversationKeyForFolder(folderKey: string): string {
+  const view = useWorkspaceTabStore.getState().lastChatViewByProjectKey[folderKey];
+  return view ? workspaceTabViewKey(view) : folderKey;
+}
+
+function conversationConfig(
+  configs: Readonly<Record<string, MeetingComposerConfig>>,
+  conversationKey: string,
+  folderKey: string,
+): MeetingComposerConfig {
+  const saved = configs[conversationKey];
+  if (saved) return normalizeMeetingComposerConfig(saved);
+  const legacy = configs[folderKey];
+  return legacy && conversationKey !== folderKey
+    ? normalizeMeetingComposerConfig({ ...legacy, enabled: false })
+    : DEFAULT_MEETING_COMPOSER_CONFIG;
+}
+
 interface MeetingComposerState {
   readonly configsByFolder: Readonly<Record<string, MeetingComposerConfig>>;
   readonly updateConfig: (
@@ -177,12 +212,7 @@ interface MeetingComposerState {
   ) => void;
 }
 
-/**
- * One meeting setup PER FOLDER, persisted: each folder is its own meeting
- * room. Arming a roster in one folder never leaks into another, and within a
- * folder the switch stays on — across conversations, tabs, tab re-creations
- * and app restarts — until the person turns it off there.
- */
+/** Conversation settings are persisted under their stable view identity. */
 export const useMeetingComposerStore = create<MeetingComposerState>()(
   persist(
     (set) => ({
@@ -232,37 +262,52 @@ try {
 }
 
 export function readMeetingComposerConfig(): MeetingComposerConfig {
-  return normalizeMeetingComposerConfig(
-    useMeetingComposerStore.getState().configsByFolder[activeFolderKey()] ??
-      DEFAULT_MEETING_COMPOSER_CONFIG,
+  return conversationConfig(
+    useMeetingComposerStore.getState().configsByFolder,
+    activeMeetingConversationKey(),
+    activeFolderKey(),
   );
 }
 
 export function useMeetingComposerConfig(): MeetingComposerConfig {
-  const folderKey = useWorkspaceTabStore((state) => {
-    const active = state.tabs.find((tab) => tab.id === state.activeTabId);
-    return active?.projectKey ?? NO_FOLDER_KEY;
-  });
-  return useMeetingComposerConfigForFolder(folderKey);
+  const keys = useWorkspaceTabStore(
+    useShallow((state) => {
+      const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+      const folderKey = active?.projectKey ?? NO_FOLDER_KEY;
+      return {
+        folderKey,
+        conversationKey:
+          active && active.view.kind !== "control-center"
+            ? workspaceTabViewKey(active.view)
+            : folderKey,
+      };
+    }),
+  );
+  return useMeetingComposerStore(
+    useShallow((state) =>
+      conversationConfig(state.configsByFolder, keys.conversationKey, keys.folderKey),
+    ),
+  );
 }
 
 export function useMeetingComposerConfigForFolder(folderKey: string): MeetingComposerConfig {
+  const conversationKey = useWorkspaceTabStore((state) => {
+    const view = state.lastChatViewByProjectKey[folderKey];
+    return view ? workspaceTabViewKey(view) : folderKey;
+  });
   return useMeetingComposerStore(
-    useShallow((state) =>
-      normalizeMeetingComposerConfig(
-        state.configsByFolder[folderKey] ?? DEFAULT_MEETING_COMPOSER_CONFIG,
-      ),
-    ),
+    useShallow((state) => conversationConfig(state.configsByFolder, conversationKey, folderKey)),
   );
 }
 
 export function meetingSetupFromConfig(config: MeetingComposerConfig): WorkspaceMeetingSetup {
   return {
     mode: config.mode,
-    allowAdditionalWorkers: config.allowAdditionalWorkers,
+    allowAdditionalWorkers: false,
     participants: config.seats.map((seat) => ({
       id: WorkspaceMeetingParticipantId.make(seat.id),
       displayName: seat.displayName,
+      ...(seat.roleDescription ? { roleDescription: seat.roleDescription } : {}),
       modelSelection: {
         instanceId: seat.instanceId,
         model: seat.model,
@@ -282,9 +327,11 @@ export function configFromExecutionProfile(
   config: MeetingComposerConfig,
   profile: WorkspaceExecutionProfile,
 ): MeetingComposerConfig {
+  const { maxWorkerTurns: _previousWorkerLimit, ...previousConfig } = config;
   return {
-    ...config,
+    ...previousConfig,
     enabled: true,
+    executionMode: profile.orchestra.executionMode ?? "once",
     style: profile.meeting.maxRounds === 0 ? "collaboration" : "meeting",
     mode: profile.meeting.mode,
     maxRounds: profile.meeting.maxRounds || DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds,
@@ -296,6 +343,7 @@ export function configFromExecutionProfile(
     isolateWorktrees: profile.orchestra.isolateWorktrees,
     reviewPlan: profile.orchestra.reviewPlan === true,
     resumeAfterLimit: profile.orchestra.resumeAfterLimit === true,
+    watchdogIntervalSeconds: profile.orchestra.watchdogIntervalSeconds,
     verificationCommands: profile.verificationCommands,
     ...(profile.orchestra.maxWorkerTurns === undefined
       ? {}
@@ -305,6 +353,7 @@ export function configFromExecutionProfile(
       displayName: participant.displayName,
       instanceId: participant.modelSelection.instanceId,
       model: participant.modelSelection.model,
+      ...(participant.roleDescription ? { roleDescription: participant.roleDescription } : {}),
       ...(participant.modelSelection.options
         ? { options: participant.modelSelection.options }
         : {}),
@@ -316,24 +365,29 @@ export function configFromExecutionProfile(
 export function updateMeetingComposerConfig(
   update: (config: MeetingComposerConfig) => MeetingComposerConfig,
 ): void {
-  useMeetingComposerStore.getState().updateConfig(activeFolderKey(), update);
+  const store = useMeetingComposerStore.getState();
+  const key = activeMeetingConversationKey();
+  const current = conversationConfig(store.configsByFolder, key, activeFolderKey());
+  store.updateConfig(key, () => update(current));
 }
 
-/** The server's roster cap; a ninth checkbox is refused here rather than at send. */
-export const MAX_MEETING_SEATS = 8;
+export function disarmMeetingComposer(key: string): void {
+  useMeetingComposerStore.getState().updateConfig(key, (config) => ({ ...config, enabled: false }));
+}
 
-/** One account can contribute several models, each with its own role and options. */
+export function promoteMeetingComposerConfig(draftKey: string, threadKey: string): void {
+  const store = useMeetingComposerStore.getState();
+  const draft = store.configsByFolder[draftKey];
+  if (!draft || store.configsByFolder[threadKey]) return;
+  store.updateConfig(threadKey, () => ({ ...draft, enabled: false }));
+}
+
+/** Every added seat is independent, including seats using the same model. */
 export function addMeetingComposerSeat(seat: Omit<MeetingComposerSeat, "id">): void {
-  updateMeetingComposerConfig((config) => {
-    if (
-      config.seats.length >= MAX_MEETING_SEATS ||
-      config.seats.some(
-        (current) => current.instanceId === seat.instanceId && current.model === seat.model,
-      )
-    )
-      return config;
-    return { ...config, seats: [...config.seats, { ...seat, id: `seat-${randomUUID()}` }] };
-  });
+  updateMeetingComposerConfig((config) => ({
+    ...config,
+    seats: [...config.seats, { ...seat, id: `seat-${randomUUID()}` }],
+  }));
 }
 
 /**
@@ -344,7 +398,6 @@ export function addMeetingComposerSeat(seat: Omit<MeetingComposerSeat, "id">): v
 export function toggleMeetingComposerSeat(seat: MeetingComposerSeat): void {
   updateMeetingComposerConfig((config) => {
     const existing = config.seats.find((candidate) => candidate.id === seat.id);
-    if (existing === undefined && config.seats.length >= MAX_MEETING_SEATS) return config;
     const seats =
       existing === undefined
         ? [...config.seats, seat]
@@ -364,15 +417,7 @@ export function setMeetingComposerSeatModel(
 ): void {
   updateMeetingComposerConfig((config) => {
     const current = config.seats.find((seat) => seat.id === seatId);
-    if (
-      !current ||
-      current.model === model ||
-      config.seats.some(
-        (seat) =>
-          seat.id !== seatId && seat.instanceId === current.instanceId && seat.model === model,
-      )
-    )
-      return config;
+    if (!current || current.model === model) return config;
     return {
       ...config,
       seats: config.seats.map((seat) => (seat.id === seatId ? { ...seat, model, options } : seat)),

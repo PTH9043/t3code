@@ -170,4 +170,37 @@ describe("ThreadBackgroundLiveness", () => {
     a.clearThreadLiveness("t");
     expect(a.getThreadBackgroundLiveness("t")).toBeNull();
   });
+
+  it("clearThreadNonMonitorLiveness drops agent/shell/delegate liveness while preserving persistent monitors", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const threadId = "t-stop-plain";
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "delegate-claude",
+      taskType: undefined,
+      status: "running",
+      kind: "started",
+    });
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "shell-1",
+      taskType: "local_bash",
+      status: "running",
+      kind: "started",
+    });
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "watch-1",
+      taskType: "monitor",
+      status: "running",
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
+
+    liveness.clearThreadNonMonitorLiveness(threadId);
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+
+    liveness.clearThreadLiveness(threadId);
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+  });
 });

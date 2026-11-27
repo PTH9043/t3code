@@ -7,6 +7,7 @@ import { OrchestrationEngineLive } from "./Layers/OrchestrationEngine.ts";
 import { OrchestrationTurnWaitLive } from "./Layers/OrchestrationTurnWait.ts";
 import { OrchestrationProjectionPipelineLive } from "./Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
+import * as BackgroundAutoCompactor from "./BackgroundAutoCompactor.ts";
 import * as ThreadBackgroundLiveness from "./ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "./ThreadPlanProgress.ts";
 
@@ -29,6 +30,7 @@ export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
   // same instance to the snapshot query here and re-exports it for runtime
   // ingestion.
 ).pipe(
+  Layer.provideMerge(BackgroundAutoCompactor.layer),
   Layer.provideMerge(ThreadBackgroundLiveness.layer),
   Layer.provideMerge(ThreadPlanProgress.layer),
 );

@@ -1,4 +1,8 @@
-import { WORKSPACE_WORKFLOW_WS_METHODS } from "@t3tools/contracts";
+import {
+  COUNCIL_WS_METHODS,
+  MISSION_CONTROL_WS_METHODS,
+  WORKSPACE_WORKFLOW_WS_METHODS,
+} from "@t3tools/contracts";
 import {
   WORKSPACE_AGENT_CONTROL_WS_METHODS,
   WORKSPACE_TASK_INBOX_WS_METHODS,
@@ -27,6 +31,112 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       tag: WORKSPACE_WORKFLOW_WS_METHODS.getRun,
       idleTtlMs: 0,
     }),
+    councilStream: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:council-stream",
+      tag: COUNCIL_WS_METHODS.subscribe,
+    }),
+    threadCouncilSessions: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:council-sessions",
+      tag: COUNCIL_WS_METHODS.listThreadSessions,
+      staleTimeMs: 1_000,
+    }),
+    councilTriage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:triage",
+      tag: COUNCIL_WS_METHODS.triage,
+    }),
+    startCouncilAutoSeat: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:start-auto-seat",
+      tag: COUNCIL_WS_METHODS.startAutoSeat,
+    }),
+    approveCouncilOverride: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:approve-override",
+      tag: COUNCIL_WS_METHODS.approveOverride,
+    }),
+    executeCouncilPinnedSpec: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:execute-pinned-spec",
+      tag: COUNCIL_WS_METHODS.executePinnedSpec,
+    }),
+    reverifyCouncilPinnedSpec: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:reverify-pinned-spec",
+      tag: COUNCIL_WS_METHODS.reverifyPinnedSpec,
+    }),
+    abortCouncil: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:council:abort",
+      tag: COUNCIL_WS_METHODS.abort,
+    }),
+    missionControlSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:mission-control:snapshot",
+      tag: MISSION_CONTROL_WS_METHODS.getSnapshot,
+      staleTimeMs: 1_000,
+    }),
+    missionControlStream: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:mission-control:stream",
+      tag: MISSION_CONTROL_WS_METHODS.subscribe,
+    }),
+    createMission: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:create",
+      tag: MISSION_CONTROL_WS_METHODS.createMission,
+    }),
+    cancelMission: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:cancel",
+      tag: MISSION_CONTROL_WS_METHODS.cancelMission,
+    }),
+    deleteMission: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:delete",
+      tag: MISSION_CONTROL_WS_METHODS.deleteMission,
+    }),
+    decideMissionApproval: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:decide-approval",
+      tag: MISSION_CONTROL_WS_METHODS.decideApproval,
+    }),
+    upsertMissionCrewRole: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:upsert-crew",
+      tag: MISSION_CONTROL_WS_METHODS.upsertCrewRole,
+    }),
+    deleteMissionCrewRole: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:delete-crew",
+      tag: MISSION_CONTROL_WS_METHODS.deleteCrewRole,
+    }),
+    startMissionSyncMeeting: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:sync-meeting",
+      tag: MISSION_CONTROL_WS_METHODS.startSyncMeeting,
+    }),
+    startRoundtableMeeting: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:start-roundtable-meeting",
+      tag: MISSION_CONTROL_WS_METHODS.startRoundtableMeeting,
+    }),
+    cancelMissionMeeting: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:cancel-meeting",
+      tag: MISSION_CONTROL_WS_METHODS.cancelMeeting,
+    }),
+    deleteMissionMeeting: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:delete-meeting",
+      tag: MISSION_CONTROL_WS_METHODS.deleteMeeting,
+    }),
+    promoteMeetingToMission: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:promote-meeting",
+      tag: MISSION_CONTROL_WS_METHODS.promoteMeetingToMission,
+    }),
+    setMissionSynapsePruned: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:set-synapse-pruned",
+      tag: MISSION_CONTROL_WS_METHODS.setSynapsePruned,
+    }),
+    setMissionKillSwitch: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:kill-switch",
+      tag: MISSION_CONTROL_WS_METHODS.killSwitch,
+    }),
+    generateMissionDigestNow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:digest-now",
+      tag: MISSION_CONTROL_WS_METHODS.generateDigestNow,
+    }),
+    runMissionHeartbeatCheck: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:heartbeat",
+      tag: MISSION_CONTROL_WS_METHODS.runHeartbeatCheck,
+    }),
+    inspectMissionArtifact: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:mission-control:inspect-artifact",
+      tag: MISSION_CONTROL_WS_METHODS.inspectArtifact,
+    }),
     workspaceWorkflows: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:workflows",
       tag: WORKSPACE_WORKFLOW_WS_METHODS.overview,
@@ -35,6 +145,11 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     workflowSkills: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:workflow-skills",
       tag: WORKSPACE_WORKFLOW_WS_METHODS.skills,
+      idleTtlMs: 0,
+    }),
+    chatProjectSkills: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:chat-project-skills",
+      tag: WORKSPACE_WORKFLOW_WS_METHODS.chatSkills,
       idleTtlMs: 0,
     }),
     saveWorkflow: createEnvironmentRpcCommand(runtime, {
@@ -164,6 +279,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
+    }),
+    exportWorkspaceKnowledge: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:orchestration:export-workspace-knowledge",
+      tag: ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge,
     }),
     workspaceKnowledge: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:workspace-knowledge",

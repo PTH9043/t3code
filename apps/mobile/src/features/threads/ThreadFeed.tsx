@@ -1,3 +1,4 @@
+import { MobileToolActivityProvider } from "./MobileToolActivity";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { type LegendListRef } from "@legendapp/list/react-native";
@@ -100,7 +101,7 @@ import {
 } from "./thread-work-log";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { useAssetUrl } from "../../state/assets";
-import { GeneratedResult } from "./GeneratedResult";
+import { GeneratedResultsList } from "./GeneratedResult";
 import { resolveWorkspaceRelativeFilePath } from "../files/filePath";
 
 const MESSAGE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
@@ -1042,39 +1043,46 @@ function renderFeedEntry(
             </Markdown>
           )
         ) : null}
-        {attachments.map((attachment) => {
-          if (attachment.result && props.resultOwners.get(attachment.id) !== message.id)
-            return null;
-          if (attachment.result)
-            return (
-              <GeneratedResult
-                key={attachment.id}
-                attachment={attachment}
-                environmentId={props.environmentId}
-                onPressImage={props.onPressImage}
-              />
-            );
-          if (attachment.type === "file") {
-            return (
-              <MessageAttachmentFile
-                key={attachment.id}
-                environmentId={props.environmentId}
-                attachmentId={attachment.id}
-                name={attachment.name}
-                sizeBytes={attachment.sizeBytes}
-              />
-            );
-          }
-          return (
-            <MessageAttachmentImage
-              key={attachment.id}
-              environmentId={props.environmentId}
-              attachmentId={attachment.id}
-              className="mt-1.5 aspect-[1.3] w-full rounded-[18px] bg-neutral-200 dark:bg-neutral-800"
-              onPressImage={props.onPressImage}
-            />
+        {(() => {
+          const ownedResults = attachments.filter(
+            (attachment) =>
+              attachment.result && props.resultOwners.get(attachment.id) === message.id,
           );
-        })}
+          const regularAttachments = attachments.filter((attachment) => !attachment.result);
+          return (
+            <>
+              {ownedResults.length > 0 ? (
+                <GeneratedResultsList
+                  attachments={ownedResults}
+                  environmentId={props.environmentId}
+                  onPressImage={props.onPressImage}
+                />
+              ) : null}
+              {regularAttachments.map((attachment) => {
+                if (attachment.type === "file") {
+                  return (
+                    <MessageAttachmentFile
+                      key={attachment.id}
+                      environmentId={props.environmentId}
+                      attachmentId={attachment.id}
+                      name={attachment.name}
+                      sizeBytes={attachment.sizeBytes}
+                    />
+                  );
+                }
+                return (
+                  <MessageAttachmentImage
+                    key={attachment.id}
+                    environmentId={props.environmentId}
+                    attachmentId={attachment.id}
+                    className="mt-1.5 aspect-[1.3] w-full rounded-[18px] bg-neutral-200 dark:bg-neutral-800"
+                    onPressImage={props.onPressImage}
+                  />
+                );
+              })}
+            </>
+          );
+        })()}
         {showAssistantMeta ? (
           <View className="mt-1 flex-row items-center gap-1">
             <CopyTextButton
@@ -1399,6 +1407,13 @@ function ThreadFeedPlaceholder(props: {
 }
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
+  return (
+    <MobileToolActivityProvider environmentId={props.environmentId} threadId={props.threadId}>
+      <ThreadFeedContent {...props} />
+    </MobileToolActivityProvider>
+  );
+});
+const ThreadFeedContent = memo(function ThreadFeedContent(props: ThreadFeedProps) {
   const navigation = useNavigation();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const foldSettleFrameRef = useRef<number | null>(null);

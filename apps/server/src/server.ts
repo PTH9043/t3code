@@ -20,8 +20,10 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import * as UpgradeRoomMemory from "./orchestration/UpgradeRoomMemory.ts";
 import {
   otlpTracesProxyRouteLayer,
+  vramArbiterRouteLayer,
   assetRouteLayer,
   serverEnvironmentHttpApiLayer,
   staticAndDevRouteLayer,
@@ -31,8 +33,10 @@ import {
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as DirectRpcServer from "./direct/DirectRpcServer.ts";
+import { prepareDirectHttpResponse } from "./direct/DirectHttpResponse.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -64,6 +68,7 @@ import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import { TelegramChannelsLive } from "./telegram/service.ts";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
@@ -75,6 +80,8 @@ import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletion
 import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
 import { WorkspaceAgentExecutorLive } from "./orchestration/Layers/WorkspaceAgentExecutor.ts";
+import { CouncilOrchestratorLive } from "./orchestration/council/CouncilOrchestratorLive.ts";
+import { MissionOrchestratorLive } from "./t3x/missionControl/MissionOrchestratorLive.ts";
 import { ReadOnlyResultCache } from "./documents/ReadOnlyResultCache.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
 import { SharedLibrarySyncLive } from "./library/SharedLibrarySync.ts";
@@ -85,6 +92,7 @@ import { WorkspaceSchedulerReactorLive } from "./orchestration/Layers/WorkspaceS
 import { WorkspaceProgramSupervisorLive } from "./orchestration/Layers/WorkspaceProgramSupervisor.ts";
 import { WorkspaceKnowledgeFileStoreLive } from "./orchestration/Layers/WorkspaceKnowledgeFileStore.ts";
 import { WorkspaceMemory } from "./orchestration/WorkspaceMemory.ts";
+import * as WatchdogRuntime from "./orchestration/WatchdogRuntime.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -93,6 +101,10 @@ import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import { activeWorkRegistry } from "./orchestration/ActiveWorkTracker.ts";
+import { UnifiedExecutionLedgerLive } from "./t3x/executionLedger/UnifiedExecutionLedger.ts";
+import { WorkerEngineServiceLive } from "./t3x/workerEngine/WorkerEngineService.ts";
+import { workerEngineHttpRoutesLayer } from "./t3x/workerEngine/WorkerEngineHttpRoutes.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -275,6 +287,7 @@ const WorkspaceProgramSupervisorLayerLive = WorkspaceProgramSupervisorLive.pipe(
 // VcsStatusBroadcaster and HostProcessPlatform come from the wider runtime
 // graph (VcsLayerLive / host process layers) that ReactorLayerLive sits inside.
 const WorkspaceMonitoringReactorLayerLive = WorkspaceMonitoringReactorLive.pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
   Layer.provide(WorkspaceProgramSupervisorLayerLive),
   Layer.provide(ResourceTelemetryLayerLive),
   Layer.provide(ServerSelfSignals.layer),
@@ -324,8 +337,12 @@ const ReactorLayerLive = Layer.empty
       ),
     ),
     Layer.provideMerge(DevelopmentLayerLive),
+    Layer.provideMerge(CouncilOrchestratorLive),
+    Layer.provideMerge(WorkerEngineServiceLive.pipe(Layer.provide(WorkspaceAgentExecutorLive))),
+    Layer.provideMerge(MissionOrchestratorLive.pipe(Layer.provide(WorkspaceAgentExecutorLive))),
     Layer.provideMerge(WorkspaceAgentExecutorLive),
     Layer.provideMerge(WorkspaceAgentControl.layer),
+    Layer.provideMerge(WatchdogRuntime.layer),
   )
   .pipe(
     Layer.provideMerge(WorkspaceSchedulerReactorLive),
@@ -354,7 +371,9 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
 );
 
-const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+const PersistenceLayerLive = UnifiedExecutionLedgerLive.pipe(
+  Layer.provideMerge(SqlitePersistenceLayerLive),
+);
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
@@ -505,22 +524,20 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.mergeAll(
-      CloudCliTokenManager.layer.pipe(
-        Layer.provide(ServerSecretStore.layer),
-        Layer.provide(ExternalLauncher.layer),
-      ),
+      CloudCliTokenManager.layer.pipe(Layer.provide(ServerSecretStore.layer)),
       CloudManagedEndpointRuntimeLive,
-    ),
+    ).pipe(Layer.provideMerge(ExternalLauncher.layer)),
   ),
 );
 
-const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
+const RuntimeDependenciesLive = TelegramChannelsLive.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesLive),
+).pipe(
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
-  Layer.provideMerge(ExternalLauncher.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
 );
@@ -543,9 +560,11 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
     otlpTracesProxyRouteLayer,
+    vramArbiterRouteLayer,
     assetRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
+    workerEngineHttpRoutesLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(
@@ -570,6 +589,8 @@ export const makeServerLayer = Layer.unwrap(
     const launcherLayer = ServiceLauncherClient.layer;
 
     yield* fixPath();
+    activeWorkRegistry.configureStateDir(config.stateDir);
+    yield* Effect.addFinalizer(() => Effect.sync(() => activeWorkRegistry.clearAll()));
 
     const httpListeningLayer = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -665,7 +686,7 @@ export const makeServerLayer = Layer.unwrap(
       : Layer.empty;
     const cloudDesiredLinkReconcileLayer = Layer.effectDiscard(
       Effect.gen(function* () {
-        if (!hasCloudPublicConfig) {
+        if (config.upgradeRoom || !hasCloudPublicConfig) {
           yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
           return;
         }
@@ -760,7 +781,9 @@ export const makeServerLayer = Layer.unwrap(
         const router = yield* HttpRouter.HttpRouter;
         const context = yield* Effect.context<HttpRequirements>();
         // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- The shared router erases route-specific errors, which become HTTP failures.
-        const httpEffect = router.asHttpEffect().pipe(Effect.orDie);
+        const httpEffect = router
+          .asHttpEffect()
+          .pipe(Effect.map(prepareDirectHttpResponse), Effect.orDie);
         return DirectRpcServer.DirectHttpHandler.of({
           handle: HttpEffect.toWebHandlerWith<
             HttpRequirements,
@@ -798,6 +821,7 @@ export const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(runtimeServicesLive),
+      Layer.provide(UpgradeRoomMemory.layer),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),
       Layer.provideMerge(HttpServerLive),

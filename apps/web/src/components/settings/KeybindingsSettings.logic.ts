@@ -53,6 +53,66 @@ export function shortcutToKeybindingInput(shortcut: KeybindingShortcut): string 
   return parts.join("+");
 }
 
+export const WHEN_VARIABLE_LABELS: Readonly<Record<string, string>> = {
+  terminalFocus: "터미널 포커스",
+  terminalOpen: "터미널 열림",
+  modelPickerOpen: "모델 선택기 열림",
+  editorFocus: "편집기 포커스",
+  true: "항상",
+  false: "사용 안 함",
+};
+
+const NEGATED_WHEN_VARIABLE_LABELS: Readonly<Record<string, string>> = {
+  terminalFocus: "터미널 포커스 아닐 때",
+  terminalOpen: "터미널 닫힘",
+  modelPickerOpen: "모델 선택기 닫힘",
+  editorFocus: "편집기 포커스 아닐 때",
+  true: "사용 안 함",
+  false: "항상",
+};
+
+export function formatWhenVariableLabel(identifier: string, negated = false): string {
+  if (negated) {
+    return (
+      NEGATED_WHEN_VARIABLE_LABELS[identifier] ??
+      `${WHEN_VARIABLE_LABELS[identifier] ?? identifier} 아님`
+    );
+  }
+  return WHEN_VARIABLE_LABELS[identifier] ?? identifier;
+}
+
+export function formatWhenAstLabel(node: KeybindingWhenNode | undefined): string {
+  if (!node) return "항상";
+  switch (node.type) {
+    case "identifier":
+      return formatWhenVariableLabel(node.name, false);
+    case "not":
+      if (node.node.type === "identifier") {
+        return formatWhenVariableLabel(node.node.name, true);
+      }
+      return `(${formatWhenAstLabel(node.node)}) 아님`;
+    case "and":
+      return `${formatWhenAstLabel(node.left)} · ${formatWhenAstLabel(node.right)}`;
+    case "or":
+      return `${formatWhenAstLabel(node.left)} 또는 ${formatWhenAstLabel(node.right)}`;
+  }
+}
+
+export function formatWhenExpressionBadges(
+  node: KeybindingWhenNode | undefined,
+): ReadonlyArray<string> {
+  if (!node) return ["항상"];
+  if (node.type === "and") {
+    return [...formatWhenExpressionBadges(node.left), ...formatWhenExpressionBadges(node.right)];
+  }
+  return [formatWhenAstLabel(node)];
+}
+
+export function isWebBrowserReservedKeybinding(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  return /^(?:mod|ctrl)\+[1-9]$/.test(normalized);
+}
+
 export function whenAstToExpression(node: KeybindingWhenNode | undefined): string {
   if (!node) return "";
   switch (node.type) {

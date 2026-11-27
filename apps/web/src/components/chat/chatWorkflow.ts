@@ -1,4 +1,3 @@
-import { WorkspaceMeetingParticipantId } from "@t3tools/contracts";
 import type {
   ModelSelection,
   WorkflowDefinition,
@@ -11,6 +10,51 @@ import type {
 export type WorkflowModelMode = "current" | "project" | "single" | "roles";
 export type WorkflowModelRole = keyof WorkflowRoleModels;
 export type WorkflowModelDraft = Partial<Record<WorkflowModelRole, ModelSelection>>;
+
+export function exactWorkflowModelSelection(
+  selected: ModelSelection | null | undefined,
+  resolved: ModelSelection,
+  providerAvailable: boolean,
+): ModelSelection | null {
+  if (
+    !providerAvailable ||
+    !selected ||
+    selected.instanceId !== resolved.instanceId ||
+    selected.model !== resolved.model
+  )
+    return null;
+  return selected;
+}
+
+export function workflowStartFailureMessage(reason: unknown): string {
+  const detail =
+    reason instanceof Error
+      ? reason.message
+      : typeof reason === "string"
+        ? reason
+        : typeof reason === "object" &&
+            reason !== null &&
+            "message" in reason &&
+            typeof reason.message === "string"
+          ? reason.message
+          : "";
+  return [
+    "실행을 시작하지 못했거나 실행 응답을 확인하지 못했습니다.",
+    ...(detail.trim() ? [`오류: ${detail.trim()}`] : []),
+    "중복 실행을 피하려면 같은 요청으로 다시 확인하세요.",
+  ].join("\n");
+}
+
+export function selectIndependentMeetingCoordinator(
+  meeting: WorkspaceMeetingSetup,
+  _currentModel: ModelSelection | null | undefined,
+): { readonly meeting: WorkspaceMeetingSetup | null; readonly error: string | null } {
+  const coordinator = meeting.participants.find((seat) => seat.id === meeting.chairParticipantId);
+  if (!coordinator) {
+    return { meeting: null, error: "통합 작업에 사용할 감독 AI를 지정하세요." };
+  }
+  return { meeting, error: null };
+}
 
 export function resolveWorkflowRoleModels(
   mode: WorkflowModelMode,
@@ -29,77 +73,6 @@ export function resolveWorkflowRoleModels(
       researcher: roles.researcher,
     };
   return undefined;
-}
-
-/** Use the chosen coordinator for planning without changing the saved roster. */
-export function selectMeetingCoordinator(
-  meeting: WorkspaceMeetingSetup,
-  selected: ModelSelection | undefined,
-  explicitlySelected: ReadonlyArray<ModelSelection> = [],
-): { readonly meeting: WorkspaceMeetingSetup | null; readonly error: string | null } {
-  if (!selected) return { meeting, error: null };
-  // Old rosters may still contain the previously forced Fable model. Leave the
-  // saved roster intact, but run that model only when it is selected now.
-  const allowed = [selected, ...explicitlySelected];
-  const participants = meeting.participants.filter(
-    (seat) =>
-      !seat.modelSelection.model.toLowerCase().includes("fable") ||
-      allowed.some(
-        (choice) =>
-          choice.instanceId === seat.modelSelection.instanceId &&
-          choice.model === seat.modelSelection.model,
-      ),
-  );
-  const existing = participants.find(
-    (seat) =>
-      seat.modelSelection.instanceId === selected.instanceId &&
-      seat.modelSelection.model === selected.model,
-  );
-  if (existing) {
-    if (participants.length < 2)
-      return {
-        meeting: null,
-        error: "선택한 모델과 함께 사용할 다른 참가자를 한 명 이상 선택하세요.",
-      };
-    return {
-      meeting: {
-        ...meeting,
-        chairParticipantId: existing.id,
-        participants: participants.map((seat) =>
-          seat.id === existing.id ? { ...seat, modelSelection: selected } : seat,
-        ),
-      },
-      error: null,
-    };
-  }
-  if (participants.length === 0) {
-    return {
-      meeting: null,
-      error: "선택한 모델과 함께 사용할 다른 참가자를 한 명 이상 선택하세요.",
-    };
-  }
-  if (participants.length >= 8) {
-    return {
-      meeting: null,
-      error:
-        "선택한 총괄 모델을 추가하려면 참가자 한 명을 제외하거나 참가자 중에서 총괄을 선택하세요.",
-    };
-  }
-  const ids = new Set(participants.map((seat) => String(seat.id)));
-  let id = "selected-coordinator";
-  for (let suffix = 2; ids.has(id); suffix++) id = `selected-coordinator-${suffix}`;
-  const chairParticipantId = WorkspaceMeetingParticipantId.make(id);
-  return {
-    meeting: {
-      ...meeting,
-      chairParticipantId,
-      participants: [
-        ...participants,
-        { id: chairParticipantId, displayName: selected.model, modelSelection: selected },
-      ],
-    },
-    error: null,
-  };
 }
 
 export interface ChatWorkflowChoice {

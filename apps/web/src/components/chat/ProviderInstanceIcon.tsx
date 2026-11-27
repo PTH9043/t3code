@@ -1,7 +1,7 @@
 import { type CSSProperties, memo } from "react";
 import { type ProviderDriverKind } from "@t3tools/contracts";
 
-import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import { getModelOrProviderIcon, getProviderInstanceIcon } from "./providerIconUtils";
 import { cn } from "~/lib/utils";
 
 export function providerInstanceInitials(label: string): string {
@@ -17,6 +17,12 @@ export function providerInstanceInitials(label: string): string {
 export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   driverKind: ProviderDriverKind;
   displayName: string;
+  /** Opaque instance config — read for `apiConnection.providerId` branding. */
+  config?: unknown;
+  /** Instance id — lets brand inference work when `config` is unavailable. */
+  instanceId?: string;
+  /** Optional model slug/name — when provided, prefers the model family's brand icon. */
+  model?: string | undefined;
   accentColor?: string | undefined;
   showBadge?: boolean;
   badgeContent?: "initials" | "none";
@@ -26,7 +32,14 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   statusDotClassName?: string;
   indicatorBackground?: string;
 }) {
-  const Icon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
+  const Icon = props.model
+    ? getModelOrProviderIcon({
+        driverKind: props.driverKind,
+        config: props.config,
+        instanceId: props.instanceId,
+        model: props.model,
+      })
+    : getProviderInstanceIcon(props.driverKind, props.config, props.instanceId);
   const indicatorBackground = props.indicatorBackground ?? "var(--card)";
   const accentStyle = props.accentColor
     ? ({ "--provider-accent": props.accentColor } as CSSProperties)

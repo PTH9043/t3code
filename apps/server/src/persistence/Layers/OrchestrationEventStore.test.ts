@@ -17,6 +17,37 @@ const layer = it.layer(
 );
 
 layer("OrchestrationEventStore", (it) => {
+  it.effect(
+    "pages selected event types through an inclusive snapshot without reading later events",
+    () =>
+      Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        yield* sql`
+        WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<1202)
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        )
+        SELECT 'selected-' || n, 'project', 'selected-project', n,
+          CASE WHEN n%2=0 THEN 'project.meta-updated' ELSE 'project.runtime-viewed' END,
+          ${now}, NULL, NULL, NULL, 'client',
+          json_object('projectId','selected-project','title','Title','updatedAt',${now},'viewedThrough',${now}), '{}'
+        FROM numbers
+      `;
+        const filtered = yield* Stream.runCollect(
+          eventStore.readTypesThroughSequence!(0, 1200, ["project.meta-updated"]),
+        ).pipe(Effect.map((chunk) => Array.from(chunk)));
+        assert.equal(filtered.length, 600);
+        assert.equal(filtered[0]?.sequence, 2);
+        assert.equal(filtered.at(-1)?.sequence, 1200);
+        assert.ok(filtered.every((event) => event.type === "project.meta-updated"));
+        const none = yield* Stream.runCollect(eventStore.readTypesThroughSequence!(0, 1200, []));
+        assert.equal(none.length, 0);
+        yield* sql`DELETE FROM orchestration_events WHERE stream_id='selected-project'`;
+      }),
+  );
   it.effect("stores json columns as strings and replays decoded events", () =>
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;

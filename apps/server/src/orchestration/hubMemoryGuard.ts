@@ -1,5 +1,35 @@
 import type { WorkspaceProgram } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import {
+  initSharedBlackboardSchema,
+  sweepExpiredBlackboardAndCompactRam,
+  sweepExpiredBlackboardAndCompactRamEffect,
+  upsertBlackboardEntryCas,
+  upsertBlackboardEntryCasEffect,
+  type BlackboardCategory,
+  type BlackboardEntry,
+  type SynchronousSqliteLike,
+} from "./conversationHandoffState.ts";
+
+export {
+  initSharedBlackboardSchema,
+  sweepExpiredBlackboardAndCompactRam,
+  sweepExpiredBlackboardAndCompactRamEffect,
+  upsertBlackboardEntryCas,
+  upsertBlackboardEntryCasEffect,
+  type BlackboardCategory,
+  type BlackboardEntry,
+  type SynchronousSqliteLike,
+};
+
+/**
+ * Compute process commit/RSS usage ratio against the configured hub memory hard cap.
+ */
+export function computeHubRssUsageRatio(rssBytes: number, commitLimitMb: number | null): number {
+  if (commitLimitMb === null || commitLimitMb <= 0 || rssBytes <= 0) return 0;
+  const limitBytes = commitLimitMb * 1024 * 1024;
+  return Math.min(1, Math.max(0, rssBytes / limitBytes));
+}
 
 /**
  * Hub memory for workspace programs.

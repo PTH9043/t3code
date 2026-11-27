@@ -1,7 +1,12 @@
 import * as Crypto from "effect/Crypto";
+import { ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
-import { createAtomCommandScheduler, createEnvironmentCommand } from "./runtime.ts";
+import {
+  createAtomCommandScheduler,
+  createEnvironmentCommand,
+  createEnvironmentRpcCommand,
+} from "./runtime.ts";
 import {
   type ArchiveThreadInput,
   type CreateThreadInput,
@@ -79,6 +84,10 @@ export function createThreadEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    checkTurnReceipt: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:check-turn-receipt",
+      tag: ORCHESTRATION_WS_METHODS.checkTurnReceipt,
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),

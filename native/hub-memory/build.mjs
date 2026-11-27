@@ -1,3 +1,4 @@
+import { readMsvcEnvironment } from "../msvc-environment.mjs";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -46,41 +47,30 @@ const installation = run(
   ],
   { encoding: "utf8" },
 ).trim();
-if (!installation) throw new Error("Visual Studio C++ build tools are required.");
-const vsdevcmd = NodePath.join(installation, "Common7", "Tools", "VsDevCmd.bat");
-const vcvars = NodePath.join(installation, "Common7", "Tools", "vsdevcmd", "ext", "vcvars.bat");
-const target = architecture === "arm64" ? "arm64" : "x64";
-// Initialize the Windows SDK and compiler without VS's optional extensions:
-// the vcpkg extension invokes PowerShell, which this environment forbids.
-const environmentOutput = run(
-  "cmd.exe",
-  [
-    "/u",
-    "/d",
-    "/s",
-    "/c",
-    `"call "${vsdevcmd}" -no_ext -host_arch=x64 -arch=${target} >nul && call "${vcvars}" >nul && set"`,
-  ],
-  {
-    windowsVerbatimArguments: true,
-    env: { ...process.env, VSCMD_SKIP_SENDTELEMETRY: "1", VSCMD_VCVARSALL_INIT: "1" },
-  },
-);
-const compilerEnv = { ...process.env };
-for (const line of environmentOutput.toString("utf16le").split(/\r?\n/)) {
-  const separator = line.indexOf("=");
-  if (separator > 0) {
-    const key = line.slice(0, separator);
-    for (const existing of Object.keys(compilerEnv)) {
-      if (existing.toLowerCase() === key.toLowerCase()) delete compilerEnv[existing];
-    }
-    compilerEnv[key] = line.slice(separator + 1);
-  }
+if (!installation) {
+  // Reuse an existing same-architecture guard only when it is newer than its source.
+  const source = NodePath.join(here, "guard.cpp");
+  const prebuilt = NodePath.join(here, "target", architecture, "t3-hub-guard.exe");
+  if (
+    !NodeFS.existsSync(prebuilt) ||
+    NodeFS.statSync(prebuilt).mtimeMs < NodeFS.statSync(source).mtimeMs
+  )
+    throw new Error(
+      "Visual Studio C++ build tools are required; no current prebuilt guard is available.",
+    );
+  const bytes = NodeFS.readFileSync(prebuilt);
+  const offset = bytes.readUInt32LE(0x3c);
+  if (bytes.readUInt16LE(offset + 4) !== (architecture === "arm64" ? 0xaa64 : 0x8664))
+    throw new Error("Hub guard target architecture mismatch.");
+  if (NodeOS.arch() === architecture) run(prebuilt, ["--version"], { stdio: "inherit" });
+  NodeFS.mkdirSync(output, { recursive: true });
+  const binary = NodePath.join(output, "t3-hub-guard.exe");
+  if (NodePath.resolve(binary) !== NodePath.resolve(prebuilt))
+    NodeFS.copyFileSync(prebuilt, binary);
+  console.log(binary);
+  process.exit(0);
 }
-const vcvarsInclude = compilerEnv.__VSCMD_VCVARS_INCLUDE ?? "";
-compilerEnv.INCLUDE = vcvarsInclude + (compilerEnv.INCLUDE ?? "");
-compilerEnv.EXTERNAL_INCLUDE = vcvarsInclude + (compilerEnv.EXTERNAL_INCLUDE ?? "");
-delete compilerEnv.__VSCMD_VCVARS_INCLUDE;
+const compilerEnv = readMsvcEnvironment(installation, architecture, run);
 NodeFS.mkdirSync(output, { recursive: true });
 const binary = NodePath.join(output, "t3-hub-guard.exe");
 run(

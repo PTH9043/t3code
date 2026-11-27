@@ -7,6 +7,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
  * remains data-driven.
  */
 export type ThreadActionMenuId =
+  | "open-viewer"
   | "new-thread-on-branch"
   | "pin"
   | "unpin"
@@ -18,6 +19,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "open-in-file-manager"
   | "copy-path"
   | "copy-branch"
   | "delete";
@@ -34,6 +36,7 @@ export interface ThreadActionMenuState {
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
+    readonly openInFileManager?: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
@@ -47,6 +50,7 @@ export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
   return [
+    { id: "open-viewer", label: "대화 뷰어 열기" },
     ...(state.branch
       ? [
           {
@@ -98,6 +102,9 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "읽지 않음으로 표시" },
+    ...(state.supports.openInFileManager
+      ? [{ id: "open-in-file-manager" as const, label: "파일 탐색기에서 열기" }]
+      : []),
     { id: "copy-path", label: "경로 복사", icon: "copy" },
     ...(state.branch ? [{ id: "copy-branch" as const, label: "브랜치 복사", icon: "copy" }] : []),
     { id: "delete", label: "삭제", destructive: true, icon: "trash" },

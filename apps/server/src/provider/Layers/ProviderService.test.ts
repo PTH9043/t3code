@@ -12,6 +12,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderExecutionId,
@@ -38,6 +39,10 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { HttpServer } from "effect/unstable/http";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import { readMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -97,27 +102,28 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
-    Effect.sync(() => {
-      const now = "2026-01-01T00:00:00.000Z";
-      const session: ProviderSession = {
-        provider,
-        ...(input.providerInstanceId !== undefined
-          ? { providerInstanceId: input.providerInstanceId }
-          : {}),
-        status: "ready",
-        runtimeMode: input.runtimeMode,
-        threadId: input.threadId,
-        resumeCursor: input.resumeCursor ?? {
-          opaque: `resume-${String(input.threadId)}`,
-        },
-        cwd: input.cwd ?? process.cwd(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      sessions.set(session.threadId, session);
-      return session;
-    }),
+  const startSession = vi.fn(
+    (input: Parameters<ProviderAdapterShape<ProviderAdapterError>["startSession"]>[0]) =>
+      Effect.sync(() => {
+        const now = "2026-01-01T00:00:00.000Z";
+        const session: ProviderSession = {
+          provider,
+          ...(input.providerInstanceId !== undefined
+            ? { providerInstanceId: input.providerInstanceId }
+            : {}),
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? {
+            opaque: `resume-${String(input.threadId)}`,
+          },
+          cwd: input.cwd ?? process.cwd(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        sessions.set(session.threadId, session);
+        return session;
+      }),
   );
 
   const sendTurn = vi.fn(
@@ -219,6 +225,16 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      workspaceDelegate: () => true,
+      ...(provider === CURSOR_DRIVER
+        ? {}
+        : {
+            nativeSubagentPolicy: (id: ThreadId) => ({
+              restricted:
+                startSession.mock.calls.findLast(([request]) => request.threadId === id)?.[0]
+                  .restrictNativeSubagents === true,
+            }),
+          }),
     },
     startSession,
     sendTurn,
@@ -330,6 +346,92 @@ function makeProviderServiceLayer() {
     layer,
   };
 }
+
+it.effect("revoking a room stops only its watches across live adapters", () =>
+  Effect.gen(function* () {
+    const room = asThreadId("watch-room");
+    const other = asThreadId("other-room");
+    const settingsLayer = ServerSettings.ServerSettingsService.layerTest({
+      backgroundWatchThreadIds: [room, other],
+    });
+    const codex = makeFakeCodexAdapter();
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+    const called = yield* Deferred.make<void>();
+    const stopped: ThreadId[] = [];
+    const stop = (id: ThreadId) =>
+      Effect.gen(function* () {
+        stopped.push(id);
+        if (stopped.length === 2) yield* Deferred.succeed(called, undefined);
+      });
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: {
+        ...codex.adapter,
+        stopBackgroundWatches: (id) =>
+          stop(id).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: String(CODEX_DRIVER),
+                  method: "stopBackgroundWatches",
+                  detail: "synthetic sensitive diagnostic",
+                }),
+              ),
+            ),
+          ),
+      },
+      [CLAUDE_AGENT_DRIVER]: { ...claude.adapter, stopBackgroundWatches: stop },
+    });
+    const layer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(
+        ProviderSessionDirectoryLive.pipe(
+          Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+        ),
+      ),
+      Layer.provideMerge(settingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+      Layer.provide(NodeServices.layer),
+    );
+    yield* Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const provider = yield* ProviderService.ProviderService;
+      const warning = yield* Deferred.make<ProviderRuntimeEvent>();
+      yield* Stream.runForEach(provider.streamEvents, (event) =>
+        Deferred.succeed(warning, event),
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* settings.updateSettings({
+        backgroundWatchThreadUpdate: { threadId: room, enabled: false },
+      });
+      yield* Deferred.await(called);
+      assert.deepEqual(stopped, [room, room]);
+      const event = yield* Deferred.await(warning);
+      assert.equal(event.type, "runtime.warning");
+      assert.equal(event.threadId, room);
+      assert.deepInclude(event.payload, {
+        detail: {
+          operation: "background-watch.stop",
+          status: "unconfirmed",
+          providerInstanceId: CODEX_DRIVER,
+        },
+      });
+      if (event.type === "runtime.warning") {
+        assert.notInclude(event.payload.message, "synthetic sensitive diagnostic");
+        assert.include(event.payload.message, "중지를 다시 요청");
+      }
+      for (const adapter of [codex, claude]) {
+        assert.equal(adapter.stopSession.mock.calls.length, 0);
+        assert.equal(adapter.interruptTurn.mock.calls.length, 0);
+        assert.equal(adapter.startSession.mock.calls.length, 0);
+      }
+    }).pipe(Effect.provide(layer));
+  }),
+);
 
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   Effect.gen(function* () {
@@ -475,7 +577,6 @@ it.effect(
               })
             : Effect.fail(unsupported()),
         listInstances: () => Effect.succeed([instanceId]),
-        listProviders: () => Effect.succeed([driverKind] as const),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
           PubSub.subscribe(pubsub),
@@ -554,7 +655,6 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
             })
           : Effect.fail(unsupported()),
       listInstances: () => Effect.succeed([instanceId]),
-      listProviders: () => Effect.succeed([CODEX_DRIVER] as const),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
         PubSub.subscribe(pubsub),
@@ -1175,6 +1275,72 @@ routing.layer("ProviderServiceLive routing", (it) => {
         ["claudeAgent"],
       );
     }),
+  );
+
+  it.effect(
+    "preserves the native room gate on recovery and rejects an unrestricted idle query",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("native-room-recovery");
+        const modelSelection = createModelSelection(codexInstanceId, "parent");
+        const request = {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "approval-required",
+          modelSelection,
+        } as const;
+        const team = {
+          threadId,
+          answeringInstanceId: codexInstanceId,
+          forModel: modelSelection.model,
+          source: "room",
+          members: [],
+        } as const;
+        const turn = {
+          threadId,
+          modelSelection,
+          input: "review",
+          interactionMode: "plan",
+        } as const;
+        yield* provider.startSession(threadId, request);
+        const before = routing.codex.sendTurn.mock.calls.length;
+        const rejected = yield* provider.sendTurn(turn, team).pipe(Effect.flip);
+        assert.instanceOf(rejected, ProviderValidationError);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, before);
+        const activeTurnId = asTurnId("inherited-active");
+        routing.codex.updateSession(threadId, (session) => ({
+          ...session,
+          status: "running",
+          activeTurnId,
+          model: modelSelection.model,
+        }));
+        const otherParent = createModelSelection(codexInstanceId, "different-parent");
+        const different = yield* provider
+          .sendTurn(
+            { ...turn, modelSelection: otherParent },
+            { ...team, forModel: otherParent.model },
+          )
+          .pipe(Effect.flip);
+        assert.instanceOf(different, ProviderValidationError);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, before);
+        yield* provider.sendTurn(turn, team);
+        assert.propertyVal(
+          routing.codex.sendTurn.mock.lastCall?.[0],
+          "nativePolicySteerTurnId",
+          activeTurnId,
+        );
+        const scoped = yield* provider.startSession(threadId, request, true);
+        yield* routing.codex.stopAll();
+        yield* provider.sendTurn(turn, team);
+        assert.deepInclude(routing.codex.startSession.mock.lastCall?.[0], {
+          restrictNativeSubagents: true,
+          modelSelection,
+          resumeCursor: scoped.resumeCursor,
+          runtimeMode: "approval-required",
+        });
+        assert.equal(routing.codex.sendTurn.mock.lastCall?.[0].interactionMode, "plan");
+      }),
   );
 
   it.effect("recovers stale sessions for sendTurn using persisted cwd", () =>
@@ -2157,6 +2323,106 @@ validation.layer("ProviderServiceLive validation", (it) => {
 
 const policyRouting = makeProviderServiceLayer();
 policyRouting.layer("ProviderServiceLive execution policy", (it) => {
+  it.effect("submits and authorizes the same Cursor team, including while steering", () =>
+    Effect.gen(function* () {
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("cursor-room-team");
+      const instanceId = ProviderInstanceId.make("cursor");
+      const modelSelection = { instanceId, model: "parent" };
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: "approval-required",
+      });
+      const token = readMcpProviderSession(threadId)!.authorizationHeader.slice("Bearer ".length);
+      const team = {
+        threadId,
+        answeringInstanceId: instanceId,
+        forModel: modelSelection.model,
+        source: "room",
+        members: [
+          { instanceId: codexInstanceId, account: "Codex", role: "scout", model: "worker" },
+        ],
+      } as const;
+      const request = {
+        threadId,
+        input: "Inspect the tests.",
+        modelSelection,
+        interactionMode: "plan",
+      } as const;
+      const { turnId } = yield* provider.sendTurn(request, team);
+      policyRouting.cursor.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: turnId,
+      }));
+      const invocation = yield* registry.resolve(token);
+      assert.deepEqual(invocation?.delegateTeam, team);
+      assert.strictEqual(yield* invocation!.activeDelegateTurnId!, turnId);
+      const empty = { ...team, members: [] };
+      yield* provider.sendTurn(request, empty);
+      const sent = policyRouting.cursor.sendTurn.mock.calls.at(-1)![0];
+      assert.deepEqual(sent.modelSelection, modelSelection);
+      assert.equal(sent.interactionMode, "plan");
+      assert.include(sent.input!, "scout@codex:worker");
+      assert.deepEqual((yield* registry.resolve(token))?.delegateTeam, team);
+      policyRouting.cursor.updateSession(threadId, (session) => ({ ...session, status: "ready" }));
+      assert.isUndefined(yield* invocation!.activeDelegateTurnId!);
+      yield* provider.sendTurn(request, empty);
+      assert.deepEqual((yield* registry.resolve(token))?.delegateTeam, empty);
+      assert.include(
+        policyRouting.cursor.sendTurn.mock.calls.at(-1)![0].input!,
+        "Do the work yourself.",
+      );
+      yield* provider.stopSession({ threadId });
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: "approval-required",
+      });
+      const replacement = yield* provider.sendTurn(request, team);
+      assert.strictEqual(replacement.turnId, turnId); // The test adapter reuses the native ID.
+      policyRouting.cursor.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: replacement.turnId,
+      }));
+      assert.isUndefined(yield* invocation!.activeDelegateTurnId!);
+      const nextToken = readMcpProviderSession(threadId)!.authorizationHeader.slice(
+        "Bearer ".length,
+      );
+      const nextInvocation = yield* registry.resolve(nextToken);
+      assert.strictEqual(yield* nextInvocation!.activeDelegateTurnId!, replacement.turnId);
+      yield* provider.stopSession({ threadId });
+    }).pipe(
+      Effect.provide(
+        McpSessionRegistry.layer.pipe(
+          Layer.provide(
+            Layer.succeed(
+              HttpServer.HttpServer,
+              HttpServer.HttpServer.of({
+                address: { _tag: "TcpAddress", hostname: "127.0.0.1", port: 43123 },
+                serve: () => Effect.die("unused"),
+              }),
+            ),
+          ),
+          Layer.provide(
+            Layer.succeed(
+              ServerEnvironment.ServerEnvironment,
+              ServerEnvironment.ServerEnvironment.of({
+                getEnvironmentId: Effect.succeed(EnvironmentId.make("test-env")),
+                getDescriptor: Effect.die("unused"),
+              }),
+            ),
+          ),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
   for (const [driver, adapter] of [
     [CODEX_DRIVER, policyRouting.codex],
     [CLAUDE_AGENT_DRIVER, policyRouting.claude],

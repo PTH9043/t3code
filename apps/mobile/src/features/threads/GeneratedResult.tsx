@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Image, Linking, Pressable, ScrollView, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import type { ChatAttachment, EnvironmentId } from "@t3tools/contracts";
 import {
   GENERATED_TEXT_VISIBLE_CHARS,
+  groupGeneratedResultAttachments,
   readResultText,
   resultTextExcerpt,
 } from "@t3tools/shared/generatedResults";
@@ -19,6 +20,98 @@ export function GeneratedResult(props: {
     <GeneratedImage {...props} />
   ) : (
     <GeneratedText {...props} />
+  );
+}
+
+export function GeneratedResultsList(props: {
+  readonly attachments: ReadonlyArray<ChatAttachment>;
+  readonly environmentId: EnvironmentId;
+  readonly onPressImage: (uri: string) => void;
+}) {
+  const groups = useMemo(
+    () => groupGeneratedResultAttachments(props.attachments),
+    [props.attachments],
+  );
+  return (
+    <>
+      {groups.map((group) =>
+        group.kind === "image-gallery" ? (
+          <GeneratedImageGallery
+            key={group.id}
+            attachments={group.attachments}
+            environmentId={props.environmentId}
+            onPressImage={props.onPressImage}
+          />
+        ) : (
+          <GeneratedResult
+            key={group.attachment.id}
+            attachment={group.attachment}
+            environmentId={props.environmentId}
+            onPressImage={props.onPressImage}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+function GeneratedImageGalleryTile({ attachment, environmentId, onPressImage }: ResultProps) {
+  const uri = useAssetUrl(environmentId, { _tag: "attachment", attachmentId: attachment.id });
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <View
+      style={{ width: "48.5%" }}
+      className="overflow-hidden rounded-lg border border-neutral-300 dark:border-neutral-700"
+      accessibilityLabel={"생성 이미지 " + attachment.name}
+    >
+      {uri && !error ? (
+        <Pressable
+          accessibilityLabel={"이미지 확대 " + attachment.name}
+          onPress={() => onPressImage(uri)}
+        >
+          <Image
+            source={{ uri }}
+            resizeMode="contain"
+            style={{ width: "100%", height: 150 }}
+            onError={() => setError("이미지를 표시할 수 없습니다.")}
+          />
+        </Pressable>
+      ) : (
+        <View style={{ height: 150 }} className="items-center justify-center p-2">
+          <Text className="text-center text-xs">{error ?? "이미지를 불러오는 중…"}</Text>
+        </View>
+      )}
+      <Text numberOfLines={1} className="px-2 py-1 text-xs">
+        {attachment.name}
+      </Text>
+    </View>
+  );
+}
+
+function GeneratedImageGallery(props: {
+  readonly attachments: ReadonlyArray<ChatAttachment>;
+  readonly environmentId: EnvironmentId;
+  readonly onPressImage: (uri: string) => void;
+}) {
+  return (
+    <View
+      className="my-2 overflow-hidden rounded-xl border border-neutral-300 dark:border-neutral-700"
+      accessibilityLabel={`생성 이미지 ${props.attachments.length}장`}
+    >
+      <Text className="px-3 pt-2.5 pb-1.5 text-xs font-t3-semibold">
+        생성 이미지 {props.attachments.length}장
+      </Text>
+      <View className="flex-row flex-wrap justify-between gap-y-2 px-2 pb-2">
+        {props.attachments.map((attachment) => (
+          <GeneratedImageGalleryTile
+            key={attachment.id}
+            attachment={attachment}
+            environmentId={props.environmentId}
+            onPressImage={props.onPressImage}
+          />
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -81,12 +174,12 @@ function GeneratedText({ attachment, environmentId }: ResultProps) {
   });
   const [body, setBody] = useState<Awaited<ReturnType<typeof readResultText>> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
-    if (!preview) return;
+    if (!expanded || !preview) return;
     const controller = new AbortController();
     void readResultText(preview, controller.signal).then(
       (value) => {
@@ -97,7 +190,7 @@ function GeneratedText({ attachment, environmentId }: ResultProps) {
       },
     );
     return () => controller.abort();
-  }, [preview]);
+  }, [expanded, preview]);
   const fullText = async () => {
     if (body && !body.truncated) return body;
     if (!original) throw new Error("결과 파일 연결을 기다리는 중입니다.");

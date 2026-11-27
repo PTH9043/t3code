@@ -437,9 +437,11 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
   const { pendingTask, onSelectPendingTask, onDeletePendingTask } = props;
   const timestamp = relativeTime(pendingTask.message.createdAt);
-  const subtitleParts = [props.environmentLabel, pendingTask.creation.branch].filter(
-    (part): part is string => Boolean(part),
-  );
+  const subtitleParts = [
+    pendingTask.message.deliveryFailure?.message,
+    props.environmentLabel,
+    pendingTask.creation.branch,
+  ].filter((part): part is string => Boolean(part));
 
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -450,7 +452,9 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
   const statusPill = (
     <View className="rounded-full bg-zinc-500/12 px-1.5 py-0.5 dark:bg-zinc-500/16">
-      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">대기</Text>
+      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">
+        {pendingTask.message.deliveryFailure ? "전송 확인" : "대기"}
+      </Text>
     </View>
   );
 

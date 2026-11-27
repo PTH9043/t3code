@@ -759,10 +759,13 @@ export class PreviewAutomationExecutionError extends Schema.TaggedErrorClass<Pre
   {
     ...PreviewAutomationRequestErrorFields,
     ...PreviewAutomationRemoteDiagnosticFields,
+    /** Error class name of the client-side cause. An identifier only, never its text. */
+    remoteCauseTag: Schema.optional(TrimmedNonEmptyString),
   },
 ) {
   override get message(): string {
-    return `Preview automation ${this.operation} failed on client ${this.clientId}.`;
+    const cause = this.remoteCauseTag === undefined ? "" : ` (cause: ${this.remoteCauseTag})`;
+    return `Preview automation ${this.operation} failed on client ${this.clientId}${cause}.`;
   }
 }
 

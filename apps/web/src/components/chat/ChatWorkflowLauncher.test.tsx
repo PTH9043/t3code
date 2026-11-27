@@ -2,7 +2,14 @@ import { Children, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  WorkflowStart,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { DEFAULT_MEETING_COMPOSER_CONFIG } from "../../meetingComposerStore";
 import { ChatWorkflowLauncher } from "./ChatWorkflowLauncher";
 import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
@@ -106,7 +113,7 @@ const seats = ["a", "b"].map((id) => ({
 const base = {
   project,
   contextKey: "thread",
-  threadId: null,
+  threadId: ThreadId.make("thread"),
   prompt: "현재 목표",
   attachmentCount: 0,
   startBlocked: false,
@@ -170,7 +177,7 @@ it("starts from the same panel with the selected orchestra participants", async 
   const markup = renderToStaticMarkup(
     <ChatWorkflowLauncher
       {...base}
-      meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true, seats }}
+      meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true, seats, chairSeatId: "a" }}
     />,
   );
   expect(markup).toContain("작업 단계 구성");
@@ -182,24 +189,144 @@ it("starts from the same panel with the selected orchestra participants", async 
     input: {
       task: "현재 목표",
       meeting: {
-        chairParticipantId: "selected-coordinator",
+        chairParticipantId: "a",
         participants: [
           expect.objectContaining({ displayName: "a" }),
           expect.objectContaining({ displayName: "b" }),
-          expect.objectContaining({ modelSelection: base.currentModel }),
         ],
-      },
-      roleModels: {
-        coordinator: base.currentModel,
-        implementer: base.currentModel,
-        researcher: base.currentModel,
       },
     },
   });
+  expect((state.start.mock.calls[0]![0] as { input: object }).input).not.toHaveProperty(
+    "roleModels",
+  );
   expect(state.selectMode).not.toHaveBeenCalled();
 });
 
-it("keeps the persistent workspace and orchestra settings in the same AI work panel", () => {
+it("sends the explicit persistent choice with the selected supervisor and permission mode", async () => {
+  renderToStaticMarkup(
+    <ChatWorkflowLauncher
+      {...base}
+      meetingConfig={{
+        ...DEFAULT_MEETING_COMPOSER_CONFIG,
+        enabled: true,
+        executionMode: "persistent",
+        seats,
+        chairSeatId: "a",
+      }}
+    />,
+  );
+  click("AI 작업 시작");
+  await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(state.start.mock.calls[0]![0]).toMatchObject({
+    input: {
+      meeting: { chairParticipantId: "a" },
+      orchestra: { executionMode: "persistent" },
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+    },
+  });
+});
+
+const decodeWorkflowStart = Schema.decodeUnknownSync(WorkflowStart);
+
+it("starts integrated work in the draft conversation with its selected chat model", async () => {
+  const threadId = ThreadId.make("draft-thread");
+  const onDraftStarting = vi.fn();
+  const modelTeams = [
+    {
+      threadId,
+      answeringInstanceId: base.currentModel.instanceId,
+      forModel: base.currentModel.model,
+      members: [],
+    },
+  ];
+  const getBootstrap = vi.fn((model: typeof base.currentModel) => ({
+    createThread: {
+      projectId: project.id,
+      title: "draft",
+      modelSelection: model,
+      modelTeams,
+      runtimeMode: "full-access" as const,
+      interactionMode: "plan" as const,
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+    },
+  }));
+  renderToStaticMarkup(
+    <ChatWorkflowLauncher
+      {...base}
+      threadId={threadId}
+      getBootstrap={getBootstrap}
+      onDraftStarting={onDraftStarting}
+      meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true, seats, chairSeatId: "a" }}
+    />,
+  );
+  click("AI 작업 시작");
+  await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  const submitted = state.start.mock.calls[0]![0] as { input: unknown };
+  expect(decodeWorkflowStart(submitted.input).bootstrap?.createThread?.modelTeams).toEqual(
+    modelTeams,
+  );
+  expect(onDraftStarting.mock.calls).toEqual([[true], [false]]);
+  expect(state.start.mock.calls[0]![0]).toMatchObject({
+    input: {
+      threadId,
+      userMessage: "현재 목표",
+      bootstrap: { createThread: { modelSelection: base.currentModel, modelTeams } },
+      meeting: { chairParticipantId: "a" },
+    },
+  });
+});
+
+it("keeps ordinary workflow starts available without an orchestra conversation", async () => {
+  const getBootstrap = vi.fn((model: typeof base.currentModel) => ({
+    createThread: {
+      projectId: project.id,
+      title: "draft",
+      modelSelection: model,
+      runtimeMode: "full-access" as const,
+      interactionMode: "plan" as const,
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+    },
+  }));
+  renderToStaticMarkup(
+    <ChatWorkflowLauncher
+      {...base}
+      threadId={null}
+      getBootstrap={getBootstrap}
+      meetingConfig={DEFAULT_MEETING_COMPOSER_CONFIG}
+    />,
+  );
+  click("AI 작업 시작");
+  await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(state.start.mock.calls[0]![0]).toMatchObject({
+    input: {
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+    },
+  });
+  expect(getBootstrap).not.toHaveBeenCalled();
+  expect((state.start.mock.calls[0]![0] as { input: object }).input).not.toHaveProperty("threadId");
+});
+
+it("does not start an orchestra without a selected conversation", () => {
+  const markup = renderToStaticMarkup(
+    <ChatWorkflowLauncher
+      {...base}
+      threadId={null}
+      meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true, seats, chairSeatId: "a" }}
+    />,
+  );
+  expect(markup).toContain("현재 프로젝트의 대화를 선택");
+  expect(state.buttons.find((button) => button.label === "AI 작업 시작")?.disabled).toBe(true);
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+it("uses the unified orchestra settings instead of reviving the old persistent workspace", () => {
   const development = {
     environmentId: project.environmentId,
     projectId: project.id,
@@ -217,14 +344,14 @@ it("keeps the persistent workspace and orchestra settings in the same AI work pa
       meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true, seats }}
     />,
   );
-  expect(markup).toContain("공통 지속 진행 설정");
+  expect(markup).not.toContain("공통 지속 진행 설정");
   expect(markup).toContain("공통 참가자 설정");
   expect(markup).toContain("작업 단계 구성");
-  expect(markup).toContain("보낼 대상 · Main");
+  expect(markup).not.toContain("보낼 대상 · Main");
   expect(state.selectMode).not.toHaveBeenCalled();
 });
 
-it("does not label a missing selected workspace as Main", () => {
+it("does not route a normal conversation to a legacy workspace", () => {
   const development = {
     environmentId: project.environmentId,
     projectId: project.id,
@@ -242,7 +369,7 @@ it("does not label a missing selected workspace as Main", () => {
       meetingConfig={DEFAULT_MEETING_COMPOSER_CONFIG}
     />,
   );
-  expect(markup).toContain("보낼 대상 · 선택한 작업실 (사용 불가)");
+  expect(markup).not.toContain("보낼 대상 · 선택한 작업실 (사용 불가)");
   expect(markup).not.toContain("보낼 대상 · Main");
 });
 
@@ -279,8 +406,29 @@ it("shows the existing participant requirement before starting a workflow with o
       meetingConfig={{ ...DEFAULT_MEETING_COMPOSER_CONFIG, enabled: true }}
     />,
   );
-  expect(markup).toContain("오케스트라 참가자를 2명 이상 선택하세요.");
+  expect(markup).toContain("감독 AI를 한 명 이상 선택하세요.");
   expect(state.buttons.find((entry) => entry.label === "AI 작업 시작")?.disabled).toBe(true);
+});
+
+it("allows an explicitly selected supervisor without other participants", async () => {
+  renderToStaticMarkup(
+    <ChatWorkflowLauncher
+      {...base}
+      meetingConfig={{
+        ...DEFAULT_MEETING_COMPOSER_CONFIG,
+        enabled: true,
+        seats: [seats[0]!],
+        chairSeatId: "a",
+      }}
+    />,
+  );
+  click("AI 작업 시작");
+  await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(state.start.mock.calls[0]![0]).toMatchObject({
+    input: {
+      meeting: { chairParticipantId: "a", participants: [expect.objectContaining({ id: "a" })] },
+    },
+  });
 });
 
 it("shows AI-planned and saved-flow runs in the same history", () => {

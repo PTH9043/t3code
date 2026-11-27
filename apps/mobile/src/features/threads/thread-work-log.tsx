@@ -1,3 +1,4 @@
+import { MobileToolActivityDetail } from "./MobileToolActivity";
 import * as Haptics from "expo-haptics";
 import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
 import { LayoutAnimation, Pressable, ScrollView, useColorScheme, View } from "react-native";
@@ -152,7 +153,7 @@ export function ThreadWorkLog(props: {
         {rows.map((row) => {
           const expanded = props.expandedRows[row.id] ?? false;
           const canExpand = row.canExpand;
-          const fullDetail = expanded ? row.getFullDetail() : null;
+          const fullDetail = expanded && !row.presented ? row.getFullDetail() : null;
           const displayText = row.detail ? `${row.summary} ${row.detail}` : row.summary;
           const iconIsDestructive = row.icon === "alert" || row.icon === "warning";
 
@@ -248,6 +249,9 @@ export function ThreadWorkLog(props: {
                 </View>
               </Pressable>
 
+              {expanded && row.presented && (
+                <MobileToolActivityDetail row={row.presented} technical={row.getFullDetail} />
+              )}
               {fullDetail ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
                   <ScrollView

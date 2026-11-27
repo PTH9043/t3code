@@ -423,11 +423,20 @@ export const runHiddenWindowsProcess = Effect.fn("ProcessRunner.runHiddenWindows
             ...input.args.slice(0, commandIndex + 1),
             '"' + input.args.slice(commandIndex + 1).join(" ") + '"',
           ];
+    // This path receives already shell-escaped arguments from the provider
+    // resolver. Invoke cmd explicitly with Node's equivalent single command
+    // string so Node does not concatenate a shell-mode argument array.
+    const shellCommand = input.shell
+      ? (environment.ComSpec ?? environment.COMSPEC ?? "cmd.exe")
+      : input.command;
+    const shellArgs = input.shell
+      ? ["/d", "/s", "/c", `"${[input.command, ...args].join(" ")}"`]
+      : args;
     return yield* Effect.callback<ProcessRunOutput, ProcessRunError>((resume) => {
       let closed = false;
       const child = execFile(
-        input.command,
-        args,
+        shellCommand,
+        shellArgs,
         {
           cwd: input.spawnCwd ?? input.cwd,
           env:
@@ -436,9 +445,9 @@ export const runHiddenWindowsProcess = Effect.fn("ProcessRunner.runHiddenWindows
               : input.replaceEnv
                 ? input.env
                 : { ...environment, ...input.env },
-          shell: input.shell ?? false,
+          shell: false,
           windowsHide: true,
-          windowsVerbatimArguments: commandIndex >= 0,
+          windowsVerbatimArguments: input.shell === true || commandIndex >= 0,
           encoding: input.windowsOutputEncoding ?? "utf8",
           maxBuffer: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         },

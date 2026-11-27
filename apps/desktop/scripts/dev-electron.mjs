@@ -25,6 +25,8 @@ if (!Number.isInteger(port) || port <= 0) {
 const requiredFiles = [
   "dist-electron/main.cjs",
   "dist-electron/preload.cjs",
+  "dist-electron/preview-pick-preload.cjs",
+  "dist-electron/preview-pip-preload.cjs",
   "../server/dist/bin.mjs",
 ];
 const forcedShutdownTimeoutMs = 1_500;
@@ -133,15 +135,21 @@ function stopFailedAppWhenSafe(app) {
     .catch(() => undefined)
     .then(async () => {
       if (shuttingDown || !heldForBundleChange || currentApp !== app) return;
+      let releaseRestartGuard;
       if (hostPlatform === "win32") {
         const inspection = inspectAutomaticRestart(app.pid);
         if (!inspection.safe) {
           delayAutomaticStop(inspection.reason, () => stopFailedAppWhenSafe(app));
           return;
         }
+        releaseRestartGuard = inspection.release;
       }
-      clearAutomaticStopDelay();
-      await stopApp();
+      try {
+        clearAutomaticStopDelay();
+        await stopApp();
+      } finally {
+        releaseRestartGuard?.();
+      }
     });
 }
 
@@ -295,15 +303,21 @@ function scheduleRestart({ bundleChanged = false } = {}) {
     restartQueue = restartQueue
       .catch(() => undefined)
       .then(async () => {
+        let releaseRestartGuard;
         if (currentApp && hostPlatform === "win32") {
           const inspection = inspectAutomaticRestart(currentApp.pid);
           if (!inspection.safe) {
             delayAutomaticStop(inspection.reason, () => scheduleRestart());
             return;
           }
+          releaseRestartGuard = inspection.release;
         }
-        clearAutomaticStopDelay();
-        await stopApp();
+        try {
+          clearAutomaticStopDelay();
+          await stopApp();
+        } finally {
+          releaseRestartGuard?.();
+        }
         if (!shuttingDown) {
           startApp();
         }

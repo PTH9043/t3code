@@ -22,6 +22,11 @@ import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { AiHelpHost } from "./help/AiHelpHost";
 import { AiHelpButton } from "./help/AiHelpButton";
 import { ControlCenterSidebarNav } from "./control-center/ControlCenterSidebarNav";
+import {
+  GLOBAL_ACTIVITY_RAIL_WIDTH_PX,
+  GlobalActivityRail,
+  MobileActivityTabBar,
+} from "./GlobalActivityRail";
 import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import {
@@ -42,6 +47,10 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "90px";
+// Desktop layout reserves 48px on the far left for GlobalActivityRail, so the
+// macOS traffic-light clearance relative to the sidebar edge is 90px - 48px = 42px.
+const MACOS_TRAFFIC_LIGHTS_WITH_RAIL_LEFT_INSET = "42px";
+const DESKTOP_RAIL_BREAKPOINT_PX = 768;
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -97,7 +106,7 @@ function SidebarControl() {
 
   return (
     <div
-      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center gap-1"
+      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center gap-1 md:left-[calc(3rem+var(--workspace-controls-left))]"
       data-sidebar-control=""
     >
       <Tooltip>
@@ -139,7 +148,9 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   // and a clamped drag ends with an unchanged width, which skips the re-render
   // that would otherwise refresh a render-time snapshot.
   const viewportWidth = useSyncExternalStore(subscribeToViewportWidth, readViewportWidth);
-  const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth);
+  const railReservedWidth =
+    viewportWidth >= DESKTOP_RAIL_BREAKPOINT_PX ? GLOBAL_ACTIVITY_RAIL_WIDTH_PX : 0;
+  const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth - railReservedWidth);
   const [isWindowFullscreen, setIsWindowFullscreen] = useState(() => {
     const getWindowFullscreenState = window.desktopBridge?.getWindowFullscreenState;
     return isMacosDesktop && typeof getWindowFullscreenState === "function"
@@ -149,7 +160,12 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const sidebarProviderStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
     ...(isMacosDesktop && !isWindowFullscreen
-      ? { "--workspace-controls-left": MACOS_TRAFFIC_LIGHTS_LEFT_INSET }
+      ? {
+          "--workspace-controls-left":
+            railReservedWidth > 0
+              ? MACOS_TRAFFIC_LIGHTS_WITH_RAIL_LEFT_INSET
+              : MACOS_TRAFFIC_LIGHTS_LEFT_INSET,
+        }
       : {}),
   } as CSSProperties;
 
@@ -191,18 +207,23 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   }, [navigate, pathname]);
 
   return (
-    <SidebarProvider className="h-dvh! min-h-0!" defaultOpen style={sidebarProviderStyle}>
+    <SidebarProvider
+      className="h-dvh! min-h-0! max-md:pb-14"
+      defaultOpen
+      style={sidebarProviderStyle}
+    >
+      <GlobalActivityRail topInset={isMacosDesktop && !isWindowFullscreen} />
       <Sidebar
         side="left"
         collapsible="offcanvas"
         data-app-sidebar=""
-        className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
+        className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:left-12"
         resizable={{
           maxWidth: sidebarMaximumWidth,
           minWidth: THREAD_SIDEBAR_MIN_WIDTH,
           shouldAcceptWidth: ({ currentWidth, nextWidth, wrapper }) =>
             nextWidth <= currentWidth ||
-            wrapper.clientWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
+            wrapper.clientWidth - railReservedWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
           storageKey: THREAD_SIDEBAR_WIDTH_STORAGE_KEY,
           onResize: setSidebarWidth,
         }}
@@ -225,6 +246,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         <SidebarRail />
       </Sidebar>
       {children}
+      <MobileActivityTabBar />
       <AiHelpHost />
       <SidebarControl />
     </SidebarProvider>

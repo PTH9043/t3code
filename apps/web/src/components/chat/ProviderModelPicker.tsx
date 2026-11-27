@@ -13,6 +13,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { ModelPickerContent } from "./ModelPickerContent";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { isClaudeApiEntry, isMuseCloudEntry } from "./modelPickerProviderGroups";
 import {
   ModelEsque,
   getTriggerDisplayModelLabel,
@@ -22,6 +23,16 @@ import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { MeetingComposerTarget } from "../../meetingComposerStore";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
 
+const RAW_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function resolveReadableAccountAlias(displayName: string | undefined, driverLabel: string): string {
+  const trimmed = displayName?.trim() ?? "";
+  if (!trimmed || RAW_UUID_REGEX.test(trimmed)) {
+    return driverLabel || "기본 계정";
+  }
+  return trimmed;
+}
+
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   /**
    * The instance currently selected in the composer. Drives the trigger
@@ -29,6 +40,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
    */
   activeInstanceId: ProviderInstanceId;
   model: string;
+  triggerPlaceholder?: string;
   lockedProvider: ProviderDriverKind | null;
   lockedContinuationGroupKey?: string | null;
   /** Instance entries rendered in the sidebar + used to resolve display name. */
@@ -59,10 +71,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   // resolves fallbacks before rendering this component; if the selected
   // instance disappears, do not infer a replacement from its driver kind.
   const activeEntry = useMemo(() => {
+    if (props.triggerPlaceholder) return null;
     return (
       props.instanceEntries.find((entry) => entry.instanceId === props.activeInstanceId) ?? null
     );
-  }, [props.activeInstanceId, props.instanceEntries]);
+  }, [props.activeInstanceId, props.instanceEntries, props.triggerPlaceholder]);
 
   const activeInstanceId = props.activeInstanceId;
   const selectedInstanceOptions = props.modelOptionsByInstance.get(activeInstanceId) ?? [];
@@ -73,16 +86,33 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const selectedModel =
     selectedInstanceOptions.find((option) => option.slug === props.model) ??
     selectedInstanceOptions[0];
-  const triggerTitle = selectedModel ? getTriggerDisplayModelName(selectedModel) : props.model;
-  const triggerLabel = selectedModel ? getTriggerDisplayModelLabel(selectedModel) : props.model;
+  const triggerTitle =
+    props.triggerPlaceholder ??
+    (selectedModel ? getTriggerDisplayModelName(selectedModel) : props.model);
+  const triggerLabel =
+    props.triggerPlaceholder ??
+    (selectedModel ? getTriggerDisplayModelLabel(selectedModel) : props.model);
+  const driverLabel = activeEntry
+    ? isMuseCloudEntry(activeEntry)
+      ? "Muse Cloud"
+      : activeEntry.driverKind === "muse"
+        ? "Muse Code"
+        : (PROVIDER_DISPLAY_NAMES[activeEntry.driverKind] ?? activeEntry.driverKind)
+    : "";
+  const readableAccountAlias = activeEntry
+    ? resolveReadableAccountAlias(activeEntry.displayName, driverLabel)
+    : "";
+  const openAiAccount = activeEntry?.openAiAccountTag ? activeEntry : null;
+  const namedAccount = activeEntry?.individualAccount ? activeEntry : openAiAccount;
+  const namedAccountAlias = namedAccount
+    ? resolveReadableAccountAlias(namedAccount.displayName, driverLabel)
+    : "";
+  const accountAndModel = namedAccount ? `${triggerLabel} · ${namedAccountAlias}` : triggerLabel;
 
   // Always hide instance badge and use driver label instead of displayName.
   // Multiple instances of the same driver (e.g. "claude" + "claude_personal")
   // are unified under one label (e.g. "Claude") with auto-switch handling failover.
   const showInstanceBadge = false;
-  const driverLabel = activeEntry?.driverKind
-    ? (PROVIDER_DISPLAY_NAMES[activeEntry.driverKind] ?? activeEntry.driverKind)
-    : (activeEntry?.displayName ?? "");
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -159,12 +189,17 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       <PopoverTrigger
         render={
           <ComposerControl
-            aria-label={props.triggerAriaLabel}
+            aria-label={
+              openAiAccount
+                ? [props.triggerAriaLabel, accountAndModel].filter(Boolean).join(" · ")
+                : props.triggerAriaLabel
+            }
+            title={openAiAccount ? accountAndModel : undefined}
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
             className={cn(
-              "min-w-0 justify-between whitespace-nowrap",
-              props.compact ? "max-w-42 shrink-0" : "max-w-48 shrink sm:max-w-56",
+              "min-w-[140px] justify-between whitespace-nowrap",
+              props.compact ? "max-w-48 shrink-0" : "max-w-56 shrink-0 sm:max-w-64",
               props.triggerClassName,
             )}
             disabled={props.disabled}
@@ -176,6 +211,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             <ProviderInstanceIcon
               driverKind={activeEntry.driverKind}
               displayName={driverLabel}
+              instanceId={String(activeEntry.instanceId)}
+              model={selectedModel?.slug ?? props.model}
               accentColor={activeEntry.accentColor}
               showBadge={showInstanceBadge}
               className="size-4"
@@ -187,11 +224,32 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               )}
             />
           ) : null}
+          {openAiAccount ? (
+            <span className="max-w-24 shrink-0 truncate rounded bg-primary/10 px-1 text-[9px] font-semibold text-primary">
+              API #{openAiAccount.openAiAccountTag}
+            </span>
+          ) : activeEntry && isClaudeApiEntry(activeEntry) ? (
+            <span
+              data-chat-claude-api="true"
+              className="shrink-0 rounded bg-primary/10 px-1 text-[9px] font-semibold text-primary"
+            >
+              API
+            </span>
+          ) : activeEntry && isMuseCloudEntry(activeEntry) ? (
+            <span
+              data-chat-muse-cloud="true"
+              className="shrink-0 rounded bg-primary/10 px-1 text-[9px] font-semibold text-primary"
+            >
+              Cloud
+            </span>
+          ) : null}
           <Tooltip>
             <TooltipTrigger render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}>
-              {triggerTitle}
+              {activeEntry?.individualAccount
+                ? `${triggerTitle} · ${readableAccountAlias}`
+                : triggerTitle}
             </TooltipTrigger>
-            <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
+            <TooltipPopup side="top">{accountAndModel}</TooltipPopup>
           </Tooltip>
         </span>
         <span aria-hidden="true" className="flex items-center">
@@ -212,6 +270,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 : "models"
           }
           activeInstanceId={activeInstanceId}
+          preferReadyAccount={Boolean(props.triggerPlaceholder)}
           model={props.model}
           lockedProvider={props.lockedProvider}
           lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}

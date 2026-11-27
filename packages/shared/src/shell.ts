@@ -323,7 +323,7 @@ export type WindowsShellEnvironmentReader = (
 export const WindowsShellEnvironment = Context.Reference<WindowsShellEnvironmentReader>(
   "@t3tools/shared/shell/WindowsShellEnvironment",
   {
-    defaultValue: () => readEnvironmentFromWindowsShell,
+    defaultValue: () => (names) => readEnvironmentFromWindowsProcess(names),
   },
 );
 
@@ -333,6 +333,25 @@ export const CommandAvailability = Context.Reference<CommandAvailabilityChecker>
     defaultValue: () => isCommandAvailable,
   },
 );
+
+/** PATH and FNM values are inherited by CMD, so read them without launching a shell. */
+export function readEnvironmentFromWindowsProcess(
+  names: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = process.env,
+): Partial<Record<string, string>> {
+  const requested = new Set(names);
+  for (const name of names) {
+    if (!SHELL_ENV_NAME_PATTERN.test(name)) {
+      throw new Error(`Unsupported environment variable name: ${name}`);
+    }
+  }
+  const result: Partial<Record<string, string>> = {};
+  for (const [key, value] of Object.entries(environment)) {
+    const name = key.toUpperCase();
+    if (requested.has(name) && value) result[name] = value;
+  }
+  return result;
+}
 
 export function readEnvironmentFromWindowsShell(
   names: ReadonlyArray<string>,
@@ -487,8 +506,8 @@ function resolveCommandCandidates(
 // 30s unless resolved by explicit path.
 // TTL expiry uses the monotonic clock (Clock.currentTimeNanos) so backward
 // wall-clock adjustments cannot keep expired entries alive.
-const COMMAND_RESOLUTION_CACHE_TTL_NANOS = 30_000_000_000n;
-const COMMAND_RESOLUTION_CACHE_MAX_ENTRIES = 512;
+const COMMAND_RESOLUTION_CACHE_TTL_NANOS = 300_000_000_000n;
+const COMMAND_RESOLUTION_CACHE_MAX_ENTRIES = 1024;
 const COMMAND_RESOLUTION_CACHE_KEY_SEPARATOR = String.fromCharCode(0);
 
 interface CommandResolutionCacheEntry {
@@ -586,20 +605,38 @@ const resolveCommandPathForPlatform = Effect.fn("shell.resolveCommandPathForPlat
   }
 
   const pathEntries: string[] = [];
+  const seenPathEntries = new Set<string>();
   for (const entry of pathValue.split(pathDelimiterForPlatform(platform))) {
     const pathEntry = stripWrappingQuotes(entry.trim());
-    if (pathEntry.length > 0) {
-      pathEntries.push(pathEntry);
+    if (pathEntry.length === 0) continue;
+    const dedupeKey = platform === "win32" ? pathEntry.toLowerCase() : pathEntry;
+    if (seenPathEntries.has(dedupeKey)) continue;
+    seenPathEntries.add(dedupeKey);
+    pathEntries.push(pathEntry);
+  }
+
+  const candidatePaths: string[] = [];
+  for (const pathEntry of pathEntries) {
+    for (const candidate of commandCandidates) {
+      candidatePaths.push(path.join(pathEntry, candidate));
     }
   }
 
-  for (const pathEntry of pathEntries) {
-    for (const candidate of commandCandidates) {
-      const candidatePath = path.join(pathEntry, candidate);
-      if (yield* isExecutableFile(candidatePath, platform, windowsPathExtensions)) {
-        cacheCommandResolution(cache, cacheKey, candidatePath, nowNanos);
-        return candidatePath;
-      }
+  // Probe candidates in bounded batches so Windows PATH×PATHEXT scans complete in <500ms
+  // instead of 5+ seconds serially, while strictly preserving PATH/PATHEXT precedence.
+  const PROBE_BATCH_SIZE = 16;
+  for (let offset = 0; offset < candidatePaths.length; offset += PROBE_BATCH_SIZE) {
+    const batch = candidatePaths.slice(offset, offset + PROBE_BATCH_SIZE);
+    const results = yield* Effect.forEach(
+      batch,
+      (candidatePath) => isExecutableFile(candidatePath, platform, windowsPathExtensions),
+      { concurrency: "unbounded" },
+    );
+    const matchIndex = results.findIndex(Boolean);
+    if (matchIndex >= 0) {
+      const matched = batch[matchIndex]!;
+      cacheCommandResolution(cache, cacheKey, matched, nowNanos);
+      return matched;
     }
   }
   cacheCommandResolution(cache, cacheKey, null, nowNanos);
@@ -663,9 +700,15 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
     }
   }
 
+  // Node joins a shell-mode command and its arguments with spaces anyway; a
+  // separate argument list only earns DEP0190. Hand over the already escaped
+  // line as the command so the spawn is identical and the warning is gone.
   return {
-    command: escapeWindowsShellArg(resolvedCommand),
-    args: sanitizeShellModeArgsForPlatform(args, platform),
+    command: [
+      escapeWindowsShellArg(resolvedCommand),
+      ...sanitizeShellModeArgsForPlatform(args, platform),
+    ].join(" "),
+    args: [],
     shell: true,
   };
 });

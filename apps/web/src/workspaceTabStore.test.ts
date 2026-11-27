@@ -63,6 +63,22 @@ describe("workspaceTabStore", () => {
     expect(state.tabs.find((tab) => tab.id === firstTabId)?.view).toEqual(threadView("thread-a"));
   });
 
+  it("opens the upgrade room once without replacing the existing conversation tab", () => {
+    const room = { kind: "upgrade-room" } as const;
+    const store = useWorkspaceTabStore.getState();
+    store.syncRouteView(threadView("regular-chat"));
+    expect(store.openBackgroundTab(room)).toBe(true);
+    store.syncRouteView(room);
+    const roomTabId = useWorkspaceTabStore.getState().activeTabId;
+
+    store.syncRouteView(threadView("regular-chat"));
+    expect(store.openBackgroundTab(room)).toBe(true);
+    store.syncRouteView(room);
+    const state = useWorkspaceTabStore.getState();
+    expect(state.tabs.map((tab) => tab.view)).toEqual([threadView("regular-chat"), room]);
+    expect(state.activeTabId).toBe(roomTabId);
+  });
+
   it("refuses a background tab past the cap and dedupes existing views", () => {
     const store = useWorkspaceTabStore.getState();
     for (let index = 0; index < MAX_WORKSPACE_TABS; index += 1) {

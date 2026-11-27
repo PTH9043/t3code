@@ -1,15 +1,8 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
-
-const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
-
-## T3 Code collaborative browser
-
-You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
-
-For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
-
-Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
-`;
+import {
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
+  T3_TOOL_EXECUTION_AND_ANTI_RESISTANCE_POLICY,
+} from "./t3CoreToolInstructions.ts";
 
 export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
@@ -132,6 +125,8 @@ Do not ask "should I proceed?" in the final output. The user can easily switch o
 
 Only produce at most one \`<proposed_plan>\` block per turn, and only when you are presenting a complete spec.
 ${T3_CODE_BROWSER_TOOL_INSTRUCTIONS}
+
+${T3_TOOL_EXECUTION_AND_ANTI_RESISTANCE_POLICY}
 </collaboration_mode>`;
 
 export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Collaboration Mode: Default
@@ -148,11 +143,27 @@ In Default mode, follow the user's selected request mode. When the current messa
 
 When a question is necessary, use request_user_input so T3 can display the answer card. Follow the native tool schema and preserve the current permissions and collaboration mode.
 ${T3_CODE_BROWSER_TOOL_INSTRUCTIONS}
+
+${T3_TOOL_EXECUTION_AND_ANTI_RESISTANCE_POLICY}
 </collaboration_mode>`;
 
 export interface CodexRuntimeInfo {
   readonly model: string;
   readonly reasoningEffort: string;
+  /**
+   * Model the user assigned to sub-agents of the answering model. Set once
+   * the answering model changed mid-session to one whose assignment differs
+   * from the session's `agents.default_subagent_model`. An agent definition
+   * that pins its own model still wins over the spawn value.
+   */
+  readonly subagentModel?: string | undefined;
+  /**
+   * The `<subordinate_models>` block for the answering model, built by
+   * `buildSubordinateRoster`; absent when the user placed no models under it.
+   */
+  readonly subordinateRoster?: string | undefined;
+  /** Mandatory unified global assistant contract elevated into Codex developer instructions. */
+  readonly globalInstructions?: string | undefined;
 }
 
 // Values come from trusted config, but keep the block single-line regardless.
@@ -168,7 +179,14 @@ export function buildCodexDeveloperInstructions(
     interactionMode === "plan"
       ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
       : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
+  const subagents = runtime.subagentModel
+    ? `
+
+<subagent_model>The user assigned ${toSingleLine(runtime.subagentModel)} as the model for sub-agents you spawn while answering as this model. Pass it as the model whenever you spawn a native agent, unless the user or that agent's own definition names a different one. Use the current request's workspace_delegate roster for T3 team assignments. Never substitute a native agent for a designated member.</subagent_model>`
+    : "";
+  const subordinates = runtime.subordinateRoster ? `\n\n${runtime.subordinateRoster}` : "";
+  const globalBlock = runtime.globalInstructions ? `\n\n${runtime.globalInstructions}` : "";
   return `${base}
 
-<runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
+<runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>${subagents}${subordinates}${globalBlock}`;
 }

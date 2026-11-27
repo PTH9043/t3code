@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useMatch, useNavigate } from "@tanstack/react-router";
 import {
+  CommandId,
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_CONVERSATION_RAG_SETTINGS,
   DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
+  formatPdfSearchEditionLabel,
   ProviderInstanceId,
   ThreadId,
   WorkspaceKnowledgeItemId,
@@ -36,6 +38,7 @@ import {
   CheckIcon,
   CrownIcon,
   DatabaseIcon,
+  DownloadIcon,
   FileStackIcon,
   FolderCogIcon,
   PlusIcon,
@@ -62,6 +65,14 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import {
+  Dialog,
+  DialogPopup,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "../ui/dialog";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
@@ -69,6 +80,10 @@ import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
 import { McpToolsSection } from "../settings/McpToolsSection";
 import { WorkspaceDesignReference } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { KNOWLEDGE_KIND_LABELS } from "../knowledge/knowledgeKinds";
+import { KnowledgeDocLink, knowledgeDashboardRoute } from "../knowledge/KnowledgeDocLink";
+import { KnowledgeExcerpt } from "../knowledge/StoredKnowledgeOriginal";
+import { restoreWikiDocument } from "../knowledge/knowledgeApi";
 import { DesignReferenceFields, DesignReferencePreview } from "./DesignReferenceFields";
 import {
   CompletionAutomationSection,
@@ -82,9 +97,23 @@ import { CollaborationSection } from "./CollaborationSection";
 import { WorkspaceAutomationSection } from "./WorkspaceAutomationSection";
 import { WorkspacePromptDiagnostics, WorkspacePromptTokens } from "./WorkspacePromptDiagnostics";
 import { WorkspaceResearchPanel } from "./WorkspaceResearchPanel";
+import {
+  renderWorkspaceKnowledgePrintView,
+  serializeWorkspaceKnowledgeExport,
+  serializeWorkspaceKnowledgeMarkdown,
+  type KnowledgeExportScope,
+} from "./workspaceKnowledgeExport";
 import { ExecutionProfiles, ExecutionProfileSelect } from "./ExecutionProfiles";
 import { AttentionInbox } from "./AttentionInbox";
-import { WorkspaceSectionNav } from "./WorkspaceSectionNav";
+import { MissionControlView } from "./missionControl/MissionControlView";
+import {
+  WorkspaceSectionNav,
+  defaultSectionForDomain,
+  getControlCenterSection,
+  resolveControlCenterTabState,
+  type ControlCenterDomainId,
+  type ControlCenterSectionId,
+} from "./WorkspaceSectionNav";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import {
   ROLE_LABELS,
@@ -99,16 +128,6 @@ const decodeDesign = Schema.decodeUnknownSync(WorkspaceDesignReference);
 
 const SELECT_CLASS =
   "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-shadow focus:border-ring focus:ring-3 focus:ring-ring/20 dark:bg-input/32";
-
-const KNOWLEDGE_KIND_LABELS: Readonly<Record<WorkspaceKnowledgeKind, string>> = {
-  directive: "사용자 지침",
-  goal: "영속 목표",
-  "rag-source": "RAG 자료",
-  "run-memory": "실행 기억",
-  "working-memory": "작업 기억",
-  "long-term-memory": "장기기억",
-  prompt: "프롬프트 조각",
-};
 
 const ALL_ROLES = Object.keys(ROLE_LABELS) as WorkspaceAgentRole[];
 const ALL_KNOWLEDGE_KINDS = Object.keys(KNOWLEDGE_KIND_LABELS) as WorkspaceKnowledgeKind[];
@@ -180,7 +199,103 @@ function runtimeEvidenceAuthorityLabel(authority: WorkspaceRuntimeEvidence["auth
   return "프로젝트 오케스트레이션";
 }
 
-function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
+export interface RuntimeEvidenceSummary {
+  readonly visibleItems: ReadonlyArray<WorkspaceRuntimeEvidence>;
+  readonly totalCount: number;
+  readonly attentionCount: number;
+  readonly visibleAttentionCount: number;
+}
+
+export function selectRuntimeEvidenceSummary(
+  evidence: ReadonlyArray<WorkspaceRuntimeEvidence>,
+  limit = 12,
+): RuntimeEvidenceSummary {
+  const visibleItems = evidence.slice(0, limit);
+  const isAttention = (item: WorkspaceRuntimeEvidence) =>
+    item.status === "blocked" || item.status === "failed";
+  const attentionCount = evidence.filter(isAttention).length;
+  const visibleAttentionCount = visibleItems.filter(isAttention).length;
+  return {
+    visibleItems,
+    totalCount: evidence.length,
+    attentionCount,
+    visibleAttentionCount,
+  };
+}
+
+export interface RuntimeKpiCard {
+  readonly id: string;
+  readonly label: string;
+  readonly value: number;
+  readonly detail: string;
+}
+
+export function buildRuntimeKpiCards(
+  counts:
+    | {
+        readonly workingThreadCount?: number;
+        readonly blockedThreadCount?: number;
+        readonly failedThreadCount?: number;
+        readonly completedUnseenCount?: number;
+        readonly activeProgramCount?: number;
+        readonly unhealthyProgramCount?: number;
+        readonly openIncidentCount?: number;
+        readonly activeCollaborationCount?: number;
+        readonly enabledScheduleCount?: number;
+      }
+    | undefined,
+): ReadonlyArray<RuntimeKpiCard> {
+  const workingThreads = counts?.workingThreadCount ?? 0;
+  const blockedThreads = counts?.blockedThreadCount ?? 0;
+  const failedThreads = counts?.failedThreadCount ?? 0;
+  const completedUnseen = counts?.completedUnseenCount ?? 0;
+  const activePrograms = counts?.activeProgramCount ?? 0;
+  const unhealthyPrograms = counts?.unhealthyProgramCount ?? 0;
+  const openIncidents = counts?.openIncidentCount ?? 0;
+  const activeCollaborations = counts?.activeCollaborationCount ?? 0;
+  const enabledSchedules = counts?.enabledScheduleCount ?? 0;
+
+  return [
+    {
+      id: "active-work",
+      label: "진행 중 작업",
+      value: workingThreads + activeCollaborations,
+      detail: `대화 ${workingThreads} · 작업 그래프 ${activeCollaborations}`,
+    },
+    {
+      id: "attention-needed",
+      label: "확인·오류 필요",
+      value: blockedThreads + failedThreads + openIncidents,
+      detail: `확인 ${blockedThreads} · 오류 ${failedThreads} · 장애 ${openIncidents}`,
+    },
+    {
+      id: "completed-unseen",
+      label: "새 완료",
+      value: completedUnseen,
+      detail: "미확인 완료 대화",
+    },
+    {
+      id: "programs",
+      label: "실행 프로그램",
+      value: activePrograms,
+      detail: `비정상 ${unhealthyPrograms} · 열린 장애 ${openIncidents}`,
+    },
+    {
+      id: "schedules",
+      label: "활성 스케줄",
+      value: enabledSchedules,
+      detail: "무인 예약 작업",
+    },
+  ];
+}
+
+function WorkspaceRuntimeSection({
+  project,
+  onSelectSection,
+}: {
+  project: EnvironmentProject;
+  onSelectSection: (section: ControlCenterSectionId) => void;
+}) {
   const navigate = useNavigate();
   const runtime = useEnvironmentQuery(
     orchestrationEnvironment.workspaceRuntime({
@@ -195,6 +310,11 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
   const snapshot = runtime.data;
   const counts = snapshot?.counts;
   const lastViewedReceiptRef = useRef<string | null>(null);
+  const kpiCards = useMemo(() => buildRuntimeKpiCards(counts), [counts]);
+  const evidenceSummary = useMemo(
+    () => selectRuntimeEvidenceSummary(snapshot?.evidence ?? []),
+    [snapshot?.evidence],
+  );
 
   useEffect(() => {
     if (snapshot?.attention !== "completed-unseen" || snapshot.latestCompletionAt === null) return;
@@ -227,7 +347,7 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
       });
       return;
     }
-    const sectionId =
+    const sectionId: ControlCenterSectionId =
       item.source === "program" || item.source === "incident"
         ? "project-programs"
         : item.source === "collaboration"
@@ -235,7 +355,7 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
           : item.source === "monitoring"
             ? "project-monitoring"
             : "project-automation";
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    onSelectSection(sectionId);
   };
 
   return (
@@ -270,21 +390,15 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
       {runtime.error ? <p className="text-sm text-destructive">{runtime.error}</p> : null}
       {snapshot ? (
         <div className="grid gap-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
-            {[
-              ["작업 중 대화", counts?.workingThreadCount ?? 0],
-              ["확인할 대화", counts?.blockedThreadCount ?? 0],
-              ["오류 대화", counts?.failedThreadCount ?? 0],
-              ["새 완료", counts?.completedUnseenCount ?? 0],
-              ["실행 프로그램", counts?.activeProgramCount ?? 0],
-              ["비정상 프로그램", counts?.unhealthyProgramCount ?? 0],
-              ["열린 장애", counts?.openIncidentCount ?? 0],
-              ["실행 작업 그래프", counts?.activeCollaborationCount ?? 0],
-              ["활성 스케줄", counts?.enabledScheduleCount ?? 0],
-            ].map(([label, value]) => (
-              <div key={label} className="rounded-xl border border-border/65 bg-muted/20 p-3">
-                <p className="text-[11px] text-muted-foreground">{label}</p>
-                <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2">
+            {kpiCards.map((card) => (
+              <div
+                key={card.id}
+                className="min-w-0 rounded-xl border border-border/65 bg-muted/20 p-3"
+              >
+                <p className="truncate text-[11px] text-muted-foreground">{card.label}</p>
+                <p className="mt-1 text-xl font-semibold tabular-nums">{card.value}</p>
+                <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{card.detail}</p>
               </div>
             ))}
           </div>
@@ -294,18 +408,19 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
               <div>
                 <h3 className="text-sm font-semibold">판정 근거</h3>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  확인 또는 오류 근거 {counts?.attentionCount ?? 0}개 · 갱신{" "}
+                  확인 또는 오류 근거 {evidenceSummary.attentionCount}개 · 근거{" "}
+                  {evidenceSummary.visibleItems.length}/{evidenceSummary.totalCount}건 · 갱신{" "}
                   {formatTimestamp(snapshot.updatedAt)}
                 </p>
               </div>
-              {(counts?.attentionCount ?? 0) > 0 ? (
+              {evidenceSummary.attentionCount > 0 ? (
                 <AlertTriangleIcon className="size-4 text-warning" />
               ) : (
                 <CheckIcon className="size-4 text-success" />
               )}
             </div>
             <div className="divide-y divide-border/55">
-              {snapshot.evidence.slice(0, 12).map((item) => (
+              {evidenceSummary.visibleItems.map((item) => (
                 <button
                   type="button"
                   key={`${item.source}:${item.sourceId}:${item.status}`}
@@ -334,7 +449,7 @@ function WorkspaceRuntimeSection({ project }: { project: EnvironmentProject }) {
                   </time>
                 </button>
               ))}
-              {snapshot.evidence.length === 0 ? (
+              {evidenceSummary.visibleItems.length === 0 ? (
                 <p className="px-4 py-8 text-center text-sm text-muted-foreground">
                   아직 실행 근거가 없습니다. 프로젝트는 유휴 상태입니다.
                 </p>
@@ -467,7 +582,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
   const [compactHandoffs, setCompactHandoffs] = useState(
     configuredContext?.compactHandoffs ?? false,
   );
-  const [autoChatMemory, setAutoChatMemory] = useState(configuredContext?.autoChatMemory ?? false);
+  const [autoChatMemory, setAutoChatMemory] = useState(configuredContext?.autoChatMemory ?? true);
   const [contextTokens, setContextTokens] = useState(
     String(configuredContext?.maxContextTokens ?? ""),
   );
@@ -510,7 +625,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     setOrchestraIsolate(configuredOrchestra.isolateWorktrees);
     setRelevantMemory(configuredContext?.memoryMode === "relevant");
     setCompactHandoffs(configuredContext?.compactHandoffs ?? false);
-    setAutoChatMemory(configuredContext?.autoChatMemory ?? false);
+    setAutoChatMemory(configuredContext?.autoChatMemory ?? true);
     setContextTokens(String(configuredContext?.maxContextTokens ?? ""));
   }, [
     configuredAgentKnowledge,
@@ -541,7 +656,7 @@ function WorkspaceBoundarySection({ project }: { project: EnvironmentProject }) 
     normalizedContextTokens !== (configuredContext?.maxContextTokens ?? null) ||
     relevantMemory !== (configuredContext?.memoryMode === "relevant") ||
     compactHandoffs !== (configuredContext?.compactHandoffs ?? false) ||
-    autoChatMemory !== (configuredContext?.autoChatMemory ?? false) ||
+    autoChatMemory !== (configuredContext?.autoChatMemory ?? true) ||
     memoryRoot !== configuredRoot ||
     conversationRagEnabled !== configuredConversationRag.enabled ||
     redactSensitiveData !== configuredConversationRag.redactSensitiveData ||
@@ -814,9 +929,96 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
   const knowledge = useEnvironmentQuery(
     orchestrationEnvironment.workspaceKnowledge({
       environmentId: project.environmentId,
-      input: { projectId: project.id, includeShared: false },
+      input: { projectId: project.id, includeShared: false, summariesOnly: true },
     }),
   );
+  const exportKnowledge = useAtomCommand(orchestrationEnvironment.exportWorkspaceKnowledge, {
+    label: "프로젝트 기억 전체 목록 내보내기",
+    reportFailure: false,
+  });
+  const [exportingKnowledge, setExportingKnowledge] = useState(false);
+  const [exportScope, setExportScope] = useState<KnowledgeExportScope>("all");
+  const [printView, setPrintView] = useState<string | null>(null);
+  const [printReady, setPrintReady] = useState(false);
+  const printFrame = useRef<HTMLIFrameElement>(null);
+  const exportKnowledgeList = async (format: "json" | "markdown" | "pdf") => {
+    setExportingKnowledge(true);
+    try {
+      const result = await exportKnowledge({
+        environmentId: project.environmentId,
+        input: { projectId: project.id, includeShared: false, includeArchiveSnapshot: true },
+      });
+      if (
+        notifyCommandFailure(result, "기억 목록을 가져오지 못했습니다.") ||
+        result._tag !== "Success"
+      )
+        return;
+      if (!result.value.archiveSnapshot)
+        throw new Error("서버가 전체 기억 내보내기를 지원하지 않습니다. 최신 서버를 사용하세요.");
+      const exportedAt = new Date().toISOString();
+      const input = {
+        projectId: project.id,
+        projectTitle: project.title,
+        exportedAt,
+        items: result.value.items,
+        archiveSnapshot: result.value.archiveSnapshot,
+        scope: exportScope,
+      };
+      const safeProjectId = project.id.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const scopeSuffix =
+        exportScope === "user_only"
+          ? "-user-dialogue-style"
+          : exportScope === "ai_only"
+            ? "-ai-research-outputs"
+            : "";
+      if (format === "pdf") {
+        setPrintReady(false);
+        setPrintView(renderWorkspaceKnowledgePrintView(input));
+      } else if (format === "markdown") {
+        const md = serializeWorkspaceKnowledgeMarkdown(input);
+        const url = URL.createObjectURL(new Blob([md], { type: "text/markdown;charset=utf-8" }));
+        try {
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `t3-knowledge-${safeProjectId}${scopeSuffix}-${exportedAt.slice(0, 10)}.md`;
+          link.click();
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } else {
+        const json = serializeWorkspaceKnowledgeExport(input);
+        const url = URL.createObjectURL(
+          new Blob([json], { type: "application/json;charset=utf-8" }),
+        );
+        try {
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `t3-knowledge-${safeProjectId}${scopeSuffix}-${exportedAt.slice(0, 10)}.json`;
+          link.click();
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+      const scopeToastLabel =
+        exportScope === "user_only"
+          ? "내 대화·말투 분리 기억"
+          : exportScope === "ai_only"
+            ? "AI 작성·조사 결과 기억"
+            : "전체 기억(분리 구역 포함)";
+      notifySuccess(
+        format === "pdf" ? "PDF 인쇄 보기를 열었습니다." : `${scopeToastLabel}을 내보냈습니다.`,
+        `지식 ${input.items.length.toLocaleString("ko-KR")}개 · 대화 ${input.archiveSnapshot.threads.length.toLocaleString("ko-KR")}개`,
+      );
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "전체 기억 내보내기 실패",
+        description: error instanceof Error ? error.message : "파일을 만들지 못했습니다.",
+      });
+    } finally {
+      setExportingKnowledge(false);
+    }
+  };
   const upsertKnowledge = useAtomCommand(projectEnvironment.upsertWorkspaceKnowledgeItem, {
     label: "프로젝트 지식 저장",
     reportFailure: false,
@@ -831,7 +1033,6 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
   const [relativeFolder, setRelativeFolder] = useState("");
   const [scope, setScope] = useState<WorkspaceKnowledgeScope>("project");
   const [appliesToFolder, setAppliesToFolder] = useState("");
-  const [editingItem, setEditingItem] = useState<WorkspaceKnowledgeItem | null>(null);
   const [design, setDesign] = useState<WorkspaceDesignReference | null>(null);
   const [tags, setTags] = useState("");
   const [saving, setSaving] = useState(false);
@@ -959,7 +1160,7 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
             components: design.components.filter(Boolean),
           })
         : null;
-      const { design: _previousDesign, ...research } = editingItem?.research ?? {
+      const research = {
         query: title.trim(),
         sources: [],
         capturedAt: new Date().toISOString(),
@@ -968,32 +1169,22 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
       const result = await upsertKnowledge({
         environmentId: project.environmentId,
         input: {
-          projectId: editingItem?.projectId ?? project.id,
-          itemId: editingItem?.id ?? WorkspaceKnowledgeItemId.make(`knowledge-${randomUUID()}`),
+          projectId: project.id,
+          itemId: WorkspaceKnowledgeItemId.make(`knowledge-${randomUUID()}`),
           kind: validDesign && kind !== "long-term-memory" ? "rag-source" : kind,
           title: title.trim(),
           content: content.trim(),
           status: "active",
-          origin: editingItem?.origin ?? "user",
+          origin: "user",
           scope,
           appliesToFolder: scope === "folder" ? appliesToFolder.trim().replaceAll("\\", "/") : null,
-          research:
-            validDesign || editingItem?.research
-              ? {
-                  ...research,
-                  ...(validDesign
-                    ? {
-                        design: validDesign,
-                        sources: [
-                          ...new Set([
-                            ...research.sources,
-                            ...(validDesign.sourceUrl ? [validDesign.sourceUrl] : []),
-                          ]),
-                        ],
-                      }
-                    : {}),
-                }
-              : null,
+          research: validDesign
+            ? {
+                ...research,
+                design: validDesign,
+                sources: validDesign.sourceUrl ? [validDesign.sourceUrl] : [],
+              }
+            : null,
           relativeFolder:
             kind === "long-term-memory" && relativeFolder.trim()
               ? relativeFolder.trim().replaceAll("\\", "/")
@@ -1009,7 +1200,6 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
         setContent("");
         setRelativeFolder("");
         setAppliesToFolder("");
-        setEditingItem(null);
         setDesign(null);
         setTags("");
         knowledge.refresh();
@@ -1041,36 +1231,11 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
     }
   };
 
-  const edit = (item: WorkspaceKnowledgeItem) => {
-    setEditingItem(item);
-    setDesign(item.research?.design ?? null);
-    setKind(item.kind);
-    setTitle(item.title);
-    setContent(item.content);
-    setTags(item.tags.join(", "));
-    setRelativeFolder(item.relativeFolder ?? "");
-    setScope(item.scope ?? "project");
-    setAppliesToFolder(item.appliesToFolder ?? "");
-    document.getElementById("knowledge-title")?.focus();
-  };
-
+  const restoreDocument = useAtomCommand(restoreWikiDocument, { reportFailure: false });
   const restore = async (item: WorkspaceKnowledgeItem) => {
-    const result = await upsertKnowledge({
+    const result = await restoreDocument({
       environmentId: project.environmentId,
-      input: {
-        projectId: item.projectId,
-        itemId: item.id,
-        kind: item.kind,
-        title: item.title,
-        content: item.content,
-        status: "active",
-        origin: item.origin,
-        relativeFolder: item.relativeFolder,
-        tags: item.tags,
-        scope: item.scope ?? "project",
-        appliesToFolder: item.appliesToFolder ?? null,
-        research: item.research ?? null,
-      },
+      input: { projectId: project.id, itemId: item.id, commandId: CommandId.make(randomUUID()) },
     });
     if (!notifyCommandFailure(result, "지식 항목 복원 실패")) {
       knowledge.refresh();
@@ -1185,25 +1350,8 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           <div className="flex justify-end">
             <Button onClick={() => void save()} disabled={saving}>
               {saving ? <RefreshCcwIcon /> : <DatabaseIcon />}
-              {editingItem ? "변경 저장" : "기억 저장"}
+              기억 저장
             </Button>
-            {editingItem ? (
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setEditingItem(null);
-                  setDesign(null);
-                  setTitle("");
-                  setContent("");
-                  setRelativeFolder("");
-                  setAppliesToFolder("");
-                  setTags("");
-                  setScope("project");
-                }}
-              >
-                편집 취소
-              </Button>
-            ) : null}
           </div>
         </div>
 
@@ -1274,7 +1422,9 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           <div className="grid content-start gap-3 rounded-xl border border-border/70 p-4">
             <div className="flex items-center gap-2">
               <SearchIcon className="size-4 text-primary" />
-              <h3 className="text-sm font-semibold">격리 RAG 검색</h3>
+              <h3 id="project-knowledge-search" className="scroll-mt-4 text-sm font-semibold">
+                격리 RAG 검색
+              </h3>
             </div>
             <div className="flex gap-2">
               <Input
@@ -1305,9 +1455,22 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                 className="rounded-lg bg-muted/35 p-3"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-xs font-semibold">{match.title}</span>
+                  <span className="truncate text-xs font-semibold">
+                    <KnowledgeDocLink
+                      environmentId={project.environmentId}
+                      projectId={match.projectId}
+                      itemId={match.itemId}
+                    >
+                      {match.title}
+                    </KnowledgeDocLink>
+                  </span>
                   <Badge variant="outline">{KNOWLEDGE_KIND_LABELS[match.kind]}</Badge>
                 </div>
+                {match.pdfRevision && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {formatPdfSearchEditionLabel(match.pdfRevision)}
+                  </p>
+                )}
                 <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs text-muted-foreground">
                   {match.snippet}
                 </p>
@@ -1379,6 +1542,7 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                 ) : null}
                 {composedPrompt.data.diagnostics ? (
                   <WorkspacePromptDiagnostics
+                    environmentId={project.environmentId}
                     diagnostics={composedPrompt.data.diagnostics}
                     items={knowledge.data?.items ?? []}
                   />
@@ -1394,11 +1558,63 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
         <div className="grid gap-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold">저장 항목</h3>
-            <Button size="xs" variant="ghost" onClick={knowledge.refresh}>
-              <RefreshCcwIcon />
-              새로고침
-            </Button>
+            <div className="flex flex-wrap items-center gap-1">
+              <Link
+                to={knowledgeDashboardRoute}
+                params={{ environmentId: project.environmentId, projectId: project.id }}
+                className="inline-flex h-6 items-center rounded-lg border px-2 text-xs font-medium text-primary"
+              >
+                위키 관리
+              </Link>
+              <select
+                aria-label="기억 내보내기 구분"
+                className="h-6 rounded-lg border bg-background px-2 text-xs"
+                value={exportScope}
+                onChange={(event) => setExportScope(event.target.value as KnowledgeExportScope)}
+              >
+                <option value="all">전체 (분리 구역 포함)</option>
+                <option value="user_only">내 대화·말투만</option>
+                <option value="ai_only">AI 작성·조사 결과만</option>
+              </select>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => void exportKnowledgeList("json")}
+                disabled={exportingKnowledge}
+              >
+                <DownloadIcon />
+                {exportingKnowledge ? "내보내는 중…" : "JSON 내보내기"}
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => void exportKnowledgeList("markdown")}
+                disabled={exportingKnowledge}
+              >
+                <DownloadIcon />
+                Markdown (.md)
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => void exportKnowledgeList("pdf")}
+                disabled={exportingKnowledge}
+              >
+                <FileStackIcon />
+                PDF 보기 / 저장
+              </Button>
+              <Button size="xs" variant="ghost" onClick={knowledge.refresh}>
+                <RefreshCcwIcon />
+                새로고침
+              </Button>
+            </div>
           </div>
+          <p className="text-xs text-muted-foreground">
+            내 대화·말투 프로필(<code>user-utterances/</code>)과 AI 작성·조사 결과(
+            <code>ai-outputs/</code>)는 물리적으로 분리 보관되며 AI는 두 영역을 모두 참조할 수
+            있습니다. 위 구분 선택으로 내 대화·말투만, AI 조사 결과만, 또는 분리 구역이 모두 담긴
+            전체 파일을 JSON·Markdown·PDF로 각각 저장할 수 있습니다.
+          </p>
           {knowledge.error ? <p className="text-xs text-destructive">{knowledge.error}</p> : null}
           <div className="grid gap-2 lg:grid-cols-2">
             {knowledge.data?.items.map((item) => (
@@ -1410,7 +1626,15 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                   <FileStackIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <h4 className="truncate text-sm font-medium">{item.title}</h4>
+                      <h4 className="truncate text-sm font-medium">
+                        <KnowledgeDocLink
+                          environmentId={project.environmentId}
+                          projectId={item.projectId}
+                          itemId={item.id}
+                        >
+                          {item.title}
+                        </KnowledgeDocLink>
+                      </h4>
                       <Badge variant="outline">
                         {item.scope === "environment"
                           ? "공용"
@@ -1448,9 +1672,11 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                         <Badge variant="warning">미사용</Badge>
                       )}
                     </div>
-                    <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                      {item.content}
-                    </p>
+                    <KnowledgeExcerpt
+                      environmentId={project.environmentId}
+                      projectId={item.projectId}
+                      itemId={item.id}
+                    />
                     {item.research?.design ? (
                       <DesignReferencePreview
                         environmentId={project.environmentId}
@@ -1474,9 +1700,17 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
                       </p>
                     ) : null}
                   </div>
-                  <Button size="xs" variant="ghost" onClick={() => edit(item)}>
-                    수정
-                  </Button>
+                  {item.status !== "archived" && (
+                    <KnowledgeDocLink
+                      environmentId={project.environmentId}
+                      projectId={item.projectId}
+                      itemId={item.id}
+                      view="edit"
+                      className="rounded px-2 py-1 text-xs font-medium text-primary hover:underline"
+                    >
+                      수정
+                    </KnowledgeDocLink>
+                  )}
                   {item.status !== "archived" ? (
                     <Button
                       size="icon-xs"
@@ -1497,6 +1731,38 @@ function KnowledgeSection({ project }: { project: EnvironmentProject }) {
           </div>
         </div>
       </div>
+      <Dialog
+        open={printView !== null}
+        onOpenChange={(open) => {
+          if (!open) setPrintView(null);
+        }}
+      >
+        <DialogPopup className="w-[min(96vw,72rem)] max-w-none">
+          <DialogHeader>
+            <DialogTitle>전체 기억 PDF 미리보기</DialogTitle>
+            <DialogDescription>인쇄 창에서 PDF로 저장할 수 있습니다.</DialogDescription>
+          </DialogHeader>
+          <iframe
+            ref={printFrame}
+            title="전체 기억 인쇄 미리보기"
+            sandbox="allow-same-origin allow-modals"
+            srcDoc={printView ?? ""}
+            onLoad={() => setPrintReady(true)}
+            className="h-[65vh] w-full border-y bg-white"
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPrintView(null)}>
+              닫기
+            </Button>
+            <Button
+              disabled={!printReady}
+              onClick={() => printFrame.current?.contentWindow?.print()}
+            >
+              PDF로 저장 / 인쇄
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </SectionCard>
   );
 }
@@ -2313,120 +2579,292 @@ function ScheduleSection({ project }: { project: EnvironmentProject }) {
 }
 
 export function WorkspaceControlCenter({ project }: { project: EnvironmentProject }) {
+  const navigate = useNavigate();
+  const match = useMatch({ from: "/control-center/$environmentId/$projectId", shouldThrow: false });
+  const hash = useLocation({ select: (location) => location.hash });
+  const isOwnRoute =
+    match?.params.environmentId === project.environmentId && match?.params.projectId === project.id;
+  const routeDomain = isOwnRoute ? match?.search.domain : undefined;
+  const routeSection = isOwnRoute ? match?.search.section : undefined;
+  const routeKnowledgeRun = isOwnRoute ? match?.search.knowledgeRun : undefined;
+  const routeHash = isOwnRoute ? hash : "";
+
+  const [tabState, setTabState] = useState(() =>
+    resolveControlCenterTabState({
+      domain: routeDomain,
+      section: routeSection,
+      hash: routeHash,
+      knowledgeRun: routeKnowledgeRun,
+    }),
+  );
+  const [heroExpanded, setHeroExpanded] = useState(false);
+  const showFullHero = tabState.section === "project-status" || heroExpanded;
+
+  useEffect(() => {
+    if (!isOwnRoute) return;
+    if (!routeDomain && !routeSection && !routeHash && !routeKnowledgeRun) return;
+    const resolved = resolveControlCenterTabState({
+      domain: routeDomain,
+      section: routeSection,
+      hash: routeHash,
+      knowledgeRun: routeKnowledgeRun,
+    });
+    setTabState((current) =>
+      current.domain === resolved.domain && current.section === resolved.section
+        ? current
+        : resolved,
+    );
+  }, [isOwnRoute, routeDomain, routeHash, routeKnowledgeRun, routeSection]);
+
+  const navigateToScopedTab = useCallback(
+    (nextDomain: ControlCenterDomainId, nextSection: ControlCenterSectionId) => {
+      setTabState({ domain: nextDomain, section: nextSection });
+      void navigate({
+        to: "/control-center/$environmentId/$projectId",
+        params: {
+          environmentId: project.environmentId,
+          projectId: project.id,
+        },
+        search: (previous) => ({
+          ...(previous?.knowledgeRun ? { knowledgeRun: previous.knowledgeRun } : {}),
+          domain: nextDomain,
+          section: nextSection,
+        }),
+        hash: "",
+        replace: true,
+        resetScroll: false,
+      });
+    },
+    [navigate, project.environmentId, project.id],
+  );
+
+  const selectDomain = useCallback(
+    (nextDomain: ControlCenterDomainId) => {
+      const nextSection =
+        tabState.domain === nextDomain ? tabState.section : defaultSectionForDomain(nextDomain);
+      navigateToScopedTab(nextDomain, nextSection);
+    },
+    [navigateToScopedTab, tabState.domain, tabState.section],
+  );
+
+  const selectSection = useCallback(
+    (nextSection: ControlCenterSectionId) => {
+      const def = getControlCenterSection(nextSection);
+      navigateToScopedTab(def.domain, def.id);
+    },
+    [navigateToScopedTab],
+  );
+
+  const renderActiveSection = () => {
+    switch (tabState.section) {
+      case "mission-control":
+        return (
+          <MissionControlView project={project} onExit={() => selectSection("project-status")} />
+        );
+      case "project-status":
+        return <WorkspaceRuntimeSection project={project} onSelectSection={selectSection} />;
+      case "attention-inbox":
+        return <AttentionInbox project={project} />;
+      case "project-runs":
+        return <CollaborationSection project={project} />;
+      case "project-automation-results":
+        return (
+          <WorkspaceAutomationSection
+            key={`${project.environmentId}:${project.id}`}
+            project={project}
+          />
+        );
+      case "project-profiles":
+        return (
+          <section id="project-profiles">
+            <ExecutionProfiles
+              environmentId={project.environmentId}
+              folderKey={`${project.environmentId}:${project.id}`}
+            />
+          </section>
+        );
+      case "conversation-transfer":
+        return <ConversationTransferSection project={project} />;
+      case "project-memory":
+        return <WorkspaceBoundarySection project={project} />;
+      case "project-knowledge":
+        return <KnowledgeSection project={project} />;
+      case "project-tools":
+        return (
+          <McpToolsSection
+            id="project-tools"
+            environmentId={project.environmentId}
+            workspaceRoot={project.workspaceRoot}
+          />
+        );
+      case "extensions":
+        return (
+          <ExtensionsSection
+            environmentId={project.environmentId}
+            workspaceRoot={project.workspaceRoot}
+          />
+        );
+      case "project-automation":
+        return <ScheduleSection project={project} />;
+      case "completion-checks":
+        return (
+          <div className="grid gap-5">
+            <CompletionAutomationSection project={project} />
+            <CompletionAutomationReceipts project={project} />
+          </div>
+        );
+      case "project-accounts":
+        return <RoleSection project={project} />;
+      case "project-programs":
+        return (
+          <section id="project-programs" className="scroll-mt-24">
+            <WorkspaceProgramsSection project={project} />
+          </section>
+        );
+      case "project-monitoring":
+        return <WorkspaceMonitoringSection project={project} />;
+      case "project-terminals":
+        return <ProjectTerminalsSection project={project} />;
+    }
+  };
+
   return (
     <main className="workspace-control-center min-h-0 flex-1 overflow-y-auto bg-muted/15">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-6 sm:px-6 lg:px-8">
-        <section className="rounded-2xl border border-border bg-card p-5 sm:p-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-primary">
-                <FolderCogIcon className="size-4" />
-                <span className="text-xs font-semibold uppercase tracking-wide">
-                  프로젝트 작업실
-                </span>
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 pt-4 pb-12 sm:px-6 lg:px-8">
+        {showFullHero ? (
+          <section
+            data-project-hero-mode="expanded"
+            className="rounded-2xl border border-border bg-card p-5 sm:p-6"
+          >
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-primary">
+                  <FolderCogIcon className="size-4" />
+                  <span className="text-xs font-semibold uppercase tracking-wide">
+                    프로젝트 작업실
+                  </span>
+                </div>
+                <h1 className="mt-2 truncate text-2xl font-semibold tracking-tight">
+                  {project.title}
+                </h1>
+                <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+                  {project.workspaceRoot}
+                </p>
               </div>
-              <h1 className="mt-2 truncate text-2xl font-semibold tracking-tight">
-                {project.title}
-              </h1>
-              <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
-                {project.workspaceRoot}
-              </p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="success">
+                  <ShieldCheckIcon /> 엄격 격리
+                </Badge>
+                <Badge variant="info">
+                  <DatabaseIcon /> 기억 격리
+                </Badge>
+                <Badge variant="warning">
+                  <CrownIcon /> 사용자 우선
+                </Badge>
+                {tabState.section !== "project-status" ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => setHeroExpanded(false)}
+                  >
+                    상단 요약 접기
+                  </Button>
+                ) : null}
+              </div>
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              <Badge variant="success">
+            <p className="mt-3 max-w-4xl text-sm leading-relaxed text-muted-foreground">
+              AI 실행부터 도구 연결, 프로젝트 기억과 후속 자동화까지 관리하세요.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-2 border-t border-border pt-4 sm:grid-cols-4">
+              {(
+                [
+                  {
+                    id: "project-runs",
+                    label: "AI 실행",
+                    detail: "작업 시작·결과 확인",
+                    icon: BotIcon,
+                  },
+                  {
+                    id: "project-profiles",
+                    label: "실행 프로필",
+                    detail: "저장한 구성 적용",
+                    icon: SparklesIcon,
+                  },
+                  {
+                    id: "project-tools",
+                    label: "MCP 도구",
+                    detail: "연결·제공 도구 확인",
+                    icon: TerminalIcon,
+                  },
+                  {
+                    id: "project-memory",
+                    label: "프로젝트 기억",
+                    detail: "RAG·지침·장기기억",
+                    icon: DatabaseIcon,
+                  },
+                ] as const
+              ).map(({ id, label, detail, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => selectSection(id)}
+                  className="flex items-center gap-3 rounded-xl p-3 text-left transition-colors hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
+                    <Icon className="size-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold">{label}</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">{detail}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <section
+            data-project-hero-mode="compact"
+            className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-card/95 px-4 py-2.5 shadow-xs backdrop-blur-md"
+          >
+            <div className="flex min-w-0 items-center gap-2.5">
+              <FolderCogIcon className="size-4 shrink-0 text-primary" />
+              <h1 className="truncate text-sm font-semibold tracking-tight">{project.title}</h1>
+              <span className="hidden truncate font-mono text-[11px] text-muted-foreground md:inline">
+                {project.workspaceRoot}
+              </span>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+              <Badge variant="success" size="sm">
                 <ShieldCheckIcon /> 엄격 격리
               </Badge>
-              <Badge variant="info">
+              <Badge variant="info" size="sm">
                 <DatabaseIcon /> 기억 격리
               </Badge>
-              <Badge variant="warning">
-                <CrownIcon /> 사용자 우선
-              </Badge>
+              <Button type="button" size="xs" variant="ghost" onClick={() => setHeroExpanded(true)}>
+                요약 펼치기
+              </Button>
             </div>
-          </div>
-          <p className="mt-3 max-w-4xl text-sm leading-relaxed text-muted-foreground">
-            AI 실행부터 도구 연결, 프로젝트 기억과 후속 자동화까지 관리하세요.
-          </p>
-          <div className="mt-5 grid grid-cols-2 gap-2 border-t border-border pt-4 sm:grid-cols-4">
-            {[
-              {
-                id: "project-runs",
-                label: "AI 실행",
-                detail: "작업 시작·결과 확인",
-                icon: BotIcon,
-              },
-              {
-                id: "project-profiles",
-                label: "실행 프로필",
-                detail: "저장한 구성 적용",
-                icon: SparklesIcon,
-              },
-              {
-                id: "project-tools",
-                label: "MCP 도구",
-                detail: "연결·제공 도구 확인",
-                icon: TerminalIcon,
-              },
-              {
-                id: "project-memory",
-                label: "프로젝트 기억",
-                detail: "RAG·지침·장기기억",
-                icon: DatabaseIcon,
-              },
-            ].map(({ id, label, detail, icon: Icon }) => (
-              <a
-                key={id}
-                href={`#${id}`}
-                className="flex items-center gap-3 rounded-xl p-3 transition-colors hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
-                  <Icon className="size-4" />
-                </span>
-                <span className="min-w-0">
-                  <span className="block text-sm font-semibold">{label}</span>
-                  <span className="mt-0.5 block text-[11px] text-muted-foreground">{detail}</span>
-                </span>
-              </a>
-            ))}
-          </div>
-        </section>
+          </section>
+        )}
 
-        <WorkspaceSectionNav />
+        <WorkspaceSectionNav
+          activeDomain={tabState.domain}
+          activeSection={tabState.section}
+          onSelectDomain={selectDomain}
+          onSelectSection={selectSection}
+        />
 
-        <AttentionInbox project={project} />
-        <WorkspaceRuntimeSection project={project} />
-        <ProjectTerminalsSection project={project} />
-        <WorkspaceBoundarySection project={project} />
-        <section id="project-programs" className="scroll-mt-24">
-          <WorkspaceProgramsSection project={project} />
-        </section>
-        <WorkspaceMonitoringSection project={project} />
-        <section id="project-profiles">
-          <ExecutionProfiles
-            environmentId={project.environmentId}
-            folderKey={`${project.environmentId}:${project.id}`}
-          />
-        </section>
-        <CollaborationSection project={project} />
-        <WorkspaceAutomationSection
-          key={`${project.environmentId}:${project.id}`}
-          project={project}
-        />
-        <McpToolsSection
-          id="project-tools"
-          environmentId={project.environmentId}
-          workspaceRoot={project.workspaceRoot}
-        />
-        <ExtensionsSection
-          environmentId={project.environmentId}
-          workspaceRoot={project.workspaceRoot}
-        />
-        <RoleSection project={project} />
-        <KnowledgeSection project={project} />
-        <CompletionAutomationSection project={project} />
-        <CompletionAutomationReceipts project={project} />
-        <ConversationTransferSection project={project} />
-        <ScheduleSection project={project} />
+        <div
+          role="tabpanel"
+          id={`cc-tabpanel-${tabState.section}`}
+          aria-labelledby={`cc-section-tab-${tabState.section}`}
+          data-active-domain={tabState.domain}
+          data-active-section={tabState.section}
+          className="grid gap-5"
+        >
+          {renderActiveSection()}
+        </div>
       </div>
     </main>
   );

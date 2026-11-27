@@ -1,4 +1,5 @@
 import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettingsPatch } from "@t3tools/contracts/settings";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -9,6 +10,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
@@ -59,6 +61,9 @@ export class DesktopClientSettings extends Context.Service<
     readonly set: (
       settings: ClientSettings,
     ) => Effect.Effect<void, DesktopClientSettingsWriteError>;
+    readonly patch: (
+      patch: ClientSettingsPatch,
+    ) => Effect.Effect<ClientSettings, DesktopClientSettingsWriteError>;
   }
 >()("@t3tools/desktop/settings/DesktopClientSettings") {}
 
@@ -151,33 +156,49 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
+  const lock = yield* Semaphore.make(1);
+  const write = (settings: ClientSettings) =>
+    crypto.randomUUIDv4.pipe(
+      Effect.map((uuid) => uuid.replace(/-/g, "")),
+      Effect.mapError(
+        (cause) =>
+          new DesktopClientSettingsWriteError({
+            operation: "create-temporary-file-name",
+            path: environment.clientSettingsPath,
+            cause,
+          }),
+      ),
+      Effect.flatMap((suffix) =>
+        writeClientSettings({
+          fileSystem,
+          path,
+          settingsPath: environment.clientSettingsPath,
+          settings,
+          suffix,
+        }),
+      ),
+    );
 
   return DesktopClientSettings.of({
     get: readClientSettings(fileSystem, environment.clientSettingsPath).pipe(
       Effect.withSpan("desktop.clientSettings.get"),
     ),
     set: (settings) =>
-      crypto.randomUUIDv4.pipe(
-        Effect.map((uuid) => uuid.replace(/-/g, "")),
-        Effect.mapError(
-          (cause) =>
-            new DesktopClientSettingsWriteError({
-              operation: "create-temporary-file-name",
-              path: environment.clientSettingsPath,
-              cause,
-            }),
-        ),
-        Effect.flatMap((suffix) =>
-          writeClientSettings({
-            fileSystem,
-            path,
-            settingsPath: environment.clientSettingsPath,
-            settings,
-            suffix,
+      lock.withPermits(1)(write(settings)).pipe(Effect.withSpan("desktop.clientSettings.set")),
+    patch: (patch) =>
+      lock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            const current = Option.getOrElse(
+              yield* readClientSettings(fileSystem, environment.clientSettingsPath),
+              () => DEFAULT_CLIENT_SETTINGS,
+            );
+            const next = { ...current, ...patch };
+            yield* write(next);
+            return next;
           }),
-        ),
-        Effect.withSpan("desktop.clientSettings.set"),
-      ),
+        )
+        .pipe(Effect.withSpan("desktop.clientSettings.patch")),
   });
 });
 
@@ -191,6 +212,11 @@ export const layerTest = (initialSettings: Option.Option<ClientSettings> = Optio
       return DesktopClientSettings.of({
         get: Ref.get(settingsRef),
         set: (settings) => Ref.set(settingsRef, Option.some(settings)),
+        patch: (patch) =>
+          Ref.modify(settingsRef, (current) => {
+            const next = { ...Option.getOrElse(current, () => DEFAULT_CLIENT_SETTINGS), ...patch };
+            return [next, Option.some(next)] as const;
+          }),
       });
     }),
   );

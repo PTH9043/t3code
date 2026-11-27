@@ -25,6 +25,7 @@ export function runWslDirectBridge(serverEntry: string, serverArgs: readonly str
       {
         stdio: ["ignore", "pipe", "pipe", "pipe", "ignore", "ignore", "pipe", "pipe"],
         shell: false,
+        windowsHide: true,
       },
     );
     const streams: ReadonlyArray<NodeStream.Readable | NodeStream.Writable | null | undefined> =

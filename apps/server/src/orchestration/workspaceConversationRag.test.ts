@@ -119,4 +119,31 @@ describe("workspace conversation RAG compaction", () => {
       }),
     ).toBeNull();
   });
+
+  it("populates full provenance metadata (actor, confidence, modelSelection) for automatic conversation RAG items (BUG-06)", () => {
+    const item = toConversationRagKnowledgeItem({
+      projectId: ProjectId.make("project-a"),
+      threadId: ThreadId.make("thread-prov"),
+      threadTitle: "지원 계획표 업데이트",
+      sourceId: MessageId.make("message-prov"),
+      text: "원티드 공고를 지원 계획표에 추가해 주세요.",
+      attachments: [],
+      createdAt: "2026-11-22T05:00:00.000Z",
+      settings,
+      modelSelection: {
+        provider: "gemini",
+        instanceId: "gemini-default" as never,
+        model: "gemini-4-neon",
+      },
+    });
+    expect(item?.provenance).toMatchObject({
+      threadId: "thread-prov",
+      actor: "user",
+      confidence: "medium",
+      modelSelection: {
+        instanceId: "gemini-default",
+        model: "gemini-4-neon",
+      },
+    });
+  });
 });

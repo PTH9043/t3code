@@ -2,9 +2,11 @@ import {
   CheckpointRef,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   EventId,
+  WorkspaceKnowledgeItemId,
   MessageId,
   ProjectId,
   ThreadId,
+  TrimmedNonEmptyString,
   TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -41,6 +43,264 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "lists every project knowledge item beyond search limits, including archived items",
+    () =>
+      Effect.gen(function* () {
+        const snapshot = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const projectId = asProjectId("knowledge-export-project");
+        const other = asProjectId("knowledge-export-other");
+        const at = "2026-01-01T00:00:00.000Z";
+        yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES (${projectId},'Project','/project','[]',${at},${at}), (${other},'Other','/other','[]',${at},${at})`;
+        for (let index = 0; index < 45; index++) {
+          const id = `export-item-${index}`;
+          const content = `한글 내용 ${index} · 전체 원문`;
+          yield* sql`INSERT INTO projection_workspace_knowledge_items(project_id,item_id,kind,title,content,status,origin,tags_json,created_at,updated_at)
+          VALUES (${projectId},${id},'rag-source',${id},${content},${index === 44 ? "archived" : "active"},'user','[]',${at},${at})`;
+        }
+        yield* sql`INSERT INTO projection_workspace_knowledge_items(project_id,item_id,kind,title,content,status,origin,tags_json,created_at,updated_at)
+        VALUES (${other},'other-project-item','rag-source','other','private','active','user','[]',${at},${at})`;
+        const result = yield* snapshot.listWorkspaceKnowledge!({ projectId, includeShared: false });
+        assert.equal(result.items.length, 45);
+        assert.equal(result.items.find((item) => item.id === "export-item-44")?.status, "archived");
+        assert.equal(
+          result.items.find((item) => item.id === "export-item-44")?.content,
+          "한글 내용 44 · 전체 원문",
+        );
+        assert.ok(!result.items.some((item) => item.projectId === other));
+        yield* sql`DELETE FROM projection_workspace_knowledge_items WHERE project_id IN (${projectId},${other})`;
+        yield* sql`DELETE FROM projection_projects WHERE project_id IN (${projectId},${other})`;
+      }),
+  );
+  it.effect(
+    "exports all project memory and conversations without leaking other projects or deleted threads",
+    () =>
+      Effect.gen(function* () {
+        const snapshot = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const projectId = asProjectId("full-export-p");
+        const other = asProjectId("full-export-q");
+        const at = "2026-01-01T00:00:00.000Z";
+        yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES (${projectId},'P','/p','[]',${at},${at}),(${other},'Q','/q','[]',${at},${at})`;
+        yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at,deleted_at)
+        VALUES ('export-live',${projectId},'기록',${at},${at},NULL),('export-deleted',${projectId},'삭제',${at},${at},${at}),('export-other',${other},'다른 프로젝트',${at},${at},NULL)`;
+        yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+        VALUES ('export-msg','export-live','user','한국어 원문',0,${at},${at}),('export-hidden','export-deleted','user','삭제된 대화',0,${at},${at}),('export-other-msg','export-other','user','다른 프로젝트',0,${at},${at})`;
+        yield* sql`INSERT INTO workspace_memory_v2(id,project_id,scope,topic,text,source_json,source_hash,origin,verification,status,created_at,updated_at)
+        VALUES ('export-memory',${projectId},'project','결정','중요한 내용','{}','h','user','user-statement','consolidated',${at},${at}),('export-forgotten',${projectId},'project','잊기','제외할 기억','{}','h','user','user-statement','forgotten',${at},${at}),('export-other-mem',${other},'project','다른 기억','비공개','{}','h','user','user-statement','pending',${at},${at})`;
+        yield* sql`INSERT INTO projection_thread_activities(activity_id,thread_id,tone,kind,summary,payload_json,created_at)
+        VALUES ('export-activity','export-live','info','test','도구 기록','{}',${at})`;
+        const result = yield* snapshot.listWorkspaceKnowledge!({
+          projectId,
+          includeArchiveSnapshot: true,
+        });
+        assert.deepEqual(
+          result.archiveSnapshot?.memories.map((row) => row.id),
+          ["export-memory"],
+        );
+        assert.deepEqual(
+          result.archiveSnapshot?.threads.map((row) => row.thread_id),
+          ["export-live"],
+        );
+        assert.deepEqual(
+          result.archiveSnapshot?.messages.map((row) => row.text),
+          ["한국어 원문"],
+        );
+        assert.equal(result.archiveSnapshot?.activities.length, 1);
+        assert.equal(
+          (yield* snapshot.listWorkspaceKnowledge!({ projectId })).archiveSnapshot,
+          undefined,
+        );
+        yield* sql`DELETE FROM projection_thread_activities WHERE thread_id='export-live'`;
+        yield* sql`DELETE FROM workspace_memory_v2 WHERE project_id IN (${projectId},${other})`;
+        yield* sql`DELETE FROM projection_thread_messages WHERE thread_id IN ('export-live','export-deleted','export-other')`;
+        yield* sql`DELETE FROM projection_threads WHERE project_id IN (${projectId},${other})`;
+        yield* sql`DELETE FROM projection_projects WHERE project_id IN (${projectId},${other})`;
+      }),
+  );
+  it.effect("excludes forgotten conversation knowledge without hiding independent sources", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = asProjectId("forgotten-knowledge-project");
+      yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES (${projectId},'Project','/project','[]','t','t')`;
+      yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+        VALUES ('thread',${projectId},'Thread','t','t')`;
+      yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+        VALUES ('hidden','thread','user','hidden',0,'t','t'),('kept','thread','user','kept',0,'t','t')`;
+      for (const [id, tags] of [
+        ["conversation-hidden", '["auto-conversation"]'],
+        ["conversation-kept", '["auto-conversation"]'],
+        ["conversation-unmapped", '["auto-conversation"]'],
+        ["manual", "[]"],
+      ] as const) {
+        yield* sql`INSERT INTO projection_workspace_knowledge_items(project_id,item_id,kind,title,content,status,origin,tags_json,created_at,updated_at)
+          VALUES (${projectId},${id},'rag-source',${id},${id},'active','user',${tags},'t','t')`;
+      }
+      yield* sql`INSERT INTO workspace_conversation_rag_sources(project_id,thread_id,item_id,source_kind,source_id) VALUES
+        (${projectId},'thread','conversation-hidden','message','hidden'),
+        (${projectId},'thread','conversation-kept','message','kept')`;
+      yield* sql`INSERT INTO workspace_memory_v2(id,project_id,scope,topic,text,source_json,source_hash,origin,verification,status,created_at,updated_at)
+        VALUES ('forgotten-knowledge',${projectId},'project','test','','{"kind":"message","id":"hidden"}','x','user','user-statement','forgotten','t','t'),
+               ('invalid-knowledge',${projectId},'project','test','','invalid-json','x','user','user-statement','forgotten','t','t')`;
+      assert.ok(snapshot.listWorkspaceKnowledge);
+      const result = yield* snapshot.listWorkspaceKnowledge({ projectId });
+      assert.deepEqual(result.items.map((item) => item.id).sort(), ["conversation-kept", "manual"]);
+      for (const [id, expected] of [
+        ["manual", ["manual"]],
+        ["conversation-hidden", []],
+        ["conversation-unmapped", []],
+      ] as const) {
+        const detail = yield* snapshot.listWorkspaceKnowledge({
+          projectId,
+          itemId: WorkspaceKnowledgeItemId.make(id),
+        });
+        assert.deepEqual(
+          detail.items.map((item) => String(item.id)),
+          [...expected],
+        );
+      }
+      assert.ok(snapshot.composeWorkspacePrompt);
+      const prompt = yield* snapshot.composeWorkspacePrompt({
+        projectId,
+        task: TrimmedNonEmptyString.make("manual"),
+        includeRag: false,
+        contextMode: "standard",
+      });
+      assert.ok(!prompt.prompt.includes("conversation-hidden"));
+      assert.ok(!prompt.prompt.includes("conversation-unmapped"));
+      yield* sql`DELETE FROM workspace_conversation_rag_sources WHERE project_id=${projectId}`;
+      yield* sql`DELETE FROM workspace_memory_v2 WHERE project_id=${projectId}`;
+      yield* sql`DELETE FROM projection_workspace_knowledge_items WHERE project_id=${projectId}`;
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id='thread'`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id='thread'`;
+      yield* sql`DELETE FROM projection_projects WHERE project_id=${projectId}`;
+    }),
+  );
+  it.effect("classifies fallback handoff messages by their preceding user's folder", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES ('handoff-scope-p','Project','/scope','[]','t','t'),('handoff-scope-other-p','Other','/other','[]','t','t')`;
+      yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+        VALUES ('handoff-scope-t','handoff-scope-p','T','t','t')`;
+      yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES
+        ('scope-unclassified-first','handoff-scope-t','assistant','old',0,'t','t'),
+        ('scope-web','handoff-scope-t','user','web',0,'t','t'),
+        ('scope-web-answer','handoff-scope-t','assistant','answer',0,'t','t'),
+        ('scope-server','handoff-scope-t','user','server',0,'t','t'),
+        ('scope-server-answer','handoff-scope-t','assistant','answer',0,'t','t'),
+        ('scope-unknown','handoff-scope-t','user','unclassified',0,'t','t'),
+        ('scope-current','handoff-scope-t','user','current',0,'t','t')`;
+      yield* sql`INSERT INTO workspace_memory_v2_message_folders(message_id,project_id,thread_id,folder) VALUES
+        ('scope-web','handoff-scope-p','handoff-scope-t','apps/web'),
+        ('scope-server','handoff-scope-p','handoff-scope-t','apps/server'),
+        ('scope-current','handoff-scope-p','handoff-scope-t','apps/web')`;
+      assert.ok(snapshot.getHandoffOutOfScopeMessageIds);
+      assert.deepEqual(
+        yield* snapshot.getHandoffOutOfScopeMessageIds({
+          projectId: asProjectId("handoff-scope-p"),
+          threadId: ThreadId.make("handoff-scope-t"),
+          messageId: "scope-current",
+        }),
+        ["scope-unclassified-first", "scope-server", "scope-server-answer", "scope-unknown"],
+      );
+      assert.isNull(
+        yield* snapshot.getHandoffOutOfScopeMessageIds({
+          projectId: asProjectId("handoff-scope-p"),
+          threadId: ThreadId.make("handoff-scope-t"),
+          messageId: "scope-unknown",
+        }),
+      );
+      assert.isNull(
+        yield* snapshot.getHandoffOutOfScopeMessageIds({
+          projectId: asProjectId("handoff-scope-other-p"),
+          threadId: ThreadId.make("handoff-scope-t"),
+          messageId: "scope-current",
+        }),
+      );
+      yield* sql`DELETE FROM workspace_memory_v2_message_folders WHERE thread_id='handoff-scope-t'`;
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id='handoff-scope-t'`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id='handoff-scope-t'`;
+      yield* sql`DELETE FROM projection_projects WHERE project_id IN ('handoff-scope-p','handoff-scope-other-p')`;
+    }),
+  );
+
+  it.effect("finds forgotten conversation messages only in their project and thread", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES ('handoff-p','Project','/handoff','[]','t','t'), ('handoff-other-p','Other','/other','[]','t','t')`;
+      yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+        VALUES ('handoff-t','handoff-p','T','t','t'), ('handoff-other-t','handoff-p','Other','t','t'), ('handoff-foreign-t','handoff-other-p','Foreign','t','t')`;
+      yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+        VALUES ('handoff-hidden','handoff-t','user','old',0,'t','t'),
+               ('handoff-keep','handoff-t','user','keep',0,'t','t'),
+               ('handoff-other-hidden','handoff-other-t','user','other',0,'t','t'),
+               ('handoff-foreign-hidden','handoff-foreign-t','user','foreign',0,'t','t')`;
+      yield* sql`INSERT INTO workspace_memory_v2(id,project_id,scope,topic,text,source_json,source_hash,origin,verification,status,created_at,updated_at)
+        VALUES ('hidden','handoff-p','project','t','', '{"kind":"message","id":"handoff-hidden"}','x','user','user-statement','forgotten','t','t'),
+               ('keep','handoff-p','project','t','keep', '{"kind":"message","id":"handoff-keep"}','x','user','user-statement','observed','t','t'),
+               ('other','handoff-p','project','t','', '{"kind":"message","id":"handoff-other-hidden"}','x','user','user-statement','forgotten','t','t'),
+               ('foreign','handoff-other-p','project','t','', '{"kind":"message","id":"handoff-foreign-hidden"}','x','user','user-statement','forgotten','t','t'),
+               ('invalid','handoff-p','project','t','', 'invalid-json','x','user','user-statement','forgotten','t','t')`;
+      assert.ok(snapshot.getForgottenThreadMessageIds);
+      assert.deepEqual(
+        yield* snapshot.getForgottenThreadMessageIds({
+          projectId: asProjectId("handoff-p"),
+          threadId: ThreadId.make("handoff-t"),
+        }),
+        ["handoff-hidden"],
+      );
+      assert.deepEqual(
+        yield* snapshot.getForgottenThreadMessageIds({
+          projectId: asProjectId("handoff-other-p"),
+          threadId: ThreadId.make("handoff-t"),
+        }),
+        [],
+      );
+      yield* sql`DELETE FROM workspace_memory_v2 WHERE project_id IN ('handoff-p','handoff-other-p')`;
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id IN ('handoff-t','handoff-other-t','handoff-foreign-t')`;
+      yield* sql`DELETE FROM projection_threads WHERE project_id IN ('handoff-p','handoff-other-p')`;
+      yield* sql`DELETE FROM projection_projects WHERE project_id IN ('handoff-p','handoff-other-p')`;
+    }),
+  );
+
+  it.effect("finds only the delegation blocks still marked running or awaiting the user", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES ('delegate-p','Project','/delegate','[]','t','t')`;
+      yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+        VALUES ('delegate-t','delegate-p','T','t','t')`;
+      yield* sql`INSERT INTO projection_thread_activities(activity_id,thread_id,tone,kind,summary,payload_json,created_at)
+        VALUES ('delegate-running','delegate-t','info','orchestra.block','b','{"nodeId":"delegate-worker","status":"running"}','t1'),
+               ('delegate-waiting','delegate-t','info','orchestra.block','b','{"nodeId":"delegate-advisor","status":"awaiting-user"}','t2'),
+               ('delegate-done','delegate-t','info','orchestra.block','b','{"nodeId":"delegate-scout","status":"completed"}','t3'),
+               ('delegate-orchestra','delegate-t','info','orchestra.block','b','{"nodeId":"task-1","status":"running"}','t4'),
+               ('delegate-other-kind','delegate-t','info','tool.completed','b','{"nodeId":"delegate-worker","status":"running"}','t5'),
+               ('delegate-orphan','delegate-missing-t','info','orchestra.block','b','{"nodeId":"delegate-worker","status":"running"}','t6')`;
+      assert.ok(snapshot.getUnfinishedDelegationBlocks);
+      const rows = (yield* snapshot.getUnfinishedDelegationBlocks()).filter((row) =>
+        row.threadId.startsWith("delegate-"),
+      );
+      assert.deepEqual(rows.map((row) => [row.threadId, row.createdAt, row.payload]).toSorted(), [
+        ["delegate-t", "t1", '{"nodeId":"delegate-worker","status":"running"}'],
+        ["delegate-t", "t2", '{"nodeId":"delegate-advisor","status":"awaiting-user"}'],
+      ]);
+      yield* sql`DELETE FROM projection_thread_activities WHERE activity_id LIKE 'delegate-%'`;
+      yield* sql`DELETE FROM projection_threads WHERE thread_id = 'delegate-t'`;
+      yield* sql`DELETE FROM projection_projects WHERE project_id = 'delegate-p'`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2407,6 +2667,40 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
     snapshot.thread.messages.map((message) => message.id).toSorted();
   const activityIds = (snapshot: { thread: { activities: ReadonlyArray<{ id: string }> } }) =>
     snapshot.thread.activities.map((activity) => activity.id).toSorted();
+
+  it.effect(
+    "returns the saved terminal state for each tool's own turn in full and paged detail",
+    () =>
+      Effect.gen(function* () {
+        yield* seedFanOutThread();
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        yield* sql`UPDATE projection_turns SET state = 'interrupted', checkpoint_status = NULL
+        WHERE thread_id = 'thread-w' AND turn_id = 'turn-4'`;
+        yield* sql`UPDATE projection_turns SET state = 'running', completed_at = NULL
+        WHERE thread_id = 'thread-w' AND turn_id = 'turn-5'`;
+        yield* sql`UPDATE projection_thread_activities SET payload_json = '{"toolActivityTurnState":"completed"}'
+        WHERE thread_id = 'thread-w' AND turn_id = 'turn-5'`;
+        for (const window of [undefined, { turnLimit: 2 }]) {
+          const snapshot = yield* query.getThreadDetailSnapshot(threadW, window);
+          assert.equal(snapshot._tag, "Some");
+          if (snapshot._tag !== "Some") continue;
+          const activities = snapshot.value.thread.activities;
+          assert.deepStrictEqual(activities.find((row) => row.id === "turn-4-activity")?.payload, {
+            ok: true,
+            toolActivityTurnState: "interrupted",
+          });
+          assert.deepStrictEqual(
+            activities.find((row) => row.id === "turn-5-activity")?.payload,
+            {},
+          );
+          assert.deepStrictEqual(
+            activities.find((row) => row.id === "turnless-activity")?.payload,
+            { usedTokens: 1 },
+          );
+        }
+      }),
+  );
 
   it.effect("returns the full thread with no page metadata when no window is requested", () =>
     Effect.gen(function* () {

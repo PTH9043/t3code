@@ -56,6 +56,43 @@ describe("desktop bundle watching on Windows", () => {
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
+  it("does not restart when a watcher rewrites identical bundle bytes", () => {
+    const onChange = vi.fn();
+    stop = watchDesktopBundles({ files, onChange, platform: "win32" });
+    for (const file of files) {
+      NodeFS.writeFileSync(file, "initial");
+      NodeFS.utimesSync(file, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+    }
+    vi.advanceTimersByTime(1_000);
+    expect(onChange).not.toHaveBeenCalled();
+    NodeFS.writeFileSync(files[0], "changed");
+    vi.advanceTimersByTime(1_000);
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart if a temporarily missing bundle returns unchanged", () => {
+    const onChange = vi.fn();
+    stop = watchDesktopBundles({ files, onChange, platform: "win32" });
+    NodeFS.unlinkSync(files[0]);
+    vi.advanceTimersByTime(1_000);
+    expect(onChange).not.toHaveBeenCalled();
+    NodeFS.writeFileSync(files[0], "initial");
+    vi.advanceTimersByTime(1_000);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("ignores a temporary change that is restored before all bundles are ready", () => {
+    const onChange = vi.fn();
+    stop = watchDesktopBundles({ files, onChange, platform: "win32" });
+    NodeFS.unlinkSync(files[1]);
+    NodeFS.writeFileSync(files[0], "temporary change");
+    vi.advanceTimersByTime(1_000);
+    NodeFS.writeFileSync(files[0], "initial");
+    NodeFS.writeFileSync(files[1], "initial");
+    vi.advanceTimersByTime(1_000);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("survives replacement of a clean build directory and waits for all bundles", () => {
     const onChange = vi.fn();
     stop = watchDesktopBundles({ files, onChange, platform: "win32" });

@@ -24,9 +24,18 @@
 [`ProviderAdapter.ts`][adapter]를 따릅니다. 특정 에이전트의 전송 방식, 설정, 이벤트 형태가 어떻게
 대응되는지 보려면 드라이버와 그 어댑터를 함께 읽으세요.
 
-Gemini의 Google OAuth는 [`GeminiAuth.ts`][geminiauth]가 원격에서도 사용할 수 있는 URL/코드 흐름으로
-처리합니다. 각 인스턴스는 별도 `GEMINI_CLI_HOME`을 사용하고, Gemini CLI의 OS 전역 키체인 대신 그
-홈 안의 암호화 파일 저장소를 강제하므로 여러 Google 계정이 서로 덮어쓰지 않습니다.
+Antigravity(`gemini` 드라이버)는 [`AntigravityLaunch.ts`](../../apps/server/src/provider/Drivers/AntigravityLaunch.ts)로
+`agy acp --gemini-dir <geminiDir> --app-data-dir antigravity-cli --process-per-session` 실행 인자를 구성하며(`full-access` 세션에 한해 `--dangerously-skip-permissions` 추가),
+Google OAuth 로그인은 [`GeminiAuth.ts`][geminiauth]가 `agy acp --login`의 브라우저 루프백 콜백 및 원격 코드 제출
+흐름을 모두 처리합니다. 각 인스턴스는 격리된 `--gemini-dir` 아래에 동기화된 `config/skills.json` 및 `config/plugins.json`
+매니페스트를 유지해 글로벌·플러그인·프로젝트 스킬을 공유합니다.
+[`GeminiMcpToolRecovery.ts`](../../apps/server/src/provider/acp/GeminiMcpToolRecovery.ts)와
+[`GeminiAdapter.ts`](../../apps/server/src/provider/Layers/GeminiAdapter.ts)는 Antigravity 세션 도구 선언 한도를
+보호하기 위해 `t3-code`를 MCP 목록 1순위로 고정하고 기본 환경에서 내장 기능 중복 서버(`t3-filesystem`, `t3-thinking`)를
+제외하며, 세션 중 `t3-code` 도구 누락(`is not enabled for server t3-code` / `unknown tool`)과 오탐 보안 거절이
+감지되면 `t3-code` 단독 구성으로 `session/load` 무중단 자동 재연결(턴당 최대 1회)을 수행합니다. 또한 에이전트가
+`_meta.antigravity.systemPrompt.append`를 광고할 때 [`t3CoreToolInstructions.ts`](../../apps/server/src/provider/t3CoreToolInstructions.ts)의
+협업 브라우저·도구 오류 규약을 네이티브 시스템 채널로 전달합니다.
 
 ### 사용자에게 묻는 질문
 

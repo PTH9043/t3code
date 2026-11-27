@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -13,6 +14,7 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -145,12 +147,13 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();
       for (const withMeeting of [true, false]) {
-        const { meeting, ...base } = requestCommand();
+        const { meeting, ...base } = requestCommand(threadId);
         const accepted = asSingleEvent(
           yield* decideOrchestrationCommand({
             command: {
               ...base,
               ...(withMeeting ? { meeting } : {}),
+              runContext: { threadId, requestDigest: "isolation-fixture" },
               orchestra: { maxParallel: 2, isolateWorktrees: true },
             },
             readModel,
@@ -161,8 +164,19 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
           accepted.type === "project.collaboration-run-requested"
             ? accepted.payload.run.orchestra
             : null,
-        ).toEqual({ maxParallel: 2, isolateWorktrees: true });
+        ).toEqual({ maxParallel: 2, isolateWorktrees: true, completionCheck: true });
       }
+    }),
+  );
+
+  it.effect("rejects user meetings without a chosen conversation", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      const error = yield* decideOrchestrationCommand({
+        command: requestCommand(),
+        readModel,
+      }).pipe(Effect.flip);
+      expect(error.message).toContain("대화를 선택");
     }),
   );
 
@@ -173,7 +187,8 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
         event.type === "project.collaboration-run-requested" ? event.payload.run.orchestra : null;
 
       // Nothing stored: the request-level absence keeps the pre-orchestra shape.
-      const { meeting: _unused, ...bare } = requestCommand();
+      const { meeting: _unused, ...base } = requestCommand();
+      const bare = { ...base, runContext: { threadId, requestDigest: "defaults-fixture" } };
       expect(
         runOrchestraOf(
           asSingleEvent(yield* decideOrchestrationCommand({ command: bare, readModel })),
@@ -208,7 +223,7 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
         runOrchestraOf(
           asSingleEvent(yield* decideOrchestrationCommand({ command: bare, readModel })),
         ),
-      ).toEqual({ maxParallel: 4, isolateWorktrees: true });
+      ).toEqual({ maxParallel: 4, isolateWorktrees: true, completionCheck: true });
 
       // …while an explicit request-level setting still wins.
       expect(
@@ -220,7 +235,7 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
             }),
           ),
         ),
-      ).toEqual({ maxParallel: 1, isolateWorktrees: false });
+      ).toEqual({ maxParallel: 1, isolateWorktrees: false, completionCheck: true });
     }),
   );
 
@@ -263,16 +278,180 @@ it.layer(NodeServices.layer)("Meeting thread decider", (it) => {
     }),
   );
 
-  it.effect("still opens a fresh thread when the request names none", () =>
+  it.effect("keeps the chosen roster and explicit additional-worker setting", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel();
+      for (const oldSetting of [undefined, false, true]) {
+        const setup = {
+          ...meetingSetup(threadId),
+          ...(oldSetting === undefined ? {} : { allowAdditionalWorkers: oldSetting }),
+          participants: meetingSetup(threadId).participants.map((participant, index) => ({
+            ...participant,
+            roleDescription: index === 0 ? "감독" : "구현",
+          })),
+        };
+        const event = asSingleEvent(
+          yield* decideOrchestrationCommand({
+            command: { ...requestCommand(threadId), meeting: setup },
+            readModel,
+          }),
+        );
+        expect(event.type).toBe("project.collaboration-run-requested");
+        if (event.type !== "project.collaboration-run-requested") return;
+        expect(event.payload.run.meeting?.allowAdditionalWorkers).toBe(oldSetting === true);
+        expect(event.payload.run.meeting?.participants).toEqual(setup.participants);
+        expect(event.payload.run.meeting?.chairParticipantId).toBe(setup.chairParticipantId);
+        expect(setup.allowAdditionalWorkers).toBe(oldSetting);
+      }
+    }),
+  );
+
+  it.effect("does not start a meeting over a queued conversation turn", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      let readModel = yield* seedReadModel();
+      const sent = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("existing-turn"),
+          threadId,
+          message: {
+            messageId: MessageId.make("existing-message"),
+            role: "user",
+            text: "Finish this first",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now,
+        },
+        readModel,
+      });
+      let sequence = 3;
+      for (const event of Array.isArray(sent) ? sent : [sent]) {
+        readModel = yield* projectEvent(readModel, {
+          ...event,
+          sequence: sequence++,
+        } as OrchestrationEvent);
+      }
+      const ownRequest = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.message.user.append",
+            commandId: CommandId.make("workflow-request:run-a"),
+            threadId,
+            messageId: MessageId.make("workflow-request:run-a"),
+            text: "Start integrated work",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      readModel = yield* projectEvent(readModel, {
+        ...ownRequest,
+        sequence: sequence++,
+      } as OrchestrationEvent);
+      const error = yield* decideOrchestrationCommand({
+        command: requestCommand(threadId),
+        readModel,
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+      expect(error.message).toContain("현재 대화의 작업이나 질문이 끝난 뒤");
+      const independentThread = ThreadId.make("independent-thread");
+      const created = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.create",
+            commandId: CommandId.make("create-independent-thread"),
+            threadId: independentThread,
+            projectId,
+            title: "Independent conversation",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex-a"), model: "gpt-5" },
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      readModel = yield* projectEvent(readModel, {
+        ...created,
+        sequence: sequence++,
+      } as OrchestrationEvent);
+      const independent = asSingleEvent(
+        yield* decideOrchestrationCommand({
+          command: requestCommand(independentThread),
+          readModel,
+        }),
+      );
+      expect(independent.type).toBe("project.collaboration-run-requested");
+      if (independent.type === "project.collaboration-run-requested")
+        expect(independent.payload.run.meeting).toMatchObject({
+          threadId: independentThread,
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+        });
+    }),
+  );
+
+  it.effect("waits for a conversation question to be resolved before a meeting starts", () =>
+    Effect.gen(function* () {
+      let readModel = yield* seedReadModel();
+      const append = (kind: "user-input.requested" | "user-input.resolved") =>
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.activity.append",
+            commandId: CommandId.make(`question-${kind}`),
+            threadId,
+            activity: {
+              id: EventId.make(`activity-${kind}`),
+              tone: "info",
+              kind,
+              summary: kind,
+              payload: { requestId: "question-1" },
+              turnId: null,
+              createdAt: now,
+            },
+            createdAt: now,
+          },
+          readModel,
+        });
+      const requested = asSingleEvent(yield* append("user-input.requested"));
+      readModel = yield* projectEvent(readModel, {
+        ...requested,
+        sequence: 3,
+      } as OrchestrationEvent);
+      const error = yield* decideOrchestrationCommand({
+        command: requestCommand(threadId),
+        readModel,
+      }).pipe(Effect.flip);
+      expect(error.message).toContain("현재 대화의 작업이나 질문이 끝난 뒤");
+      const resolved = asSingleEvent(yield* append("user-input.resolved"));
+      readModel = yield* projectEvent(readModel, {
+        ...resolved,
+        sequence: 4,
+      } as OrchestrationEvent);
+      const accepted = asSingleEvent(
+        yield* decideOrchestrationCommand({ command: requestCommand(threadId), readModel }),
+      );
+      expect(accepted.type).toBe("project.collaboration-run-requested");
+    }),
+  );
+
+  it.effect("preserves automation meetings without an attached conversation", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel();
       const event = asSingleEvent(
-        yield* decideOrchestrationCommand({ command: requestCommand(), readModel }),
+        yield* decideOrchestrationCommand({
+          command: { ...requestCommand(), source: "automation" },
+          readModel,
+        }),
       );
-
       expect(event.type).toBe("project.collaboration-run-requested");
-      if (event.type !== "project.collaboration-run-requested") return;
-      expect(event.payload.run.meeting?.threadId).toBeNull();
+      if (event.type === "project.collaboration-run-requested")
+        expect(event.payload.run.meeting?.threadId).toBeNull();
     }),
   );
 

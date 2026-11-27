@@ -14,7 +14,7 @@ workspace_manage의 verify는 고정된 후보 커밋을 검증하고 integrate�
 승인되지 않은 push, 공개 tag/release, 배포를 실행하지 마세요. 자동화는 로컬 release-ready까지입니다.
 Owner 결과는 원문 전체를 복사하기보다 결정, 인터페이스 변화, 커밋, 검증 결과와 위험으로 이해하세요.
 실패 시 status의 failureRecovery와 원문 로그를 확인하세요. 같은 작업을 다시 dispatch할 때 recoveryStrategy(retry-after-check/repair-and-verify/diagnose-environment/clarify-requirement)를 지정하세요. 미수락 통신 실패는 상태 확인 후 1회만 재시도하고, 검증 실패는 수정 후 검증하며, 전달 불명확 입력은 재전송하지 마세요.
-최신 외부 정보가 필요하면 workspace_research를 사용하세요. 출처·수집 날짜가 프로젝트 RAG 자료로 저장됩니다. 연결된 Grok API의 보고 비용과 하루 상한을 확인하고 필요한 조사만 하세요.
+최신 외부 정보가 필요하면 workspace_research를 사용하세요. 출처·수집 날짜가 프로젝트 RAG 자료로 저장됩니다. 자동 검색에는 설정한 검색용 모델 순서와 현재 작업의 권한·비용 한도를 따르세요.
 `;
 
 export const ARCHITECT_DEVELOPMENT_INSTRUCTIONS = `

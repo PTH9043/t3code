@@ -25,6 +25,7 @@ import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import { CursorDriver, type CursorDriverEnv } from "./Drivers/CursorDriver.ts";
 import { GeminiDriver, type GeminiDriverEnv } from "./Drivers/GeminiDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
+import { MuseDriver, type MuseDriverEnv } from "./Drivers/MuseDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import type { AnyProviderDriver } from "./ProviderDriver.ts";
 
@@ -39,6 +40,7 @@ export type BuiltInDriversEnv =
   | CursorDriverEnv
   | GeminiDriverEnv
   | GrokDriverEnv
+  | MuseDriverEnv
   | OpenCodeDriverEnv;
 
 /**
@@ -52,5 +54,6 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   CursorDriver,
   GeminiDriver,
   GrokDriver,
+  MuseDriver,
   OpenCodeDriver,
 ];

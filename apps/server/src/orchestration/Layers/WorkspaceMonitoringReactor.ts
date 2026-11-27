@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeUtil from "node:util";
 import {
   CommandId,
   EventId,
@@ -33,13 +35,16 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionWorkspaceAgentRoleRepository } from "../../persistence/Services/ProjectionWorkspaceAgentRoles.ts";
 import { ProjectionWorkspaceProgramRepository } from "../../persistence/Services/ProjectionWorkspacePrograms.ts";
 import {
   ServerSelfSignals,
   type ServerSelfSignalsReading,
+  type ServerSelfSpanRates,
 } from "../../diagnostics/ServerSelfSignals.ts";
 import { ResourceTelemetry } from "../../resourceTelemetry/ResourceTelemetry.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -56,6 +61,7 @@ import {
   type MonitoringFinding,
 } from "../workspaceMonitoring.ts";
 import { SampleRing, evaluateTrend } from "../workspaceMonitoringTrends.ts";
+import { makeWorkspaceMonitoringJournal } from "../workspaceMonitoringJournal.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
 import {
@@ -76,6 +82,22 @@ const LAST_CHECKED_WRITE_INTERVAL_MS = 5 * 60_000;
 const HELD_NOTICE_INTERVAL_MS = 60 * 60_000;
 const REPEAT_REPORT_MIN_MINUTES = 30;
 
+function canRetryStop(cause: Cause.Cause<unknown>): boolean {
+  return (
+    cause.reasons.length > 0 &&
+    cause.reasons.every((reason) => {
+      if (Cause.isInterruptReason(reason)) return false;
+      const error = Cause.isDieReason(reason) ? reason.defect : reason.error;
+      return (
+        error instanceof Error &&
+        (!("_tag" in error) ||
+          error._tag === "PersistenceSqlError" ||
+          error._tag === "OrchestrationListenerCallbackError")
+      );
+    })
+  );
+}
+
 function conciseCause(cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);
   return (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
@@ -85,9 +107,30 @@ interface ProjectMonitor {
   readonly rings: Map<string, SampleRing>;
   /** fingerprint → epoch ms of the last turn it contributed to. */
   readonly firedAt: Map<string, number>;
+  readonly deferredFindings: Map<
+    string,
+    {
+      readonly metricIndex: number;
+      readonly finding: MonitoringFinding;
+      readonly occurrenceId: string;
+      readonly fingerprint: string;
+    }
+  >;
+  readonly recoveredFindings: Set<string>;
+  readonly lastQueuedAt: Map<string, number>;
+  journalLoaded: boolean;
+  readonly pendingPlaybookActions: Map<string, string>;
+  deferredPlan: WorkspaceMonitoringPlan | null;
   knownProgramIds: ReadonlySet<string> | null;
   proposalInFlight: boolean;
+  /**
+   * Proposal generation whose automatic proposal turn ended without a plan.
+   * The next check must not start another AI turn for it: only 다시 분석 (a new
+   * generation) or toggling monitoring asks again.
+   */
+  proposalHeldGeneration: number | null;
   turnInFlight: boolean;
+  unavailableRoot: string | null;
   staleNoticed: boolean;
   lastEvaluatedAt: number;
   lastCheckedWriteAt: number;
@@ -110,9 +153,17 @@ function freshMonitor(): ProjectMonitor {
   return {
     rings: new Map(),
     firedAt: new Map(),
+    deferredFindings: new Map(),
+    recoveredFindings: new Set(),
+    lastQueuedAt: new Map(),
+    journalLoaded: false,
+    pendingPlaybookActions: new Map(),
+    deferredPlan: null,
     knownProgramIds: null,
     proposalInFlight: false,
+    proposalHeldGeneration: null,
     turnInFlight: false,
+    unavailableRoot: null,
     staleNoticed: false,
     lastEvaluatedAt: 0,
     lastCheckedWriteAt: 0,
@@ -226,7 +277,10 @@ function categoryUsage(
 
 export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const sql = yield* SqlClient.SqlClient;
+  const journal = makeWorkspaceMonitoringJournal(sql);
   const projectRepository = yield* ProjectionProjectRepository;
+  const turnRepository = yield* ProjectionTurnRepository;
   const programRepository = yield* ProjectionWorkspaceProgramRepository;
   const roleRepository = yield* ProjectionWorkspaceAgentRoleRepository;
   const supervisor = yield* WorkspaceProgramSupervisor;
@@ -268,6 +322,21 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     }
     return monitor;
   };
+  const forgetDisabledMonitorIfIdle = (projectId: ProjectId, monitor: ProjectMonitor) => {
+    if (
+      !enabledProjects.has(projectId) &&
+      monitors.get(projectId) === monitor &&
+      !monitor.turnInFlight &&
+      !monitor.proposalInFlight
+    )
+      monitors.delete(projectId);
+  };
+  const suspendMonitor = (projectId: ProjectId) => {
+    const monitor = monitors.get(projectId);
+    if (monitor === undefined) return;
+    monitor.externalProcesses = [];
+    forgetDisabledMonitorIfIdle(projectId, monitor);
+  };
 
   // The sidecar only streams while someone holds a subscription. Hold exactly
   // one while any project is monitored; drop it when the last switch goes off.
@@ -293,6 +362,35 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       }).pipe(Effect.as({ autoDiagnosis: false, monitoringAutoActions: false } as const)),
     ),
   );
+
+  const activeMonitoringPlan = (settings: WorkspaceMonitoringSettings) =>
+    settings.activePlan !== undefined
+      ? settings.activePlan
+      : settings.plan !== null && settings.plan.approvedAt !== null
+        ? settings.plan
+        : null;
+
+  const canExecuteMonitoringPlaybook = Effect.fn(
+    "WorkspaceMonitoringReactor.canExecuteMonitoringPlaybook",
+  )(function* (projectId: ProjectId, plan: WorkspaceMonitoringPlan, proposalGeneration: number) {
+    const permissions = yield* readPermissions;
+    if (!permissions.monitoringAutoActions) return false;
+    const row = yield* projectRepository.getById({ projectId });
+    if (Option.isNone(row) || row.value.deletedAt !== null) return false;
+    const settings = row.value.workspaceControl.monitoring;
+    const activePlan = activeMonitoringPlan(settings);
+    return (
+      settings.enabled &&
+      settings.autonomy === "playbooks" &&
+      settings.planStatus === "approved" &&
+      settings.activePlanStale !== true &&
+      (settings.proposalGeneration ?? 0) === proposalGeneration &&
+      activePlan !== null &&
+      activePlan.approvedAt !== null &&
+      NodeUtil.isDeepStrictEqual(activePlan, plan) &&
+      NodeUtil.isDeepStrictEqual(settings.plan, plan)
+    );
+  });
 
   // T3 Code's own signals go to exactly one project's thread: the one named in
   // server settings, or — when none is named — the first project with
@@ -422,12 +520,13 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     const modelSelection = yield* pickMonitoringModel(projectId);
     if (modelSelection === null) return null;
     const requestedAt = yield* nowIso;
+    const messageId = MessageId.make(yield* randomUUID);
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.make(yield* randomUUID),
       threadId,
       message: {
-        messageId: MessageId.make(yield* randomUUID),
+        messageId,
         role: "user",
         text: prompt,
         attachments: [],
@@ -442,13 +541,26 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       threadId,
       requestedAtOrAfter: requestedAt,
     });
-    if (result.turn.state !== "completed") return null;
+    if (result.turn.state !== "completed" || result.turn.requestedAt !== requestedAt) return null;
+    const persistedTurn = yield* turnRepository.getByTurnId({
+      threadId,
+      turnId: result.turn.turnId,
+    });
+    if (Option.isNone(persistedTurn) || persistedTurn.value.pendingMessageId !== messageId)
+      return null;
     const assistantMessageId = result.turn.assistantMessageId;
     const message =
       (assistantMessageId === null
         ? undefined
-        : result.thread.messages.find((candidate) => candidate.id === assistantMessageId)) ??
-      result.thread.messages.findLast((candidate) => candidate.role === "assistant");
+        : result.thread.messages.find(
+            (candidate) =>
+              candidate.id === assistantMessageId &&
+              candidate.role === "assistant" &&
+              (candidate.turnId === null || candidate.turnId === result.turn.turnId),
+          )) ??
+      result.thread.messages.findLast(
+        (candidate) => candidate.role === "assistant" && candidate.turnId === result.turn.turnId,
+      );
     return message?.text.trim() ?? null;
   });
 
@@ -486,8 +598,17 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           selfMonitoring: isSelfMonitoringOwner(selfMonitoring, input.projectId),
           autonomy: input.settings.autonomy,
         });
+        // Whatever ends this attempt without a stored plan holds the generation.
+        monitor.proposalHeldGeneration = input.settings.proposalGeneration ?? 0;
         const output = yield* runAutomationTurn(input.projectId, input.threadId, prompt);
         if (output === null) {
+          yield* Effect.logWarning(
+            "Monitoring: proposal turn did not complete; held until 다시 분석",
+            {
+              projectId: input.projectId,
+              threadId: input.threadId,
+            },
+          );
           yield* appendNotice({
             threadId: input.threadId,
             kind: "monitoring.proposal.failed",
@@ -504,6 +625,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
               type: "project.monitoring.plan.propose",
               commandId: CommandId.make(yield* randomUUID),
               projectId: input.projectId,
+              expectedGeneration: input.settings.proposalGeneration ?? 0,
               plan: {
                 ...parsed.plan,
                 revision: 0,
@@ -533,6 +655,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       }),
       Effect.sync(() => {
         monitor.proposalInFlight = false;
+        forgetDisabledMonitorIfIdle(input.projectId, monitor);
       }),
     );
   });
@@ -543,6 +666,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     readonly runs: ReadonlyArray<WorkspaceProgramRun>;
     readonly openIncidents: ReadonlyArray<WorkspaceIncident>;
     readonly selfSignals: ServerSelfSignalsReading;
+    readonly selfRatesByWindow: ReadonlyMap<number, ServerSelfSpanRates>;
     readonly regression: ProjectMonitor["regression"];
     readonly probes: ProjectMonitor["probes"];
     readonly logs: ProjectMonitor["logs"];
@@ -638,16 +762,21 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         return run?.consecutiveHealthFailures ?? null;
       }
       // For the server itself, "latency" is event-loop lag (p99 ms since the
-      // last read) and "slow-spans" is the per-minute rate of slow effect
-      // spans. Program latency and regression arrive with a later phase; a
-      // metric with no sampler simply never fires rather than misfiring.
+      // last read). Span rates use each metric’s own window; a metric with
+      // no sampler simply never fires rather than misfiring.
       case "latency": {
         if (target.kind === "self-server") return context.selfSignals.eventLoopP99Ms;
         const url = probeUrlFor(target, context.programs);
         return url === null ? null : (context.probes.get(url)?.latencyMs ?? null);
       }
       case "slow-spans":
-        return target.kind === "self-server" ? context.selfSignals.slowSpansPerMin : null;
+        return target.kind === "self-server"
+          ? (context.selfRatesByWindow.get(metric.windowMin)?.slowSpansPerMin ?? null)
+          : null;
+      case "failed-spans":
+        return target.kind === "self-server"
+          ? (context.selfRatesByWindow.get(metric.windowMin)?.failedSpansPerMin ?? null)
+          : null;
       case "log-matches": {
         const matches = logMatchesFor(target, metric.windowMin, context);
         return matches === null ? null : matches.length;
@@ -660,10 +789,19 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
   const executePlaybooks = Effect.fn("WorkspaceMonitoringReactor.executePlaybooks")(function* (
     projectId: ProjectId,
     plan: WorkspaceMonitoringPlan,
+    proposalGeneration: number,
     findings: ReadonlyArray<{ readonly metricIndex: number; readonly finding: MonitoringFinding }>,
     incidents: ReadonlyArray<WorkspaceIncident>,
   ) {
-    const executed: string[] = [];
+    const monitor = monitorFor(projectId);
+    const executed: string[] = [...monitor.pendingPlaybookActions.values()];
+    if (plan.approvedAt === null) return executed;
+    const monitoringGuard = {
+      proposalGeneration,
+      planRevision: plan.revision,
+      planApprovedAt: plan.approvedAt,
+    };
+    const executedKeys = new Set(monitor.pendingPlaybookActions.keys());
     const firedMetricIndexes = new Set(findings.map((entry) => entry.metricIndex));
     const playbooks: ReadonlyArray<WorkspaceMonitoringPlaybook> = plan.playbooks.filter(
       (playbook) => firedMetricIndexes.has(playbook.when) && playbook.action !== "notify-only",
@@ -673,26 +811,63 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       const target = metric === undefined ? undefined : plan.targets[metric.targetIndex];
       const programId = playbook.programId ?? target?.programId;
       if (programId === undefined) continue;
+      const actionKey = `${playbook.action}|${programId}`;
+      if (executedKeys.has(actionKey)) continue;
       const createdAt = yield* nowIso;
       const commandId = CommandId.make(yield* randomUUID);
+      if (!(yield* canExecuteMonitoringPlaybook(projectId, plan, proposalGeneration))) break;
       switch (playbook.action) {
         case "restart-program":
         case "stop-program":
-        case "start-program":
-          yield* orchestrationEngine.dispatch({
-            type:
-              playbook.action === "restart-program"
-                ? "project.program.restart"
-                : playbook.action === "stop-program"
-                  ? "project.program.stop"
-                  : "project.program.start",
-            commandId,
-            projectId,
-            programId,
-            createdAt,
-          });
+        case "start-program": {
+          const publish = serverSettings.runMonitoringAutoAction(
+            orchestrationEngine.dispatch({
+              type:
+                playbook.action === "restart-program"
+                  ? "project.program.restart"
+                  : playbook.action === "stop-program"
+                    ? "project.program.stop"
+                    : "project.program.start",
+              commandId,
+              projectId,
+              programId,
+              monitoringGuard,
+              createdAt,
+            }),
+          );
+          // Replay the same command ID: its receipt and stop event commit together.
+          const dispatched = yield* playbook.action === "stop-program"
+            ? publish.pipe(
+                Effect.catchCause((cause) =>
+                  Effect.gen(function* () {
+                    if (
+                      !canRetryStop(cause) ||
+                      !(yield* canExecuteMonitoringPlaybook(projectId, plan, proposalGeneration))
+                    ) {
+                      return yield* Effect.failCause(cause);
+                    }
+                    yield* Effect.logWarning("Monitoring: retrying program stop", {
+                      projectId,
+                      programId,
+                      commandId,
+                    });
+                    const retry = yield* publish;
+                    // Permission can be revoked after the plan recheck. The first attempt is still uncertain.
+                    if (Option.isNone(retry)) return yield* Effect.failCause(cause);
+                    return retry;
+                  }),
+                ),
+              )
+            : publish;
+          if (Option.isNone(dispatched)) break;
           executed.push(`${playbook.action} · programId=${programId}`);
+          executedKeys.add(actionKey);
+          monitor.pendingPlaybookActions.set(
+            actionKey,
+            `${playbook.action} · programId=${programId}`,
+          );
           break;
+        }
         case "repair-run": {
           const incident = incidents.find(
             (candidate) =>
@@ -700,16 +875,22 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
               (candidate.status === "open" || candidate.status === "awaiting-user"),
           );
           if (incident === undefined) break;
-          yield* orchestrationEngine.dispatch({
-            type: "project.program.incident.repair.request",
-            commandId,
-            projectId,
-            incidentId: incident.id,
-            instruction:
-              "모니터링 플레이북(repair-run)이 자동으로 요청한 수정입니다. 장애 증거를 재현하고 고친 뒤 등록된 검증 명령으로 확인하세요.",
-            createdAt,
-          });
+          const dispatched = yield* serverSettings.runMonitoringAutoAction(
+            orchestrationEngine.dispatch({
+              type: "project.program.incident.repair.request",
+              commandId,
+              projectId,
+              incidentId: incident.id,
+              monitoringGuard,
+              instruction:
+                "모니터링 플레이북(repair-run)이 자동으로 요청한 수정입니다. 장애 증거를 재현하고 고친 뒤 등록된 검증 명령으로 확인하세요.",
+              createdAt,
+            }),
+          );
+          if (Option.isNone(dispatched)) break;
           executed.push(`repair-run · incident=${incident.id}`);
+          executedKeys.add(actionKey);
+          monitor.pendingPlaybookActions.set(actionKey, `repair-run · incident=${incident.id}`);
           break;
         }
         case "notify-only":
@@ -719,13 +900,8 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     return executed;
   });
 
-  const executeRequestedActions = Effect.fn("WorkspaceMonitoringReactor.executeRequestedActions")(
-    function* (
-      projectId: ProjectId,
-      threadId: ThreadId,
-      plan: WorkspaceMonitoringPlan,
-      output: string,
-    ) {
+  const reportSuggestedActions = Effect.fn("WorkspaceMonitoringReactor.reportSuggestedActions")(
+    function* (threadId: ThreadId, plan: WorkspaceMonitoringPlan, output: string) {
       const parsed = parseMonitoringActions(output, plan);
       if (parsed.rejected !== null) {
         yield* appendNotice({
@@ -735,23 +911,11 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           summary: parsed.rejected,
         });
       }
-      for (const requested of parsed.actions) {
-        yield* orchestrationEngine.dispatch({
-          type:
-            requested.action === "restart-program"
-              ? "project.program.restart"
-              : requested.action === "stop-program"
-                ? "project.program.stop"
-                : "project.program.start",
-          commandId: CommandId.make(yield* randomUUID),
-          projectId,
-          programId: requested.programId,
-          createdAt: yield* nowIso,
-        });
+      for (const suggested of parsed.actions) {
         yield* appendNotice({
           threadId,
-          kind: "monitoring.action.executed",
-          summary: `사람의 결정에 따라 서버가 실행했습니다: ${requested.action} · programId=${requested.programId}. 결과는 다음 점검에서 확인합니다.`,
+          kind: "monitoring.action.suggested",
+          summary: `감시 AI의 조치 제안: ${suggested.action} · programId=${suggested.programId}. 이 출력만으로는 프로그램을 제어하지 않았습니다.`,
         });
       }
     },
@@ -1020,8 +1184,13 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       readonly settings: WorkspaceMonitoringSettings;
       readonly plan: WorkspaceMonitoringPlan;
       readonly workspaceRoot: string;
+      readonly readSelfSignals: (windowMin: number, nowMs: number) => ServerSelfSignalsReading;
     }) {
       const monitor = monitorFor(input.projectId);
+      if (!NodeUtil.isDeepStrictEqual(monitor.deferredPlan, input.plan)) {
+        monitor.pendingPlaybookActions.clear();
+        monitor.deferredPlan = input.plan;
+      }
       const now = yield* nowIso;
       const nowMs = Date.parse(now);
       const [snapshot, programs, runs, incidents] = yield* Effect.all([
@@ -1034,20 +1203,37 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           limit: 20,
         }),
       ]);
-      // One read per evaluation, sized to the longest self-server window in
-      // the plan (the event-loop histogram resets on read).
+      // Share one latency read per tick and avoid resetting the histogram for
+      // plans that only need other signals.
       const selfWindowMin = Math.max(
         1,
         ...input.plan.metrics
           .filter((metric) => input.plan.targets[metric.targetIndex]?.kind === "self-server")
           .map((metric) => metric.windowMin),
       );
+      const selfRatesByWindow = new Map<number, ServerSelfSpanRates>();
+      for (const metric of input.plan.metrics) {
+        if (
+          input.plan.targets[metric.targetIndex]?.kind === "self-server" &&
+          (metric.metric === "slow-spans" || metric.metric === "failed-spans") &&
+          !selfRatesByWindow.has(metric.windowMin)
+        ) {
+          selfRatesByWindow.set(metric.windowMin, selfSignals.readRates(metric.windowMin, nowMs));
+        }
+      }
       const context: SampleContext = {
         telemetry: snapshot,
         programs,
         runs,
         openIncidents: incidents,
-        selfSignals: selfSignals.read(selfWindowMin, nowMs),
+        selfSignals: input.plan.metrics.some(
+          (metric) =>
+            metric.metric === "latency" &&
+            input.plan.targets[metric.targetIndex]?.kind === "self-server",
+        )
+          ? input.readSelfSignals(selfWindowMin, nowMs)
+          : { eventLoopP99Ms: 0, slowSpansPerMin: 0, failedSpansPerMin: 0 },
+        selfRatesByWindow,
         regression: monitor.regression,
         probes: monitor.probes,
         logs: monitor.logs,
@@ -1082,13 +1268,14 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         // samples (or its absence) with the new one's warm-up reads as a
         // memory climb that never happened. Key the ring by process identity
         // so trends start over with the process; self targets key by kind.
-        const ringKey = `${metric.targetIndex}|${metric.metric}|${targetIdentity(target, context)}`;
+        const ringPrefix = `${metricIndex}|${metric.targetIndex}|${metric.metric}|${metric.windowMin}|${metric.trend}|`;
+        const ringKey = `${ringPrefix}${targetIdentity(target, context)}`;
         let ring = monitor.rings.get(ringKey);
         if (ring === undefined) {
           ring = new SampleRing(RING_CAPACITY);
           monitor.rings.set(ringKey, ring);
           for (const key of monitor.rings.keys()) {
-            if (key !== ringKey && key.startsWith(`${metric.targetIndex}|${metric.metric}|`)) {
+            if (key !== ringKey && key.startsWith(ringPrefix)) {
               monitor.rings.delete(key);
             }
           }
@@ -1096,7 +1283,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
         ring.push({ at: nowMs, value });
         const verdict = evaluateTrend(metric, ring, nowMs);
         if (verdict === null || !verdict.anomalous) return;
-        const fingerprint = `${metric.targetIndex}|${metric.metric}|${verdict.direction}`;
+        const fingerprint = `${input.plan.proposedAt}|${input.plan.revision}|${target.kind}|${target.programId ?? ""}|${metricIndex}|${metric.targetIndex}|${metric.metric}|${metric.windowMin}|${metric.trend}|${metric.limit}|${verdict.direction}`;
         // A condition that simply persists (a program that stays down) is
         // re-reported at most every 30 minutes — or the metric's own window if
         // that is longer — so the thread does not fill with the same finding.
@@ -1125,41 +1312,175 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           },
         });
       });
-      if (fired.length === 0) return;
+      // Preserve new observations while a previous diagnosis is running.
+      // Deferred observations are reported later, but never used to trigger
+      // a stale automatic action after the underlying condition has cleared.
+      const queued: Array<{
+        readonly metricIndex: number;
+        readonly finding: MonitoringFinding;
+        readonly occurrenceId: string;
+        readonly fingerprint: string;
+      }> = [];
+      for (const entry of fired) {
+        const repeatMs =
+          Math.max(entry.finding.metric.windowMin, REPEAT_REPORT_MIN_MINUTES) * 60_000;
+        const lastQueued = monitor.lastQueuedAt.get(entry.finding.fingerprint);
+        if (lastQueued === undefined || nowMs - lastQueued >= repeatMs) {
+          queued.push({
+            ...entry,
+            fingerprint: entry.finding.fingerprint,
+            occurrenceId: yield* randomUUID,
+          });
+        }
+      }
+      if (queued.length > 0) {
+        yield* journal.upsert(input.projectId, queued);
+        for (const entry of queued) {
+          monitor.deferredFindings.set(entry.occurrenceId, entry);
+          monitor.lastQueuedAt.set(entry.fingerprint, Date.parse(entry.finding.observedAt));
+        }
+      }
+      if (monitor.turnInFlight || monitor.proposalInFlight) return;
+      const currentFingerprints = new Set(fired.map((entry) => entry.finding.fingerprint));
+      const uncertainOccurrences = new Set<string>();
+      for (const entry of monitor.deferredFindings.values()) {
+        const state = yield* journal.getActionState(input.projectId, entry);
+        if (state?.state === "publishing") uncertainOccurrences.add(entry.occurrenceId);
+      }
+      const reportFindings = [...monitor.deferredFindings.values()].map((entry) => {
+        const isCurrent =
+          currentFingerprints.has(entry.finding.fingerprint) &&
+          monitor.lastQueuedAt.get(entry.finding.fingerprint) ===
+            Date.parse(entry.finding.observedAt);
+        if (
+          isCurrent &&
+          !monitor.recoveredFindings.has(entry.occurrenceId) &&
+          !uncertainOccurrences.has(entry.occurrenceId)
+        )
+          return entry;
+        return {
+          ...entry,
+          finding: {
+            ...entry.finding,
+            observed: `${uncertainOccurrences.has(entry.occurrenceId) ? "자동 조치 발행이 중단되어 실행 여부가 불확실합니다. 이전 결과와 현재 상태를 확인해야 합니다." : monitor.recoveredFindings.has(entry.occurrenceId) ? "감시 재개 전 발견됨; 이전 자동 조치 실행 여부와 현재 상태를 확인해야 합니다." : "이전에 관찰됨; 현재 상태는 다시 확인해야 합니다."}\n${entry.finding.observed}`,
+          },
+        };
+      });
+      if (reportFindings.length === 0) return;
 
       const permissions = yield* readPermissions;
-      const executed =
-        input.settings.autonomy === "playbooks" && permissions.monitoringAutoActions
-          ? yield* executePlaybooks(input.projectId, input.plan, fired, incidents)
-          : [];
+      let executed: string[] = [...monitor.pendingPlaybookActions.values()];
+      if (
+        input.settings.autonomy === "playbooks" &&
+        permissions.monitoringAutoActions &&
+        (yield* canExecuteMonitoringPlaybook(
+          input.projectId,
+          input.plan,
+          input.settings.proposalGeneration ?? 0,
+        ))
+      ) {
+        const claimed: Array<{
+          readonly entry: (typeof fired)[number];
+          readonly ref: { readonly fingerprint: string; readonly occurrenceId: string };
+        }> = [];
+        for (const entry of fired) {
+          if (
+            !input.plan.playbooks.some(
+              (playbook) =>
+                playbook.when === entry.metricIndex && playbook.action !== "notify-only",
+            )
+          )
+            continue;
+          const occurrence = [...monitor.deferredFindings.values()].findLast(
+            (candidate) =>
+              candidate.fingerprint === entry.finding.fingerprint &&
+              Date.parse(candidate.finding.observedAt) ===
+                monitor.lastQueuedAt.get(candidate.fingerprint),
+          );
+          if (occurrence === undefined) continue;
+          const ref = {
+            fingerprint: occurrence.fingerprint,
+            occurrenceId: occurrence.occurrenceId,
+          };
+          const state = yield* journal.prepareAction(input.projectId, ref);
+          if (state?.state === "pending" && (yield* journal.claimAction(input.projectId, ref))) {
+            claimed.push({ entry, ref });
+          }
+        }
+        if (claimed.length > 0) {
+          executed = yield* executePlaybooks(
+            input.projectId,
+            input.plan,
+            input.settings.proposalGeneration ?? 0,
+            claimed.map(({ entry }) => entry),
+            incidents,
+          );
+          // Completion records publication, not the outcome of the OS operation.
+          for (const { entry, ref } of claimed) {
+            const target = input.plan.targets[entry.finding.metric.targetIndex];
+            const actionKeys = input.plan.playbooks
+              .filter(
+                (playbook) =>
+                  playbook.when === entry.metricIndex && playbook.action !== "notify-only",
+              )
+              .map((playbook) => {
+                const programId = playbook.programId ?? target?.programId;
+                return programId === undefined ? null : playbook.action + "|" + programId;
+              })
+              .filter((key): key is string => key !== null);
+            if (
+              actionKeys.length > 0 &&
+              actionKeys.every((key) => monitor.pendingPlaybookActions.has(key))
+            ) {
+              yield* journal.completeAction(input.projectId, ref, nowMs);
+            } else if (actionKeys.every((key) => !monitor.pendingPlaybookActions.has(key))) {
+              yield* journal.releaseAction(input.projectId, ref);
+            }
+          }
+        }
+      }
 
       const budget = monitoringTurnBudget(input.settings, now);
       if (!permissions.autoDiagnosis || budget.remainingHour === 0 || budget.remainingDay === 0) {
         // Held findings are still "seen" for cooldown purposes so a dry budget
         // does not turn into a flood the moment it refills.
-        for (const entry of fired) monitor.firedAt.set(entry.finding.fingerprint, nowMs);
+        if (fired.length > 0) {
+          yield* journal.saveCooldowns(
+            input.projectId,
+            fired.map((entry) => ({ fingerprint: entry.finding.fingerprint, firedAt: nowMs })),
+          );
+          for (const entry of fired) monitor.firedAt.set(entry.finding.fingerprint, nowMs);
+        }
+        monitor.pendingPlaybookActions.clear();
         if (nowMs - monitor.lastHeldNoticeAt >= HELD_NOTICE_INTERVAL_MS) {
           monitor.lastHeldNoticeAt = nowMs;
           yield* appendNotice({
             threadId: input.threadId,
             kind: "monitoring.finding.held",
             summary: !permissions.autoDiagnosis
-              ? `이상 ${fired.length}건을 감지했지만 권한 설정에서 자동 AI 진단이 꺼져 있어 보고 턴을 시작하지 않았습니다: ${fired.map((entry) => entry.finding.targetLabel).join(", ")}`
-              : `이상 ${fired.length}건을 감지했지만 AI 턴 예산이 소진되어 보류했습니다: ${fired.map((entry) => entry.finding.targetLabel).join(", ")}`,
+              ? `이상 ${reportFindings.length}건을 감지했지만 권한 설정에서 자동 AI 진단이 꺼져 있어 보고 턴을 시작하지 않았습니다: ${reportFindings.map((entry) => entry.finding.targetLabel).join(", ")}`
+              : `이상 ${reportFindings.length}건을 감지했지만 AI 턴 예산이 소진되어 보류했습니다: ${reportFindings.map((entry) => entry.finding.targetLabel).join(", ")}`,
           });
         }
         return;
       }
 
-      for (const entry of fired) monitor.firedAt.set(entry.finding.fingerprint, nowMs);
+      if (fired.length > 0) {
+        yield* journal.saveCooldowns(
+          input.projectId,
+          fired.map((entry) => ({ fingerprint: entry.finding.fingerprint, firedAt: nowMs })),
+        );
+        for (const entry of fired) monitor.firedAt.set(entry.finding.fingerprint, nowMs);
+      }
       yield* updateRuntime(input.projectId, {
         turnLog: [...budget.trimmedLog, now].slice(-60),
         lastCheckedAt: now,
       });
+      monitor.pendingPlaybookActions.clear();
       monitor.lastCheckedWriteAt = nowMs;
       const prompt = buildMonitoringFindingPrompt({
         projectTitle: input.projectTitle,
-        findings: fired.map((entry) => entry.finding),
+        findings: reportFindings.map((entry) => entry.finding),
         executedPlaybooks: executed,
         autonomy: input.settings.autonomy,
         budget: {
@@ -1170,15 +1491,38 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       });
       monitor.turnInFlight = true;
       const plan = input.plan;
+      const reportedSnapshot = [...monitor.deferredFindings.entries()];
       yield* forkBackground(
         runAutomationTurn(input.projectId, input.threadId, prompt).pipe(
-          // "답하면 실행": the turn settles only after the person answered the
-          // AI's question; whatever action the AI relayed is executed here
-          // with the same commands the control-center buttons dispatch.
+          // An AI action block is a suggestion: it does not prove what a person
+          // selected. Explicit program controls and permitted playbooks remain separate.
           Effect.flatMap((output) =>
             output === null
-              ? Effect.void
-              : executeRequestedActions(input.projectId, input.threadId, plan, output),
+              ? Effect.logWarning("Monitoring: finding turn did not complete", {
+                  projectId: input.projectId,
+                  threadId: input.threadId,
+                })
+              : reportSuggestedActions(input.threadId, plan, output).pipe(
+                  Effect.andThen(
+                    journal.acknowledge(
+                      input.projectId,
+                      reportedSnapshot.map(([occurrenceId, entry]) => ({
+                        fingerprint: entry.finding.fingerprint,
+                        occurrenceId,
+                      })),
+                    ),
+                  ),
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      for (const [occurrenceId, entry] of reportedSnapshot) {
+                        if (monitor.deferredFindings.get(occurrenceId) === entry) {
+                          monitor.deferredFindings.delete(occurrenceId);
+                          monitor.recoveredFindings.delete(occurrenceId);
+                        }
+                      }
+                    }),
+                  ),
+                ),
           ),
           Effect.catchCause((cause) =>
             Effect.logWarning("Monitoring: finding turn failed", {
@@ -1189,6 +1533,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           Effect.ensuring(
             Effect.sync(() => {
               monitor.turnInFlight = false;
+              forgetDisabledMonitorIfIdle(input.projectId, monitor);
             }),
           ),
         ),
@@ -1198,6 +1543,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
 
   const checkProject = Effect.fn("WorkspaceMonitoringReactor.checkProject")(function* (
     projectId: ProjectId,
+    readSelfSignals: (windowMin: number, nowMs: number) => ServerSelfSignalsReading,
   ) {
     const row = yield* projectRepository.getById({ projectId });
     if (Option.isNone(row) || row.value.deletedAt !== null) {
@@ -1209,71 +1555,134 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
     const settings = project.workspaceControl.monitoring;
     if (!settings.enabled) {
       enabledProjects.delete(projectId);
-      monitors.delete(projectId);
+      suspendMonitor(projectId);
       return;
     }
     const monitor = monitorFor(projectId);
-    monitor.externalProcesses =
-      settings.planStatus === "approved" ? externalProcessesOf(settings.plan) : [];
     const nowMs = Date.parse(yield* nowIso);
     if (nowMs - monitor.lastEvaluatedAt < settings.checkIntervalSec * 1_000) return;
     monitor.lastEvaluatedAt = nowMs;
 
+    const folder = yield* fileSystem.stat(project.workspaceRoot).pipe(Effect.option);
+    if (Option.isNone(folder) || folder.value.type !== "Directory") {
+      monitor.externalProcesses = [];
+      if (monitor.unavailableRoot !== project.workspaceRoot) {
+        yield* Effect.logWarning("Monitoring paused: project folder unavailable", {
+          projectId,
+          workspaceRoot: project.workspaceRoot,
+        });
+        if (settings.threadId) {
+          yield* appendNotice({
+            threadId: settings.threadId,
+            kind: "monitoring.workspace.unavailable",
+            summary: `프로젝트 폴더를 열 수 없어 감시를 일시 중지했습니다. / Monitoring paused: project folder unavailable (${project.workspaceRoot})`,
+          });
+        }
+        monitor.unavailableRoot = project.workspaceRoot;
+      }
+      return;
+    }
+    monitor.unavailableRoot = null;
+
+    if (!monitor.journalLoaded) {
+      const [pending, cooldowns] = yield* Effect.all([
+        journal.list(projectId),
+        journal.loadCooldowns(projectId),
+      ]);
+      for (const entry of cooldowns) monitor.firedAt.set(entry.fingerprint, entry.firedAt);
+      for (const entry of pending) {
+        monitor.deferredFindings.set(entry.occurrenceId, entry);
+        monitor.recoveredFindings.add(entry.occurrenceId);
+        const observedAt = Date.parse(entry.finding.observedAt);
+        monitor.lastQueuedAt.set(
+          entry.fingerprint,
+          Math.max(monitor.lastQueuedAt.get(entry.fingerprint) ?? 0, observedAt),
+        );
+      }
+      // Only a claimed publication is ambiguous after interruption. Findings
+      // that never claimed an action can still be evaluated immediately.
+      const uncertain = [];
+      for (const entry of pending) {
+        const state = yield* journal.getActionState(projectId, entry);
+        if (state?.state === "publishing") uncertain.push(entry);
+      }
+      if (uncertain.length > 0) {
+        const recoveredAt = Date.parse(yield* nowIso);
+        const recoveryCooldowns = uncertain.map((entry) => ({
+          fingerprint: entry.fingerprint,
+          firedAt: recoveredAt,
+        }));
+        yield* journal.saveCooldowns(projectId, recoveryCooldowns);
+        for (const entry of recoveryCooldowns)
+          monitor.firedAt.set(
+            entry.fingerprint,
+            Math.max(monitor.firedAt.get(entry.fingerprint) ?? 0, entry.firedAt),
+          );
+      }
+      monitor.journalLoaded = true;
+    }
+    const activePlan = activeMonitoringPlan(settings);
+    const activePlanStale =
+      settings.activePlan !== undefined && settings.activePlan !== null
+        ? (settings.activePlanStale ?? false)
+        : settings.planStatus === "stale";
+    monitor.externalProcesses = externalProcessesOf(activePlan);
+
     const threadId = yield* ensureThread(projectId, project.title, settings);
     if (threadId === null) return;
 
-    switch (settings.planStatus) {
-      case "none":
-        if (!monitor.proposalInFlight) {
-          yield* forkBackground(
-            propose({
-              projectId,
-              projectTitle: project.title,
-              workspaceRoot: project.workspaceRoot,
-              threadId,
-              settings,
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Monitoring: proposal failed", {
-                  projectId,
-                  cause: conciseCause(cause),
-                }),
-              ),
-            ),
-          );
-        }
-        return;
-      case "proposed":
-        return;
-      case "stale":
-        if (!monitor.staleNoticed) {
-          monitor.staleNoticed = true;
-          yield* appendNotice({
-            threadId,
-            kind: "monitoring.plan.stale",
-            summary: MONITORING_STALE_NOTICE,
-          });
-        }
-        return;
-      case "approved": {
-        monitor.staleNoticed = false;
-        if (settings.plan === null || monitor.turnInFlight) return;
-        yield* evaluateProject({
+    if (
+      settings.planStatus === "none" &&
+      !monitor.proposalInFlight &&
+      !monitor.turnInFlight &&
+      monitor.proposalHeldGeneration !== (settings.proposalGeneration ?? 0)
+    ) {
+      monitor.proposalInFlight = true;
+      yield* forkBackground(
+        propose({
           projectId,
           projectTitle: project.title,
+          workspaceRoot: project.workspaceRoot,
           threadId,
           settings,
-          plan: settings.plan,
-          workspaceRoot: project.workspaceRoot,
-        });
-        if (nowMs - monitor.lastCheckedWriteAt >= LAST_CHECKED_WRITE_INTERVAL_MS) {
-          monitor.lastCheckedWriteAt = nowMs;
-          yield* updateRuntime(projectId, {
-            lastCheckedAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
-          });
-        }
-        return;
-      }
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Monitoring: proposal failed", {
+              projectId,
+              cause: conciseCause(cause),
+            }),
+          ),
+        ),
+      );
+    }
+    if (activePlan === null) return;
+    if (activePlanStale && !monitor.staleNoticed) {
+      monitor.staleNoticed = true;
+      yield* appendNotice({
+        threadId,
+        kind: "monitoring.plan.stale",
+        summary: MONITORING_STALE_NOTICE,
+      });
+    } else if (!activePlanStale) {
+      monitor.staleNoticed = false;
+    }
+    // Existing approved plans keep observing while a replacement is pending.
+    // Automatic playbooks remain disabled until the new plan is approved.
+    const observationOnly = activePlanStale || settings.planStatus !== "approved";
+    yield* evaluateProject({
+      projectId,
+      projectTitle: project.title,
+      threadId,
+      settings: observationOnly ? { ...settings, autonomy: "ask" } : settings,
+      plan: activePlan,
+      workspaceRoot: project.workspaceRoot,
+      readSelfSignals,
+    });
+    if (nowMs - monitor.lastCheckedWriteAt >= LAST_CHECKED_WRITE_INTERVAL_MS) {
+      monitor.lastCheckedWriteAt = nowMs;
+      yield* updateRuntime(projectId, {
+        lastCheckedAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
+      });
     }
   });
 
@@ -1314,8 +1723,11 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
       return;
     }
     yield* ensureTelemetry;
+    let selfReading: ServerSelfSignalsReading | undefined;
+    const readSelfSignals = (windowMin: number, nowMs: number) =>
+      (selfReading ??= selfSignals.read(windowMin, nowMs));
     for (const projectId of Array.from(enabledProjects)) {
-      yield* checkProject(projectId).pipe(
+      yield* checkProject(projectId, readSelfSignals).pipe(
         Effect.catchCause((cause) => {
           if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
           return Effect.logWarning("Monitoring: project check failed", {
@@ -1349,7 +1761,7 @@ export const makeWorkspaceMonitoringReactor = Effect.gen(function* () {
           if (monitoring.planStatus === "none") monitor.lastEvaluatedAt = 0;
         } else {
           enabledProjects.delete(event.payload.projectId);
-          monitors.delete(event.payload.projectId);
+          suspendMonitor(event.payload.projectId);
         }
         return Effect.void;
       }

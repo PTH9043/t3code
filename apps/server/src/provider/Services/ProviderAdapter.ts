@@ -41,6 +41,18 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /** This adapter attaches the authenticated T3 MCP endpoint to its agent sessions. */
+  readonly workspaceDelegate?: (threadId: ThreadId) => boolean;
+  /** Native subagent tools are fixed at launch on adapters that expose this capability. */
+  readonly nativeSubagentPolicy?: (threadId: ThreadId) =>
+    | {
+        readonly restricted: boolean;
+        /** Claude can report background output as a synthetic turn between user requests. */
+        readonly syntheticTurn?: boolean;
+      }
+    | undefined;
+  /** The explicit stop awaits all local session event producers before its exit event. */
+  readonly stopSessionDrainsEvents?: true;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -64,19 +76,21 @@ export interface ProviderAdapterShape<TError> {
    * Start a provider-backed session.
    */
   readonly startSession: (
-    input: ProviderSessionStartInput,
+    input: ProviderSessionStartInput & { readonly restrictNativeSubagents?: boolean },
   ) => Effect.Effect<ProviderSession, TError>;
 
   /**
    * Send a turn to an active provider session.
    */
   readonly sendTurn: (
-    input: ProviderSendTurnInput,
+    input: ProviderSendTurnInput & { readonly nativePolicySteerTurnId?: TurnId },
   ) => Effect.Effect<ProviderTurnStartResult, TError>;
 
   /**
    * Interrupt an active turn.
    */
+  /** Stop only monitors owned by this room, leaving its turn and other work running. */
+  readonly stopBackgroundWatches?: (threadId: ThreadId) => Effect.Effect<void, TError>;
   readonly interruptTurn: (
     threadId: ThreadId,
     turnId?: TurnId,

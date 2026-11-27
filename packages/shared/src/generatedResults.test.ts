@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   extractResultFileLinks,
+  groupGeneratedResultAttachments,
   readResultText,
   resultTextExcerpt,
   resultFileType,
   resultPathKey,
-} from "./generatedResults";
+} from "./generatedResults.ts";
 afterEach(() => vi.unstubAllGlobals());
 describe("generated results", () => {
   it("does not split emoji at the preview boundary", () => {
@@ -64,5 +65,29 @@ describe("generated results", () => {
       vi.fn().mockResolvedValue(new Response("not a result", { status: 404 })),
     );
     await expect(readResultText("https://test.invalid/missing")).rejects.toThrow("404");
+  });
+  it("groups multiple generated images into a single gallery while preserving non-image order", () => {
+    const grouped = groupGeneratedResultAttachments([
+      { id: "r1", type: "file", result: { kind: "text" } },
+      { id: "img1", type: "image", result: { kind: "image" } },
+      { id: "r2", type: "file", result: { kind: "text" } },
+      { id: "img2", type: "image", result: { kind: "image" } },
+      { id: "img3", type: "image", result: { kind: "image" } },
+      { id: "f1", type: "file" },
+    ]);
+    expect(grouped.map((g) => g.kind)).toEqual(["text", "image-gallery", "text", "file"]);
+    const gallery = grouped[1];
+    expect(gallery?.kind === "image-gallery" ? gallery.attachments.map((a) => a.id) : []).toEqual([
+      "img1",
+      "img2",
+      "img3",
+    ]);
+  });
+  it("keeps a single generated image as a standalone image item", () => {
+    const grouped = groupGeneratedResultAttachments([
+      { id: "img1", type: "image", result: { kind: "image" } },
+      { id: "r1", type: "file", result: { kind: "text" } },
+    ]);
+    expect(grouped.map((g) => g.kind)).toEqual(["image", "text"]);
   });
 });

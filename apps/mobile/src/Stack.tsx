@@ -36,6 +36,10 @@ import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import {
+  KnowledgeWikiDocumentScreen,
+  KnowledgeWikiRouteScreen,
+} from "./features/orchestration/KnowledgeWikiRouteScreen";
 import { WorkspaceCollaborationRunsRouteScreen } from "./features/orchestration/WorkspaceCollaborationRunsRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
@@ -417,6 +421,16 @@ export const RootStack = createNativeStackNavigator({
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
       },
+    }),
+    KnowledgeWiki: createNativeStackScreen({
+      screen: KnowledgeWikiRouteScreen,
+      linking: "workspaces/:environmentId/:projectId/knowledge",
+      options: { ...SOLID_HEADER_OPTIONS, title: "지식 위키" },
+    }),
+    KnowledgeWikiDocument: createNativeStackScreen({
+      screen: KnowledgeWikiDocumentScreen,
+      linking: "workspaces/:environmentId/:projectId/knowledge/docs/:itemId",
+      options: { ...SOLID_HEADER_OPTIONS, title: "지식 문서" },
     }),
     WorkspaceCollaborationRuns: createNativeStackScreen({
       screen: WorkspaceCollaborationRunsRouteScreen,

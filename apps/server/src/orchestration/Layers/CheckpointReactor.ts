@@ -28,6 +28,14 @@ import {
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ServerConfig } from "../../config.ts";
+import {
+  isDetachedUpgradeRoomThread,
+  UPGRADE_ROOM_RUN_ID,
+  upgradeRoomTurnIds,
+} from "../UpgradeRoomTurns.ts";
+import { WATCHDOG_PROJECTION_CONSUMER, type WatchdogJournal } from "../WatchdogJournal.ts";
+import { WatchdogRuntime } from "../WatchdogRuntime.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -88,6 +96,8 @@ const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
   const completionAutomation = yield* Effect.serviceOption(WorkspaceAutomationRunner);
+  const watchdogRuntime = yield* Effect.serviceOption(WatchdogRuntime);
+  const serverConfig = yield* Effect.serviceOption(ServerConfig);
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
 
@@ -700,8 +710,9 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
+  const applyRevertRequested = Effect.fn("applyRevertRequested")(function* (
     event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+    roomJournal?: WatchdogJournal,
   ) {
     const now = DateTime.formatIso(yield* DateTime.now);
 
@@ -716,8 +727,20 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.payload.threadId);
-    if (Option.isNone(sessionRuntime)) {
+    const sessionRuntime = roomJournal
+      ? Option.none()
+      : yield* resolveSessionRuntimeForThread(thread.id);
+    const cwd = roomJournal
+      ? yield* resolveCheckpointCwd({
+          threadId: thread.id,
+          thread,
+          projects: yield* resolveThreadProjects(thread.projectId),
+          preferSessionRuntime: false,
+        })
+      : Option.isSome(sessionRuntime)
+        ? sessionRuntime.value.cwd
+        : undefined;
+    if (!cwd) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -726,7 +749,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
-    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
+    if (!isGitWorkspace(cwd)) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -769,9 +792,9 @@ const make = Effect.gen(function* () {
     }
 
     const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: sessionRuntime.value.cwd,
+      cwd,
       checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
+      fallbackToHead: !roomJournal && event.payload.turnCount === 0,
     });
     if (!restored) {
       yield* appendRevertFailureActivity({
@@ -785,10 +808,12 @@ const make = Effect.gen(function* () {
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    yield* workspaceEntries.refresh(cwd);
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
-    if (rolledBackTurns > 0) {
+    if (rolledBackTurns > 0 && roomJournal) {
+      roomJournal.clearUpgradeRoomResumeCursors();
+    } else if (rolledBackTurns > 0 && Option.isSome(sessionRuntime)) {
       yield* providerService.rollbackConversation({
         threadId: sessionRuntime.value.threadId,
         numTurns: rolledBackTurns,
@@ -804,7 +829,7 @@ const make = Effect.gen(function* () {
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({
-        cwd: sessionRuntime.value.cwd,
+        cwd,
         checkpointRefs: staleCheckpointRefs,
       });
     }
@@ -828,6 +853,45 @@ const make = Effect.gen(function* () {
         ),
         Effect.asVoid,
       );
+  });
+
+  const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+  ) {
+    const { threadId, turnCount } = event.payload;
+    if (
+      Option.isNone(serverConfig) ||
+      Option.isNone(watchdogRuntime) ||
+      !isDetachedUpgradeRoomThread(serverConfig.value.upgradeRoom, threadId)
+    ) {
+      return yield* applyRevertRequested(event);
+    }
+    const journal = watchdogRuntime.value.journal;
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        journal.tryBeginUpgradeRoomRewind({
+          threadId,
+          runId: UPGRADE_ROOM_RUN_ID,
+          consumer: WATCHDOG_PROJECTION_CONSUMER,
+          jobIdForTurn: (id) => upgradeRoomTurnIds(id).jobId,
+        }),
+      ),
+      (acquired) =>
+        acquired
+          ? applyRevertRequested(event, journal)
+          : nowIso.pipe(
+              Effect.flatMap((createdAt) =>
+                appendRevertFailureActivity({
+                  threadId,
+                  turnCount,
+                  createdAt,
+                  detail: "업그레이드 방의 실행 및 대기 작업을 정리한 뒤 되돌릴 수 있습니다.",
+                }),
+              ),
+              Effect.asVoid,
+            ),
+      (acquired) => (acquired ? Effect.sync(() => journal.endUpgradeRoomRewind()) : Effect.void),
+    );
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
@@ -973,6 +1037,37 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
+  const captureDetachedTurn: CheckpointReactorShape["captureDetachedTurn"] = Effect.fn(
+    "CheckpointReactor.captureDetachedTurn",
+  )(function* (input) {
+    const thread = yield* resolveThreadDetail(input.threadId);
+    if (!thread) return yield* Effect.die("Detached turn's checkpoint thread is unavailable.");
+    const checkpoint = thread.checkpoints.find((entry) => entry.turnId === input.turnId);
+    if (checkpoint?.status === "ready") return;
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const cwd = yield* resolveCheckpointCwd({
+      threadId: input.threadId,
+      thread,
+      projects,
+      preferSessionRuntime: false,
+    });
+    // Like ordinary turns, a folder without a Git repository has no checkpoint.
+    if (!cwd) return;
+    const turnCount =
+      checkpoint?.checkpointTurnCount ??
+      thread.checkpoints.reduce((max, entry) => Math.max(max, entry.checkpointTurnCount), 0) + 1;
+    yield* captureAndDispatchCheckpoint({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      thread,
+      cwd,
+      turnCount,
+      status: "ready",
+      assistantMessageId: input.assistantMessageId,
+      createdAt: input.completedAt,
+    });
+  });
+
   const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
     // Subscriptions must exist before start() returns, or events published in
     // the gap are lost to this consumer.
@@ -1007,6 +1102,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    captureDetachedTurn,
   } satisfies CheckpointReactorShape;
 });
 

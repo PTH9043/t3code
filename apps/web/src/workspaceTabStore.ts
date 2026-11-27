@@ -10,6 +10,7 @@ import { isElectron } from "./env";
  * person last navigated it to, the way a browser tab holds its last page.
  */
 export type WorkspaceTabView =
+  | { readonly kind: "upgrade-room" }
   | { readonly kind: "thread"; readonly environmentId: string; readonly threadId: string }
   | { readonly kind: "draft"; readonly draftId: string }
   | { readonly kind: "control-center"; readonly environmentId: string; readonly projectId: string };
@@ -42,6 +43,8 @@ export const MAX_WORKSPACE_TABS = 10;
 
 export function workspaceTabViewKey(view: WorkspaceTabView): string {
   switch (view.kind) {
+    case "upgrade-room":
+      return "upgrade-room";
     case "thread":
       return `thread:${view.environmentId}:${view.threadId}`;
     case "draft":
@@ -106,6 +109,12 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
         const key = workspaceTabViewKey(view);
         const projectKey = options?.projectKey ?? null;
         const { tabs, activeTabId, lastChatView, lastChatViewByProjectKey } = get();
+        if (view.kind === "upgrade-room") {
+          if (!get().openBackgroundTab(view)) return;
+          const room = get().tabs.find((tab) => tab.view.kind === "upgrade-room");
+          if (room && room.id !== activeTabId) get().activateTab(room.id);
+          return;
+        }
         if (view.kind !== "control-center") {
           // Recorded before the tab bookkeeping below, which has early
           // returns for navigation that leaves the tabs untouched.
@@ -165,7 +174,8 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
           return;
         }
         const sameFolder =
-          projectKey === null || active.projectKey === null || active.projectKey === projectKey;
+          active.view.kind !== "upgrade-room" &&
+          (projectKey === null || active.projectKey === null || active.projectKey === projectKey);
         if (sameFolder) {
           // Same-folder navigation stays in the tab, the way a browser click
           // navigates the page you are on.
@@ -176,14 +186,18 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
         // reuse the most recent tab already working in that folder, or open a
         // new one. Only the cap forces a retarget.
         const folderTab = tabs
-          .filter((tab) => tab.projectKey === projectKey)
+          .filter((tab) => tab.view.kind !== "upgrade-room" && tab.projectKey === projectKey)
           .sort((left, right) => right.lastActivatedAt - left.lastActivatedAt)[0];
         if (folderTab) {
           retarget(folderTab.id, true);
           return;
         }
         if (tabs.length >= MAX_WORKSPACE_TABS) {
-          retarget(active.id, false);
+          const target =
+            active.view.kind === "upgrade-room"
+              ? tabs.find((tab) => tab.view.kind !== "upgrade-room")
+              : active;
+          if (target) retarget(target.id, target.id !== active.id);
           return;
         }
         const tab: WorkspaceTab = {
@@ -291,6 +305,7 @@ export const useWorkspaceTabStore = create<WorkspaceTabState>()(
       },
 
       retargetTabView: (fromViewKey, view) => {
+        if (view.kind === "upgrade-room" || fromViewKey === "upgrade-room") return;
         const { tabs, lastChatView, lastChatViewByProjectKey } = get();
         const matches = (candidate: WorkspaceTabView) =>
           workspaceTabViewKey(candidate) === fromViewKey;

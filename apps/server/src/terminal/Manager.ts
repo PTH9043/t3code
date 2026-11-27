@@ -61,6 +61,10 @@ import {
   terminalSessionsTotal,
 } from "../observability/Metrics.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  windowsTerminalProcessGroup,
+  type WindowsTerminalProcessGroup,
+} from "../process/windowsJobObject.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 
@@ -102,10 +106,13 @@ class TerminalSubprocessCheckError extends Schema.TaggedErrorClass<TerminalSubpr
     cause: Schema.optional(Schema.Defect()),
     terminalPid: Schema.Number,
     command: Schema.Literals(["cscript", "pgrep", "ps"]),
+    detail: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Failed to inspect terminal subprocesses for PID ${this.terminalPid} with ${this.command}`;
+    return this.detail
+      ? `Failed to inspect terminal subprocesses for PID ${this.terminalPid} with ${this.command} (${this.detail})`
+      : `Failed to inspect terminal subprocesses for PID ${this.terminalPid} with ${this.command}`;
   }
 }
 const isTerminalSubprocessCheckError = Schema.is(TerminalSubprocessCheckError);
@@ -685,8 +692,8 @@ function windowsInspectSubprocess(
       command: "cscript.exe",
       args: ["//NoLogo", "//B", "//U", probeFile],
       windowsOutputEncoding: "utf16le",
-      timeout: "1500 millis",
-      maxOutputBytes: 32_768,
+      timeout: "4000 millis",
+      maxOutputBytes: 131_072,
       outputMode: "truncate",
       timeoutBehavior: "timedOutResult",
     });
@@ -694,7 +701,19 @@ function windowsInspectSubprocess(
     Effect.flatMap(
       (result): Effect.Effect<TerminalSubprocessInspectResult, TerminalSubprocessCheckError> => {
         if (result.timedOut || result.code !== 0 || !result.stdout.trim()) {
-          return Effect.fail(new TerminalSubprocessCheckError({ terminalPid, command: "cscript" }));
+          const detailParts: string[] = [];
+          if (result.timedOut) detailParts.push("timedOut");
+          if (result.code !== 0) detailParts.push(`code=${String(result.code)}`);
+          if (!result.stdout.trim()) detailParts.push("empty stdout");
+          const stderrSnippet = result.stderr.trim().replace(/\s+/g, " ").slice(0, 160);
+          if (stderrSnippet) detailParts.push(`stderr=${stderrSnippet}`);
+          return Effect.fail(
+            new TerminalSubprocessCheckError({
+              terminalPid,
+              command: "cscript",
+              detail: detailParts.join(", "),
+            }),
+          );
         }
         const processNameById = new Map<number, string>();
         const childrenByParent = new Map<number, number[]>();
@@ -1254,6 +1273,7 @@ interface TerminalManagerOptions {
     readonly threadId: string;
     readonly terminalId: string;
   }) => Effect.Effect<void>;
+  windowsProcessGroup?: WindowsTerminalProcessGroup;
 }
 
 export const make = Effect.fn("TerminalManager.make")(function* () {
@@ -1265,6 +1285,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     ptyAdapter,
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
+    windowsProcessGroup: windowsTerminalProcessGroup,
   });
 });
 
@@ -1307,6 +1328,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
+  const windowsProcessGroup = platform === "win32" ? options.windowsProcessGroup : undefined;
 
   yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
 
@@ -1550,6 +1572,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }),
       ),
     );
+
+    if (windowsProcessGroup && process.pid > 0) {
+      yield* Effect.tryPromise(() => windowsProcessGroup.terminatePid(process.pid)).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("failed to terminate Windows terminal process tree", {
+            threadId,
+            terminalId,
+            terminalPid: process.pid,
+            cause,
+          }),
+        ),
+      );
+    }
   });
 
   const startKillEscalation = Effect.fn("terminal.startKillEscalation")(function* (
@@ -1950,6 +1985,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
 
       yield* clearKillFiber(action.process);
+      if (windowsProcessGroup && action.process && action.process.pid > 0) {
+        windowsProcessGroup.unregister(action.process.pid);
+      }
       yield* unregisterTerminal({
         threadId: action.threadId,
         terminalId: action.terminalId,
@@ -2096,6 +2134,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
+            if (windowsProcessGroup && processPid > 0) {
+              windowsProcessGroup.register(processPid, `${session.threadId}:${session.terminalId}`);
+            }
             const unsubscribeData = ptyProcess.onData((data) => {
               if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
                 return;
@@ -2222,6 +2263,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
+  const subprocessFailureBackoffByPid = new Map<
+    number,
+    { consecutiveFailures: number; nextRetryAtMs: number }
+  >();
+
   const pollSubprocessActivity = Effect.fn("terminal.pollSubprocessActivity")(function* () {
     const state = yield* readManagerState;
     const runningSessions = [...state.sessions.values()].filter(
@@ -2230,28 +2276,57 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
     if (runningSessions.length === 0) {
+      subprocessFailureBackoffByPid.clear();
       return;
+    }
+
+    const activePids = new Set(runningSessions.map((session) => session.pid));
+    for (const pid of subprocessFailureBackoffByPid.keys()) {
+      if (!activePids.has(pid)) {
+        subprocessFailureBackoffByPid.delete(pid);
+      }
     }
 
     const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
       session: TerminalSessionState & { pid: number },
     ) {
       const terminalPid = session.pid;
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      const backoff = subprocessFailureBackoffByPid.get(terminalPid);
+      if (backoff !== undefined && nowMs < backoff.nextRetryAtMs) {
+        return;
+      }
+
       const inspectResult = yield* subprocessInspector(terminalPid).pipe(
         Effect.map(Option.some),
         Effect.catch((reason) =>
-          Effect.logWarning("failed to check terminal subprocess activity", {
-            threadId: session.threadId,
-            terminalId: session.terminalId,
-            terminalPid,
-            reason,
-          }).pipe(Effect.as(Option.none<TerminalSubprocessInspectResult>())),
+          Effect.gen(function* () {
+            const failures = (backoff?.consecutiveFailures ?? 0) + 1;
+            const delayMs = Math.min(30_000, 2_000 * 2 ** Math.min(failures - 1, 4));
+            subprocessFailureBackoffByPid.set(terminalPid, {
+              consecutiveFailures: failures,
+              nextRetryAtMs: nowMs + delayMs,
+            });
+            if (failures === 1 || failures % 5 === 0) {
+              yield* Effect.logWarning("failed to check terminal subprocess activity", {
+                threadId: session.threadId,
+                terminalId: session.terminalId,
+                terminalPid,
+                consecutiveFailures: failures,
+                nextRetryInMs: delayMs,
+                reason,
+              });
+            }
+            return Option.none<TerminalSubprocessInspectResult>();
+          }),
         ),
       );
 
       if (Option.isNone(inspectResult)) {
         return;
       }
+
+      subprocessFailureBackoffByPid.delete(terminalPid);
 
       const next = inspectResult.value;
       yield* registerTerminalProcesses({
@@ -2346,6 +2421,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         concurrency: "unbounded",
         discard: true,
       });
+
+      if (windowsProcessGroup) {
+        yield* Effect.tryPromise(() => windowsProcessGroup.terminateAll()).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to terminate remaining Windows terminal process trees", {
+              cause,
+            }),
+          ),
+        );
+      }
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 

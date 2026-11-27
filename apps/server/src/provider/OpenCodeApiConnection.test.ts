@@ -16,6 +16,18 @@ const settings = decodeSettings({
 });
 
 describe("OpenCode API connection", () => {
+  it("repairs the API path for an existing Antseed account at runtime", () => {
+    const old = {
+      ...settings,
+      apiConnection: {
+        ...settings.apiConnection!,
+        providerId: "t3_antseed",
+        baseUrl: "http://localhost:8379",
+      },
+    };
+    const config = JSON.parse(openCodeApiEnvironment(old, {}).OPENCODE_CONFIG_CONTENT!);
+    expect(config.provider.t3_antseed.options.baseURL).toBe("http://localhost:8379/v1");
+  });
   it("uses official provider configuration and an environment reference without embedding credentials", () => {
     const environment = openCodeApiEnvironment(settings, {
       [OPENCODE_API_KEY_ENV]: "secret-test-key",

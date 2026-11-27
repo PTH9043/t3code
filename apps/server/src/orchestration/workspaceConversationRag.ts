@@ -4,11 +4,14 @@ import {
   WorkspaceKnowledgeItemId,
   type ChatAttachment,
   type IsoDateTime,
+  type ModelSelection,
   type ProjectId,
   type ThreadId,
   type WorkspaceConversationRagSettings,
+  type WorkspaceKnowledgeActor,
   type WorkspaceKnowledgeItem,
 } from "@t3tools/contracts";
+import { redactMemorySensitiveData } from "./memoryPrivacyGuard.ts";
 
 const AUTO_CONVERSATION_TAG = "auto-conversation";
 const COMPACTION_MARKER = "[…중간의 반복·초과 내용은 원본 대화에 보존됨…]";
@@ -27,46 +30,11 @@ function digest(value: string, length: number): string {
   return NodeCrypto.createHash("sha256").update(value).digest("hex").slice(0, length);
 }
 
-function replaceSensitive(
-  value: string,
-  pattern: RegExp,
-  replacement: string | ((...args: string[]) => string),
-): { readonly value: string; readonly count: number } {
-  let count = 0;
-  const next = value.replace(pattern, (...args: string[]) => {
-    count += 1;
-    return typeof replacement === "string" ? replacement : replacement(...args);
-  });
-  return { value: next, count };
-}
-
 export function redactConversationRagSensitiveData(input: string): {
   readonly content: string;
   readonly redactionCount: number;
 } {
-  let content = input;
-  let redactionCount = 0;
-  const apply = (pattern: RegExp, replacement: string | ((...args: string[]) => string)) => {
-    const result = replaceSensitive(content, pattern, replacement);
-    content = result.value;
-    redactionCount += result.count;
-  };
-
-  apply(
-    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
-    "[민감정보 제거: 개인 키]",
-  );
-  apply(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi, "Bearer [민감정보 제거: 토큰]");
-  apply(
-    /\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16})\b/g,
-    "[민감정보 제거: 자격 증명]",
-  );
-  apply(
-    /((?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret)\s*[:=]\s*)(["']?)([^\s"',;]{6,})(["']?)/gi,
-    (_match, prefix, quote) => `${prefix}${quote}[민감정보 제거]${quote}`,
-  );
-
-  return { content, redactionCount };
+  return redactMemorySensitiveData(input);
 }
 
 function normalizeConversationInput(input: string): string {
@@ -75,6 +43,7 @@ function normalizeConversationInput(input: string): string {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\uFEFF]/g, "")
     .split("\n")
     .map((line) => line.replace(/[ \t]+$/g, ""))
+    .filter((line) => !/^\s*(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+|\[\s*[=#>-]{4,}\s*\]\s*\d+%)\s*$/u.test(line))
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -200,6 +169,9 @@ export function toConversationRagKnowledgeItem(input: {
   readonly createdAt: IsoDateTime;
   readonly settings: WorkspaceConversationRagSettings;
   readonly relativeFolder?: string | null;
+  readonly actor?: WorkspaceKnowledgeActor | null;
+  readonly confidence?: "high" | "medium" | "low";
+  readonly modelSelection?: ModelSelection | null;
 }): WorkspaceKnowledgeItem | null {
   if (!input.settings.enabled) return null;
   const attachments = attachmentContext(input.attachments);
@@ -216,6 +188,19 @@ export function toConversationRagKnowledgeItem(input: {
     projectId: input.projectId,
     kind: "rag-source",
     title: `대화 입력 · ${threadTitle}`,
+    provenance: {
+      threadId: input.threadId,
+      actor: input.actor ?? "user",
+      confidence: input.confidence ?? "medium",
+      ...(input.modelSelection
+        ? {
+            modelSelection: {
+              instanceId: input.modelSelection.instanceId,
+              model: input.modelSelection.model,
+            },
+          }
+        : {}),
+    },
     content: compacted.content,
     status: "active",
     origin: "user",

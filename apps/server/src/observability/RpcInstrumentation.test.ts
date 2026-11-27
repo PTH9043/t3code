@@ -322,4 +322,46 @@ describe("RpcInstrumentation", () => {
       assert.deepStrictEqual(spanNames, []);
     }),
   );
+
+  it.effect(
+    "tags stream RPC spans as subscriptions with TTFB and live buffer overflow metadata",
+    () =>
+      Effect.gen(function* () {
+        const captured: Array<{
+          readonly name: string;
+          readonly attributes: ReadonlyMap<string, unknown>;
+        }> = [];
+        const tracer = Tracer.make({
+          span: (options) => {
+            const span = new Tracer.NativeSpan(options);
+            const end = span.end.bind(span);
+            span.end = (endTime, exit) => {
+              end(endTime, exit);
+              if (span.sampled) {
+                captured.push({ name: span.name, attributes: new Map(span.attributes) });
+              }
+            };
+            return span;
+          },
+        });
+
+        const exit = yield* Stream.runCollect(
+          observeRpcStream(
+            "orchestration.subscribeThread",
+            Stream.make("first-chunk").pipe(
+              Stream.concat(Stream.fail("live buffer overflowed while streaming")),
+            ),
+          ),
+        ).pipe(Effect.exit, Effect.withTracer(tracer));
+
+        assert.equal(Exit.isFailure(exit), true);
+        const subSpan = captured.find(
+          (span) => span.name === "ws.rpc.orchestration.subscribeThread",
+        );
+        assert.exists(subSpan);
+        assert.equal(subSpan.attributes.get("rpc.kind"), "subscription");
+        assert.equal(typeof subSpan.attributes.get("rpc.subscription.ttfb_ms"), "number");
+        assert.equal(subSpan.attributes.get("rpc.subscription.buffer_overflow"), true);
+      }),
+  );
 });

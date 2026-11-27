@@ -51,6 +51,12 @@ import type {
 } from "./terminal.ts";
 import * as Schema from "effect/Schema";
 import type {
+  DesktopAssistantConversationRef,
+  DesktopAssistantModelUpdate,
+  DesktopAssistantSettings,
+  DesktopAssistantSettingsPatch,
+} from "./desktopAssistant.ts";
+import type {
   DiscoveredLocalServerList,
   PreviewCloseInput,
   PreviewEvent,
@@ -92,7 +98,7 @@ import { EnvironmentId } from "./baseSchemas.ts";
 import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } from "./auth.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import type { ClientSettings } from "./settings.ts";
+import type { ClientSettings, ClientSettingsPatch } from "./settings.ts";
 import type {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -1104,6 +1110,45 @@ export interface DesktopBridge {
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
+  patchClientSettings?: (patch: ClientSettingsPatch) => Promise<ClientSettings>;
+  onClientSettingsChanged?: (listener: (settings: ClientSettings) => void) => () => void;
+  getAssistantSettings?: () => Promise<DesktopAssistantSettings>;
+  getAssistantVoiceStatus?: () => Promise<{
+    paths: { python: string; whisper: string; qwen: string; script: string; sample: string };
+    python: boolean;
+    whisper: boolean;
+    qwen: boolean;
+    script: boolean;
+    sample: boolean;
+  }>;
+  beginAssistantVoiceRecording?: () => Promise<string>;
+  endAssistantVoiceRecording?: (token: string) => Promise<void>;
+  runAssistantVoice?: (request: {
+    task: "transcribe" | "clone";
+    audio?: string;
+    text?: string;
+    referenceText?: string;
+  }) => Promise<{ ok: boolean; text?: string; audio?: string; error?: string; device?: string }>;
+  cancelAssistantVoice?: () => Promise<boolean>;
+  beginAssistantVoiceSample?: () => Promise<string>;
+  saveAssistantVoiceSample?: (request: {
+    audio: string;
+    token: string;
+  }) => Promise<{ ok: boolean; error?: string; warning?: string }>;
+  deleteAssistantVoiceSample?: () => Promise<{ ok: boolean; error?: string }>;
+  setAssistantSettings?: (
+    patch: DesktopAssistantSettingsPatch,
+  ) => Promise<DesktopAssistantSettings>;
+  openAssistant?: () => Promise<void>;
+  closeAssistant?: () => Promise<void>;
+  onAssistantSettingsChanged?: (
+    listener: (settings: DesktopAssistantSettings) => void,
+  ) => () => void;
+  publishAssistantModelUpdate?: (update: DesktopAssistantModelUpdate) => Promise<void>;
+  getAssistantModelSelection?: (
+    conversation: DesktopAssistantConversationRef,
+  ) => Promise<DesktopAssistantModelUpdate | null>;
+  onAssistantModelUpdate?: (listener: (update: DesktopAssistantModelUpdate) => void) => () => void;
   getConnectionCatalog?: () => Promise<string | null>;
   setConnectionCatalog?: (catalog: string) => Promise<boolean>;
   clearConnectionCatalog?: () => Promise<void>;
@@ -1150,6 +1195,17 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /** Windows main window only. Pairing stays inside the native host. */
+  upgradeRoomTab?: {
+    open: (owner: string) => Promise<boolean>;
+    /** Reattach an already authenticated guest after renderer reload without launching or pairing. */
+    resume: (owner: string) => Promise<boolean>;
+    onMenuOpen: (listener: () => void) => () => void;
+    layout: (
+      owner: string,
+      bounds: { x: number; y: number; width: number; height: number } | null,
+    ) => void;
+  };
   onMenuAction: (listener: (action: string) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   /** Toggle the native main window between maximized and restored bounds. */

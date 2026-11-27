@@ -6,6 +6,10 @@ import {
   buildKeybindingCommandOptions,
   buildWhenVariableOptions,
   commandLabel,
+  formatWhenAstLabel,
+  formatWhenExpressionBadges,
+  formatWhenVariableLabel,
+  isWebBrowserReservedKeybinding,
   keybindingConflictLabels,
   keybindingFromKeyboardEvent,
   parseWhenExpressionDraft,
@@ -245,5 +249,21 @@ describe("KeybindingsSettings.logic", () => {
         when: "",
       }),
     ).toEqual(["새 로컬 대화"]);
+  });
+
+  it("maps internal when expressions to readable Korean badges and detects web Ctrl+1..9 conflicts", () => {
+    expect(formatWhenVariableLabel("terminalFocus")).toBe("터미널 포커스");
+    expect(formatWhenVariableLabel("terminalFocus", true)).toBe("터미널 포커스 아닐 때");
+    expect(
+      formatWhenExpressionBadges({
+        type: "and",
+        left: { type: "not", node: { type: "identifier", name: "terminalFocus" } },
+        right: { type: "identifier", name: "terminalOpen" },
+      }),
+    ).toEqual(["터미널 포커스 아닐 때", "터미널 열림"]);
+    expect(formatWhenAstLabel(undefined)).toBe("항상");
+    expect(isWebBrowserReservedKeybinding("mod+1")).toBe(true);
+    expect(isWebBrowserReservedKeybinding("ctrl+9")).toBe(true);
+    expect(isWebBrowserReservedKeybinding("mod+k")).toBe(false);
   });
 });

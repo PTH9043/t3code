@@ -134,6 +134,18 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
     },
   });
 
+  const listRecentMcpActivityRows = SqlSchema.findAll({
+    Request: ListProjectionThreadActivitiesByKindInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, recentMcp }) => sql`
+      SELECT activity_id AS "activityId", thread_id AS "threadId", turn_id AS "turnId",
+        tone, kind, summary, payload_json AS "payload", sequence, created_at AS "createdAt"
+      FROM projection_thread_activities INDEXED BY idx_projection_thread_activities_thread_created
+      WHERE thread_id = ${threadId} AND created_at >= ${recentMcp?.since ?? ""}
+        AND kind = 'tool.completed' AND summary IN ${sql.in([...(recentMcp?.summaries ?? [])])}
+    `,
+  });
+
   const deleteProjectionThreadActivityRows = SqlSchema.void({
     Request: DeleteProjectionThreadActivitiesInput,
     execute: ({ threadId }) =>
@@ -185,17 +197,36 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
 
   const listByThreadIdAndKinds: ProjectionThreadActivityRepositoryShape["listByThreadIdAndKinds"] =
     (input) =>
-      input.kinds.length === 0 && (input.completedToolNames?.length ?? 0) === 0
+      input.kinds.length === 0 &&
+      (input.completedToolNames?.length ?? 0) === 0 &&
+      (input.recentMcp?.summaries.length ?? 0) === 0
         ? Effect.succeed([])
-        : listProjectionThreadActivityRowsByKind(input).pipe(
+        : Effect.all([
+            input.kinds.length === 0 && (input.completedToolNames?.length ?? 0) === 0
+              ? Effect.succeed([])
+              : listProjectionThreadActivityRowsByKind(input),
+            (input.recentMcp?.summaries.length ?? 0) === 0
+              ? Effect.succeed([])
+              : listRecentMcpActivityRows(input),
+          ]).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionThreadActivityRepository.listByThreadIdAndKinds:query",
                 "ProjectionThreadActivityRepository.listByThreadIdAndKinds:decodeRows",
               ),
             ),
-            Effect.map((rows) =>
-              rows.map((row) => ({
+            Effect.map(([base, recent]) => {
+              const rows = [
+                ...new Map([...base, ...recent].map((row) => [row.activityId, row])).values(),
+              ];
+              rows.sort(
+                (left, right) =>
+                  Number(left.sequence !== null) - Number(right.sequence !== null) ||
+                  (left.sequence ?? 0) - (right.sequence ?? 0) ||
+                  left.createdAt.localeCompare(right.createdAt) ||
+                  left.activityId.localeCompare(right.activityId),
+              );
+              return rows.map((row) => ({
                 activityId: row.activityId,
                 threadId: row.threadId,
                 turnId: row.turnId,
@@ -205,8 +236,8 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
                 payload: row.payload,
                 ...(row.sequence !== null ? { sequence: row.sequence } : {}),
                 createdAt: row.createdAt,
-              })),
-            ),
+              }));
+            }),
           );
 
   return {

@@ -962,9 +962,14 @@ export const layer = Layer.effect(
                 pendingMessageId: null,
                 runSeen: false,
                 activatedAt: confirmed && current.goal!.status === "active" ? timestamp : null,
-                lastSummary: confirmed
-                  ? "저장된 입력·완료 응답·목표 진행 기록과 동일한 native session을 확인했습니다. 남은 단계부터 이어갑니다."
-                  : `재시작 시 Main 입력 ${current.goal!.pendingMessageId}와 실행 상태를 확인하세요. 자동 재전송하지 않습니다.`,
+                lastSummary: [
+                  current.goal!.lastSummary,
+                  confirmed
+                    ? "저장된 입력·완료 응답·목표 진행 기록과 동일한 native session을 확인했습니다."
+                    : `재시작 시 Main 입력 ${current.goal!.pendingMessageId}와 실행 상태를 확인하세요. 자동 재전송하지 않습니다.`,
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
               },
             }),
             { goalId: state.goal.id, messageId: state.goal.pendingMessageId },
@@ -998,6 +1003,32 @@ export const layer = Layer.effect(
         }));
       }
     });
+    // Old project-wide workspaces are historical records. New persistent work
+    // runs through the conversation-scoped collaboration runner instead.
+    for (const state of yield* store.list) {
+      if (!state.enabled && state.goal?.status !== "active") continue;
+      const timestamp = yield* now;
+      yield* save(state.projectId, id(), "legacy-workspace.auto-stopped", "runtime", (current) => ({
+        ...current,
+        enabled: false,
+        goal:
+          current.goal?.status === "active"
+            ? {
+                ...current.goal,
+                status: "paused",
+                revision: current.goal.revision + 1,
+                activeMilliseconds: developmentGoalElapsed(current.goal, timestamp),
+                activatedAt: null,
+                lastSummary: [
+                  current.goal.lastSummary,
+                  "기존 지속 작업실의 자동 진행을 중지했습니다. 기록은 보존됩니다.",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              }
+            : current.goal,
+      }));
+    }
     yield* forkParked(
       recover.pipe(
         Effect.andThen(pump),
@@ -1890,7 +1921,8 @@ export const layer = Layer.effect(
       );
       if (!state || !binding)
         return yield* new WorkspaceDevelopmentError({
-          message: "이 인증된 세션에는 지속 작업실 관리 권한이 없습니다.",
+          message:
+            "이 세션은 별도 지속 작업실 관리에 연결되지 않았습니다. 이 오류는 일반 대화의 파일 접근·수정 권한과 무관하므로, 요청된 일반 작업은 현재 대화에서 직접 계속하세요. 이 도구의 상태를 반복 조회할 필요는 없습니다.",
         });
       yield* bindingIdentity(binding);
       yield* recordNative(state.projectId, binding);

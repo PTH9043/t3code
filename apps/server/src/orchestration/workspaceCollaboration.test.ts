@@ -2,9 +2,11 @@ import {
   ProjectId,
   ProviderInstanceId,
   WorkspaceCollaborationRunId,
+  WorkspaceMeetingParticipantId,
   WorkspaceTaskNodeId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import { workflowDefaults } from "@t3tools/shared/workflow";
 
 import {
   buildWorkspaceCollaborationStepPrompt,
@@ -31,6 +33,172 @@ const binding = (role: "coordinator" | "planner" | "implementer", enabled = true
 });
 
 describe("workspace collaboration planning", () => {
+  it("keeps the user's workflow input visible to validation and recovery after the original step fails", () => {
+    const requested = "U3~U10 전부 수행; 각 단계 보고, 수정, 재검증, RAG 기록 후 다음 단계";
+    const definition = {
+      ...workflowDefaults()[0]!,
+      revision: 1,
+      archived: false,
+      digest: "fixture",
+      createdAt: "2026-08-08T00:00:00.000Z",
+    };
+    const initial = buildInitialWorkspaceTaskGraph("기능 개발");
+    const validation = {
+      ...initial.nodes[0]!,
+      id: WorkspaceTaskNodeId.make("validate-execute"),
+      kind: "validation" as const,
+    };
+    const recovery = {
+      ...validation,
+      id: WorkspaceTaskNodeId.make("recovery"),
+      kind: "debug" as const,
+    };
+    const graph = { ...initial, nodes: [validation, recovery] };
+    const run = {
+      id: WorkspaceCollaborationRunId.make("run-workflow"),
+      projectId,
+      source: "user" as const,
+      scheduleId: null,
+      incidentId: null,
+      task: "기능 개발",
+      status: "running" as const,
+      steps: [],
+      graph,
+      meeting: null,
+      orchestra: null,
+      finalOutput: null,
+      error: null,
+      createdAt: definition.createdAt,
+      updatedAt: definition.createdAt,
+      workflow: {
+        definitionId: definition.id,
+        definitionRevision: 1,
+        definitionDigest: definition.digest,
+        title: definition.title,
+        definition,
+        values: { goal: requested },
+        nodeSkills: [],
+        roleBindings: [],
+        control: "active" as const,
+        controlRevision: 0,
+        updatedAt: definition.createdAt,
+        requestDigest: "fixture",
+      },
+    };
+    for (const node of [validation, recovery]) {
+      const prompt = buildWorkspaceTaskNodePrompt({
+        run,
+        graph,
+        node,
+        workspacePrompt: "",
+        availableAgents: [],
+      });
+      expect(prompt).toContain(requested);
+      expect(prompt).toContain("later user corrections take precedence");
+      expect(prompt).toContain("continue it rather than treating an audit as completion");
+      expect(prompt).not.toContain("CURRENT USER REQUEST: 기능 개발");
+    }
+    const failed = {
+      ...validation,
+      validation: {
+        targetNodeId: WorkspaceTaskNodeId.make("execute"),
+        verdict: "fail" as const,
+        confidence: "high" as const,
+        summary: "runtime integration missing",
+        evidence: [],
+        failureClassification: "implementation" as const,
+        nextAction: "implement and verify integration",
+        recordedAt: definition.createdAt,
+      },
+    };
+    const synthesis = {
+      ...recovery,
+      id: WorkspaceTaskNodeId.make("final"),
+      kind: "synthesis" as const,
+    };
+    const finalGraph = { ...initial, nodes: [failed, recovery, synthesis] };
+    const prompt = buildWorkspaceTaskNodePrompt({
+      run,
+      graph: finalGraph,
+      node: synthesis,
+      workspacePrompt: "",
+      availableAgents: [],
+    });
+    expect(prompt).toContain("runtime integration missing");
+    expect(prompt).toContain("check whether later evidence resolved each issue");
+    expect(prompt).toContain(requested);
+  });
+  it("passes the exact rejection receipt to dependent repair without leaking unrelated evidence", () => {
+    const initial = buildInitialWorkspaceTaskGraph("fix the report");
+    const base = initial.nodes[0]!;
+    const receipt = {
+      targetNodeId: WorkspaceTaskNodeId.make("worker"),
+      verdict: "fail" as const,
+      confidence: "high" as const,
+      summary: "entryNotional이 없다는 주장은 틀렸음",
+      evidence: ["stop_loss_engine.py:26: entryNotional 확인", "stopFraction 공급 근거 별도 확인"],
+      failureClassification: "information" as const,
+      nextAction: "근거를 정정하고 재검증",
+      recordedAt: "2026-11-06T00:00:00.000Z",
+    };
+    const failed = {
+      ...base,
+      id: WorkspaceTaskNodeId.make("validation"),
+      kind: "validation" as const,
+      output: null,
+      validation: receipt,
+    };
+    const unrelated = {
+      ...failed,
+      id: WorkspaceTaskNodeId.make("private"),
+      validation: { ...receipt, summary: "UNRELATED PRIVATE FINDING" },
+    };
+    const repair = {
+      ...base,
+      id: WorkspaceTaskNodeId.make("repair"),
+      kind: "debug" as const,
+      dependsOn: [failed.id],
+    };
+    const graph = { ...initial, nodes: [failed, unrelated, repair] };
+    const run = {
+      id: WorkspaceCollaborationRunId.make("run"),
+      projectId,
+      source: "user" as const,
+      scheduleId: null,
+      incidentId: null,
+      task: "fix the report",
+      status: "running" as const,
+      steps: [],
+      graph,
+      meeting: null,
+      orchestra: null,
+      finalOutput: null,
+      error: null,
+      createdAt: receipt.recordedAt,
+      updatedAt: receipt.recordedAt,
+    };
+    const prompt = buildWorkspaceTaskNodePrompt({
+      run,
+      graph,
+      node: repair,
+      workspacePrompt: "",
+      availableAgents: [],
+    });
+    const receiptLine = prompt
+      .split("\n")
+      .find((line) => line.startsWith('{"nodeId":"validation"'));
+    expect(receiptLine).toBeDefined();
+    expect(JSON.parse(receiptLine!)).toEqual({
+      nodeId: failed.id,
+      targetNodeId: receipt.targetNodeId,
+      summary: receipt.summary,
+      evidence: receipt.evidence,
+      nextAction: receipt.nextAction,
+      failureClassification: receipt.failureClassification,
+    });
+    expect(prompt).not.toContain("UNRELATED PRIVATE FINDING");
+  });
+
   it("shows a validator the target's server-recorded prerequisites without inventing missing success", () => {
     const initial = buildInitialWorkspaceTaskGraph("verify the report");
     const base = initial.nodes[0]!;
@@ -154,6 +322,37 @@ describe("workspace collaboration planning", () => {
     });
     expect(resumedPrompt).not.toMatch(/fable|페이블/iu);
     expect(resumedPrompt).toContain("사용자가 선택한 모델과 참가자를 유지");
+
+    const participantId = WorkspaceMeetingParticipantId.make("worker");
+    const meeting = {
+      mode: "fixed-rounds" as const,
+      phase: "executing" as const,
+      threadId: null,
+      participants: [
+        {
+          id: participantId,
+          displayName: "Worker",
+          modelSelection: binding("implementer").modelSelection,
+          roleDescription: "검증과 회귀 확인",
+        },
+      ],
+      chairParticipantId: participantId,
+      maxRounds: 0,
+      userInLoop: false,
+      rounds: [],
+      pendingQuestion: null,
+      answers: [],
+      interjections: [],
+    };
+    const workerPrompt = buildWorkspaceTaskNodePrompt({
+      workspacePrompt: "",
+      run,
+      graph,
+      node: { ...graph.nodes[0]!, participantId },
+      meeting,
+      availableAgents: [],
+    });
+    expect(workerPrompt).toContain("사용자가 지정한 역할: 검증과 회귀 확인");
   });
 
   it("states user priority and treats memory and peer handoffs as non-authoritative", () => {
@@ -255,6 +454,11 @@ describe("workspace collaboration planning", () => {
       expect(prompt).toContain(heading);
     }
     expect(prompt).toContain("DIRECT DEPENDENCY EVIDENCE");
+    expect(prompt).toContain("CURRENT USER REQUEST: ship it");
+    expect(prompt).toContain("subsequent direct instructions take precedence over earlier plans");
+    expect(prompt.indexOf("CURRENT USER REQUEST: ship it")).toBeLessThan(
+      prompt.indexOf("DIRECT DEPENDENCY EVIDENCE"),
+    );
     expect(prompt).not.toContain("UNRELATED PRIVATE OUTPUT");
     // No worktree on this node: the isolation rule must stay out of the prompt.
     expect(prompt).not.toContain("dedicated git worktree");
@@ -286,5 +490,42 @@ describe("workspace collaboration planning", () => {
     // its absolute path; the prompt now pins the agent to the worktree cwd.
     expect(isolated).toContain("dedicated git worktree: E:/worktrees/chain-1");
     expect(isolated).toContain("Never modify the project's original checkout");
+  });
+
+  it("injects fail-well [UNREADABLE] rule for scheduled collaboration runs only", () => {
+    const steps = buildWorkspaceCollaborationSteps([binding("coordinator")]);
+    const step = steps[0]!;
+    const baseRun = {
+      id: WorkspaceCollaborationRunId.make("run-sched"),
+      projectId,
+      source: "schedule" as const,
+      scheduleId: null,
+      incidentId: null,
+      task: "Daily check",
+      status: "running" as const,
+      steps,
+      graph: null,
+      meeting: null,
+      orchestra: null,
+      finalOutput: null,
+      error: null,
+      createdAt: "2026-11-22T00:00:00.000Z",
+      updatedAt: "2026-11-22T00:00:00.000Z",
+    };
+    const scheduledPrompt = buildWorkspaceCollaborationStepPrompt({
+      workspacePrompt: "Workspace ID: workspace-a",
+      run: baseRun,
+      step,
+      priorSteps: [],
+    });
+    expect(scheduledPrompt).toContain("[UNREADABLE]");
+
+    const userPrompt = buildWorkspaceCollaborationStepPrompt({
+      workspacePrompt: "Workspace ID: workspace-a",
+      run: { ...baseRun, source: "user" as const },
+      step,
+      priorSteps: [],
+    });
+    expect(userPrompt).not.toContain("[UNREADABLE]");
   });
 });

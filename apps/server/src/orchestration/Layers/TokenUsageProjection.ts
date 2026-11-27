@@ -157,13 +157,15 @@ export const makeTokenUsageProjection = Effect.gen(function* () {
         return;
       }
       if (event.type === "thread.session-set") {
-        const { threadId, session } = event.payload;
+        const { threadId, session, turnRequest } = event.payload;
         if (session.activeTurnId !== null && session.status === "running") {
+          const requestId = turnRequest?.messageId ?? null;
           yield* sql`UPDATE projection_token_usage_requests
           SET turn_id = ${session.activeTurnId}, status = 'running'
           WHERE request_id = (
             SELECT request_id FROM projection_token_usage_requests
-            WHERE thread_id = ${threadId} AND turn_id IS NULL AND status IN ('pending','stopped','error','interrupted')
+             WHERE thread_id = ${threadId} AND turn_id IS NULL AND status IN ('pending','stopped','error','interrupted')
+               AND (${requestId} IS NULL OR request_id = ${requestId})
             ORDER BY requested_sequence DESC LIMIT 1
           ) AND NOT EXISTS (
             SELECT 1 FROM projection_token_usage_requests
@@ -331,6 +333,12 @@ export const makeTokenUsageProjection = Effect.gen(function* () {
           ${encodeIssues([...nextIssues])})
         ON CONFLICT(request_id, source_id) DO UPDATE SET
           counts_json = excluded.counts_json, issues_json = excluded.issues_json`;
+        // Subagent spend is inside these counts (Claude modelUsage), so the
+        // request's native children are covered rather than unknown.
+        if (observation.includesNativeChildren === true) {
+          yield* sql`UPDATE projection_token_usage_requests SET has_native_children = 0
+          WHERE request_id = ${request.requestId}`;
+        }
       }
     },
     Effect.mapError(toPersistenceSqlError("TokenUsageProjection.apply")),

@@ -1,3 +1,4 @@
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -10,22 +11,39 @@ function fileStamp(path) {
   }
 }
 
+function fileDigest(path) {
+  try {
+    return NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
 /** Watch only runnable bundles, surviving output directories replaced by clean builds. */
 export function watchDesktopBundles({ files, onChange, platform, intervalMs = 1_000 }) {
-  const stamps = new Map(files.map((file) => [file, fileStamp(file)]));
-  let changed = false;
+  const states = new Map(
+    files.map((file) => [file, { stamp: fileStamp(file), digest: fileDigest(file) }]),
+  );
+  const delivered = new Map(files.map((file) => [file, states.get(file)?.digest]));
   const scan = () => {
     let ready = true;
     for (const file of files) {
       const stamp = fileStamp(file);
-      if (stamp !== stamps.get(file)) {
-        stamps.set(file, stamp);
-        changed = true;
+      if (stamp === null) {
+        ready = false;
+        continue;
       }
-      if (stamp === null) ready = false;
+      const previous = states.get(file);
+      if (stamp === previous?.stamp) continue;
+      const digest = fileDigest(file);
+      if (digest === null) {
+        ready = false;
+        continue;
+      }
+      states.set(file, { stamp, digest });
     }
-    if (ready && changed) {
-      changed = false;
+    if (ready && files.some((file) => states.get(file)?.digest !== delivered.get(file))) {
+      for (const file of files) delivered.set(file, states.get(file)?.digest);
       onChange();
     }
   };

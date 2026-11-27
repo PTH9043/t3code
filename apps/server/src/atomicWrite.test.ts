@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -35,6 +36,33 @@ const makeFileSystem = (renameOutcomes: ReadonlyArray<string | null>) => {
 };
 
 describe("writeFileStringAtomically", () => {
+  it.effect(
+    "preserves the previous file and removes the temporary directory when writing fails",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-failed-write-" });
+        const filePath = path.join(root, "journal.json");
+        yield* fs.writeFileString(filePath, "previous");
+        const failing = new Proxy(fs, {
+          get(target, property, receiver) {
+            if (property !== "writeFileString") return Reflect.get(target, property, receiver);
+            return (file: string) =>
+              fs
+                .writeFileString(file, "partial")
+                .pipe(Effect.andThen(Effect.die(new Error("synthetic journal write failure"))));
+          },
+        });
+        const result = yield* writeFileStringAtomically({ filePath, contents: "replacement" }).pipe(
+          Effect.provideService(FileSystem.FileSystem, failing),
+          Effect.exit,
+        );
+        assert.ok(Exit.isFailure(result));
+        assert.strictEqual(yield* fs.readFileString(filePath), "previous");
+        assert.deepStrictEqual(yield* fs.readDirectory(root), ["journal.json"]);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it.effect("writes hash-named artifacts near the Windows path limit", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

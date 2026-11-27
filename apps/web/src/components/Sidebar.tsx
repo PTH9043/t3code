@@ -33,6 +33,8 @@ import {
   AlarmClockIcon,
   AlarmClockOffIcon,
   ActivityIcon,
+  BookOpenIcon,
+  BrainCircuitIcon,
   CheckIcon,
   EyeIcon,
   ChevronDownIcon,
@@ -51,6 +53,7 @@ import {
   PlusIcon,
   SearchIcon,
   ServerIcon,
+  SettingsIcon,
   SquarePenIcon,
   TerminalIcon,
   Trash2Icon,
@@ -90,6 +93,7 @@ import { isModelPickerOpen } from "../modelPickerVisibility";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
+import { useRightPanelStore } from "../rightPanelStore";
 import { readLocalApi } from "../localApi";
 import {
   deriveProjectGroupingOverrideKey,
@@ -115,6 +119,7 @@ import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments"
 import { useListedThreadShells, useProjects } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
+import { shellEnvironment } from "../state/shell";
 import { threadEnvironment } from "../state/threads";
 import { projectEnvironment } from "../state/projects";
 import { orchestrationEnvironment } from "../state/orchestration";
@@ -183,8 +188,25 @@ import {
 import { Input } from "./ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
-import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import {
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  useSidebar,
+} from "./ui/sidebar";
+import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
+import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
+import { openAiHelp } from "./help/aiHelpStore";
+import {
+  UpgradeRoomMenuItem,
+  useUpgradeRoomFolderShortcut,
+  hasUpgradeRoomFolderShortcut,
+} from "./sidebar/UpgradeRoomMenuItem";
+import { useUpgradeRoomThreadOpener } from "./sidebar/useUpgradeRoomThreadOpener";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -333,6 +355,7 @@ function SidebarThreadTooltip({
               <ProviderInstanceIcon
                 driverKind={driverKind}
                 displayName={thread.session?.providerName ?? modelInstanceId}
+                instanceId={modelInstanceId}
                 iconClassName="size-3 shrink-0 grayscale opacity-60"
               />
               <div className="min-w-0 truncate text-foreground/75">{modelLabel}</div>
@@ -1251,6 +1274,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     <ProviderInstanceIcon
                       driverKind={driverKind}
                       displayName={thread.session?.providerName ?? modelInstanceId}
+                      instanceId={modelInstanceId}
                       iconClassName="size-3.5"
                     />
                   </span>
@@ -1410,6 +1434,9 @@ export default function Sidebar() {
     deleteThread,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
     reportFailure: false,
   });
   const deleteProject = useAtomCommand(projectEnvironment.delete, {
@@ -1644,6 +1671,9 @@ export default function Sidebar() {
           null),
     [effectiveProjectScopeKey, projectGroups],
   );
+  const openUpgradeRoom = useUpgradeRoomThreadOpener().open;
+  const folderShortcut = useUpgradeRoomFolderShortcut(scopedProjectGroup, primaryEnvironmentId);
+  const menuShortcut = useUpgradeRoomFolderShortcut(projectActionsTarget, primaryEnvironmentId);
   const scopedProjectRuntime = useEnvironmentQuery(
     scopedProjectGroup === null
       ? null
@@ -2197,6 +2227,7 @@ export default function Sidebar() {
         navigateToThread(scopeThreadRef(nextThread.environmentId, nextThread.id));
         return;
       }
+      if (hasUpgradeRoomFolderShortcut(projectGroup, primaryEnvironmentId)) return;
       void newThreadContext.handleNewThread(
         scopeProjectRef(projectGroup.environmentId, projectGroup.id),
       );
@@ -2205,6 +2236,7 @@ export default function Sidebar() {
       navigateToThread,
       newThreadContext.handleNewThread,
       projectGroups,
+      primaryEnvironmentId,
       routedProjectScopeKey,
       threads,
     ],
@@ -2214,7 +2246,7 @@ export default function Sidebar() {
   // the picked folder's most recent conversation opens as a background tab —
   // the side-by-side flow the tab bar exists for.
   const openProjectScopeInNewTab = useCallback(
-    (scopeKey: string) => {
+    (scopeKey: string, trusted: boolean) => {
       const projectGroup = projectGroups.find((project) => project.projectKey === scopeKey);
       if (!projectGroup) return;
       const memberKeys = new Set(
@@ -2230,6 +2262,10 @@ export default function Sidebar() {
         ),
       )[0];
       if (!nextThread) {
+        if (hasUpgradeRoomFolderShortcut(projectGroup, primaryEnvironmentId)) {
+          if (trusted) void openUpgradeRoom();
+          return;
+        }
         toastManager.add(
           stackedThreadToast({
             type: "info",
@@ -2266,7 +2302,7 @@ export default function Sidebar() {
         }),
       );
     },
-    [projectGroups, threads],
+    [openUpgradeRoom, primaryEnvironmentId, projectGroups, threads],
   );
 
   const clearThreadSearch = useCallback(() => {
@@ -3011,6 +3047,12 @@ export default function Sidebar() {
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
+                openInFileManager:
+                  Boolean(threadWorkspacePath) &&
+                  (serverConfigs
+                    .get(thread.environmentId)
+                    ?.availableEditors.includes("file-manager") ??
+                    false),
               },
               snoozePresets,
             }),
@@ -3026,6 +3068,10 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "open-viewer":
+            useRightPanelStore.getState().open(threadRef, "agents");
+            navigateToThread(threadRef);
+            return;
           case "new-thread-on-branch": {
             // Explicit branch carry-over: reuse the thread's worktree when it
             // has one, otherwise its branch on the local checkout.
@@ -3088,6 +3134,33 @@ export default function Sidebar() {
           case "mark-unread":
             markThreadUnread(threadKey, thread.latestTurn?.completedAt);
             return;
+          case "open-in-file-manager": {
+            if (!threadWorkspacePath) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "폴더를 열 수 없습니다",
+                  description: "이 대화에는 열 수 있는 작업공간 경로가 없습니다.",
+                }),
+              );
+              return;
+            }
+            const result = await openInEditor({
+              environmentId: thread.environmentId,
+              input: { cwd: threadWorkspacePath, editor: "file-manager" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "파일 탐색기에서 열지 못했습니다",
+                  description: sidebarActionErrorMessage(error),
+                }),
+              );
+            }
+            return;
+          }
           case "copy-path":
             if (!threadWorkspacePath) {
               toastManager.add(
@@ -3149,7 +3222,9 @@ export default function Sidebar() {
       copyPathToClipboard,
       deleteThread,
       handleMultiSelectContextMenu,
+      navigateToThread,
       markThreadUnread,
+      openInEditor,
       projectCwdByKey,
       serverConfigs,
       startThreadRename,
@@ -3351,56 +3426,101 @@ export default function Sidebar() {
                   {/* Wider than the (narrow) trigger so folder names stay
                       readable next to the two row actions. */}
                   <MenuPopup align="start" className="min-w-(--anchor-width) max-w-80">
+                    <UpgradeRoomMenuItem variant="project-picker" separate />
                     <MenuRadioGroup
                       value={effectiveProjectScopeKey ?? ""}
                       onValueChange={(value) => handleProjectScopeChange(value as string)}
                     >
-                      {projectGroups.map((project) => {
-                        const scopeKey = project.projectKey;
-                        return (
-                          <MenuRadioItem
-                            key={scopeKey}
-                            data-file-drop-project={project.id}
-                            data-file-drop-group="true"
-                            data-file-drop-environment={project.environmentId}
-                            value={scopeKey}
-                            closeOnClick
-                            className="h-8 min-h-8 px-1 py-0 text-sm font-medium [&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
+                      {(() => {
+                        const hostGroups = new Map<
+                          string,
+                          {
+                            hostLabel: string;
+                            projects: typeof projectGroups;
+                          }
+                        >();
+                        for (const project of projectGroups) {
+                          const hostLabel =
+                            environmentLabelById.get(project.environmentId) ?? "현재 환경";
+                          const existing = hostGroups.get(project.environmentId);
+                          if (existing) {
+                            existing.projects.push(project);
+                          } else {
+                            hostGroups.set(project.environmentId, {
+                              hostLabel,
+                              projects: [project],
+                            });
+                          }
+                        }
+                        return Array.from(hostGroups.entries()).map(([envId, hostGroup]) => (
+                          <div
+                            key={envId}
+                            className="not-first:mt-1 not-first:border-t not-first:border-border/60 not-first:pt-1"
                           >
-                            <ProjectFavicon
-                              environmentId={project.environmentId}
-                              cwd={project.workspaceRoot}
-                              className="size-4 shrink-0"
-                            />
-                            <span className="min-w-0 truncate text-sm">{project.displayName}</span>
-                            <button
-                              type="button"
-                              aria-label={`${project.displayName} 새 탭에서 열기`}
-                              title="새 탭에서 열기"
-                              className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                              onPointerDown={(event) => event.stopPropagation()}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openProjectScopeInNewTab(project.projectKey);
-                              }}
+                            <div
+                              data-sidebar-host-header={envId}
+                              className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium text-muted-foreground"
                             >
-                              <ExternalLinkIcon className="size-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              aria-label={`${project.displayName} 프로젝트 작업`}
-                              title={`${project.displayName} 프로젝트 작업`}
-                              className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                              onPointerDown={(event) => event.stopPropagation()}
-                              onClick={(event) => {
-                                void handleProjectActions(event, project);
-                              }}
-                            >
-                              <EllipsisIcon className="size-3.5" />
-                            </button>
-                          </MenuRadioItem>
-                        );
-                      })}
+                              <ServerIcon
+                                className="size-3 shrink-0 opacity-70"
+                                aria-hidden="true"
+                              />
+                              <span className="min-w-0 flex-1 truncate">{hostGroup.hostLabel}</span>
+                              <span className="shrink-0 tabular-nums text-[10px] opacity-75">
+                                {hostGroup.projects.length}
+                              </span>
+                            </div>
+                            {hostGroup.projects.map((project) => {
+                              const scopeKey = project.projectKey;
+                              return (
+                                <MenuRadioItem
+                                  key={scopeKey}
+                                  data-file-drop-project={project.id}
+                                  data-file-drop-group="true"
+                                  data-file-drop-environment={project.environmentId}
+                                  value={scopeKey}
+                                  closeOnClick
+                                  className="h-8 min-h-8 px-1 py-0 text-sm font-medium [&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
+                                >
+                                  <ProjectFavicon
+                                    environmentId={project.environmentId}
+                                    cwd={project.workspaceRoot}
+                                    className="size-4 shrink-0"
+                                  />
+                                  <span className="min-w-0 truncate text-sm">
+                                    {project.displayName}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    aria-label={`${project.displayName} 새 탭에서 열기`}
+                                    title="새 탭에서 열기"
+                                    className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openProjectScopeInNewTab(project.projectKey, event.isTrusted);
+                                    }}
+                                  >
+                                    <ExternalLinkIcon className="size-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    aria-label={`${project.displayName} 프로젝트 작업`}
+                                    title={`${project.displayName} 프로젝트 작업`}
+                                    className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-icon-muted outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                      void handleProjectActions(event, project);
+                                    }}
+                                  >
+                                    <EllipsisIcon className="size-3.5" />
+                                  </button>
+                                </MenuRadioItem>
+                              );
+                            })}
+                          </div>
+                        ));
+                      })()}
                     </MenuRadioGroup>
                   </MenuPopup>
                 </Menu>
@@ -3534,6 +3654,7 @@ export default function Sidebar() {
               timeout={400}
             >
               <ul role="list" className="flex flex-col gap-px">
+                {folderShortcut.linked && <UpgradeRoomMenuItem />}
                 {(() => {
                   const renderThreadRow = (
                     thread: EnvironmentThreadShell,
@@ -3770,6 +3891,7 @@ export default function Sidebar() {
             </TooltipProvider>
           ) : null}
           {!isSearchingThreads &&
+          !folderShortcut.linked &&
           pinnedThreads.length +
             activeThreads.length +
             snoozedThreads.length +
@@ -3840,6 +3962,20 @@ export default function Sidebar() {
           </DialogHeader>
           <DialogPanel className="p-0">
             <div className="divide-y divide-border/60">
+              {menuShortcut.available && (
+                <div className="px-6 py-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      menuShortcut.setLinked(!menuShortcut.linked);
+                      setProjectActionsTarget(null);
+                    }}
+                  >
+                    {menuShortcut.label}
+                  </Button>
+                </div>
+              )}
               {projectActionsTarget?.memberProjects.map((member) => (
                 <section
                   key={member.physicalProjectKey}
@@ -3981,7 +4117,57 @@ export default function Sidebar() {
           </DialogFooter>
         </DialogPopup>
       </Dialog>
-      <SidebarChromeFooter />
+      <SidebarFooter className="p-[var(--sidebar-content-inset)]">
+        <SidebarProviderUpdatePill />
+        <SidebarUpdatePill />
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                openAiHelp();
+              }}
+            >
+              <BookOpenIcon />
+              <span>AI 사용 도움말</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          {/* Desktop/tablet navigation lives in GlobalActivityRail; keep mobile drawer entry points */}
+          <SidebarMenuItem className="md:hidden">
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                void router.navigate({ to: "/control-center" });
+              }}
+            >
+              <BrainCircuitIcon />
+              <span>AI 제어센터</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem className="md:hidden">
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                void router.navigate({ to: "/settings/diagnostics" });
+              }}
+            >
+              <ActivityIcon />
+              <span>시스템 진단</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem className="md:hidden">
+            <SidebarMenuButton
+              onClick={() => {
+                if (isMobile) setOpenMobile(false);
+                void router.navigate({ to: "/settings/general" });
+              }}
+            >
+              <SettingsIcon />
+              <span>환경 설정</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
     </>
   );
 }

@@ -6,6 +6,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
+  ClientOrchestrationCommand,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationGetFullThreadDiffInput,
@@ -24,6 +25,8 @@ import {
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
   WorkspaceCollaborationRun,
+  WorkspaceMeeting,
+  WorkspaceMeetingSetup,
   WorkspaceProgram,
   WorkspaceProgramHealthCheck,
   WorkspaceTaskGraph,
@@ -55,12 +58,71 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeWorkspaceProgramHealthCheck = Schema.decodeUnknownEffect(WorkspaceProgramHealthCheck);
 const decodeWorkspaceProgram = Schema.decodeUnknownEffect(WorkspaceProgram);
 const decodeWorkspaceCollaborationRun = Schema.decodeUnknownEffect(WorkspaceCollaborationRun);
 const decodeWorkspaceTaskGraph = Schema.decodeUnknownEffect(WorkspaceTaskGraph);
+
+it.effect(
+  "requires the project, chosen representative, and observed item revisions for a bulk merge",
+  () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-11-19T01:01:02.000Z";
+      const command = {
+        type: "project.knowledge.bulk",
+        projectId: "p",
+        commandId: "merge",
+        createdAt,
+        operation: { type: "merge", targetId: "b" },
+        items: [
+          { id: "a", updatedAt: createdAt, revisionSequence: 3 },
+          { id: "b", updatedAt: createdAt, revisionSequence: 0 },
+        ],
+      };
+      assert.deepEqual<unknown>(yield* decodeClientOrchestrationCommand(command), command);
+      for (const invalid of [
+        { ...command, projectId: undefined },
+        { ...command, operation: { type: "merge" } },
+        { ...command, items: [{ id: "a", updatedAt: createdAt }] },
+        { ...command, items: [] },
+      ]) {
+        assert.isTrue(yield* Effect.isFailure(decodeClientOrchestrationCommand(invalid)));
+      }
+    }),
+);
+
+it.effect(
+  "preserves a roster of twelve seats and natural-language roles in setup and run state",
+  () =>
+    Effect.gen(function* () {
+      const participants = Array.from({ length: 12 }, (_, index) => ({
+        id: `seat-${index}`,
+        displayName: `AI ${index}`,
+        modelSelection: { instanceId: "shared-provider", model: "shared-model" },
+        roleDescription: `사용자가 맡긴 역할 ${index}`,
+      }));
+      const setup = yield* Schema.decodeUnknownEffect(WorkspaceMeetingSetup)({
+        mode: "fixed-rounds",
+        participants,
+        chairParticipantId: "seat-0",
+        maxRounds: 0,
+        userInLoop: false,
+      });
+      const meeting = yield* Schema.decodeUnknownEffect(WorkspaceMeeting)({
+        ...setup,
+        phase: "executing",
+        threadId: null,
+        rounds: [],
+        pendingQuestion: null,
+        answers: [],
+      });
+      assert.strictEqual(setup.participants.length, 12);
+      assert.strictEqual(meeting.participants[11]?.roleDescription, "사용자가 맡긴 역할 11");
+    }),
+);
 
 it.effect("defaults existing program records to disabled integrity convergence", () =>
   Effect.gen(function* () {
@@ -513,7 +575,44 @@ it.effect("rejects command fields that become empty after trim", () =>
   }),
 );
 
-it.effect("decodes thread.turn.start defaults for provider and runtime mode", () =>
+it.effect("strips server-only bootstrap ownership claims from client commands", () =>
+  Effect.gen(function* () {
+    const turn = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "cmd",
+      threadId: "thread",
+      bootstrapCreateClaim: "forged",
+      initialModelTeams: [],
+      requestFingerprint: "a".repeat(64),
+      message: { messageId: "msg", role: "user", text: "hello", attachments: [] },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.isFalse(Object.hasOwn(turn, "bootstrapCreateClaim"));
+    assert.isFalse(Object.hasOwn(turn, "initialModelTeams"));
+    assert.isFalse(Object.hasOwn(turn, "requestFingerprint"));
+    const deletion = yield* decodeClientOrchestrationCommand({
+      type: "thread.delete",
+      commandId: "delete",
+      threadId: "thread",
+      expectedCreationCommandId: "forged",
+    });
+    assert.isFalse(Object.hasOwn(deletion, "expectedCreationCommandId"));
+    const metadata = yield* decodeClientOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "meta",
+      threadId: "thread",
+      branch: "main",
+      bootstrapCreateClaim: "forged",
+      bootstrapExpectedWorktreePath: null,
+    });
+    assert.isFalse(Object.hasOwn(metadata, "bootstrapCreateClaim"));
+    assert.isFalse(Object.hasOwn(metadata, "bootstrapExpectedWorktreePath"));
+  }),
+);
+
+it.effect("preserves omitted thread.turn.start settings for legacy commands", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({
       type: "thread.turn.start",
@@ -528,8 +627,8 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.modelSelection, undefined);
-    assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
-    assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+    assert.strictEqual(parsed.runtimeMode, undefined);
+    assert.strictEqual(parsed.interactionMode, undefined);
   }),
 );
 
@@ -554,7 +653,7 @@ it.effect("preserves explicit provider and runtime mode in thread.turn.start", (
     });
     assert.strictEqual(parsed.modelSelection?.instanceId, "codex");
     assert.strictEqual(parsed.runtimeMode, "full-access");
-    assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+    assert.strictEqual(parsed.interactionMode, undefined);
   }),
 );
 

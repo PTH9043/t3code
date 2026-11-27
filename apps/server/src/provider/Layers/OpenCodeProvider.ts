@@ -1,4 +1,6 @@
 import {
+  isValidOpenAiApiModelId,
+  OPENAI_API_CONNECTION,
   type ModelCapabilities,
   type OpenCodeSettings,
   type ServerProviderModel,
@@ -8,6 +10,7 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
+import { LOCAL_OLLAMA_PROVIDER } from "../localOllama.ts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
@@ -270,6 +273,14 @@ function configuredModels(
 ): ReadonlyArray<ServerProviderModel> {
   // Discovered inventory entries win over configured entries with the same
   // slug: they carry richer per-model capabilities (variants, agents).
+  if (
+    openCodeSettings.apiConnection?.providerId === OPENAI_API_CONNECTION.providerId ||
+    openCodeSettings.apiConnection?.providerId === LOCAL_OLLAMA_PROVIDER
+  ) {
+    return apiConnectionModels(openCodeSettings).map(
+      (model) => discovered.find((item) => item.slug === model.slug) ?? model,
+    );
+  }
   const seen = new Set<string>();
   const merged: ServerProviderModel[] = [];
   for (const model of [...discovered, ...apiConnectionModels(openCodeSettings)]) {
@@ -342,7 +353,10 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
       serverUrl: openCodeSettings.serverUrl,
     });
     const models = configuredModels(openCodeSettings, []);
-    const hasVerifiedApiModels = openCodeSettings.apiConnection !== undefined && models.length > 0;
+    const hasVerifiedApiModels =
+      openCodeSettings.apiConnection !== undefined &&
+      models.length > 0 &&
+      (openCodeSettings.apiConnection.providerId !== LOCAL_OLLAMA_PROVIDER || version !== null);
     return buildServerProvider({
       presentation: OPENCODE_PRESENTATION,
       enabled: openCodeSettings.enabled,
@@ -459,6 +473,13 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
 
   const models = configuredModels(openCodeSettings, flattenOpenCodeModels(inventoryExit.value));
   const connectedCount = inventoryExit.value.providerList.connected.length;
+  const isOfficialOpenAi =
+    openCodeSettings.apiConnection?.providerId === OPENAI_API_CONNECTION.providerId;
+  const invalidOpenAiModels = isOfficialOpenAi
+    ? (openCodeSettings.apiConnection?.models.filter((model) => !isValidOpenAiApiModelId(model)) ??
+      [])
+    : [];
+  const hasInvalidOpenAiModel = invalidOpenAiModels.length > 0;
   return buildServerProvider({
     presentation: OPENCODE_PRESENTATION,
     enabled: true,
@@ -467,17 +488,27 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     probe: {
       installed: true,
       version,
-      status: connectedCount > 0 || models.length > 0 ? "ready" : "warning",
+      status: hasInvalidOpenAiModel
+        ? "warning"
+        : connectedCount > 0 || models.length > 0
+          ? "ready"
+          : "warning",
       auth: {
-        status: connectedCount > 0 || models.length > 0 ? "authenticated" : "unknown",
+        status:
+          !hasInvalidOpenAiModel && (connectedCount > 0 || models.length > 0)
+            ? "authenticated"
+            : "unknown",
         type: "opencode",
       },
-      message:
-        connectedCount > 0
+      message: hasInvalidOpenAiModel
+        ? `유효하지 않은 OpenAI API 모델 ID가 설정되어 있습니다(${invalidOpenAiModels.join(", ")}). 설정에서 실제 모델 ID(예: gpt-5.4, gpt-5-mini, o3)로 수정하세요.`
+        : connectedCount > 0
           ? `${connectedCount} upstream provider${connectedCount === 1 ? "" : "s"} connected through ${isExternalServer ? "the configured OpenCode server" : "OpenCode"}.`
-          : isExternalServer
-            ? "Connected to the configured OpenCode server, but it did not report any connected upstream providers."
-            : "OpenCode is available, but it did not report any connected upstream providers.",
+          : openCodeSettings.apiConnection && models.length > 0
+            ? `${models.length} configured API model${models.length === 1 ? "" : "s"} available.`
+            : isExternalServer
+              ? "Connected to the configured OpenCode server, but it did not report any connected upstream providers."
+              : "OpenCode is available, but it did not report any connected upstream providers.",
     },
   });
 });

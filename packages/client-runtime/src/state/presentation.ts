@@ -21,6 +21,12 @@ export {
 } from "./orchestra.ts";
 export { formatMeetingProtocolText } from "./meetingProtocolText.ts";
 export {
+  interruptedWork,
+  interruptedWorkLabel,
+  isConfirmedMonitor,
+  recoveryHistoryLabel,
+} from "./backgroundWatchNotice.ts";
+export {
   deriveOrchestraTaskLists,
   orchestraTaskMatchesFilter,
   orchestraTaskIsExpanded,

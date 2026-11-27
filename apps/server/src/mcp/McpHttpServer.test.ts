@@ -11,6 +11,7 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { UpgradeRoomMemory } from "../orchestration/UpgradeRoomMemory.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -373,7 +374,10 @@ it.effect("registers annotated tools and preserves authenticated request context
       );
 
       const press = yield* server
-        .callTool({ name: "preview_press", arguments: { key: "Enter" } })
+        .callTool({
+          name: "preview_press",
+          arguments: { key: "Enter", toolSummary: "Press Enter" },
+        })
         .pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
@@ -383,4 +387,121 @@ it.effect("registers annotated tools and preserves authenticated request context
       expect(press.content).toEqual([{ type: "text", text: "null" }]);
     }),
   ).pipe(Effect.provide(TestLayer)),
+);
+
+const DevelopmentTestLayer = McpHttpServer.DevelopmentToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provide(Layer.succeed(UpgradeRoomMemory, false)),
+);
+
+it.effect(
+  "flattens root anyOf union tool schemas so Antigravity/ACP toolSummary injection never collides, and strips client wrapper fields on call",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const unionToolNames = [
+          "workspace_memory",
+          "workspace_research",
+          "workspace_document",
+          "workspace_mailbox",
+          "assistant_computer",
+          "runtime_plugin",
+        ] as const;
+
+        for (const name of unionToolNames) {
+          const entry = server.tools.find(({ tool }) => tool.name === name);
+          expect(entry, `missing tool ${name}`).toBeDefined();
+          const schema = entry!.tool.inputSchema as Record<string, unknown>;
+          expect(schema.type).toBe("object");
+          expect(schema.anyOf).toBeUndefined();
+          expect(schema.oneOf).toBeUndefined();
+          expect(schema.additionalProperties).toBe(false);
+          expect(typeof schema.properties).toBe("object");
+        }
+
+        const memoryTool = server.tools.find(({ tool }) => tool.name === "workspace_memory")!.tool;
+        const memorySchema = memoryTool.inputSchema as {
+          readonly type: string;
+          readonly additionalProperties: boolean;
+          readonly required?: ReadonlyArray<string>;
+          readonly properties: Record<string, Record<string, unknown>>;
+        };
+        expect(memorySchema.required).toEqual(["action"]);
+        expect(memorySchema.properties.action).toEqual({
+          type: "string",
+          enum: [
+            "status",
+            "dream",
+            "backfill",
+            "user_style",
+            "search",
+            "reflect",
+            "read",
+            "remember",
+            "forget",
+            "forget-message",
+            "history",
+            "export",
+          ],
+        });
+        expect(memorySchema.properties.speaker).toEqual({
+          type: "string",
+          enum: ["all", "user", "ai"],
+        });
+        expect(memorySchema.properties.layer).toEqual({
+          type: "string",
+          enum: ["all", "observation", "fact"],
+        });
+
+        const mailboxSchema = server.tools.find(({ tool }) => tool.name === "workspace_mailbox")!
+          .tool.inputSchema as Record<string, unknown>;
+        expect(mailboxSchema.required).toBeUndefined();
+
+        // Simulate Antigravity CLI (`agy acp`) injecting `toolSummary` into root `properties` + `required`
+        const agyMutatedProperties = new Set([
+          ...Object.keys(memorySchema.properties),
+          "toolSummary",
+        ]);
+        const agyCallInput = {
+          action: "search",
+          limit: 10,
+          query: "youtube",
+          toolSummary: "Search YouTube memory records",
+        };
+        expect(Object.keys(agyCallInput).every((key) => agyMutatedProperties.has(key))).toBe(true);
+
+        // Server-side `stripMcpClientMetaFields` strips undeclared `toolSummary` so schema validation
+        // passes through to the actual domain handler (which reports missing WorkspaceMemory service here,
+        // NOT `InvalidParams` on `toolSummary`).
+        const callWithSummary = yield* server
+          .callTool({
+            name: "workspace_memory",
+            arguments: agyCallInput,
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(callWithSummary.isError).toBe(true);
+        expect(callWithSummary.content[0]).toEqual({
+          type: "text",
+          text: expect.stringContaining("기억 서비스가 비활성화되어 있습니다."),
+        });
+
+        // Missing per-action required fields (`query` omitted on `action: "search"`) are STILL rejected
+        // by Effect's server-side `WorkspaceMemoryToolInput` union schema!
+        const missingQuery = yield* server
+          .callTool({
+            name: "workspace_memory",
+            arguments: { action: "search", toolSummary: "Invalid search" },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+            Effect.flip,
+          );
+        expect(missingQuery._tag).toBe("InvalidParams");
+      }),
+    ).pipe(Effect.provide(DevelopmentTestLayer)),
 );

@@ -2,9 +2,14 @@ import { expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
-import { makeOllamaEmbeddings, semanticSearchFailureMessage } from "./OllamaEmbeddings.ts";
+import {
+  discoverOllamaEmbeddingModelsAtEndpoint,
+  makeOllamaEmbeddings,
+  semanticSearchFailureMessage,
+} from "./OllamaEmbeddings.ts";
 
 const input = {
   endpoint: "http://127.0.0.1:11434",
@@ -121,5 +126,133 @@ it.effect("reports an Ollama connection failure and allows the next request to r
     });
     expect(yield* embed({ ...input, purpose: "query" })).toEqual([[1, 0]]);
     expect(requests).toBe(2);
+  }),
+);
+
+it.effect(
+  "sends truncate: true so 512-token models truncate long chunks instead of returning HTTP 400",
+  () =>
+    Effect.gen(function* () {
+      const decodeEmbedPayload = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Struct({ truncate: Schema.Boolean })),
+      );
+      let capturedBodyText: string | undefined;
+      const embed = yield* makeOllamaEmbeddings(
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            if (request.body._tag === "Uint8Array") {
+              capturedBodyText = new TextDecoder().decode(request.body.body);
+            }
+            return HttpClientResponse.fromWeb(request, Response.json({ embeddings: [[0.5, 0.5]] }));
+          }),
+        ),
+      );
+      expect(yield* embed({ ...input, purpose: "index" })).toEqual([[0.5, 0.5]]);
+      const payload = yield* decodeEmbedPayload(capturedBodyText ?? "{}");
+      expect(payload.truncate).toBe(true);
+    }),
+);
+
+const decodeShowBody = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ model: Schema.String })),
+);
+
+it.effect(
+  "discovers only locally installed Ollama embedding models and ranks multilingual ones first",
+  () =>
+    Effect.gen(function* () {
+      const mockHttp = HttpClient.make((request) =>
+        Effect.sync(() => {
+          if (request.url.endsWith("/api/tags")) {
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                models: [
+                  {
+                    name: "personal-orchestrator-4b:latest",
+                    size: 2_800_000_000,
+                    details: {
+                      family: "qwen3",
+                      parameter_size: "4.0B",
+                      quantization_level: "Q5_K_M",
+                    },
+                  },
+                  {
+                    name: "mxbai-embed-large:latest",
+                    size: 670_000_000,
+                    details: { family: "bert", parameter_size: "334M", quantization_level: "F16" },
+                  },
+                  {
+                    name: "bge-m3:latest",
+                    size: 1_157_000_000,
+                    details: { family: "bert", parameter_size: "567M", quantization_level: "F16" },
+                  },
+                  {
+                    name: "nomic-embed-text-v2-moe:latest",
+                    size: 957_000_000,
+                    details: {
+                      family: "nomic-bert-moe",
+                      parameter_size: "475M",
+                      quantization_level: "F16",
+                    },
+                  },
+                  {
+                    name: "remote-embed:cloud",
+                    remote_host: "https://remote.example",
+                  },
+                ],
+              }),
+            );
+          }
+          const rawBody =
+            request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "{}";
+          const { model } = decodeShowBody(rawBody);
+          const capabilities =
+            model === "personal-orchestrator-4b:latest" ? ["completion", "tools"] : ["embedding"];
+          return HttpClientResponse.fromWeb(request, Response.json({ capabilities }));
+        }),
+      );
+
+      const res = yield* discoverOllamaEmbeddingModelsAtEndpoint(
+        mockHttp,
+        "http://127.0.0.1:11434",
+      );
+      expect(res.reachable).toBe(true);
+      expect(res.models.map((m) => m.name)).toEqual([
+        "bge-m3:latest",
+        "nomic-embed-text-v2-moe:latest",
+        "mxbai-embed-large:latest",
+      ]);
+      expect(res.models[0]?.multilingualRecommended).toBe(true);
+      expect(res.models[1]?.multilingualRecommended).toBe(true);
+      expect(res.models[2]?.multilingualRecommended).toBe(false);
+      expect(res.models[2]?.englishOnlyWarning).toContain("영어 전용");
+    }),
+);
+
+it.effect("rejects non-loopback endpoints and degrades cleanly when Ollama is unreachable", () =>
+  Effect.gen(function* () {
+    const offlineHttp = HttpClient.make((request) =>
+      Effect.fail(
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({ request }),
+        }),
+      ),
+    );
+    const nonLoopback = yield* discoverOllamaEmbeddingModelsAtEndpoint(
+      offlineHttp,
+      "https://evil.example:11434",
+    );
+    expect(nonLoopback.reachable).toBe(false);
+    expect(nonLoopback.models).toEqual([]);
+    expect(nonLoopback.errorMessage).toContain("localhost");
+
+    const offline = yield* discoverOllamaEmbeddingModelsAtEndpoint(
+      offlineHttp,
+      "http://127.0.0.1:11434",
+    );
+    expect(offline.reachable).toBe(false);
+    expect(offline.models).toEqual([]);
+    expect(offline.errorMessage).toContain("키워드 검색");
   }),
 );

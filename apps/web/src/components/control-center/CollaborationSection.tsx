@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useMatch, useNavigate } from "@tanstack/react-router";
+import { RunKnowledgeDocuments } from "../knowledge/RunKnowledgeDocuments";
 import { WorkspaceCollaborationRunId, type WorkspaceMeetingQuestion } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
@@ -46,12 +47,28 @@ import {
 
 export function CollaborationSection({ project }: { project: EnvironmentProject }) {
   const navigate = useNavigate();
+  const match = useMatch({ from: "/control-center/$environmentId/$projectId", shouldThrow: false });
+  const selectedRun =
+    match?.params.environmentId === project.environmentId && match.params.projectId === project.id
+      ? match.search.knowledgeRun
+      : undefined;
+  const selectedRunElement = useRef<HTMLDetailsElement>(null);
   const runs = useEnvironmentQuery(
     orchestrationEnvironment.workspaceCollaborationRuns({
       environmentId: project.environmentId,
-      input: { projectId: project.id },
+      input: {
+        projectId: project.id,
+        ...(selectedRun ? { runId: WorkspaceCollaborationRunId.make(selectedRun) } : {}),
+      },
     }),
   );
+  const foundRun = selectedRun && runs.data?.runs.some((run) => run.id === selectedRun);
+  useEffect(() => {
+    if (foundRun && selectedRunElement.current) {
+      selectedRunElement.current.open = true;
+      selectedRunElement.current.scrollIntoView({ block: "start" });
+    }
+  }, [foundRun, selectedRun]);
   const runtime = useEnvironmentQuery(
     orchestrationEnvironment.workspaceRuntime({
       environmentId: project.environmentId,
@@ -351,15 +368,29 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
         <div className="grid gap-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold">실행 이력</h3>
+            {selectedRun && (
+              <Link
+                to="/control-center/$environmentId/$projectId"
+                params={{ environmentId: project.environmentId, projectId: project.id }}
+                search={{}}
+                className="text-xs text-primary underline"
+              >
+                전체 실행 이력
+              </Link>
+            )}
             <Button size="xs" variant="ghost" onClick={runs.refresh}>
               <RefreshCcwIcon />
               새로고침
             </Button>
           </div>
           {runs.error ? <p className="text-xs text-destructive">{runs.error}</p> : null}
+          {selectedRun && runs.data && !foundRun && (
+            <p role="status">이 프로젝트에서 원본 실행을 찾을 수 없습니다.</p>
+          )}
           {runs.data?.runs.map((run) => (
             <details
               key={run.id}
+              ref={run.id === selectedRun ? selectedRunElement : undefined}
               className="group rounded-xl border border-border/65 p-3 open:bg-muted/15"
             >
               <summary className="flex cursor-pointer list-none items-start gap-3">
@@ -404,6 +435,7 @@ export function CollaborationSection({ project }: { project: EnvironmentProject 
                 <Badge variant={runBadgeVariant(run.status)}>{runStatusLabel(run.status)}</Badge>
               </summary>
               <div className="mt-4 grid gap-3 border-t border-border/50 pt-3">
+                <RunKnowledgeDocuments project={project} runId={run.id} />
                 {run.meeting ? (
                   <WorkspaceMeetingView
                     meeting={run.meeting}

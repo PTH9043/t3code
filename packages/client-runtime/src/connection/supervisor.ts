@@ -28,11 +28,10 @@ import {
 import * as RpcSession from "../rpc/session.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT } from "./timing.ts";
 
 const RETRY_DELAYS_MS = [3_000, 4_000, 8_000, 16_000] as const;
 const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
-// Match the desktop backend's existing startup readiness window for local work.
-const LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT = "1 minute";
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
@@ -103,7 +102,7 @@ export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
 }
 
-function usesLocalBackend(target: ConnectionTarget): boolean {
+export function usesLocalBackend(target: ConnectionTarget): boolean {
   if (target._tag === "BearerConnectionTarget") return target.connectionId.startsWith("local:");
   if (target._tag !== "PrimaryConnectionTarget") return false;
   try {
@@ -749,11 +748,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
-      if (failedWakeProbe) {
-        // The wake probe found a dead transport while the user is returning to
-        // the app, so reconnect immediately instead of sleeping the first
-        // backoff rung. Only this first attempt skips the ladder; if it fails
-        // too, normal backoff resumes.
+      if (failedWakeProbe || (localBackend && outcome.established && outcome.stable)) {
+        // A stale wake probe or a previously stable local connection can retry
+        // immediately. Repeated failures still use the normal backoff ladder.
         resetRetryLadder();
         yield* setState(connectingState(yield* Ref.get(intent), generation, 1, error));
         continue;

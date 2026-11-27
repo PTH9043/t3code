@@ -30,10 +30,22 @@ function statusLabel(status: DesktopJasnaJob["status"]): string {
   }
 }
 
-export function JasnaSection() {
+export function shouldRenderJasnaSection(
+  bridge: DesktopJasnaBridge | undefined,
+  snapshot: DesktopJasnaSnapshot | null,
+  forceOpen = false,
+): boolean {
+  if (!bridge) return false;
+  if (forceOpen) return true;
+  if (!snapshot) return false;
+  return Boolean(snapshot.executablePath) || snapshot.jobs.length > 0;
+}
+
+export function JasnaSection({ forceOpen = false }: { readonly forceOpen?: boolean } = {}) {
   const bridge: DesktopJasnaBridge | undefined =
     typeof window === "undefined" ? undefined : window.desktopBridge?.jasna;
   const [snapshot, setSnapshot] = useState<DesktopJasnaSnapshot | null>(null);
+  const [expanded, setExpanded] = useState(forceOpen);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<DesktopJasnaModel | "">("");
@@ -112,13 +124,41 @@ export function JasnaSection() {
     };
   }, [bridge, hasActiveJobs]);
 
+  const visible = shouldRenderJasnaSection(bridge, snapshot, forceOpen || expanded);
+  if (!bridge) {
+    return null;
+  }
+  if (!visible) {
+    return (
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          className="text-muted-foreground"
+          onClick={() => setExpanded(true)}
+        >
+          <FilmIcon className="size-3.5" />
+          선택 도구: Jasna 영상 복원 표시
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <FilmIcon className="size-4" />
-          영상 복원
-        </CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2">
+            <FilmIcon className="size-4" />
+            영상 복원
+          </CardTitle>
+          {!snapshot?.executablePath && (snapshot?.jobs.length ?? 0) === 0 ? (
+            <Button type="button" size="xs" variant="ghost" onClick={() => setExpanded(false)}>
+              숨기기
+            </Button>
+          ) : null}
+        </div>
         <CardDescription>
           Jasna로 이 컴퓨터의 영상을 복원합니다. 원본은 그대로 두고 새 파일로 저장합니다.
         </CardDescription>

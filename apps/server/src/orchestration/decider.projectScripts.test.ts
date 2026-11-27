@@ -302,6 +302,84 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         ]),
         runtimeMode: "approval-required",
       });
+      const selected = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-selected-modes"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-selected-modes"),
+            role: "user",
+            text: "use my selected settings",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          createdAt: now,
+        },
+        readModel,
+      });
+      const selectedEvents = Array.isArray(selected) ? selected : [selected];
+      expect(
+        selectedEvents.find((event) => event.type === "thread.turn-start-requested"),
+      ).toMatchObject({
+        payload: { runtimeMode: "full-access", interactionMode: "plan" },
+      });
+      const legacy = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-legacy-modes"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-legacy-modes"),
+            role: "user",
+            text: "legacy request",
+            attachments: [],
+          },
+          createdAt: now,
+        },
+        readModel,
+      });
+      const legacyEvents = Array.isArray(legacy) ? legacy : [legacy];
+      expect(
+        legacyEvents.find((event) => event.type === "thread.turn-start-requested"),
+      ).toMatchObject({
+        payload: { runtimeMode: "approval-required", interactionMode: "default" },
+      });
+      const planModel = yield* projectEvent(readModel, {
+        sequence: 3,
+        eventId: asEventId("evt-set-legacy-plan"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.interaction-mode-set",
+        occurredAt: now,
+        commandId: CommandId.make("cmd-set-legacy-plan"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-set-legacy-plan"),
+        metadata: {},
+        payload: { threadId: ThreadId.make("thread-1"), interactionMode: "plan", updatedAt: now },
+      });
+      const legacyPlan = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-legacy-plan"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-legacy-plan"),
+            role: "user",
+            text: "continue in plan mode",
+            attachments: [],
+          },
+          createdAt: now,
+        },
+        readModel: planModel,
+      });
+      const planEvents = Array.isArray(legacyPlan) ? legacyPlan : [legacyPlan];
+      expect(
+        planEvents.find((event) => event.type === "thread.turn-start-requested"),
+      ).toMatchObject({
+        payload: { runtimeMode: "approval-required", interactionMode: "plan" },
+      });
     }),
   );
 

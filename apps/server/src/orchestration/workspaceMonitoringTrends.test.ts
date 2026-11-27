@@ -97,6 +97,21 @@ it("threshold judges the window mean, except counting metrics which use the late
   ).toMatchObject({ anomalous: true });
 });
 
+it("uses the latest pre-averaged span rate rather than smoothing it again", () => {
+  for (const metric of ["slow-spans", "failed-spans"] as const) {
+    expect(
+      evaluateTrend(
+        { targetIndex: 0, metric, trend: "threshold", windowMin: 5, limit: 1 },
+        ringOf([
+          [1, 0],
+          [0, 1],
+        ]),
+        now,
+      ),
+    ).toMatchObject({ anomalous: true, observed: expect.stringContaining("분당 1건") });
+  }
+});
+
 it("slope flags a steady climb and ignores samples outside the window", () => {
   const memory = {
     targetIndex: 0,

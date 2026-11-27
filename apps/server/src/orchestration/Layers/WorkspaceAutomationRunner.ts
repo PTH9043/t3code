@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   WorkspaceKnowledgeItemId,
+  resolveCompletionAutomationLimits,
   type WorkspaceAutomationCheck,
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -27,6 +28,23 @@ import {
 } from "../Services/WorkspaceAutomationRunner.ts";
 
 const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+function countConsecutiveAutomationFailures(
+  activities: ReadonlyArray<{ readonly kind: string }>,
+): number {
+  let failures = 0;
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const kind = activities[index]?.kind;
+    if (kind === "automation.verified") {
+      break;
+    }
+    if (kind === "automation.failed") {
+      failures += 1;
+    }
+  }
+  return failures;
+}
+
 export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunner.make")(
   function* (input: {
     engine: Pick<OrchestrationEngineShape, "dispatch">;
@@ -51,7 +69,10 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
           kind,
           summary,
           payload,
-          tone: kind.endsWith("failed") || kind.endsWith("stale") ? "error" : "info",
+          tone:
+            kind.endsWith("failed") || kind.endsWith("stale") || kind.endsWith("limit_reached")
+              ? "error"
+              : "info",
           turnId: plan.turnId,
           createdAt,
         },
@@ -64,6 +85,11 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
       command: string,
       index: number,
     ) {
+      const limits = resolveCompletionAutomationLimits(plan.config);
+      const timeoutSeconds =
+        phase === "format"
+          ? Math.min(20, limits.commandTimeoutSeconds)
+          : limits.commandTimeoutSeconds;
       const startedAt = yield* now;
       const result = yield* input.runner
         .run({
@@ -76,16 +102,23 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
             T3_AUTOMATION_TURN_ID: plan.turnId,
           },
           stdin: "",
-          timeout: phase === "format" ? "20 seconds" : "120 seconds",
+          timeout: `${timeoutSeconds} seconds`,
           maxOutputBytes: 32_000,
           outputMode: "truncate",
         })
         .pipe(
-          Effect.map((result) => ({
-            exitCode: result.code === null ? null : Number(result.code),
-            passed: result.code === 0 && !result.timedOut,
-            output: `${result.stdout}\n${result.stderr}`.trim().slice(-2000),
-          })),
+          Effect.map((result) => {
+            const trimmedOutput = `${result.stdout}\n${result.stderr}`.trim().slice(-2000);
+            const output =
+              result.timedOut && !trimmedOutput
+                ? `명령 실행 시간 초과 (${timeoutSeconds}초)`
+                : trimmedOutput;
+            return {
+              exitCode: result.code === null ? null : Number(result.code),
+              passed: result.code === 0 && !result.timedOut,
+              output,
+            };
+          }),
           Effect.catch((error) =>
             Effect.succeed({ exitCode: null, passed: false, output: error.message }),
           ),
@@ -111,10 +144,16 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
         const project = Option.getOrNull(yield* input.query.getProjectShellById(request.projectId));
         const config = project?.workspaceControl?.completionAutomation;
         if (!config?.enabled) return null;
+        const limits = resolveCompletionAutomationLimits(config);
         const thread = Option.getOrNull(
           yield* input.query.getThreadRuntimeContext(request.threadId, {
             messages: true,
-            activityKinds: ["automation.started"],
+            activityKinds: [
+              "automation.started",
+              "automation.verified",
+              "automation.failed",
+              "automation.limit_reached",
+            ],
           }),
         );
         if (
@@ -132,10 +171,27 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
         if (firstUser?.id.startsWith("automation-followup:")) return null;
         if (
           thread.activities.some(
-            (item) => item.turnId === request.turnId && item.kind === "automation.started",
+            (item) =>
+              item.turnId === request.turnId &&
+              (item.kind === "automation.started" || item.kind === "automation.limit_reached"),
           )
         )
           return null;
+        const priorConsecutiveFailures = countConsecutiveAutomationFailures(thread.activities);
+        if (priorConsecutiveFailures >= limits.maxAutoFixAttempts) {
+          yield* activity(
+            request,
+            "automation.limit_reached",
+            `최대 자동 보정 한도(${limits.maxAutoFixAttempts}회) 도달로 자동 검증을 중단했습니다`,
+            {
+              attempts: priorConsecutiveFailures,
+              maxAutoFixAttempts: limits.maxAutoFixAttempts,
+              commandTimeoutSeconds: limits.commandTimeoutSeconds,
+              limitReached: true,
+            },
+          );
+          return null;
+        }
         const plan: WorkspaceAutomationPlan = {
           ...request,
           projectId: thread.projectId,
@@ -144,6 +200,9 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
         };
         yield* activity(plan, "automation.started", "완료 후 포맷·검증 시작", {
           verificationCommands: config.verificationCommands.length,
+          attemptNumber: priorConsecutiveFailures + 1,
+          maxAutoFixAttempts: limits.maxAutoFixAttempts,
+          commandTimeoutSeconds: limits.commandTimeoutSeconds,
         });
         for (const [index, command] of config.formatCommands.entries()) {
           const receipt = yield* check(plan, "format", command, index);
@@ -161,6 +220,7 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
     const verify = Effect.fn("WorkspaceAutomationRunner.verify")(function* (
       plan: WorkspaceAutomationPlan,
     ) {
+      const limits = resolveCompletionAutomationLimits(plan.config);
       const checks = [...plan.formatChecks];
       if (checks.every((item) => item.passed)) {
         for (const [index, command] of plan.config.verificationCommands.entries()) {
@@ -186,11 +246,23 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
         );
         return;
       }
+      const attemptNumber = countConsecutiveAutomationFailures(thread.activities) + 1;
+      const limitReached = !passed && attemptNumber >= limits.maxAutoFixAttempts;
       yield* activity(
         plan,
         passed ? "automation.verified" : "automation.failed",
-        passed ? "실제 명령 검증 통과" : "자동 검증 실패 · 결과 저장·후속 실행 보류",
-        { checks },
+        passed
+          ? "실제 명령 검증 통과"
+          : limitReached
+            ? `자동 검증 실패 · 최대 자동 보정 한도(${attemptNumber}/${limits.maxAutoFixAttempts}회) 도달로 중단`
+            : "자동 검증 실패 · 결과 저장·후속 실행 보류",
+        {
+          checks,
+          attemptNumber,
+          maxAutoFixAttempts: limits.maxAutoFixAttempts,
+          commandTimeoutSeconds: limits.commandTimeoutSeconds,
+          limitReached,
+        },
       );
       if (!passed) return;
       const createdAt = yield* now;
@@ -219,6 +291,7 @@ export const makeWorkspaceAutomationRunner = Effect.fn("WorkspaceAutomationRunne
           origin: "agent",
           relativeFolder: null,
           tags: ["verified-automation"],
+          provenance: { threadId: plan.threadId },
           createdAt,
         });
       }

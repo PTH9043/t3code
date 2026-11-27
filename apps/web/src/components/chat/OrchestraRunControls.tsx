@@ -1,4 +1,8 @@
 import { WorkspaceAgentControlPanel } from "./WorkspaceAgentControlPanel";
+import {
+  findOrchestraPlanCycle,
+  orchestraPlanDependencyWouldCycle,
+} from "./orchestraPlanDependencies";
 import { useState } from "react";
 import type {
   EnvironmentId,
@@ -129,7 +133,9 @@ function PlanEditor({
       nodeId: node.id,
       title: node.title,
       task: node.handoff.task,
-      participantId: node.participantId,
+      participantId: graph.workflowAssignment?.pendingNodeIds.includes(node.id)
+        ? null
+        : node.participantId,
       dependsOn: node.dependsOn.flatMap((id) => {
         const producer = gates.get(id) ?? id;
         return nodes.some((candidate) => candidate.id === producer) ? [producer] : [];
@@ -137,6 +143,10 @@ function PlanEditor({
     })),
   );
   const [busy, setBusy] = useState(false);
+  const cycle = findOrchestraPlanCycle(edits);
+  const cycleLabel = cycle
+    ?.map((id) => edits.find((edit) => edit.nodeId === id)?.title ?? id)
+    .join(" → ");
   const review = useAtomCommand(projectEnvironment.reviewWorkspaceCollaborationRun, {
     label: "오케스트라 실행 계획 확인",
     reportFailure: false,
@@ -221,12 +231,22 @@ function PlanEditor({
                   className={INPUT}
                   value={edit.participantId ?? ""}
                   onChange={(event) => {
+                    if (
+                      event.currentTarget.value === "" &&
+                      graph.workflowAssignment?.pendingNodeIds.includes(edit.nodeId)
+                    ) {
+                      update(edit.nodeId, { participantId: null });
+                      return;
+                    }
                     const seat = run.meeting!.participants.find(
                       (candidate) => candidate.id === event.currentTarget.value,
                     );
                     if (seat) update(edit.nodeId, { participantId: seat.id });
                   }}
                 >
+                  {graph.workflowAssignment?.pendingNodeIds.includes(edit.nodeId) && (
+                    <option value="">감독자 배정 대기</option>
+                  )}
                   {run.meeting.participants.map((seat) => (
                     <option key={seat.id} value={seat.id}>
                       {seat.displayName} · {seat.modelSelection.model}
@@ -239,33 +259,57 @@ function PlanEditor({
               <legend className="text-xs">먼저 끝나야 하는 작업</legend>
               {nodes
                 .filter((node) => node.id !== edit.nodeId)
-                .map((node) => (
-                  <label key={node.id} className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={edit.dependsOn.includes(node.id)}
-                      onChange={(event) =>
-                        update(edit.nodeId, {
-                          dependsOn: event.currentTarget.checked
-                            ? [...edit.dependsOn, node.id]
-                            : edit.dependsOn.filter((id) => id !== node.id),
-                        })
-                      }
-                    />
-                    {node.title}
-                  </label>
-                ))}
+                .map((node) => {
+                  const checked = edit.dependsOn.includes(node.id);
+                  const createsCycle =
+                    !checked && orchestraPlanDependencyWouldCycle(edits, edit.nodeId, node.id);
+                  return (
+                    <label key={node.id} className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={createsCycle}
+                        title={
+                          createsCycle
+                            ? "선택하면 작업이 서로 기다리는 순환 관계가 됩니다."
+                            : undefined
+                        }
+                        onChange={(event) =>
+                          update(edit.nodeId, {
+                            dependsOn: event.currentTarget.checked
+                              ? [...edit.dependsOn, node.id]
+                              : edit.dependsOn.filter((id) => id !== node.id),
+                          })
+                        }
+                      />
+                      {node.title}
+                      {createsCycle && <span className="text-muted-foreground">(순환 관계)</span>}
+                    </label>
+                  );
+                })}
             </fieldset>
           </div>
         </details>
       ))}
+      {cycleLabel && (
+        <p role="alert" className="text-xs text-destructive">
+          선행 작업이 순환합니다: {cycleLabel}. 선택된 선행 작업을 해제하세요.
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" onClick={() => void submit(false)}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || cycle !== null}
+          onClick={() => void submit(false)}
+        >
           계획만 저장
         </Button>
         <Button
           size="sm"
-          disabled={busy || edits.some((edit) => !edit.title.trim() || !edit.task.trim())}
+          disabled={
+            busy || cycle !== null || edits.some((edit) => !edit.title.trim() || !edit.task.trim())
+          }
           onClick={() => void submit(true)}
         >
           이 계획으로 시작

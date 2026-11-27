@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ProviderInstanceId,
+  type ConversationExportFileFormat,
+  type ConversationExportScope,
   type ConversationPreview,
   type ConversationSourceFormat,
 } from "@t3tools/contracts";
@@ -36,6 +38,7 @@ export function ConversationTransferSection({ project }: { project: EnvironmentP
   const selectedModel =
     model || selectedProvider?.models[0]?.slug || project.defaultModelSelection?.model || "";
   const [exportId, setExportId] = useState("");
+  const [exportScope, setExportScope] = useState<ConversationExportScope>("all");
   const selectedThread = threads.find((item) => item.id === exportId) ?? threads[0];
   const [summary, setSummary] = useState<ConversationPreview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -101,18 +104,31 @@ export function ConversationTransferSection({ project }: { project: EnvironmentP
       setBusy(false);
     }
   };
-  const exportNow = async (original: boolean) => {
+  const exportNow = async (options: {
+    original?: boolean;
+    outputFormat?: ConversationExportFileFormat;
+  }) => {
     if (!selectedThread) return;
     setBusy(true);
     try {
       const result = await exportChat({
         environmentId: project.environmentId,
-        input: { threadId: selectedThread.id, original },
+        input: {
+          threadId: selectedThread.id,
+          original: options.original ?? false,
+          ...(options.original
+            ? {}
+            : {
+                scope: exportScope,
+                ...(options.outputFormat ? { outputFormat: options.outputFormat } : {}),
+              }),
+        },
       });
       if (!notifyCommandFailure(result, "내보낼 원본을 확인하세요.") && result._tag === "Success") {
-        const url = URL.createObjectURL(
-          new Blob([result.value.content], { type: "text/plain;charset=utf-8" }),
-        );
+        const mime = result.value.fileName.endsWith(".md")
+          ? "text/markdown;charset=utf-8"
+          : "text/plain;charset=utf-8";
+        const url = URL.createObjectURL(new Blob([result.value.content], { type: mime }));
         const link = document.createElement("a");
         link.href = url;
         link.download = result.value.fileName;
@@ -252,11 +268,21 @@ export function ConversationTransferSection({ project }: { project: EnvironmentP
             </option>
           ))}
         </select>
+        <select
+          aria-label="대화 내보내기 구분"
+          className="rounded-lg border bg-background p-2 text-xs"
+          value={exportScope}
+          onChange={(event) => setExportScope(event.target.value as ConversationExportScope)}
+        >
+          <option value="all">전체 대화</option>
+          <option value="user_only">내 대화·말투만</option>
+          <option value="ai_only">AI 작성·조사만</option>
+        </select>
         <Button
           variant="outline"
           size="sm"
           disabled={busy || !selectedThread}
-          onClick={() => void exportNow(false)}
+          onClick={() => void exportNow({ original: false, outputFormat: "json" })}
         >
           T3 내보내기
         </Button>
@@ -264,7 +290,15 @@ export function ConversationTransferSection({ project }: { project: EnvironmentP
           variant="outline"
           size="sm"
           disabled={busy || !selectedThread}
-          onClick={() => void exportNow(true)}
+          onClick={() => void exportNow({ original: false, outputFormat: "markdown" })}
+        >
+          Markdown 분리 저장
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || !selectedThread}
+          onClick={() => void exportNow({ original: true })}
         >
           보관된 CLI 원본
         </Button>

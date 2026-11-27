@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  cleanupProjectScript,
   projectScriptCwd,
   projectScriptRuntimeEnv,
   setupProjectScript,
+  validateProjectScript,
 } from "@t3tools/shared/projectScripts";
 
 import {
@@ -87,6 +89,29 @@ describe("projectScripts helpers", () => {
 
     expect(primaryProjectScript(scripts)?.id).toBe("test");
     expect(setupProjectScript(scripts)?.id).toBe("setup");
+
+    const withHooks = [
+      buildProjectScript("validate", {
+        name: "Validate",
+        command: "vp test run",
+        icon: "test",
+        runOnWorktreeCreate: false,
+        runOnWorktreeValidate: true,
+        previewUrl: null,
+        autoOpenPreview: false,
+      }),
+      buildProjectScript("cleanup", {
+        name: "Cleanup",
+        command: "node scripts/cleanup.mjs",
+        icon: "configure",
+        runOnWorktreeCreate: false,
+        runOnWorktreeCleanup: true,
+        previewUrl: null,
+        autoOpenPreview: false,
+      }),
+    ];
+    expect(validateProjectScript(withHooks)?.id).toBe("validate");
+    expect(cleanupProjectScript(withHooks)?.id).toBe("cleanup");
   });
 
   it("builds default runtime env for scripts", () => {

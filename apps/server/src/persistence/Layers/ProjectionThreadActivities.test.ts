@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ProjectionThreadActivityRepository } from "../Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadActivityRepositoryLive } from "./ProjectionThreadActivities.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -13,6 +14,81 @@ it.layer(
     Layer.provide(NodeServices.layer),
   ),
 )("session recovery activity reads", (it) => {
+  it.effect("selects only recent named MCP calls with the existing thread-time index", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadActivityRepository;
+      const threadId = ThreadId.make("recent-mcp-thread");
+      const rows = [
+        {
+          id: "monitor",
+          summary: "t3-claude-tools · Monitor",
+          kind: "tool.completed",
+          at: "2026-11-12T01:20:00.000Z",
+        },
+        {
+          id: "stop",
+          summary: "t3-claude-tools · TaskStop",
+          kind: "tool.completed",
+          at: "2026-11-12T01:25:00.000Z",
+        },
+        {
+          id: "old",
+          summary: "t3-claude-tools · Monitor",
+          kind: "tool.completed",
+          at: "2026-11-11T01:20:00.000Z",
+        },
+        {
+          id: "other",
+          summary: "other-server · Monitor",
+          kind: "tool.completed",
+          at: "2026-11-12T01:20:00.000Z",
+        },
+        {
+          id: "started",
+          summary: "t3-claude-tools · Monitor",
+          kind: "tool.started",
+          at: "2026-11-12T01:20:00.000Z",
+        },
+      ];
+      for (const [index, row] of rows.entries())
+        yield* repository.upsert({
+          activityId: EventId.make(row.id),
+          threadId,
+          turnId: null,
+          tone: "info",
+          kind: row.kind,
+          summary: row.summary,
+          payload: {},
+          sequence: index + 1,
+          createdAt: row.at,
+        });
+      const result = yield* repository.listByThreadIdAndKinds({
+        threadId,
+        kinds: [],
+        recentMcp: {
+          since: "2026-11-12T00:30:00.000Z",
+          summaries: ["t3-claude-tools · Monitor", "t3-claude-tools · TaskStop"],
+        },
+      });
+      assert.deepStrictEqual(
+        result.map((item) => item.activityId),
+        ["monitor", "stop"],
+      );
+      const sql = yield* SqlClient.SqlClient;
+      const plan =
+        yield* sql`EXPLAIN QUERY PLAN SELECT activity_id FROM projection_thread_activities
+        INDEXED BY idx_projection_thread_activities_thread_created WHERE thread_id = ${threadId}
+        AND created_at >= ${"2026-11-12T00:30:00.000Z"} AND kind = 'tool.completed'
+        AND summary IN ('t3-claude-tools · Monitor', 't3-claude-tools · TaskStop')`;
+      assert.isTrue(
+        plan.some((row) =>
+          String((row as { detail?: unknown }).detail).includes(
+            "idx_projection_thread_activities_thread_created",
+          ),
+        ),
+      );
+    }),
+  );
   it.effect(
     "keeps question/task history and scheduled wakeups without hydrating other tool output",
     () =>

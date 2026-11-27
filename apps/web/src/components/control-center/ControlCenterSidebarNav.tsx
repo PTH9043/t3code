@@ -1,6 +1,12 @@
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeftIcon, BookOpenIcon, BrainCircuitIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  BookOpenIcon,
+  BrainCircuitIcon,
+  ServerIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { scopeProjectRef, scopedProjectKey } from "@t3tools/client-runtime/environment";
 
 import { useEnvironments } from "~/state/environments";
@@ -47,6 +53,26 @@ export function ControlCenterSidebarNav() {
     () => [...projects].sort((left, right) => left.title.localeCompare(right.title)),
     [projects],
   );
+  const projectsByHost = useMemo(() => {
+    const groups = new Map<
+      string,
+      { environmentId: string; hostLabel: string; items: typeof sortedProjects }
+    >();
+    for (const item of sortedProjects) {
+      const hostLabel = environmentLabels.get(item.environmentId) ?? "현재 환경";
+      const existing = groups.get(item.environmentId);
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        groups.set(item.environmentId, {
+          environmentId: item.environmentId,
+          hostLabel,
+          items: [item],
+        });
+      }
+    }
+    return Array.from(groups.values());
+  }, [environmentLabels, sortedProjects]);
 
   const go = (to: "/" | "/settings" | "/control-center", params?: Record<string, string>) => {
     if (isMobile) setOpenMobile(false);
@@ -116,43 +142,57 @@ export function ControlCenterSidebarNav() {
 
         <SidebarGroup className="gap-2 p-[var(--sidebar-content-inset)] pt-0">
           <SidebarGroupLabel>폴더별 프로젝트</SidebarGroupLabel>
-          <SidebarMenu>
-            {sortedProjects.map((project) => {
-              const targetPath = `/control-center/${project.environmentId}/${project.id}`;
-              return (
-                <SidebarMenuItem key={`${project.environmentId}:${project.id}`}>
-                  <SidebarMenuButton
-                    isActive={pathname === targetPath}
-                    data-file-drop-project={project.id}
-                    data-file-drop-environment={project.environmentId}
-                    onClick={() =>
-                      go("/control-center", {
-                        environmentId: project.environmentId,
-                        projectId: project.id,
-                      })
-                    }
+          {projectsByHost.length > 0 ? (
+            <div className="grid gap-3">
+              {projectsByHost.map((hostGroup) => (
+                <div key={hostGroup.environmentId} className="grid gap-1">
+                  <div
+                    data-host-group-header={hostGroup.environmentId}
+                    className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-sidebar-muted-foreground"
                   >
-                    <ProjectFavicon
-                      environmentId={project.environmentId}
-                      cwd={project.workspaceRoot}
-                      className="size-4 shrink-0"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{project.title}</span>
-                      <span className="block truncate text-[10px] text-sidebar-muted-foreground/70">
-                        {environmentLabels.get(project.environmentId) ?? "현재 환경"}
-                      </span>
+                    <ServerIcon className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">{hostGroup.hostLabel}</span>
+                    <span className="shrink-0 tabular-nums text-[10px] opacity-75">
+                      {hostGroup.items.length}
                     </span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              );
-            })}
-            {sortedProjects.length === 0 ? (
+                  </div>
+                  <SidebarMenu>
+                    {hostGroup.items.map((project) => {
+                      const targetPath = `/control-center/${project.environmentId}/${project.id}`;
+                      return (
+                        <SidebarMenuItem key={`${project.environmentId}:${project.id}`}>
+                          <SidebarMenuButton
+                            isActive={pathname === targetPath}
+                            data-file-drop-project={project.id}
+                            data-file-drop-environment={project.environmentId}
+                            onClick={() =>
+                              go("/control-center", {
+                                environmentId: project.environmentId,
+                                projectId: project.id,
+                              })
+                            }
+                          >
+                            <ProjectFavicon
+                              environmentId={project.environmentId}
+                              cwd={project.workspaceRoot}
+                              className="size-4 shrink-0"
+                            />
+                            <span className="min-w-0 flex-1 truncate">{project.title}</span>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      );
+                    })}
+                  </SidebarMenu>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <SidebarMenu>
               <li className="px-2 py-5 text-center text-xs text-sidebar-muted-foreground">
                 등록된 프로젝트가 없습니다.
               </li>
-            ) : null}
-          </SidebarMenu>
+            </SidebarMenu>
+          )}
         </SidebarGroup>
       </SidebarContent>
 

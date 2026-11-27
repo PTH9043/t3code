@@ -1,4 +1,8 @@
+import { runBackgroundModelJob } from "../background/backgroundModelQueue.ts";
+import { DEFAULT_USER_IDLE_WINDOW_MS, vramArbiter } from "../background/VramArbiter.ts";
+import { activeWorkRegistry } from "../orchestration/ActiveWorkTracker.ts";
 import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
@@ -9,11 +13,23 @@ import {
   isOllamaEmbeddingFailureReason,
 } from "./OllamaEmbeddings.ts";
 import {
+  RegisteredSemanticError,
+  RegisteredSemanticFailureReason,
+  isRegisteredSemanticError,
+} from "./RegisteredSemanticModels.ts";
+import {
+  buildRagSemanticEnvelope,
   cleanupSemanticVectors,
+  normalizeSemanticEndpoint,
+  parseProviderEmbeddingInstanceId,
   semanticScopeKey,
+  syncNativeVectorPoolForScope,
   type makeSemanticSearch,
   type SemanticScope,
 } from "./semanticSearch.ts";
+import * as Schema from "effect/Schema";
+
+const isRegisteredSemanticFailureReason = Schema.is(RegisteredSemanticFailureReason);
 
 type Job = {
   scope_key: string;
@@ -27,7 +43,17 @@ type Job = {
   retry_at: number;
   updated_at: number;
 };
-type Row = { rowId: number; itemId: string; chunkId: string; title: string; content: string };
+type Row = {
+  rowId: number;
+  itemId: string;
+  chunkId: string;
+  title: string;
+  content: string;
+  tagsText: string;
+  scope: string | null;
+  appliesToFolder: string | null;
+  updatedAt: string;
+};
 
 /** Durable coalesced project work; only one 64-row page and two embedding inputs are active. */
 export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function* (options: {
@@ -35,7 +61,9 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
   readonly vectors: ReturnType<typeof makeSemanticSearch>;
   readonly enabled: (job: Pick<Job, "endpoint" | "model">) => Effect.Effect<boolean>;
   readonly startWorker?: boolean;
+  readonly idleWaitMs?: number;
 }) {
+  const idleWaitMs = options.idleWaitMs ?? DEFAULT_USER_IDLE_WINDOW_MS;
   const sql = yield* SqlClient.SqlClient;
   const clock = yield* Clock.Clock;
   const permit = yield* Semaphore.make(1);
@@ -52,15 +80,16 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
     changed = false,
   ) {
     const key = semanticScopeKey(request);
+    const normalizedEndpoint = normalizeSemanticEndpoint(request.endpoint);
     const now = clock.currentTimeMillisUnsafe();
     if (changed) {
       yield* sql`INSERT INTO workspace_semantic_index_jobs(scope_key,project_id,endpoint,model,updated_at)
-        VALUES (${key},${request.projectId},${new URL(request.endpoint).origin},${request.model},${now})
+        VALUES (${key},${request.projectId},${normalizedEndpoint},${request.model},${now})
         ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1,after_rowid=0,through_rowid=NULL,
           failures=0,retry_at=0,failure_reason=NULL,updated_at=excluded.updated_at`;
     } else {
       yield* sql`INSERT OR IGNORE INTO workspace_semantic_index_jobs(scope_key,project_id,endpoint,model,updated_at)
-        VALUES (${key},${request.projectId},${new URL(request.endpoint).origin},${request.model},${now})`;
+        VALUES (${key},${request.projectId},${normalizedEndpoint},${request.model},${now})`;
     }
     Queue.offerUnsafe(wakeups, undefined);
   });
@@ -116,14 +145,23 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
           : row.failures > 0
             ? "retrying"
             : "pending";
+    const providerInstanceId = parseProviderEmbeddingInstanceId(request.endpoint);
+    const failureMessage =
+      providerInstanceId !== null && isRegisteredSemanticFailureReason(row?.failure_reason)
+        ? new RegisteredSemanticError({
+            providerLabel: providerInstanceId,
+            model: request.model,
+            reason: row.failure_reason,
+          }).message
+        : isOllamaEmbeddingFailureReason(row?.failure_reason)
+          ? new OllamaEmbeddingError({ model: request.model, reason: row.failure_reason }).message
+          : null;
     return {
       pending: row !== undefined,
       state,
       failures: row?.failures ?? 0,
       retryAt: row?.retry_at ?? null,
-      failureMessage: isOllamaEmbeddingFailureReason(row?.failure_reason)
-        ? new OllamaEmbeddingError({ model: request.model, reason: row.failure_reason }).message
-        : null,
+      failureMessage,
     };
   });
   const processPage = Effect.fn("SemanticIndexJobs.processPage")(function* (job: Job) {
@@ -136,21 +174,35 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
         WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
     }
     const rows = yield* sql<Row>`SELECT rowid AS "rowId",item_id AS "itemId",
-      CAST(chunk_index AS TEXT) AS "chunkId",title,content FROM projection_workspace_rag_chunks
+      CAST(chunk_index AS TEXT) AS "chunkId",title,content,
+      tags_text AS "tagsText",scope,applies_to_folder AS "appliesToFolder",updated_at AS "updatedAt"
+      FROM projection_workspace_rag_chunks
       WHERE project_id=${job.project_id} AND rowid>${job.after_rowid} AND rowid<=${through}
-      ORDER BY rowid LIMIT 64`;
+      ORDER BY rowid LIMIT 24`;
     if (rows.length) {
       const indexed = yield* Effect.tryPromise({
         try: (signal) =>
-          options.vectors.index({
-            ...scope(job),
-            signal,
-            candidates: rows.map((row) => ({ ...row, id: String(row.rowId) })),
-          }),
-        catch: (cause) =>
-          isOllamaEmbeddingError(cause)
-            ? cause
-            : new OllamaEmbeddingError({ model: job.model, reason: "request" }),
+          runBackgroundModelJob(signal, () =>
+            options.vectors.index({
+              ...scope(job),
+              signal,
+              candidates: rows.map((row) => ({
+                ...row,
+                ...buildRagSemanticEnvelope(row),
+                id: String(row.rowId),
+              })),
+            }),
+          ),
+        catch: (cause) => {
+          if (isRegisteredSemanticError(cause)) return cause;
+          if (isOllamaEmbeddingError(cause)) return cause;
+          if (typeof cause === "object" && cause !== null && "cause" in cause) {
+            const inner = (cause as { readonly cause?: unknown }).cause;
+            if (isRegisteredSemanticError(inner)) return inner;
+            if (isOllamaEmbeddingError(inner)) return inner;
+          }
+          return new OllamaEmbeddingError({ model: job.model, reason: "request" });
+        },
       });
       const keys = new Map(indexed.references.map((entry) => [entry.id, entry.key]));
       yield* sql.withTransaction(
@@ -194,47 +246,94 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
         clock.currentTimeMillisUnsafe() - state.cleanup_at >= 24 * 60 * 60 * 1000)
     )
       yield* cleanup({ projectId: job.project_id, endpoint: job.endpoint, model: job.model }, true);
+    if (!pending) {
+      yield* Effect.sync(() => {
+        try {
+          syncNativeVectorPoolForScope(options.stateDir, job.scope_key);
+        } catch {
+          // Native mmap vector pool sync is strictly best-effort; SQLite v4 remains SSOT.
+        }
+      });
+    }
   });
-  const drain = permit.withPermits(1)(
+  const processNextPage = permit.withPermits(1)(
     Effect.gen(function* () {
-      let pages = 0;
-      while (true) {
-        const [job] = yield* sql<Job>`SELECT * FROM workspace_semantic_index_jobs
-        WHERE retry_at<=${clock.currentTimeMillisUnsafe()} ORDER BY updated_at,scope_key LIMIT 1`;
-        if (!job) return { pages };
-        if (!(yield* options.enabled(job))) {
-          yield* sql`UPDATE workspace_semantic_index_jobs SET retry_at=${clock.currentTimeMillisUnsafe() + 30_000}
-          WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
-          continue;
-        }
-        const result = yield* processPage(job).pipe(Effect.result);
-        if (result._tag === "Failure") {
-          const delay = Math.min(300_000, 30_000 * 2 ** Math.min(job.failures, 4));
-          const reason = isOllamaEmbeddingError(result.failure) ? result.failure.reason : "request";
-          yield* sql`UPDATE workspace_semantic_index_jobs SET failures=failures+1,retry_at=${clock.currentTimeMillisUnsafe() + delay},failure_reason=${reason}
-          WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
-          yield* Effect.logWarning("Background semantic indexing deferred", {
-            projectId: job.project_id,
-            failures: job.failures + 1,
-            reason,
-          });
-        }
+      const nowMs = clock.currentTimeMillisUnsafe();
+      if (vramArbiter.isBackgroundPaused(options.stateDir, nowMs)) {
+        return "paused" as const;
+      }
+      // Yield background indexing while any live chat turn, delegation, or council run is active.
+      if (activeWorkRegistry.snapshot(nowMs).totalActive > 0) {
+        return "paused" as const;
+      }
+      const [job] = yield* sql<Job>`SELECT * FROM workspace_semantic_index_jobs
+      WHERE retry_at<=${nowMs} ORDER BY updated_at,scope_key LIMIT 1`;
+      if (!job) return "idle" as const;
+      if (!(yield* options.enabled(job))) {
+        yield* sql`UPDATE workspace_semantic_index_jobs SET retry_at=${nowMs + 30_000}
+        WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
+        return "skipped" as const;
+      }
+      const result = yield* processPage(job).pipe(Effect.result);
+      if (result._tag === "Failure") {
+        const delay = Math.min(300_000, 30_000 * 2 ** Math.min(job.failures, 4));
+        const reason = isRegisteredSemanticError(result.failure)
+          ? result.failure.reason
+          : isOllamaEmbeddingError(result.failure)
+            ? result.failure.reason
+            : "request";
+        yield* sql`UPDATE workspace_semantic_index_jobs SET failures=failures+1,retry_at=${clock.currentTimeMillisUnsafe() + delay},failure_reason=${reason}
+        WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
+        yield* Effect.logWarning("Background semantic indexing deferred", {
+          projectId: job.project_id,
+          failures: job.failures + 1,
+          reason,
+        });
+      }
+      return "processed" as const;
+    }),
+  );
+  const drain = Effect.gen(function* () {
+    let pages = 0;
+    while (true) {
+      const step = yield* processNextPage;
+      if (step === "idle" || step === "paused") return { pages };
+      if (step === "processed") {
         pages++;
         yield* Effect.yieldNow;
       }
-    }),
-  );
+    }
+  });
   yield* Effect.addFinalizer(() => Effect.sync(options.vectors.clear));
   if (options.startWorker !== false)
     yield* Effect.forkScoped(
       Effect.gen(function* () {
         while (true) {
           yield* Effect.raceFirst(Queue.take(wakeups), Effect.sleep("30 seconds"));
-          yield* drain.pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Semantic indexing worker could not drain", { cause }),
-            ),
-          );
+          while (true) {
+            const waitMs = vramArbiter.msUntilUserIdle(clock.currentTimeMillisUnsafe(), idleWaitMs);
+            if (waitMs > 0) {
+              yield* Effect.sleep(Duration.millis(Math.min(waitMs, 30_000)));
+              continue;
+            }
+            const step = yield* processNextPage.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Semantic indexing worker could not drain", { cause }).pipe(
+                  Effect.as("idle" as const),
+                ),
+              ),
+            );
+            if (step === "idle") break;
+            if (step === "paused") {
+              yield* Effect.sleep("15 seconds");
+              break;
+            }
+            if (step === "processed") {
+              // Pace background indexing pages outside the permit so local Ollama stays responsive
+              // for live chat RAG without blocking explicit drain calls under TestClock.
+              yield* Effect.sleep("3000 millis");
+            }
+          }
         }
       }),
     );

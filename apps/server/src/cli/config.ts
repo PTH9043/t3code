@@ -1,4 +1,5 @@
 import * as NetService from "@t3tools/shared/Net";
+import { resolveLoopbackOnlyOtlpUrl } from "@t3tools/shared/observability";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
 import * as Config from "effect/Config";
@@ -14,6 +15,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { Argument, Flag } from "effect/unstable/cli";
 
 import { readBootstrapEnvelope } from "../bootstrap.ts";
+import { resolveUpgradeRoom, verifyUpgradePaths } from "../upgradeRoom.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 
@@ -279,12 +281,31 @@ export const resolveServerConfig = (
         resolveOptionPrecedence(explicitBaseDir, Option.fromUndefinedOr(bootstrap?.t3Home)),
       ),
     );
-    const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
+    const upgradeRoom = yield* Effect.try(() =>
+      resolveUpgradeRoom(
+        process.env.T3CODE_UPGRADE_PROJECT_ROOT,
+        process.env.T3CODE_UPGRADE_PRIMARY_HOME,
+        baseDir,
+        Option.isSome(explicitBaseDir),
+      ),
+    );
+    const rawCwd =
+      upgradeRoom?.projectRoot ?? Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
-    yield* fs.makeDirectory(cwd, { recursive: true });
     const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
       baseDirIsExplicit: Option.isSome(explicitBaseDir),
     });
+    if (upgradeRoom) {
+      yield* verifyUpgradePaths(cwd, upgradeRoom.primaryHome, [
+        baseDir,
+        ...Object.values(derivedPaths),
+        derivedPaths.dbPath + "-wal",
+        derivedPaths.dbPath + "-shm",
+        derivedPaths.dbPath + "-journal",
+      ]);
+    } else {
+      yield* fs.makeDirectory(cwd, { recursive: true });
+    }
     yield* ServerConfig.ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
@@ -358,20 +379,23 @@ export const resolveServerConfig = (
       traceBatchWindowMs: env.traceBatchWindowMs,
       traceMaxBytes: env.traceMaxBytes,
       traceMaxFiles: env.traceMaxFiles,
-      otlpTracesUrl:
+      otlpTracesUrl: resolveLoopbackOnlyOtlpUrl(
         env.otlpTracesUrl ??
-        bootstrap?.otlpTracesUrl ??
-        persistedObservabilitySettings.otlpTracesUrl,
-      otlpMetricsUrl:
+          bootstrap?.otlpTracesUrl ??
+          persistedObservabilitySettings.otlpTracesUrl,
+      ),
+      otlpMetricsUrl: resolveLoopbackOnlyOtlpUrl(
         env.otlpMetricsUrl ??
-        bootstrap?.otlpMetricsUrl ??
-        persistedObservabilitySettings.otlpMetricsUrl,
+          bootstrap?.otlpMetricsUrl ??
+          persistedObservabilitySettings.otlpMetricsUrl,
+      ),
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       otlpServiceName: env.otlpServiceName,
       mode,
       port,
       cwd,
       baseDir,
+      ...(upgradeRoom ? { upgradeRoom } : {}),
       ...derivedPaths,
       serverTracePath,
       host,

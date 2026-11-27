@@ -45,6 +45,11 @@ type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
 const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
 let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+let clientSettingsCommitted = DEFAULT_CLIENT_SETTINGS;
+let clientSettingsCommitEpoch = 0;
+let clientSettingsNextPatchId = 0;
+const pendingClientSettingsPatches = new Map<number, ClientSettingsPatch>();
+let unsubscribeDesktopClientSettings: (() => void) | null = null;
 let clientSettingsHydrated = false;
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
@@ -68,6 +73,38 @@ function getClientSettingsSnapshot(): ClientSettings {
 function replaceClientSettingsSnapshot(settings: ClientSettings): void {
   clientSettingsSnapshot = settings;
   emitClientSettingsChange();
+}
+
+export function normalizeClientSettings(
+  settings: Partial<ClientSettings> | null | undefined,
+): ClientSettings {
+  if (!settings) {
+    return DEFAULT_CLIENT_SETTINGS;
+  }
+  const normalized: Record<string, unknown> = { ...DEFAULT_CLIENT_SETTINGS };
+  for (const [key, value] of Object.entries(settings)) {
+    if (value !== undefined) {
+      normalized[key] = value;
+    }
+  }
+  return normalized as ClientSettings;
+}
+
+function publishClientSettingsSnapshot(): void {
+  let settings = normalizeClientSettings(clientSettingsCommitted);
+  for (const patch of pendingClientSettingsPatches.values()) settings = { ...settings, ...patch };
+  replaceClientSettingsSnapshot(normalizeClientSettings(settings));
+}
+
+function subscribeDesktopClientSettings(): void {
+  if (unsubscribeDesktopClientSettings || typeof window === "undefined") return;
+  const subscribe = window.desktopBridge?.onClientSettingsChanged;
+  if (!subscribe) return;
+  unsubscribeDesktopClientSettings = subscribe((settings) => {
+    clientSettingsCommitEpoch += 1;
+    clientSettingsCommitted = normalizeClientSettings(settings);
+    publishClientSettingsSnapshot();
+  });
 }
 
 function setClientSettingsHydrated(nextHydrated: boolean): void {
@@ -99,6 +136,7 @@ function subscribeClientSettingsHydration(listener: () => void): () => void {
 }
 
 async function hydrateClientSettings(): Promise<void> {
+  subscribeDesktopClientSettings();
   if (clientSettingsHydrated) {
     return;
   }
@@ -107,14 +145,16 @@ async function hydrateClientSettings(): Promise<void> {
   }
 
   const hydrationGeneration = clientSettingsHydrationGeneration;
+  const hydrationCommitEpoch = clientSettingsCommitEpoch;
   const nextHydration = (async () => {
     try {
       const persistedSettings = await ensureLocalApi().persistence.getClientSettings();
       if (hydrationGeneration !== clientSettingsHydrationGeneration) {
         return;
       }
-      if (persistedSettings) {
-        replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedSettings });
+      if (persistedSettings && hydrationCommitEpoch === clientSettingsCommitEpoch) {
+        clientSettingsCommitted = normalizeClientSettings(persistedSettings);
+        publishClientSettingsSnapshot();
       }
     } catch (error) {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} hydrate failed`, {
@@ -138,7 +178,34 @@ async function hydrateClientSettings(): Promise<void> {
   return clientSettingsHydrationPromise;
 }
 
-function persistClientSettings(settings: ClientSettings): void {
+export function updateClientSettings(patch: ClientSettingsPatch): void {
+  const settings = { ...getClientSettingsSnapshot(), ...patch };
+  const desktopPatch = window.desktopBridge?.patchClientSettings;
+  if (desktopPatch) {
+    subscribeDesktopClientSettings();
+    const patchId = ++clientSettingsNextPatchId;
+    const startedAtEpoch = clientSettingsCommitEpoch;
+    pendingClientSettingsPatches.set(patchId, patch);
+    publishClientSettingsSnapshot();
+    void desktopPatch(patch)
+      .then((committed) => {
+        if (startedAtEpoch === clientSettingsCommitEpoch) {
+          clientSettingsCommitted = normalizeClientSettings(committed);
+        }
+        pendingClientSettingsPatches.delete(patchId);
+        publishClientSettingsSnapshot();
+      })
+      .catch((error) => {
+        pendingClientSettingsPatches.delete(patchId);
+        publishClientSettingsSnapshot();
+        console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
+          operation: "persist",
+          ...safeErrorLogAttributes(error),
+        });
+      });
+    return;
+  }
+  clientSettingsCommitted = settings;
   replaceClientSettingsSnapshot(settings);
   void ensureLocalApi()
     .persistence.setClientSettings(settings)
@@ -318,10 +385,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
       if (Object.keys(clientPatch).length > 0) {
-        persistClientSettings({
-          ...getClientSettingsSnapshot(),
-          ...clientPatch,
-        });
+        updateClientSettings(clientPatch);
       }
     },
     [environmentId, persistServerSettings],
@@ -340,16 +404,19 @@ export function useUpdatePrimarySettings() {
 
 export function useUpdateClientSettings() {
   return useCallback((patch: ClientSettingsPatch) => {
-    persistClientSettings({
-      ...getClientSettingsSnapshot(),
-      ...patch,
-    });
+    updateClientSettings(patch);
   }, []);
 }
 
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+  clientSettingsCommitted = DEFAULT_CLIENT_SETTINGS;
+  clientSettingsCommitEpoch = 0;
+  clientSettingsNextPatchId = 0;
+  pendingClientSettingsPatches.clear();
+  unsubscribeDesktopClientSettings?.();
+  unsubscribeDesktopClientSettings = null;
   clientSettingsHydrated = false;
   clientSettingsHydrationPromise = null;
   clientSettingsListeners.clear();
@@ -359,6 +426,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
 export function __setClientSettingsForTests(settings: ClientSettings): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = settings;
+  clientSettingsCommitted = settings;
   clientSettingsHydrated = true;
   clientSettingsHydrationPromise = null;
 }

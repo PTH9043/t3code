@@ -44,6 +44,8 @@ export interface PtyProcess {
 }
 
 export interface PtySpawnInput {
+  /** Use the bundled ConPTY session for supervised Windows process-tree shutdown. */
+  useConptyDll?: boolean;
   shell: string;
   args?: string[];
   cwd: string;

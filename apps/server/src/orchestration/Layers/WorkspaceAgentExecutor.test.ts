@@ -2,6 +2,7 @@ import {
   MessageId,
   EventId,
   RuntimeRequestId,
+  RuntimeItemId,
   type ProviderRuntimeEvent,
   ProjectId,
   ProviderDriverKind,
@@ -19,15 +20,19 @@ import {
 import { expect, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Layer, Option, PubSub, Schema, Stream } from "effect";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderValidationError } from "../../provider/Errors.ts";
 import { withFullAccessExecutionPolicy } from "../../provider/fullAccessExecutionPolicy.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   WorkspaceAgentExecutor,
+  WorkspaceAgentExecutionError,
   type WorkspaceAgentExecutionInput,
 } from "../Services/WorkspaceAgentExecutor.ts";
 import { WorkspaceAgentControl } from "../WorkspaceAgentControl.ts";
 import { WorkspaceAgentExecutorLive } from "./WorkspaceAgentExecutor.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
+import { ORDERED_SEARCH_INSTRUCTIONS } from "../../research/orderedSearchInstructions.ts";
 
 const isOrchestraBlock = Schema.is(WorkspaceOrchestraBlock);
 const at = "2026-09-13T06:00:00.000Z";
@@ -53,6 +58,255 @@ const execution: WorkspaceAgentExecutionInput = {
   kind: "implementation",
   startedAt: at,
 };
+
+for (const outcome of [
+  "research",
+  "snapshot",
+  "no-report",
+  "wrong-session",
+  "send-failed",
+  "receipt-rejected",
+] as const) {
+  it.effect(`ordinary-chat delegate verifies the submission and worker report (${outcome})`, () =>
+    Effect.gen(function* () {
+      const submitted = yield* Deferred.make<void>();
+      const eventsProcessed = yield* Deferred.make<void>();
+      const commands: OrchestrationCommand[] = [];
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("opencode-fixture"),
+        model: "research-fixture",
+      };
+      const worker = ThreadId.make(execution.execution.executionId);
+      const turnId = TurnId.make("native-worker-turn");
+      const delegatingTurnId = TurnId.make("native-supervisor-turn");
+      const report = "The two fixture records agree.";
+      const input: WorkspaceAgentExecutionInput = {
+        ...execution,
+        delegatingTurnId,
+        modelSelection,
+        runtimeMode: "approval-required",
+        role: "researcher",
+        kind: "research",
+        instruction: "Compare two fixture records.",
+        prompt: "Compare two fixture records.",
+        cwd: "C:/fixture",
+      };
+      const base = {
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: modelSelection.instanceId,
+        execution: input.execution,
+        threadId: owner,
+        turnId,
+        createdAt: at,
+      };
+      const delta = (
+        id: string,
+        text: string,
+      ): Extract<ProviderRuntimeEvent, { type: "content.delta" }> => ({
+        ...base,
+        eventId: EventId.make(id),
+        itemId: RuntimeItemId.make(id),
+        type: "content.delta",
+        payload: { streamKind: "assistant_text", delta: text },
+      });
+      const events: ProviderRuntimeEvent[] = [
+        delta("progress", "Checking the records."),
+        {
+          ...base,
+          type: "item.started",
+          eventId: EventId.make("tool"),
+          payload: { itemType: "web_search", title: "Search fixture" },
+        },
+        {
+          ...base,
+          type: "item.completed",
+          eventId: EventId.make("tool-done"),
+          payload: { itemType: "web_search", title: "Search fixture", status: "completed" },
+        },
+        {
+          ...delta("other-account", "foreign account"),
+          providerInstanceId: ProviderInstanceId.make("other"),
+        },
+        { ...delta("other-run", "foreign attempt"), execution: { ...base.execution, attempt: 2 } },
+        {
+          ...delta("other-node", "foreign node"),
+          execution: { ...base.execution, nodeId: WorkspaceTaskNodeId.make("other") },
+        },
+        { ...delta("other-owner", "foreign thread"), threadId: ThreadId.make("other-owner") },
+        { ...delta("other-turn", "foreign turn"), turnId: delegatingTurnId },
+        {
+          ...delta("tool-output", ""),
+          payload: { streamKind: "command_output", delta: "Tool result alone." },
+        },
+      ];
+      if (outcome !== "no-report") {
+        if (outcome !== "snapshot") events.push(delta("final", report));
+        events.push({
+          ...base,
+          type: "item.completed",
+          eventId: EventId.make("final-snapshot"),
+          itemId: RuntimeItemId.make("final"),
+          payload: { itemType: "assistant_message", status: "completed", detail: report },
+        });
+      }
+      events.push({
+        ...base,
+        type: "turn.completed",
+        eventId: EventId.make("done"),
+        payload: { state: "completed" },
+      });
+      let snapshot = {
+        id: owner,
+        projectId,
+        messages: [],
+        activities: [],
+      } as unknown as OrchestrationThread;
+      const layer = WorkspaceAgentExecutorLive.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ProjectionSnapshotQuery)({
+              getThreadRuntimeContext: () => Effect.succeed(Option.some(snapshot)),
+            }),
+            Layer.mock(OrchestrationEngineService)({
+              streamDomainEvents: Stream.never,
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  commands.push(command);
+                  return { sequence: commands.length };
+                }),
+            }),
+            Layer.mock(ProviderService)({
+              startSession: (threadId, options) =>
+                Effect.sync(() => {
+                  expect(threadId).toBe(worker);
+                  expect(options).toMatchObject({
+                    execution: base.execution,
+                    modelSelection,
+                    runtimeMode: "approval-required",
+                    cwd: input.cwd,
+                  });
+                  return {
+                    threadId,
+                    provider: base.provider,
+                    status: "ready" as const,
+                    runtimeMode: input.runtimeMode,
+                    createdAt: at,
+                    updatedAt: at,
+                  };
+                }),
+              sendTurn: (request) =>
+                Effect.gen(function* () {
+                  expect(request).toMatchObject({
+                    threadId: worker,
+                    modelSelection,
+                    interactionMode: input.interactionMode,
+                  });
+                  expect(request.input).toContain(input.prompt);
+                  yield* Deferred.succeed(submitted, undefined);
+                  yield* Deferred.await(eventsProcessed);
+                  if (outcome === "send-failed")
+                    return yield* new ProviderValidationError({
+                      operation: "sendTurn",
+                      issue: "Fixture send failed.",
+                    });
+                  return { threadId: outcome === "wrong-session" ? owner : worker, turnId };
+                }),
+              streamEvents: Stream.fromEffect(Deferred.await(submitted)).pipe(
+                Stream.flatMap(() => Stream.fromIterable(events)),
+                Stream.concat(
+                  Stream.fromEffect(Deferred.succeed(eventsProcessed, undefined)).pipe(
+                    Stream.drain,
+                  ),
+                ),
+                Stream.concat(Stream.never),
+              ),
+              stopSession: () => Effect.void,
+            }),
+          ),
+        ),
+      );
+      const result = yield* WorkspaceAgentExecutor.use((executor) =>
+        executor.execute({
+          ...input,
+          onInputAccepted: () =>
+            outcome === "receipt-rejected"
+              ? Effect.fail(
+                  new WorkspaceAgentExecutionError({ message: "Fixture receipt rejected." }),
+                )
+              : Effect.void,
+        }),
+      ).pipe(Effect.result, Effect.provide(layer), Effect.scoped);
+      const success = outcome === "research" || outcome === "snapshot";
+      if (success) expect(result).toMatchObject({ _tag: "Success", success: report });
+      else expect(result._tag).toBe("Failure");
+      const blocks = commands.flatMap((command) =>
+        command.type === "thread.activity.append" && command.activity.kind === "orchestra.block"
+          ? [command.activity.payload]
+          : [],
+      );
+      expect(blocks.at(-1)).toMatchObject({
+        supervisorTurnId: delegatingTurnId,
+        instruction: input.instruction,
+        modelSelection,
+        status: success ? "completed" : "failed",
+        ...(success ? { workerTurnId: turnId } : {}),
+      });
+      if (!success)
+        expect(blocks).not.toContainEqual(expect.objectContaining({ status: "completed" }));
+      const transcript = commands
+        .flatMap((command) =>
+          command.type === "thread.message.assistant.delta" ? [command.delta] : [],
+        )
+        .join("");
+      expect(transcript).not.toContain("foreign");
+      if (outcome === "research") {
+        expect(blocks).toContainEqual(
+          expect.objectContaining({
+            status: "running",
+            supervisorTurnId: delegatingTurnId,
+            workerTurnId: turnId,
+          }),
+        );
+        const key = `${input.execution.executionId}:${input.execution.attempt}`;
+        snapshot = {
+          ...snapshot,
+          messages: [
+            {
+              id: MessageId.make(`orchestra-message:${key}`),
+              text: transcript,
+              role: "assistant",
+              turnId: null,
+              streaming: false,
+              createdAt: at,
+              updatedAt: at,
+            },
+          ],
+          activities: [
+            {
+              id: EventId.make(`orchestra-block:${key}`),
+              payload: blocks.at(-1),
+              kind: "orchestra.block",
+              tone: "info",
+              summary: input.title,
+              turnId: null,
+              createdAt: at,
+            },
+          ],
+        };
+        const replay = (assignment: WorkspaceAgentExecutionInput) =>
+          WorkspaceAgentExecutor.use((executor) => executor.execute(assignment)).pipe(
+            Effect.result,
+            Effect.provide(layer),
+            Effect.scoped,
+          );
+        expect(yield* replay(input)).toMatchObject({ _tag: "Success", success: report });
+        expect((yield* replay({ ...input, instruction: "A different assignment." }))._tag).toBe(
+          "Failure",
+        );
+      }
+    }),
+  );
+}
 
 for (const previousStatus of ["running", "completed"] as const) {
   it.effect(`recovery preserves a ${previousStatus} attempt and closes only stale streaming`, () =>
@@ -262,6 +516,9 @@ for (const questionOrder of [undefined, "answer-first", "completion-first"] as c
         const layer = WorkspaceAgentExecutorLive.pipe(
           Layer.provide(
             Layer.mergeAll(
+              ServerSettingsService.layerTest({
+                searchModels: [{ provider: "openai", model: "fixture" }],
+              }),
               Layer.mock(WorkspaceAgentControl)({
                 prepare: (input) =>
                   Effect.succeed({
@@ -332,8 +589,10 @@ for (const questionOrder of [undefined, "answer-first", "completion-first"] as c
             .pipe(Effect.forkScoped);
           yield* Deferred.await(accepted);
           expect(received).toEqual([
-            withFullAccessExecutionPolicy(execution.prompt, execution.runtimeMode) +
-              "\n보존된 메시지",
+            withFullAccessExecutionPolicy(
+              `${execution.prompt}\n\n${ORDERED_SEARCH_INSTRUCTIONS}`,
+              execution.runtimeMode,
+            ) + "\n보존된 메시지",
           ]);
           expect(settled).toEqual([true]);
           const requestId = RuntimeRequestId.make("async:native-question");

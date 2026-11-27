@@ -5,6 +5,8 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import { visibleKnowledge } from "../knowledgeVisibility.ts";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -18,14 +20,30 @@ import {
   buildSearchQuery,
   chunkSearchableContent,
   makeSnippet,
+  scoreQueryDocumentInteraction,
   termCoverage,
 } from "../searchText.ts";
 import {
   ProjectionWorkspaceRagRepository,
   type ProjectionWorkspaceRagRepositoryShape,
 } from "../Services/ProjectionWorkspaceRag.ts";
+import { labelPdfRevisionHits } from "../../documents/pdfRevisionStore.ts";
 import { chunkAttachmentDocument } from "../../documents/extractDocument.ts";
-import { makeSemanticSearch, reciprocalRankFusion } from "../../documents/semanticSearch.ts";
+import {
+  buildRagSemanticEnvelope,
+  formatProviderEmbeddingEndpoint,
+  getEmbeddingModelMultilingualAdvisory,
+  makeSemanticSearch,
+  normalizeSemanticEndpoint,
+  reciprocalRankFusion,
+} from "../../documents/semanticSearch.ts";
+import { buildTemporalIndexTail } from "../../orchestration/koreanTemporalParser.ts";
+import { extractMemoryEntities } from "../../orchestration/memoryConsolidatorV3.ts";
+import {
+  ROUTING_NODE_KIND,
+  indexTextArtifactIntoRoutingGraph,
+  removeRoutingNodeByCanonicalKey,
+} from "../../orchestration/workspaceRoutingGraph.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeSemanticIndexJobs } from "../../documents/SemanticIndexJobs.ts";
@@ -33,9 +51,13 @@ import {
   makeOllamaEmbeddings,
   semanticSearchFailureMessage,
 } from "../../documents/OllamaEmbeddings.ts";
+import {
+  SEMANTIC_RERANK_MAX_CANDIDATES,
+  makeSemanticLlmReranker,
+} from "../../documents/RegisteredSemanticModels.ts";
 
-/** Candidates read per requested match, so coverage re-ranking has room to work. */
-const CANDIDATE_FACTOR = 5;
+/** Candidates read per requested match, so RRF fusion and Cross-Interaction reranking have an over-retrieved pool. */
+const CANDIDATE_FACTOR = 10;
 const MAX_CANDIDATES = 100;
 
 const RagSearchRequest = Schema.Struct({
@@ -76,7 +98,28 @@ const make = Effect.gen(function* () {
   const http = yield* Effect.serviceOption(HttpClient.HttpClient);
   const clock = yield* Clock.Clock;
   const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
-  const embed = Option.isSome(http) ? yield* makeOllamaEmbeddings(http.value) : undefined;
+  const readSettings = Option.isSome(settings)
+    ? () => settings.value.getSettings.pipe(Effect.orElseSucceed(() => null))
+    : () => Effect.succeed(null);
+  const resolveSemanticTarget = (aiSearch: {
+    readonly embeddingEndpoint: string;
+    readonly embeddingInstanceId?: string | null | undefined;
+    readonly embeddingMode?: "embedding" | "rerank" | undefined;
+    readonly embeddingModel: string;
+  }) => {
+    const mode = aiSearch.embeddingMode ?? "embedding";
+    const instanceId = aiSearch.embeddingInstanceId ?? null;
+    const endpoint = instanceId
+      ? formatProviderEmbeddingEndpoint(instanceId)
+      : aiSearch.embeddingEndpoint;
+    return { mode, instanceId, endpoint, model: aiSearch.embeddingModel };
+  };
+  const embed = Option.isSome(http)
+    ? yield* makeOllamaEmbeddings(http.value, readSettings)
+    : undefined;
+  const rerank = Option.isSome(http)
+    ? yield* makeSemanticLlmReranker(http.value, readSettings)
+    : undefined;
   const semanticSearch = makeSemanticSearch({
     now: () => clock.currentTimeMillisUnsafe(),
     embed: async ({ signal, ...input }) => {
@@ -95,11 +138,17 @@ const make = Effect.gen(function* () {
             const current = yield* settings.value.getSettings.pipe(
               Effect.orElseSucceed(() => null),
             );
-            return (
-              current?.aiSearch.semanticEnabled === true &&
-              new URL(current.aiSearch.embeddingEndpoint).origin === job.endpoint &&
-              current.aiSearch.embeddingModel === job.model
-            );
+            if (current?.aiSearch.semanticEnabled !== true) return false;
+            const target = resolveSemanticTarget(current.aiSearch);
+            if (target.mode !== "embedding") return false;
+            try {
+              return (
+                normalizeSemanticEndpoint(target.endpoint) === job.endpoint &&
+                target.model === job.model
+              );
+            } catch {
+              return false;
+            }
           }),
         })
       : undefined;
@@ -109,15 +158,17 @@ const make = Effect.gen(function* () {
   ) {
     if (!indexJobs || Option.isNone(settings)) return;
     const current = yield* settings.value.getSettings.pipe(Effect.orElseSucceed(() => null));
-    if (current?.aiSearch.semanticEnabled)
-      yield* indexJobs.enqueue(
-        {
-          projectId,
-          endpoint: current.aiSearch.embeddingEndpoint,
-          model: current.aiSearch.embeddingModel,
-        },
-        changed,
-      );
+    if (!current?.aiSearch.semanticEnabled) return;
+    const target = resolveSemanticTarget(current.aiSearch);
+    if (target.mode !== "embedding") return;
+    yield* indexJobs.enqueue(
+      {
+        projectId,
+        endpoint: target.endpoint,
+        model: target.model,
+      },
+      changed,
+    );
   });
 
   // Only the analyzed search_* columns are indexed (see searchText.ts); the
@@ -164,6 +215,16 @@ const make = Effect.gen(function* () {
         FROM projection_workspace_rag_chunks
         WHERE ${match === null ? sql`1 = 1` : sql`projection_workspace_rag_chunks MATCH ${match}`}
           AND rowid > ${afterRowId} AND rowid <= ${throughRowId}
+          AND NOT EXISTS (
+            SELECT 1 FROM projection_workspace_knowledge_items
+            WHERE project_id=projection_workspace_rag_chunks.project_id AND item_id=projection_workspace_rag_chunks.item_id
+              AND source_item_id IS NOT NULL AND NOT ${visibleKnowledge(sql)}
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM projection_workspace_knowledge_items AS merged
+            WHERE merged.project_id = projection_workspace_rag_chunks.project_id
+              AND merged.item_id = projection_workspace_rag_chunks.item_id AND merged.superseded_by IS NOT NULL
+          )
           AND (
             (scope = 'environment' AND (${includeShared ? 1 : 0} = 1 OR project_id = ${projectId}))
             OR (project_id = ${projectId} AND scope = 'project' AND json_array_length(${contextPathsJson}) = 0)
@@ -176,6 +237,34 @@ const make = Effect.gen(function* () {
           AND (${includeLongTermMemory ? 1 : 0} = 1 OR kind = 'rag-source')
           AND (${attachmentsOnly ? 1 : 0} = 0 OR instr(tags_text, 'attachment-document') > 0)
           AND json_array(project_id,item_id) NOT IN (SELECT value FROM json_each(${excludedSourceKeysJson}))
+          AND (
+            item_id NOT LIKE 'conversation-%' OR instr(tags_text, 'auto-conversation') = 0
+            OR NOT EXISTS (
+              SELECT 1 FROM workspace_memory_v2 forgotten
+              WHERE forgotten.project_id = projection_workspace_rag_chunks.project_id
+                AND forgotten.status = 'forgotten'
+                AND CASE WHEN json_valid(forgotten.source_json)
+                  THEN json_extract(forgotten.source_json, '$.kind') END = 'message'
+            )
+            OR EXISTS (
+              SELECT 1 FROM workspace_conversation_rag_sources source
+              WHERE source.project_id = projection_workspace_rag_chunks.project_id
+                AND source.item_id = projection_workspace_rag_chunks.item_id
+                AND (source.source_kind <> 'message' OR (
+                  EXISTS (SELECT 1 FROM projection_thread_messages message
+                    JOIN projection_threads thread ON thread.thread_id = message.thread_id
+                    WHERE message.message_id = source.source_id AND message.thread_id = source.thread_id
+                      AND thread.project_id = source.project_id AND thread.deleted_at IS NULL)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM workspace_memory_v2 forgotten
+                    WHERE forgotten.project_id = source.project_id AND forgotten.status = 'forgotten'
+                      AND CASE WHEN json_valid(forgotten.source_json)
+                        AND json_extract(forgotten.source_json, '$.kind') = 'message'
+                        THEN json_extract(forgotten.source_json, '$.id') END = source.source_id
+                  )
+                ))
+            )
+          )
         ORDER BY ${
           match === null
             ? sql`rowid ASC`
@@ -200,6 +289,12 @@ const make = Effect.gen(function* () {
       Effect.tap(
         () =>
           sql`DELETE FROM workspace_semantic_vector_refs WHERE project_id=${input.projectId} AND item_id=${input.itemId}`,
+      ),
+      Effect.tap(() =>
+        removeRoutingNodeByCanonicalKey(sql, {
+          projectId: input.projectId,
+          canonicalKey: `knowledge:${input.itemId}`,
+        }).pipe(Effect.ignore),
       ),
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceRag.removeItem")),
     );
@@ -240,10 +335,27 @@ const make = Effect.gen(function* () {
         ? `${item.content}\n\n${designReferenceText(item.research.design)}`
         : item.content;
       const locations = item.research?.attachment?.locations;
+      const pdfBatch = item.tags.includes("pdf-page-batch");
+      const updatedMs = Date.parse(item.updatedAt);
+      const temporalTail = buildTemporalIndexTail(
+        content,
+        Number.isFinite(updatedMs) ? updatedMs : clock.currentTimeMillisUnsafe(),
+      );
+      const entityTail = extractMemoryEntities(content, item.title).join(" ");
+      const folderLabel = item.appliesToFolder ?? item.relativeFolder ?? "";
+      const deterministicContextSummary = [
+        folderLabel ? `폴더:${folderLabel}` : "",
+        `출처:${item.origin}`,
+        temporalTail,
+        entityTail,
+      ]
+        .filter(Boolean)
+        .join(" ");
       const chunks = analyzeChunks({
         title: item.title,
         content,
-        tags: item.tags,
+        tags: pdfBatch ? [] : item.tags,
+        contextSummary: deterministicContextSummary,
         ...(locations ? { chunks: chunkAttachmentDocument(content, locations) } : {}),
       });
       yield* Effect.forEach(
@@ -256,13 +368,26 @@ const make = Effect.gen(function* () {
               , scope, applies_to_folder
             ) VALUES (
               ${item.projectId}, ${item.id}, ${item.kind}, ${chunk.chunkIndex}, ${item.title},
-              ${chunk.content}, ${item.updatedAt}, ${chunk.tagsText}, ${chunk.searchTitle},
+              ${chunk.content}, ${item.updatedAt}, ${pdfBatch ? item.tags.join(" ") : chunk.tagsText}, ${chunk.searchTitle},
               ${chunk.searchTags}, ${chunk.searchBody}
               , ${item.scope ?? "project"}, ${item.appliesToFolder ?? null}
             )
           `,
         { concurrency: 1, discard: true },
       );
+      yield* indexTextArtifactIntoRoutingGraph(sql, {
+        projectId: item.projectId,
+        nodeKind: ROUTING_NODE_KIND.MEMORY_FACT,
+        canonicalKey: `knowledge:${item.id}`,
+        title: item.title || item.id,
+        summaryMoc: content.slice(0, 220),
+        bodyMarkdown: content.slice(0, 4_000),
+        bodyRefKind: "knowledge",
+        bodyRefId: item.id,
+        epistemicState: "fact",
+        keywords: item.tags,
+        updatedAtMs: Number.isFinite(updatedMs) ? updatedMs : clock.currentTimeMillisUnsafe(),
+      }).pipe(Effect.ignore);
       yield* enqueueIndex(item.projectId, true);
     }).pipe(Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceRag.replaceItem")));
 
@@ -284,7 +409,7 @@ const make = Effect.gen(function* () {
       afterRowId: 0,
       throughRowId: Number.MAX_SAFE_INTEGER,
     };
-    return searchRows(request).pipe(
+    const rankedResult = searchRows(request).pipe(
       Effect.flatMap(
         Effect.fn("ProjectionWorkspaceRag.rank")(function* (rows) {
           // Preserve the legacy one-chunk default. Explicit multi-chunk callers
@@ -295,7 +420,14 @@ const make = Effect.gen(function* () {
                 query.terms,
                 `${row.title} ${row.tagsText} ${row.content}`,
               );
-              const rank = row.score * (1 + coverage);
+              const interaction = scoreQueryDocumentInteraction({
+                query: input.query,
+                terms: query.terms,
+                title: row.title,
+                tagsText: row.tagsText,
+                content: row.content,
+              });
+              const rank = row.score * (1 + coverage + interaction);
               return { row, rank };
             })
             .toSorted(
@@ -322,86 +454,197 @@ const make = Effect.gen(function* () {
             Option.isSome(config) &&
             Option.isSome(http)
           ) {
+            const semanticTarget = resolveSemanticTarget(preferences.aiSearch);
             const [boundary] = yield* sql<{
               last: number | null;
             }>`SELECT max(rowid) AS last FROM projection_workspace_rag_chunks`;
-            const runReadPage = Effect.runPromiseWith(yield* Effect.context<never>());
             const rowKey = (row: typeof RagCandidateRow.Type) =>
               JSON.stringify([row.projectId, row.itemId, row.chunkId]);
-            const candidatePages = async function* (signal: AbortSignal) {
-              let afterRowId = 0;
-              while (true) {
-                const page = await runReadPage(
-                  searchRows({
-                    ...request,
-                    match: null,
-                    limit: 64,
-                    afterRowId,
-                    throughRowId: boundary?.last ?? 0,
-                  }),
-                  { signal },
-                );
-                if (!page.length) break;
-                yield page.map((row) => ({ ...row, id: rowKey(row) }));
-                afterRowId = page.at(-1)!.rowId;
+
+            if (semanticTarget.mode === "rerank" && rerank) {
+              const poolByKey = new Map<string, typeof RagCandidateRow.Type>();
+              for (const entry of ranked.slice(0, SEMANTIC_RERANK_MAX_CANDIDATES)) {
+                poolByKey.set(rowKey(entry.row), entry.row);
               }
-            };
-            const semantic = yield* Effect.tryPromise({
-              try: (signal) =>
-                semanticSearch({
-                  stateDir: config.value.stateDir,
-                  projectId: input.projectId,
-                  endpoint: preferences.aiSearch.embeddingEndpoint,
-                  model: preferences.aiSearch.embeddingModel,
-                  query: input.query,
-                  candidatePages,
-                  maxChunksPerItem: input.maxChunksPerItem ?? 1,
-                  missing: async (projects) => {
-                    for (const projectId of projects)
-                      await runReadPage(enqueueIndex(projectId), { signal });
-                  },
-                  signal,
-                }),
-              catch: semanticSearchFailureMessage,
-            }).pipe(Effect.result);
-            if (semantic._tag === "Success") {
-              for (const entry of semantic.success.ranked)
-                semanticSimilarities.set(entry.id, entry.similarity);
-              const byKey = new Map(
-                [...semantic.success.candidates, ...rows].map((row) => [rowKey(row), row]),
-              );
-              ranked = reciprocalRankFusion(
-                ranked.map(({ row }) => rowKey(row)),
-                semantic.success.ranked,
-              ).map(([key, rank]) => ({ row: byKey.get(key)!, rank }));
-              retrieval = {
-                method: semantic.success.indexed > 0 ? "hybrid" : "keyword",
-                indexedChunks: semantic.success.indexed,
-                totalChunks: semantic.success.total,
-                message: semantic.success.interrupted
-                  ? "일부 의미 색인을 준비하지 못했습니다. 기존 색인과 키워드 검색을 사용합니다."
-                  : semantic.success.indexed < semantic.success.total
-                    ? "일부 의미 색인을 준비 중입니다. 키워드 검색을 함께 사용합니다."
-                    : null,
-              };
-              if (indexJobs && semantic.success.indexed < semantic.success.total) {
-                const indexing = yield* indexJobs.status({
-                  projectId: input.projectId,
-                  endpoint: preferences.aiSearch.embeddingEndpoint,
-                  model: preferences.aiSearch.embeddingModel,
+              if (poolByKey.size < SEMANTIC_RERANK_MAX_CANDIDATES) {
+                const supplemental = yield* searchRows({
+                  ...request,
+                  match: null,
+                  limit: SEMANTIC_RERANK_MAX_CANDIDATES * 2,
+                  afterRowId: 0,
+                  throughRowId: boundary?.last ?? 0,
                 });
-                if (indexing.failures > 0)
-                  retrieval.message =
-                    indexing.failureMessage ??
-                    "로컬 임베딩 작업이 실패해 재시도를 기다립니다. 기존 색인과 키워드 검색을 사용합니다. Ollama와 임베딩 모델을 확인하세요.";
+                for (const row of supplemental) {
+                  if (poolByKey.size >= SEMANTIC_RERANK_MAX_CANDIDATES) break;
+                  const key = rowKey(row);
+                  if (!poolByKey.has(key)) poolByKey.set(key, row);
+                }
               }
-            } else
-              retrieval = {
-                method: "keyword",
-                indexedChunks: 0,
-                totalChunks: 0,
-                message: semantic.failure,
+              const rerankPool = [...poolByKey.entries()].map(([id, row]) => ({
+                id,
+                title: row.title,
+                content: row.content,
+              }));
+              if (rerankPool.length === 0) {
+                retrieval = {
+                  method: "keyword",
+                  indexedChunks: 0,
+                  totalChunks: 0,
+                  message: null,
+                };
+              } else {
+                const reranked = yield* rerank({
+                  instanceId: preferences.aiSearch.embeddingInstanceId ?? null,
+                  endpoint: preferences.aiSearch.embeddingEndpoint,
+                  model: semanticTarget.model,
+                  query: input.query,
+                  candidates: rerankPool,
+                }).pipe(Effect.result);
+                if (reranked._tag === "Success") {
+                  for (const entry of reranked.success) {
+                    semanticSimilarities.set(entry.id, entry.similarity);
+                  }
+                  const byKey = new Map(
+                    [...poolByKey.values(), ...rows].map((row) => [rowKey(row), row]),
+                  );
+                  ranked = reciprocalRankFusion(
+                    ranked.map(({ row }) => rowKey(row)),
+                    reranked.success,
+                  )
+                    .map(([key, rrfScore]) => {
+                      const row = byKey.get(key)!;
+                      const interaction = scoreQueryDocumentInteraction({
+                        query: input.query,
+                        terms: query.terms,
+                        title: row.title,
+                        tagsText: row.tagsText,
+                        content: row.content,
+                      });
+                      const rank = rrfScore * (1 + 0.35 * interaction) + 0.005 * interaction;
+                      return { row, rank };
+                    })
+                    .toSorted(
+                      (left, right) =>
+                        right.rank - left.rank ||
+                        right.row.updatedAt.localeCompare(left.row.updatedAt) ||
+                        left.row.itemId.localeCompare(right.row.itemId) ||
+                        Number(left.row.chunkId) - Number(right.row.chunkId),
+                    );
+                  retrieval = {
+                    method: "hybrid",
+                    indexedChunks: rerankPool.length,
+                    totalChunks: rerankPool.length,
+                    message: null,
+                  };
+                } else {
+                  retrieval = {
+                    method: "keyword",
+                    indexedChunks: 0,
+                    totalChunks: 0,
+                    message: semanticSearchFailureMessage(reranked.failure),
+                  };
+                }
+              }
+            } else {
+              const runReadPage = Effect.runPromiseWith(yield* Effect.context<never>());
+              const candidatePages = async function* (signal: AbortSignal) {
+                let afterRowId = 0;
+                while (true) {
+                  const page = await runReadPage(
+                    searchRows({
+                      ...request,
+                      match: null,
+                      limit: 64,
+                      afterRowId,
+                      throughRowId: boundary?.last ?? 0,
+                    }),
+                    { signal },
+                  );
+                  if (!page.length) break;
+                  yield page.map((row) => ({
+                    ...row,
+                    ...buildRagSemanticEnvelope(row),
+                    id: rowKey(row),
+                  }));
+                  afterRowId = page.at(-1)!.rowId;
+                }
               };
+              const semantic = yield* Effect.tryPromise({
+                try: (signal) =>
+                  semanticSearch({
+                    stateDir: config.value.stateDir,
+                    projectId: input.projectId,
+                    endpoint: semanticTarget.endpoint,
+                    model: semanticTarget.model,
+                    query: input.query,
+                    candidatePages,
+                    maxChunksPerItem: input.maxChunksPerItem ?? 1,
+                    missing: async (projects) => {
+                      for (const projectId of projects)
+                        await runReadPage(enqueueIndex(projectId), { signal });
+                    },
+                    signal,
+                  }),
+                catch: semanticSearchFailureMessage,
+              }).pipe(Effect.result);
+              if (semantic._tag === "Success") {
+                for (const entry of semantic.success.ranked)
+                  semanticSimilarities.set(entry.id, entry.similarity);
+                const byKey = new Map(
+                  [...semantic.success.candidates, ...rows].map((row) => [rowKey(row), row]),
+                );
+                ranked = reciprocalRankFusion(
+                  ranked.map(({ row }) => rowKey(row)),
+                  semantic.success.ranked,
+                )
+                  .map(([key, rrfScore]) => {
+                    const row = byKey.get(key)!;
+                    const interaction = scoreQueryDocumentInteraction({
+                      query: input.query,
+                      terms: query.terms,
+                      title: row.title,
+                      tagsText: row.tagsText,
+                      content: row.content,
+                    });
+                    const rank = rrfScore * (1 + 0.35 * interaction) + 0.005 * interaction;
+                    return { row, rank };
+                  })
+                  .toSorted(
+                    (left, right) =>
+                      right.rank - left.rank ||
+                      right.row.updatedAt.localeCompare(left.row.updatedAt) ||
+                      left.row.itemId.localeCompare(right.row.itemId) ||
+                      Number(left.row.chunkId) - Number(right.row.chunkId),
+                  );
+                retrieval = {
+                  method: semantic.success.indexed > 0 ? "hybrid" : "keyword",
+                  indexedChunks: semantic.success.indexed,
+                  totalChunks: semantic.success.total,
+                  message: semantic.success.interrupted
+                    ? "일부 의미 색인을 준비하지 못했습니다. 기존 색인과 키워드 검색을 사용합니다."
+                    : semantic.success.indexed < semantic.success.total
+                      ? "일부 의미 색인을 준비 중입니다. 키워드 검색을 함께 사용합니다."
+                      : getEmbeddingModelMultilingualAdvisory(semanticTarget.model),
+                };
+                if (indexJobs && semantic.success.indexed < semantic.success.total) {
+                  const indexing = yield* indexJobs.status({
+                    projectId: input.projectId,
+                    endpoint: semanticTarget.endpoint,
+                    model: semanticTarget.model,
+                  });
+                  if (indexing.failures > 0)
+                    retrieval.message =
+                      indexing.failureMessage ??
+                      "임베딩 작업이 실패해 재시도를 기다립니다. 기존 색인과 키워드 검색을 사용합니다. 선택한 제공자와 모델을 확인하세요.";
+                }
+              } else
+                retrieval = {
+                  method: "keyword",
+                  indexedChunks: 0,
+                  totalChunks: 0,
+                  message: semantic.failure,
+                };
+            }
           }
           const counts = new Map<string, number>();
           const selected = ranked.filter(({ row }) => {
@@ -454,6 +697,73 @@ const make = Effect.gen(function* () {
           : toPersistenceDecodeError("ProjectionWorkspaceRag.search:decodeRows")(cause),
       ),
     );
+    // Keyword and semantic candidates are read separately. An explicit PDF
+    // publication between those reads must never combine two editions.
+    const generation = sql<{
+      generation: number;
+    }>`SELECT generation FROM pdf_revision_epoch WHERE id=1`.pipe(
+      Effect.map((rows) => rows[0]!.generation),
+      Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceRag.publicationGeneration")),
+    );
+    const recordRetrievedUsage = (matches: ReadonlyArray<WorkspaceRagMatch>) => {
+      if (matches.length === 0) return Effect.void;
+      const byProject = new Map<string, Set<string>>();
+      for (const match of matches) {
+        let ids = byProject.get(match.projectId);
+        if (!ids) {
+          ids = new Set<string>();
+          byProject.set(match.projectId, ids);
+        }
+        ids.add(match.itemId);
+      }
+      const usedAt = DateTime.formatIso(DateTime.makeUnsafe(clock.currentTimeMillisUnsafe()));
+      return Effect.forEach(
+        Array.from(byProject.entries()),
+        ([projectId, itemIdSet]) => {
+          const itemIds = Array.from(itemIdSet);
+          if (itemIds.length === 0) return Effect.void;
+          return sql`
+            UPDATE projection_workspace_knowledge_items
+            SET
+              prompt_uses = prompt_uses + 1,
+              last_used_at = CASE
+                WHEN last_used_at IS NULL OR last_used_at < ${usedAt} THEN ${usedAt}
+                ELSE last_used_at
+              END
+            WHERE project_id = ${projectId}
+              AND item_id IN ${sql.in(itemIds)}
+          `.pipe(Effect.asVoid);
+        },
+        { concurrency: 1, discard: true },
+      ).pipe(
+        // Best-effort telemetry: usage tracking must never break RAG retrieval.
+        Effect.catchCause((cause) =>
+          Effect.logWarning("ProjectionWorkspaceRag.recordRetrievedUsage failed", { cause }),
+        ),
+      );
+    };
+    return Effect.gen(function* () {
+      let before = yield* generation;
+      while (true) {
+        const result = yield* rankedResult;
+        const hasAttachment = result.matches.some((match) => match.research?.attachment);
+        if (!hasAttachment && result.retrieval?.method !== "hybrid") {
+          yield* recordRetrievedUsage(result.matches);
+          return result;
+        }
+        const matches = hasAttachment
+          ? yield* labelPdfRevisionHits(sql, result.matches).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceRag.pdfRevision")),
+            )
+          : result.matches;
+        const after = yield* generation;
+        if (after === before) {
+          yield* recordRetrievedUsage(matches);
+          return { ...result, matches };
+        }
+        before = after;
+      }
+    });
   };
 
   return ProjectionWorkspaceRagRepository.of({

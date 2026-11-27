@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   McpToolsError,
+  type ManagedMcpProvider,
   type ManagedMcpServerConfig,
   type McpToolCatalog,
   type McpToolId,
@@ -19,6 +20,7 @@ import { ServerConfig } from "../config.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { resolveClaudeSdkExecutablePath } from "../provider/Drivers/ClaudeExecutable.ts";
+import { scrubSecretsFromText } from "./HostSecurityGuard.ts";
 
 export type ManagedMcpServer =
   | {
@@ -35,13 +37,27 @@ export type ManagedMcpServer =
       readonly env?: Readonly<Record<string, string>>;
     };
 
-const TOOL_SPECS = [
+interface BuiltinToolSpec {
+  readonly id: McpToolId;
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly providers: ReadonlyArray<ManagedMcpProvider>;
+  /** Providers that already ship native equivalents (e.g. Antigravity file & thinking tools). */
+  readonly nativeRedundantProviders?: ReadonlyArray<ManagedMcpProvider>;
+  readonly estimatedToolCount: number;
+  readonly version: string | null;
+  readonly package?: string;
+}
+
+const TOOL_SPECS: ReadonlyArray<BuiltinToolSpec> = [
   {
     id: "openaiDocs",
     name: "OpenAI Docs",
     description: "OpenAI·Codex 공식 문서 검색과 읽기",
     source: "https://developers.openai.com/learn/docs-mcp",
-    providers: ["codex", "claudeAgent", "grok"],
+    providers: ["codex", "claudeAgent", "gemini", "grok"],
+    estimatedToolCount: 5,
     version: null,
   },
   {
@@ -49,7 +65,8 @@ const TOOL_SPECS = [
     name: "Context7",
     description: "라이브러리별 최신 문서와 코드 예제 검색",
     source: "https://github.com/upstash/context7",
-    providers: ["codex", "claudeAgent", "grok"],
+    providers: ["codex", "claudeAgent", "gemini", "grok"],
+    estimatedToolCount: 2,
     version: "4.1.1",
     package: "@upstash/context7-mcp",
   },
@@ -58,7 +75,9 @@ const TOOL_SPECS = [
     name: "Project Files",
     description: "현재 작업 폴더 안의 파일 읽기·검색·편집",
     source: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
-    providers: ["codex", "claudeAgent", "grok"],
+    providers: ["codex", "claudeAgent", "gemini", "grok"],
+    nativeRedundantProviders: ["gemini"],
+    estimatedToolCount: 14,
     version: "2026.8.31",
     package: "@modelcontextprotocol/server-filesystem",
   },
@@ -67,7 +86,9 @@ const TOOL_SPECS = [
     name: "Sequential Thinking",
     description: "단계별 문제 분석과 계획 검토",
     source: "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
-    providers: ["codex", "claudeAgent", "grok"],
+    providers: ["codex", "claudeAgent", "gemini", "grok"],
+    nativeRedundantProviders: ["gemini"],
+    estimatedToolCount: 1,
     version: "2026.8.31",
     package: "@modelcontextprotocol/server-sequential-thinking",
   },
@@ -77,9 +98,10 @@ const TOOL_SPECS = [
     description: "Codex에서 Claude Code의 파일·검색·셸 도구 사용",
     source: "https://code.claude.com/docs/en/mcp#use-claude-code-as-an-mcp-server",
     providers: ["codex"],
+    estimatedToolCount: 10,
     version: null,
   },
-] as const;
+];
 
 const checkedTools = new Map<
   string,
@@ -226,6 +248,8 @@ const readDefinitions = Effect.fn("ManagedMcpTools.readDefinitions")(function* (
       | "description"
       | "source"
       | "providers"
+      | "nativeRedundantProviders"
+      | "estimatedToolCount"
       | "version"
       | "scope"
       | "enabled"
@@ -237,6 +261,10 @@ const readDefinitions = Effect.fn("ManagedMcpTools.readDefinitions")(function* (
       ...spec,
       builtinId: spec.id,
       providers: [...spec.providers],
+      ...(spec.nativeRedundantProviders
+        ? { nativeRedundantProviders: [...spec.nativeRedundantProviders] }
+        : {}),
+      estimatedToolCount: spec.estimatedToolCount,
       scope: projectProfile ? "project" : "environment",
       enabled: projectProfile
         ? projectProfile.enabledBuiltins.includes(spec.id)
@@ -255,7 +283,9 @@ const readDefinitions = Effect.fn("ManagedMcpTools.readDefinitions")(function* (
       try: () => customDefinition(server),
       catch: (cause) =>
         new McpToolsError({
-          message: cause instanceof Error ? cause.message : "MCP 설정을 해석하지 못했습니다.",
+          message: scrubSecretsFromText(
+            cause instanceof Error ? cause.message : "MCP 설정을 해석하지 못했습니다.",
+          ),
         }),
     }).pipe(
       Effect.tap((definition) => Effect.sync(() => definitions.set(id, definition))),
@@ -283,6 +313,7 @@ export const makeManagedMcpResolver = Effect.fn("ManagedMcpTools.makeResolver")(
   const settings = yield* Effect.serviceOption(ServerSettingsService);
   const fs = yield* Effect.serviceOption(FileSystem.FileSystem);
   const path = yield* Effect.serviceOption(Path.Path);
+  const platform = yield* Effect.serviceOption(HostProcessPlatform);
   if (
     Option.isNone(config) ||
     Option.isNone(settings) ||
@@ -291,12 +322,14 @@ export const makeManagedMcpResolver = Effect.fn("ManagedMcpTools.makeResolver")(
   ) {
     return (_provider: string, _cwd?: string) => Effect.succeed([] as ManagedMcpServer[]);
   }
+  const resolvedPlatform = Option.getOrElse(platform, () => process.platform);
   return (provider: string, cwd?: string) =>
     readDefinitions(cwd).pipe(
       Effect.provideService(ServerConfig, config.value),
       Effect.provideService(ServerSettingsService, settings.value),
       Effect.provideService(FileSystem.FileSystem, fs.value),
       Effect.provideService(Path.Path, path.value),
+      Effect.provideService(HostProcessPlatform, resolvedPlatform),
       Effect.map(({ definitions, installed, metadata, configurationErrors }) =>
         metadata
           .filter(
@@ -304,7 +337,14 @@ export const makeManagedMcpResolver = Effect.fn("ManagedMcpTools.makeResolver")(
               spec.enabled &&
               !configurationErrors.has(spec.id) &&
               installed.get(spec.id) &&
-              spec.providers.some((kind) => kind === provider),
+              spec.providers.some((kind) => kind === provider) &&
+              // Skip builtin servers whose capabilities are already native to the provider
+              // under default environment settings so session tool budgets stay clear for `t3-code`.
+              // Explicit project profiles remain an opt-in override (reverse state).
+              !(
+                spec.scope === "environment" &&
+                spec.nativeRedundantProviders?.some((kind) => kind === provider)
+              ),
           )
           .map((spec) => definitions.get(spec.id)!),
       ),
@@ -312,12 +352,38 @@ export const makeManagedMcpResolver = Effect.fn("ManagedMcpTools.makeResolver")(
     );
 });
 
-export function codexManagedMcpArgs(servers: ReadonlyArray<ManagedMcpServer>): string[] {
-  return servers.flatMap((server) => {
+export function codexManagedMcpConfig(servers: ReadonlyArray<ManagedMcpServer>): {
+  args: string[];
+  environment: Record<string, string>;
+} {
+  const environment: Record<string, string> = {};
+  const args = servers.flatMap((server, serverIndex) => {
     const prefix = `mcp_servers.${server.name}`;
+    const envHeaders =
+      server.transport === "http"
+        ? Object.fromEntries(
+            Object.entries(server.headers ?? {})
+              .filter(([, value]) => value.trim().length > 0)
+              .map(([name, value], headerIndex) => {
+                const variable = `T3_MCP_HTTP_HEADER_${serverIndex}_${headerIndex}`;
+                environment[variable] = value;
+                return [name, variable];
+              }),
+          )
+        : {};
+    const emptyHeaders =
+      server.transport === "http"
+        ? Object.fromEntries(
+            Object.entries(server.headers ?? {}).filter(([, value]) => value.trim().length === 0),
+          )
+        : {};
     const config =
       server.transport === "http"
-        ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
+        ? {
+            url: server.url,
+            ...(Object.keys(envHeaders).length ? { env_http_headers: envHeaders } : {}),
+            ...(Object.keys(emptyHeaders).length ? { http_headers: emptyHeaders } : {}),
+          }
         : {
             command: server.command,
             args: server.args,
@@ -325,41 +391,52 @@ export function codexManagedMcpArgs(servers: ReadonlyArray<ManagedMcpServer>): s
           };
     return Object.entries(config).flatMap(([key, value]) => {
       if (
-        (key === "env" || key === "http_headers") &&
+        (key === "env" || key === "env_http_headers" || key === "http_headers") &&
         typeof value === "object" &&
         value !== null
       ) {
         return Object.entries(value).flatMap(([envKey, envValue]) => [
           "-c",
-          `${prefix}.${key}.${key === "http_headers" ? JSON.stringify(envKey) : envKey}=${JSON.stringify(envValue)}`,
+          `${prefix}.${key}.${key === "env" ? envKey : JSON.stringify(envKey)}=${JSON.stringify(envValue)}`,
         ]);
       }
       return ["-c", `${prefix}.${key}=${JSON.stringify(value)}`];
     });
   });
+  return { args, environment };
 }
 
 export function claudeManagedMcpServers(servers: ReadonlyArray<ManagedMcpServer>) {
-  return Object.fromEntries(
-    servers.map((server) => [
+  const environment: Record<string, string> = {};
+  const substitute = (values: Readonly<Record<string, string>>, serverIndex: number) =>
+    Object.fromEntries(
+      Object.entries(values).map(([name, value], valueIndex) => {
+        const variable = `T3_MANAGED_MCP_${serverIndex}_${valueIndex}`;
+        environment[variable] = value;
+        return [name, `\${${variable}}`];
+      }),
+    );
+  const config = Object.fromEntries(
+    servers.map((server, index) => [
       server.name,
       server.transport === "http"
         ? {
             type: "http" as const,
             url: server.url,
-            ...(server.headers ? { headers: { ...server.headers } } : {}),
+            ...(server.headers ? { headers: substitute(server.headers, index) } : {}),
           }
         : {
             type: "stdio" as const,
             command: server.command,
             args: [...server.args],
-            ...(server.env ? { env: { ...server.env } } : {}),
+            ...(server.env ? { env: substitute(server.env, index) } : {}),
           },
     ]),
   );
+  return { servers: config, environment };
 }
 
-export function grokManagedMcpServers(
+export function acpManagedMcpServers(
   servers: ReadonlyArray<ManagedMcpServer>,
 ): AcpSchema.McpServer[] {
   return servers.map((server) =>
@@ -379,6 +456,8 @@ export function grokManagedMcpServers(
   );
 }
 
+export const grokManagedMcpServers = acpManagedMcpServers;
+
 /** Initialize and list tools without invoking an agent or a tool that changes files. */
 export async function probeManagedMcpServer(server: ManagedMcpServer, cwd: string) {
   const client = new Client({ name: "t3-tool-check", version: "1.0.0" });
@@ -387,6 +466,7 @@ export async function probeManagedMcpServer(server: ManagedMcpServer, cwd: strin
       ? new StreamableHTTPClientTransport(new URL(server.url), {
           requestInit: {
             signal: AbortSignal.timeout(20_000),
+            redirect: "error",
             ...(server.headers ? { headers: { ...server.headers } } : {}),
           },
         })

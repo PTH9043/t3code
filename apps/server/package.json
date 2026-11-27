@@ -16,7 +16,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/bin.ts",
-    "build:bundle": "vp pack && vp pack src/service-launcher.ts --out-dir dist --no-clean",
+    "build:bundle": "vp pack && vp pack src/service-launcher.ts --out-dir dist --no-clean && vp pack src/orchestration/watchdog-worker.ts --out-dir dist --no-clean && vp pack src/mcp/codex-watch-stdio.ts --out-dir dist --no-clean",
     "start": "node dist/bin.mjs",
     "typecheck": "tsgo --noEmit",
     "test": "vp test run"
@@ -32,6 +32,7 @@
     "@napi-rs/canvas": "^0.1.100",
     "@opencode-ai/sdk": "^1.3.15",
     "@pierre/diffs": "catalog:",
+    "@primno/dpapi": "2.0.1",
     "@xmldom/xmldom": "0.9.12",
     "effect": "catalog:",
     "fflate": "0.8.2",

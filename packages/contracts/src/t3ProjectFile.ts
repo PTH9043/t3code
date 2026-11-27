@@ -41,6 +41,18 @@ export const T3ProjectFileScript = Schema.Struct({
         "When true, the script runs automatically after a worktree is created for a new thread.",
     }),
   ),
+  runOnWorktreeValidate: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "When true, the script runs as a declarative validation gate inside an isolated worktree before merging or sign-off.",
+    }),
+  ),
+  runOnWorktreeCleanup: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "When true, the script runs best-effort inside a worktree right before the worktree is removed.",
+    }),
+  ),
   previewUrl: Schema.optionalKey(
     trimmedNonEmpty({
       description:

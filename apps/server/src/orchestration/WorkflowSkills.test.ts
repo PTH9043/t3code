@@ -16,8 +16,10 @@ const text = (extra: string) =>
 const cases = [
   ["portable Codex native", "", "native", "codex", true],
   ["portable Claude native", "", "native", "claudeAgent", true],
+  ["portable Gemini native", "", "native", "gemini", true],
   ["Codex instructions", "", "instructions", "codex", true],
   ["Claude instructions", "", "instructions", "claudeAgent", true],
+  ["Gemini instructions", "", "instructions", "gemini", true],
   ["Cursor instructions", "", "instructions", "cursor", true],
   ["OpenCode instructions", "", "instructions", "opencode", true],
   ["Grok instructions", "", "instructions", "grok", true],
@@ -78,6 +80,7 @@ const cases = [
   ],
   ["Claude fork is not silently flattened", "context: fork", "instructions", "codex", false],
   ["Codex does not silently ignore native hooks", "hooks: {}", "native", "codex", false],
+  ["Gemini does not silently ignore native hooks", "hooks: {}", "native", "gemini", false],
   [
     "native model cannot override selection",
     "model: another-model",
@@ -95,6 +98,25 @@ const cases = [
 ] as const;
 
 describe("24 workflow skill invocation and compatibility fixtures", () => {
+  test("a permitted child agent can run without overriding the selected model", () => {
+    const fork = parseWorkflowSkill(text("context: fork\nagent: Explore"), "fallback");
+    expect(
+      workflowSkillSupport(fork, "native", "claudeAgent", {
+        ...policy,
+        allowAdditionalWorkers: true,
+      }),
+    ).toBeNull();
+    const overridingModel = parseWorkflowSkill(
+      text("context: fork\nagent: Explore\nmodel: another-model"),
+      "fallback",
+    );
+    expect(
+      workflowSkillSupport(overridingModel, "native", "claudeAgent", {
+        ...policy,
+        allowAdditionalWorkers: true,
+      }),
+    ).not.toBeNull();
+  });
   test.each(cases)("%s", (_name, extra, mode, driver, allowed) => {
     expect(
       workflowSkillSupport(parseWorkflowSkill(text(extra), "fallback"), mode, driver, policy) ===
@@ -117,6 +139,21 @@ describe("24 workflow skill invocation and compatibility fixtures", () => {
       ),
     ).not.toBeNull();
   });
+  test("keeps Claude's native argument, path and inherited model settings", () => {
+    const skill = parseWorkflowSkill(
+      text("arguments: [target]\nwhen_to_use: Korean resumes\npaths: '**/*.md'\nmodel: inherit"),
+      "fixture",
+    );
+    expect(workflowSkillSupport(skill, "native", "claudeAgent", policy)).toBeNull();
+    expect(
+      workflowSkillSupport(
+        parseWorkflowSkill(text("effort: low"), "fixture"),
+        "native",
+        "claudeAgent",
+        policy,
+      ),
+    ).not.toBeNull();
+  });
 });
 
 const layer = it.layer(
@@ -125,6 +162,107 @@ const layer = it.layer(
   ),
 );
 layer("Pinned workflow skill resources", (it) => {
+  it.effect(
+    "cleans losing temporary directories when identical skills are pinned concurrently",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const config = yield* ServerConfig;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-skill-concurrent-" });
+        const content = `${text("")}Concurrent fixture.\n`;
+        const skillPath = path.join(root, "SKILL.md");
+        yield* fs.writeFileString(skillPath, content);
+        const skills = yield* makeWorkflowSkills;
+        const manifest = yield* skills.manifest(skillPath);
+        const metadata: SkillMetadata = {
+          ...parseWorkflowSkill(content, "fixture"),
+          path: skillPath,
+          scope: "project",
+          provider: "codex",
+          enabled: true,
+          diagnostics: [],
+          digest: manifest.digest,
+        };
+        const binding = {
+          name: "fixture",
+          path: skillPath,
+          provider: "codex",
+          mode: "native" as const,
+          arguments: "",
+          digest: manifest.digest,
+        };
+        const pinned = yield* Effect.all(
+          [
+            skills.pin(binding, metadata),
+            skills.pin(binding, metadata),
+            skills.pin(binding, metadata),
+          ],
+          { concurrency: "unbounded" },
+        );
+        expect(new Set(pinned.map((item) => item.snapshotPath)).size).toBe(1);
+        yield* Effect.all(
+          pinned.map((item) => skills.materialize([item], "claudeAgent", policy)),
+          { concurrency: "unbounded" },
+        );
+        const snapshots = path.join(config.stateDir, "workflow-skills");
+        expect(
+          (yield* fs.readDirectory(snapshots)).filter((name) => name.startsWith("pin-")),
+        ).toEqual([]);
+        expect((yield* fs.readDirectory(path.join(snapshots, manifest.digest))).toSorted()).toEqual(
+          ["plugin", "source"],
+        );
+      }),
+  );
+  it.effect("cleans temporary directories when snapshot and plugin copies fail", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-skill-failed-copy-" });
+      yield* fs.writeFileString(path.join(root, "SKILL.md"), text(""));
+      const skills = yield* makeWorkflowSkills;
+      const manifest = yield* skills.manifest(path.join(root, "SKILL.md"));
+      const metadata: SkillMetadata = {
+        ...parseWorkflowSkill(text(""), "fixture"),
+        path: path.join(root, "SKILL.md"),
+        scope: "project",
+        provider: "codex",
+        enabled: true,
+        diagnostics: [],
+        digest: manifest.digest,
+      };
+      const binding = {
+        name: "fixture",
+        path: metadata.path,
+        provider: "codex",
+        mode: "native" as const,
+        arguments: "",
+        digest: manifest.digest,
+      };
+      const failingFs: typeof fs = {
+        ...fs,
+        copyFile: (_source, destination) => fs.copyFile(path.join(root, "missing"), destination),
+      };
+      const failingSkills = yield* makeWorkflowSkills.pipe(
+        Effect.provideService(FileSystem.FileSystem, failingFs),
+      );
+      expect(Exit.isFailure(yield* Effect.exit(failingSkills.pin(binding, metadata)))).toBe(true);
+      const snapshots = path.join(config.stateDir, "workflow-skills");
+      expect(
+        (yield* fs.readDirectory(snapshots)).filter((name) => name.startsWith("pin-")),
+      ).toEqual([]);
+      expect(yield* fs.exists(path.join(snapshots, manifest.digest))).toBe(false);
+      const pinned = yield* skills.pin(binding, metadata);
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(failingSkills.materialize([pinned], "claudeAgent", policy)),
+        ),
+      ).toBe(true);
+      const snapshotDir = path.join(snapshots, manifest.digest);
+      expect(yield* fs.readDirectory(snapshotDir)).toEqual(["source"]);
+    }),
+  );
   it.effect(
     "pins source and references, reuses the same immutable copy and rejects tampering",
     () =>
@@ -216,6 +354,12 @@ layer("Pinned workflow skill resources", (it) => {
           (yield* skills.manifest(path.join(claude.plugins[0]!, "skills", "selected", "SKILL.md")))
             .digest,
         ).toBe(manifest.digest);
+        const gemini = yield* skills.materialize([pinned], "gemini", policy);
+        expect(gemini.native).toEqual([]);
+        expect(gemini.plugins).toEqual([]);
+        expect(gemini.instructions).toContain("## Skill: fixture");
+        expect(gemini.instructions).toContain("Arguments: selected target");
+        expect(gemini.instructions).toContain("Resource root:");
       }),
   );
 });

@@ -1,6 +1,8 @@
 import {
   CommandId,
   ProjectId,
+  ProviderInstanceId,
+  ThreadId,
   WorkspaceCollaborationRunId,
   WorkspaceScheduleId,
   WorkspaceExecutionProfile,
@@ -66,6 +68,7 @@ it.layer(NodeServices.layer)("Workspace schedule decider", (it) => {
             mode: "fixed-rounds",
             maxRounds: 0,
             userInLoop: false,
+            allowAdditionalWorkers: true,
             chairParticipantId: "one",
             threadId: "old-thread",
             participants: ["one", "two"].map((id) => ({
@@ -104,6 +107,7 @@ it.layer(NodeServices.layer)("Workspace schedule decider", (it) => {
         expect(event.payload.run.meeting).toMatchObject({
           threadId: null,
           maxRounds: 0,
+          allowAdditionalWorkers: true,
           participants: profile.meeting.participants,
         });
         expect(event.payload.run.task).toContain("revision 3");
@@ -139,7 +143,30 @@ it.layer(NodeServices.layer)("Workspace schedule decider", (it) => {
 
   it.effect("marks internal scheduled runs separately from absolute-priority user runs", () =>
     Effect.gen(function* () {
-      const { projectId, readModel } = yield* workspaceReadModel;
+      const { projectId, readModel: initialReadModel } = yield* workspaceReadModel;
+      const threadId = ThreadId.make("selected-user-conversation");
+      const createdThread = singleEvent(
+        yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.create",
+            commandId: CommandId.make("create-selected-user-conversation"),
+            threadId,
+            projectId,
+            title: "Selected user conversation",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "selected" },
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+          },
+          readModel: initialReadModel,
+        }),
+      );
+      const readModel = yield* projectEvent(initialReadModel, {
+        ...createdThread,
+        sequence: 2,
+      } as OrchestrationEvent);
       const scheduleId = WorkspaceScheduleId.make("schedule-a");
       const scheduled = singleEvent(
         yield* decideOrchestrationCommand({
@@ -163,6 +190,7 @@ it.layer(NodeServices.layer)("Workspace schedule decider", (it) => {
             runId: WorkspaceCollaborationRunId.make("user-run-a"),
             projectId,
             task: "User task",
+            runContext: { threadId, requestDigest: "user-priority-fixture" },
             createdAt: now,
           },
           readModel,

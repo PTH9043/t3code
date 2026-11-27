@@ -1,4 +1,6 @@
 import {
+  COUNCIL_WS_METHODS,
+  MISSION_CONTROL_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
   WORKSPACE_DEVELOPMENT_WS_METHODS,
   WORKSPACE_TASK_INBOX_WS_METHODS,
@@ -46,6 +48,8 @@ export type EnvironmentRpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends EnvironmentRpcTag> = WsRpcProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
+  | typeof COUNCIL_WS_METHODS.subscribe
+  | typeof MISSION_CONTROL_WS_METHODS.subscribe
   | typeof WORKSPACE_AGENT_CONTROL_WS_METHODS.attention
   | typeof WORKSPACE_AGENT_CONTROL_WS_METHODS.subscribe
   | typeof WORKSPACE_TASK_INBOX_WS_METHODS.subscribe

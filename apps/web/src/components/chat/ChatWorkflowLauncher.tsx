@@ -16,6 +16,8 @@ import { previewWorkflow } from "@t3tools/shared/workflow";
 import { ArrowUpRightIcon, ChevronDownIcon, GitBranchIcon, PlayIcon, XIcon } from "lucide-react";
 import { useComposerRequestModeStore } from "../../askFirstStore";
 import {
+  activeMeetingConversationKey,
+  disarmMeetingComposer,
   meetingSetupFromConfig,
   updateMeetingComposerConfig,
   type MeetingComposerConfig,
@@ -36,7 +38,8 @@ import {
   chatWorkflowChoices,
   chatWorkflowValues,
   resolveWorkflowRoleModels,
-  selectMeetingCoordinator,
+  selectIndependentMeetingCoordinator,
+  workflowStartFailureMessage,
   type WorkflowModelDraft,
   type WorkflowModelMode,
   type WorkflowModelRole,
@@ -44,10 +47,7 @@ import {
 import { WorkflowModelSelector } from "./WorkflowModelSelector";
 import { MeetingModePanel } from "./MeetingModePanel";
 import { useComposerWorkMode } from "./useComposerWorkMode";
-import {
-  WorkspaceDevelopmentPanel,
-  type WorkspaceDevelopmentPanelProps,
-} from "./WorkspaceDevelopmentPanel";
+import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { ModelEsque } from "./providerIconUtils";
 
@@ -62,6 +62,8 @@ interface ChatWorkflowLauncherProps {
   interactionMode: ProviderInteractionMode;
   meetingConfig: MeetingComposerConfig;
   currentModel: ModelSelection | null;
+  getBootstrap?: (model: ModelSelection, title: string) => WorkflowStart["bootstrap"];
+  onDraftStarting?: (starting: boolean) => void;
   unavailableReason: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -78,7 +80,8 @@ const permissionLabels: Record<RuntimeMode, string> = {
   "full-access": "전체 권한",
 };
 const requestLabels = { direct: "바로 실행", "ask-first": "질문하기", conditions: "조건 확인" };
-const selectClass = "w-full rounded-xl border border-input bg-background px-3 py-2 text-sm";
+const selectClass =
+  "w-full min-w-0 max-w-full rounded-xl border border-input bg-background px-3 py-2 text-sm";
 const roleLabels: Record<string, string> = {
   coordinator: "총괄",
   implementer: "구현",
@@ -121,14 +124,16 @@ function ProjectChatWorkflowLauncher({
   const [values, setValues] = useState<Record<string, string>>({});
   const [savedVersion, setSavedVersion] = useState<WorkflowVersion | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<WorkspaceCollaborationRunId | null>(null);
-  const [pending, setPending] = useState<{ input: WorkflowStart; configuration: string } | null>(
-    null,
-  );
+  const [pending, setPending] = useState<{
+    input: WorkflowStart;
+    configuration: string;
+    meetingConversationKey: string;
+  } | null>(null);
   const [confirmed, setConfirmed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelModeChoice, setModelMode] = useState<WorkflowModelMode | null>(null);
-  const modelMode = modelModeChoice ?? "current";
+  const modelMode = props.meetingConfig.enabled ? "project" : (modelModeChoice ?? "current");
   const [singleModel, setSingleModel] = useState<ModelSelection | null>(null);
   const [roleModelsDraft, setRoleModelsDraft] = useState<WorkflowModelDraft>({});
   const inFlight = useRef(false);
@@ -179,10 +184,13 @@ function ProjectChatWorkflowLauncher({
     roleModelsDraft,
     props.currentModel,
   );
-  const missingModelSelection = modelMode !== "project" && roleModels === undefined;
-  const missingParticipants = props.meetingConfig.enabled && props.meetingConfig.seats.length < 2;
+  const missingModelSelection =
+    !props.meetingConfig.enabled && modelMode !== "project" && roleModels === undefined;
+  const missingParticipants = props.meetingConfig.enabled && props.meetingConfig.seats.length < 1;
   const assignedParticipants =
-    modelMode !== "project" && definition?.nodes.some((node) => node.participantId !== null);
+    !props.meetingConfig.enabled &&
+    modelMode !== "project" &&
+    definition?.nodes.some((node) => node.participantId !== null);
   const projectRoleBindings = roles.data?.roles;
   const projectRolesLoading =
     !props.meetingConfig.enabled && modelMode === "project" && !projectRoleBindings;
@@ -208,13 +216,12 @@ function ProjectChatWorkflowLauncher({
   const meetingSelection = useMemo(
     () =>
       props.meetingConfig.enabled
-        ? selectMeetingCoordinator(
+        ? selectIndependentMeetingCoordinator(
             meetingSetupFromConfig(props.meetingConfig),
-            roleModels?.coordinator,
-            roleModels ? [roleModels.implementer, roleModels.researcher] : [],
+            props.currentModel,
           )
         : null,
-    [props.meetingConfig, roleModels?.coordinator, roleModels?.implementer, roleModels?.researcher],
+    [props.meetingConfig, props.currentModel],
   );
   const execution = useMemo(() => {
     const config = props.meetingConfig;
@@ -225,6 +232,7 @@ function ProjectChatWorkflowLauncher({
       interactionMode: props.interactionMode,
     };
     const orchestra = {
+      executionMode: config.executionMode ?? "once",
       maxParallel: config.maxParallel,
       isolateWorktrees: config.isolateWorktrees,
       ...(config.reviewPlan === undefined ? {} : { reviewPlan: config.reviewPlan }),
@@ -232,6 +240,9 @@ function ProjectChatWorkflowLauncher({
         ? {}
         : { resumeAfterLimit: config.resumeAfterLimit }),
       ...(config.maxWorkerTurns === undefined ? {} : { maxWorkerTurns: config.maxWorkerTurns }),
+      ...(config.executionMode !== "persistent" || config.watchdogIntervalSeconds === undefined
+        ? {}
+        : { watchdogIntervalSeconds: config.watchdogIntervalSeconds }),
       ...(config.verificationCommands === undefined
         ? {}
         : { verificationCommands: config.verificationCommands }),
@@ -286,20 +297,6 @@ function ProjectChatWorkflowLauncher({
   const summary = allRuns.find((item) => item.id === selectedRunId);
   const run = detail.data;
   const question = run?.meeting?.pendingQuestion;
-  const development = props.development;
-  const developmentActive =
-    development?.state?.enabled === true &&
-    development.state.conversationId === development.conversationId;
-  const targetWorkspace = development?.state?.workspaces.find(
-    (workspace) => workspace.id === development.target.workspaceId,
-  );
-  const developmentTargetName = developmentActive
-    ? development.target.workspaceId === null
-      ? "Main"
-      : targetWorkspace
-        ? `${targetWorkspace.name}${targetWorkspace.status === "ready" ? "" : " (사용 불가)"}`
-        : "선택한 작업실 (사용 불가)"
-    : null;
   const threadId =
     run?.meeting?.threadId ??
     run?.runContext?.threadId ??
@@ -314,6 +311,7 @@ function ProjectChatWorkflowLauncher({
     if (
       inFlight.current ||
       props.startBlocked ||
+      (props.meetingConfig.enabled && !props.threadId) ||
       props.unavailableReason ||
       pendingChanged ||
       (!selectedId && props.attachmentCount > 0) ||
@@ -332,6 +330,9 @@ function ProjectChatWorkflowLauncher({
     )
       return;
     inFlight.current = true;
+    const meetingConversationKey = activeMeetingConversationKey();
+    const draftStarting = props.meetingConfig.enabled ? props.onDraftStarting : undefined;
+    draftStarting?.(true);
     setBusy(true);
     setError(null);
     try {
@@ -357,16 +358,28 @@ function ProjectChatWorkflowLauncher({
           setError("실행 설정이 바뀌었습니다. 현재 구성을 다시 확인하세요.");
           return;
         }
+        const bootstrap =
+          props.meetingConfig.enabled && props.currentModel && props.getBootstrap
+            ? props.getBootstrap(
+                props.currentModel,
+                props.prompt.trim() || definition?.title || "AI 작업",
+              )
+            : undefined;
         request = {
           configuration: reviewed,
+          meetingConversationKey,
           input: {
             projectId: project.id,
             ...(pinned
               ? { definitionId: pinned.id, revision: pinned.revision, values }
               : { task: props.prompt.trim() }),
+            ...(props.meetingConfig.enabled && props.prompt.trim()
+              ? { userMessage: props.prompt.trim() }
+              : {}),
             requestId: randomUUID(),
             ...(props.threadId ? { threadId: props.threadId } : {}),
-            ...(roleModels ? { roleModels } : {}),
+            ...(bootstrap === undefined ? {} : { bootstrap }),
+            ...(roleModels && !props.meetingConfig.enabled ? { roleModels } : {}),
             runtimeMode: props.runtimeMode,
             interactionMode: props.interactionMode,
             requestMode,
@@ -380,14 +393,16 @@ function ProjectChatWorkflowLauncher({
       const result = await start({ ...lookup, input: request.input });
       overview.refresh();
       if (result._tag !== "Success") {
-        setError("실행 응답을 확인하지 못했습니다. 같은 요청으로 다시 확인하세요.");
+        setError(workflowStartFailureMessage(squashAtomCommandFailure(result)));
         return;
       }
+      if (request.input.meeting) disarmMeetingComposer(request.meetingConversationKey);
       setSelectedRunId(result.value.id);
       setPending(null);
       setSavedVersion(null);
     } finally {
       inFlight.current = false;
+      draftStarting?.(false);
       setBusy(false);
     }
   };
@@ -438,13 +453,16 @@ function ProjectChatWorkflowLauncher({
           side="top"
           align="start"
           sideOffset={10}
-          className="w-[min(28rem,calc(100vw-1.5rem))] rounded-2xl border border-border/70 shadow-xl"
-          viewportClassName="max-h-[min(40rem,calc(100dvh-3rem))]"
+          className="max-h-[min(70rem,calc(100dvh-2rem),var(--available-height))] w-[min(56rem,calc(100vw-1.5rem))] rounded-2xl border border-border/70 shadow-xl"
+          viewportClassName="max-h-[min(70rem,calc(100dvh-2rem),var(--available-height))]"
           onKeyDown={(event) => {
             if (event.key === "Enter") event.stopPropagation();
           }}
         >
-          <div className="grid min-w-0 gap-4" data-chat-workflow-panel="true">
+          <div
+            className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 [overflow-wrap:anywhere]"
+            data-chat-workflow-panel="true"
+          >
             <header className="flex items-start justify-between gap-3">
               <div>
                 <PopoverTitle className="flex items-center gap-2 text-sm">
@@ -471,38 +489,16 @@ function ProjectChatWorkflowLauncher({
               </p>
             ) : null}
             <>
-              {props.development ? (
-                <details className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs">
-                  <summary className="cursor-pointer font-medium">지속 진행·담당 모델 설정</summary>
-                  <WorkspaceDevelopmentPanel
-                    {...props.development}
-                    surface="picker"
-                    mainModel={props.currentModel ?? props.development.mainModel}
-                    instanceEntries={props.instanceEntries}
-                    modelOptionsByInstance={props.modelOptionsByInstance}
-                    {...(props.onMainModelChange
-                      ? { onMainModelChange: props.onMainModelChange }
-                      : {})}
-                  />
-                </details>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  지속 진행 설정은 프로젝트의 기존 대화에서 사용할 수 있습니다.
-                </p>
-              )}
               {props.meetingConfig.enabled ? (
                 <div className="grid gap-2">
                   <details className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs">
                     <summary className="cursor-pointer font-medium">
                       오케스트라 참가자·실행 설정
                     </summary>
-                    {modelMode !== "project" ? (
-                      <p className="mt-2 text-muted-foreground">
-                        아래 지휘 AI 선택은 모델 선택 방식에서 오케스트라 참가자를 사용할 때
-                        적용됩니다. 현재 방식에서는 선택한 총괄 모델이 지휘합니다.
-                      </p>
-                    ) : null}
-                    <fieldset disabled={locked || changingMode}>
+                    <p className="mt-2 text-muted-foreground">
+                      지정한 감독 AI가 선택한 참가자에게 업무를 배정합니다.
+                    </p>
+                    <fieldset disabled={locked || changingMode} className="min-w-0">
                       <MeetingModePanel
                         instanceEntries={props.instanceEntries}
                         modelOptionsByInstance={props.modelOptionsByInstance}
@@ -515,7 +511,7 @@ function ProjectChatWorkflowLauncher({
                   </details>
                   {missingParticipants ? (
                     <p role="alert" className="text-xs text-destructive">
-                      오케스트라 참가자를 2명 이상 선택하세요.
+                      감독 AI를 한 명 이상 선택하세요.
                     </p>
                   ) : null}
                   <Button
@@ -542,7 +538,7 @@ function ProjectChatWorkflowLauncher({
                 </Button>
               )}
               <fieldset disabled={locked} className="grid min-w-0 gap-3" aria-busy={busy}>
-                <label className="grid gap-1.5 text-xs font-medium">
+                <label className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 text-xs font-medium">
                   작업 단계 구성
                   <select
                     aria-label="작업 단계 구성"
@@ -640,34 +636,30 @@ function ProjectChatWorkflowLauncher({
                     ) : null}
                   </>
                 )}
-                <WorkflowModelSelector
-                  environmentId={project.environmentId}
-                  mode={modelMode}
-                  current={props.currentModel}
-                  meetingEnabled={props.meetingConfig.enabled}
-                  single={singleModel}
-                  roles={roleModelsDraft}
-                  onModeChange={(mode) => {
-                    setModelMode(mode);
-                    setConfirmed(null);
-                  }}
-                  onSingleChange={(model) => {
-                    setSingleModel(model);
-                    setConfirmed(null);
-                  }}
-                  onRoleChange={(role: WorkflowModelRole, model) => {
-                    setRoleModelsDraft((current) => ({
-                      ...current,
-                      [role]: model ?? undefined,
-                    }));
-                    setConfirmed(null);
-                  }}
-                />
-                {modelMode !== "project" && execution?.meeting ? (
-                  <p className="text-xs text-muted-foreground">
-                    선택한 총괄 모델이 계획과 진행을 맡습니다. 이번에 선택하지 않은 Fable 모델은
-                    실행에서 제외합니다.
-                  </p>
+                {!props.meetingConfig.enabled ? (
+                  <WorkflowModelSelector
+                    environmentId={project.environmentId}
+                    mode={modelMode}
+                    current={props.currentModel}
+                    meetingEnabled={props.meetingConfig.enabled}
+                    single={singleModel}
+                    roles={roleModelsDraft}
+                    onModeChange={(mode) => {
+                      setModelMode(mode);
+                      setConfirmed(null);
+                    }}
+                    onSingleChange={(model) => {
+                      setSingleModel(model);
+                      setConfirmed(null);
+                    }}
+                    onRoleChange={(role: WorkflowModelRole, model) => {
+                      setRoleModelsDraft((current) => ({
+                        ...current,
+                        [role]: model ?? undefined,
+                      }));
+                      setConfirmed(null);
+                    }}
+                  />
                 ) : null}
                 {meetingSelection?.error ? (
                   <p role="alert" className="text-xs text-destructive">
@@ -699,7 +691,13 @@ function ProjectChatWorkflowLauncher({
                 </summary>
                 <div className="mt-2 grid gap-1.5 text-muted-foreground">
                   <p>현재 채팅의 권한·계획·질문 설정으로 실행합니다.</p>
-                  {roleModels ? (
+                  {execution?.meeting ? (
+                    execution.meeting.participants.map((seat) => (
+                      <p key={seat.id}>
+                        {seat.displayName} · {seat.modelSelection.model}
+                      </p>
+                    ))
+                  ) : roleModels ? (
                     <>
                       <p>
                         총괄 · {roleModels.coordinator.instanceId} / {roleModels.coordinator.model}
@@ -710,16 +708,7 @@ function ProjectChatWorkflowLauncher({
                       <p>
                         조사 · {roleModels.researcher.instanceId} / {roleModels.researcher.model}
                       </p>
-                      {execution?.meeting ? (
-                        <p>회의 토론은 기존 참가자 모델을 사용합니다.</p>
-                      ) : null}
                     </>
-                  ) : execution?.meeting ? (
-                    execution.meeting.participants.map((seat) => (
-                      <p key={seat.id}>
-                        {seat.displayName} · {seat.modelSelection.model}
-                      </p>
-                    ))
                   ) : (
                     <>
                       {roles.data?.roles
@@ -751,9 +740,9 @@ function ProjectChatWorkflowLauncher({
                   {issue.message}
                 </p>
               ))}
-              {!props.threadId ? (
+              {!props.threadId && props.meetingConfig.enabled ? (
                 <p className="text-xs text-muted-foreground">
-                  아직 저장되지 않은 채팅입니다. 실행 후 생성되는 실행 대화를 열 수 있습니다.
+                  현재 프로젝트의 대화를 선택한 뒤 통합 작업을 시작하세요.
                 </p>
               ) : null}
               {error ||
@@ -781,6 +770,7 @@ function ProjectChatWorkflowLauncher({
                 disabled={
                   busy ||
                   props.startBlocked ||
+                  (props.meetingConfig.enabled && !props.threadId) ||
                   missingModelSelection ||
                   missingParticipants ||
                   !!meetingSelection?.error ||
@@ -918,11 +908,6 @@ function ProjectChatWorkflowLauncher({
       {summary ? (
         <span className="min-w-0 truncate text-[11px] text-muted-foreground" role="status">
           {summary.title} · {runStatusLabel(summary.status)}
-        </span>
-      ) : null}
-      {developmentTargetName ? (
-        <span className="min-w-0 truncate text-[11px] text-muted-foreground" role="status">
-          보낼 대상 · {developmentTargetName}
         </span>
       ) : null}
     </div>

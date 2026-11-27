@@ -234,13 +234,14 @@ export function buildResourceTelemetryHistory(
     const deltasByIdentity = new Map(
       deltas.map((processDelta) => [processDelta.identityKey, processDelta]),
     );
+    const allT3Deltas = deltas.filter((processDelta) => processDelta.category !== "external");
     aggregateSamples.push({
       sampledAtMs: snapshot.sampledAtUnixMs,
       cpuPercent: merged.groups.allT3.currentCpuPercent,
       rssBytes: merged.groups.allT3.currentRssBytes,
       processCount: merged.groups.allT3.processCount,
-      ioReadBytes: deltas.reduce((total, process) => total + process.ioReadBytes, 0),
-      ioWriteBytes: deltas.reduce((total, process) => total + process.ioWriteBytes, 0),
+      ioReadBytes: allT3Deltas.reduce((total, process) => total + process.ioReadBytes, 0),
+      ioWriteBytes: allT3Deltas.reduce((total, process) => total + process.ioWriteBytes, 0),
     });
     const backendDeltas = deltas.filter(
       (processDelta) =>

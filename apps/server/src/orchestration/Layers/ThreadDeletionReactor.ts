@@ -4,17 +4,28 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
 } from "../Services/ThreadDeletionReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
+import { ServerConfig } from "../../config.ts";
+import { purgePdfJobsForThread } from "../../documents/pdfIndexJob.ts";
+import * as Option from "effect/Option";
+
+class PdfCleanupError extends Schema.TaggedErrorClass<PdfCleanupError>()("PdfCleanupError", {
+  cause: Schema.Defect(),
+}) {}
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+type ThreadRevertedEvent = Extract<OrchestrationEvent, { type: "thread.reverted" }>;
+type ThreadCleanupEvent = ThreadDeletedEvent | ThreadRevertedEvent;
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -41,6 +52,8 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const config = yield* Effect.serviceOption(ServerConfig);
+  const queries = yield* Effect.serviceOption(ProjectionSnapshotQuery);
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -57,14 +70,28 @@ const make = Effect.gen(function* () {
     });
 
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
-    event: ThreadDeletedEvent,
+    event: ThreadCleanupEvent,
   ) {
     const { threadId } = event.payload;
-    yield* stopProviderSession(threadId);
-    yield* closeThreadTerminals(threadId);
+    if (event.type === "thread.deleted") {
+      yield* stopProviderSession(threadId);
+      yield* closeThreadTerminals(threadId);
+    }
+    let retained: ReadonlySet<string> | undefined;
+    if (event.type === "thread.reverted") {
+      if (Option.isNone(queries)) return;
+      const thread = yield* queries.value.getThreadRuntimeContext(threadId, { messages: true });
+      if (Option.isNone(thread)) return;
+      retained = new Set(thread.value.messages.map((message) => message.id));
+    }
+    if (Option.isSome(config))
+      yield* Effect.tryPromise({
+        try: () => purgePdfJobsForThread(config.value.stateDir, threadId, retained),
+        catch: (cause) => new PdfCleanupError({ cause }),
+      });
   });
 
-  const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>
+  const processThreadDeletedSafely = (event: ThreadCleanupEvent) =>
     processThreadDeleted(event).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -83,7 +110,7 @@ const make = Effect.gen(function* () {
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-        if (event.type !== "thread.deleted") {
+        if (event.type !== "thread.deleted" && event.type !== "thread.reverted") {
           return Effect.void;
         }
         return worker.enqueue(event);

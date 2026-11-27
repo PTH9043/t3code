@@ -219,6 +219,41 @@ export function ThemePreviewCircles({
           </Tooltip>
         );
       })}
+      <div
+        aria-label={`${label} 시맨틱 상태 배지 미리보기`}
+        className="flex flex-col items-start justify-center gap-1 pl-1"
+      >
+        <span
+          className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] leading-none font-medium"
+          style={{
+            backgroundColor: "var(--status-danger-surface)",
+            borderColor: "var(--status-danger-border)",
+            color: "var(--status-danger-fg)",
+          }}
+        >
+          오류
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] leading-none font-medium"
+          style={{
+            backgroundColor: "var(--status-warning-surface)",
+            borderColor: "var(--status-warning-border)",
+            color: "var(--status-warning-fg)",
+          }}
+        >
+          경고
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] leading-none font-medium"
+          style={{
+            backgroundColor: "var(--status-success-surface)",
+            borderColor: "var(--status-success-border)",
+            color: "var(--status-success-fg)",
+          }}
+        >
+          성공
+        </span>
+      </div>
     </div>
   );
 }

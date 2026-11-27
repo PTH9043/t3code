@@ -38,6 +38,8 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
+import { ExecutionLedgerDiagnosticsCard } from "../../t3x/diagnostics/ExecutionLedgerDiagnosticsCard";
+import { WorkerEnginePanel } from "../../t3x/workerEngine/WorkerEnginePanel";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -1130,8 +1132,8 @@ export function DiagnosticsSettingsPanel() {
             value={data ? formatCount(data.slowSpanCount) : "..."}
             tooltip={
               data
-                ? `${formatDuration(data.slowSpanThresholdMs)} 이상 걸린 스팬입니다.`
-                : "설정된 느린 스팬 기준 이상인 스팬입니다."
+                ? `${formatDuration(data.slowSpanThresholdMs)} 이상 걸린 일반 작업 스팬입니다(장기 구독·AI 턴 제외).`
+                : "설정된 느린 스팬 기준 이상인 일반 작업 스팬입니다(장기 구독·AI 턴 제외)."
             }
             tone={data && data.slowSpanCount > 0 ? "warning" : "default"}
           />
@@ -1233,7 +1235,7 @@ export function DiagnosticsSettingsPanel() {
         )}
       </SettingsSection>
 
-      <SettingsSection title="가장 느린 스팬">
+      <SettingsSection title="가장 느린 스팬 (장기 구독 · AI 턴 제외)">
         {data && data.slowestSpans.length > 0 ? (
           <DiagnosticsTable
             headers={["스팬", "소요 시간", "종료", "추적"]}
@@ -1258,8 +1260,111 @@ export function DiagnosticsSettingsPanel() {
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows label={isInitialLoading ? "느린 스팬을 불러오는 중..." : "스팬이 없습니다."} />
+          <EmptyRows
+            label={
+              isInitialLoading ? "느린 스팬을 불러오는 중..." : "느린 일반 작업 스팬이 없습니다."
+            }
+          />
         )}
+      </SettingsSection>
+
+      <SettingsSection title="장기 구독 · AI 턴 현황">
+        <StatsGrid>
+          <StatBlock
+            label="장기 구독"
+            value={data ? formatCount(data.longLivedSubscriptionCount ?? 0) : "..."}
+            tooltip="창이 열려 있는 동안 유지되는 실시간 구독 연결 스팬입니다. 유지 시간이 길어도 지연 오류가 아닙니다."
+          />
+          <StatBlock
+            label="구독 버퍼 넘침"
+            value={data ? formatCount(data.subscriptionBufferOverflowCount ?? 0) : "..."}
+            tooltip="실시간 구독의 live buffer가 가득 차 연결이 끊어진 횟수입니다."
+            tone={data && (data.subscriptionBufferOverflowCount ?? 0) > 0 ? "danger" : "default"}
+          />
+          <StatBlock
+            label="장기 AI 턴"
+            value={data ? formatCount(data.longRunningTurnCount ?? 0) : "..."}
+            tooltip="본래 수 분 이상 실행될 수 있는 AI 응답 턴·하위 위임 스팬입니다."
+          />
+        </StatsGrid>
+        {data && (data.longLivedSubscriptions?.length ?? 0) > 0 ? (
+          <div className="border-t border-border/60">
+            <DiagnosticsTable
+              headers={["구독 스팬", "유지 시간", "첫 응답(TTFB)", "상태", "종료"]}
+              minTableWidth="min-w-[820px]"
+              columnWidths={["w-[42%]", "w-[14%]", "w-[14%]", "w-[16%]", "w-[14%]"]}
+            >
+              {data.longLivedSubscriptions!.map((span) => (
+                <tr key={`${span.traceId}:${span.spanId}`}>
+                  <td className="px-4 py-3 align-top text-xs font-medium text-foreground first:sm:pl-5">
+                    {span.name}
+                  </td>
+                  <td className="px-4 py-3 align-top font-mono tabular-nums">
+                    {formatDuration(span.durationMs)}
+                  </td>
+                  <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
+                    {span.ttfbMs !== undefined ? formatDuration(span.ttfbMs) : "-"}
+                  </td>
+                  <td className="px-4 py-3 align-top text-xs">
+                    {span.bufferOverflow ? (
+                      <span className="font-medium text-destructive">버퍼 넘침</span>
+                    ) : (
+                      <span className="text-muted-foreground">정상 유지</span>
+                    )}
+                  </td>
+                  <td className="w-px whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
+                    {formatRelativeNoWrap(span.endedAt)}
+                  </td>
+                </tr>
+              ))}
+            </DiagnosticsTable>
+          </div>
+        ) : (
+          <div className="border-t border-border/60">
+            <EmptyRows
+              label={
+                isInitialLoading
+                  ? "구독 현황을 불러오는 중..."
+                  : "기록된 장기 구독 스팬이 없습니다."
+              }
+            />
+          </div>
+        )}
+        {data && (data.longRunningTurns?.length ?? 0) > 0 ? (
+          <div className="border-t border-border/60">
+            <DiagnosticsTable
+              headers={["AI 턴 · 위임 스팬", "소요 시간", "종료", "추적"]}
+              minTableWidth="min-w-[900px]"
+              columnWidths={["w-[44%]", "w-[14%]", "w-[12%]", "w-[30%]"]}
+            >
+              {data.longRunningTurns!.map((span) => (
+                <tr key={`${span.traceId}:${span.spanId}`}>
+                  <td className="px-4 py-3 align-top text-xs font-medium text-foreground first:sm:pl-5">
+                    {span.name}
+                  </td>
+                  <td className="px-4 py-3 align-top font-mono tabular-nums">
+                    {formatDuration(span.durationMs)}
+                  </td>
+                  <td className="w-px whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
+                    {formatRelativeNoWrap(span.endedAt)}
+                  </td>
+                  <td className="min-w-0 whitespace-nowrap px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
+                    <TraceIdCell traceId={span.traceId} />
+                  </td>
+                </tr>
+              ))}
+            </DiagnosticsTable>
+          </div>
+        ) : null}
+      </SettingsSection>
+
+      <ExecutionLedgerDiagnosticsCard
+        summary={data?.executionLedger}
+        isInitialLoading={isInitialLoading}
+      />
+
+      <SettingsSection id="worker-engine" title="작업자 엔진 (메일박스 · 승인 게이트 · Worktree)">
+        <WorkerEnginePanel mode="diagnostics" />
       </SettingsSection>
 
       <SettingsSection title="스팬 로그">

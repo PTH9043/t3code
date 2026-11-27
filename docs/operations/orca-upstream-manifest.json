@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repo": "stablyai/orca",
+    "url": "https://github.com/stablyai/orca",
+    "license": "MIT",
+    "copyrightHolder": "Copyright (c) 2026 Lovecast Inc.",
+    "defaultBranch": "main"
+  },
+  "pinned": {
+    "releaseTag": "v1.4.270",
+    "releasePublishedAt": "2026-11-22T11:24:52Z",
+    "commitSha": "22ad3bbe244a0f61bc403d83aae03b68f58c1264",
+    "commitDate": "2026-11-22T11:09:44Z",
+    "orcaDbSchemaVersion": 50
+  },
+  "policy": {
+    "autoMerge": false,
+    "autoPatch": false,
+    "cadence": "weekly",
+    "notes": "Read-only upstream drift monitoring. Generates a Korean patch proposal Markdown report for watched orchestration paths only; every port requires explicit human review and MIT notice preservation."
+  },
+  "watchedPaths": [
+    {
+      "prefix": "src/main/runtime/orchestration/db/",
+      "area": "SQLite 메일박스 · 작업/디스패치 펜싱 · 결정 관문 스키마",
+      "t3Targets": [
+        "apps/server/src/persistence/Migrations/109_WorkerEngineMailbox.ts",
+        "apps/server/src/t3x/workerEngine/WorkerEngineStore.ts",
+        "apps/server/src/t3x/workerEngine/WorkerMailboxService.ts",
+        "apps/server/src/t3x/workerEngine/WorkerDecisionGateService.ts"
+      ]
+    },
+    {
+      "prefix": "src/main/runtime/orchestration/workers/lifecycle/",
+      "area": "작업자 하트비트 · 활성 감시 · 중단/복구 생명주기",
+      "t3Targets": [
+        "apps/server/src/t3x/workerEngine/WorkerHeartbeatMonitor.ts",
+        "apps/server/src/t3x/workerEngine/WorkerEngineService.ts"
+      ]
+    },
+    {
+      "prefix": "src/cli/orchestration/",
+      "area": "오케스트레이션 CLI 명령 · JSON 출력 계약 · 15초 stderr Keepalive",
+      "t3Targets": [
+        "apps/server/src/t3x/workerEngine/checkKeepalive.ts",
+        "apps/server/src/cli/worker.ts"
+      ]
+    },
+    {
+      "prefix": "docs/site/content/docs/cli/orchestration.mdx",
+      "area": "오케스트레이션 프로토콜 명세 · Worktree 수명주기 문서",
+      "t3Targets": [
+        "docs/internals/orca-orchestration-research.md",
+        ".agents/skills/t3-worker-engine/SKILL.md"
+      ]
+    }
+  ],
+  "excludedKeywords": [
+    "federated_dispatches",
+    "remote_dispatch_attachments",
+    "federation_relay_items",
+    "pointer_enter_pending",
+    "pointer_pty_id",
+    "worker_terminal_resources",
+    "bot_requests",
+    "bot_conversation_acts_for",
+    "/federation/",
+    "/bots/",
+    "/pty/"
+  ]
+}

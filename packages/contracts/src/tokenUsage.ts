@@ -25,6 +25,11 @@ export type TokenCounts = typeof TokenCounts.Type;
 export const TokenUsageObservation = Schema.Struct({
   startsAtZero: Schema.optional(Schema.Boolean),
   isFinal: Schema.optional(Schema.Boolean),
+  /**
+   * The provider's own subagents are measured: either inside these counts (Claude
+   * modelUsage) or as this separate observation for one child (Codex child threads).
+   */
+  includesNativeChildren: Schema.optional(Schema.Boolean),
   sourceId: TrimmedNonEmptyString,
   mode: Schema.Literals(["cumulative", "execution-total"]),
   provider: TrimmedNonEmptyString,

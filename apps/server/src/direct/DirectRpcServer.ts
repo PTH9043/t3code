@@ -47,6 +47,7 @@ export const layer = Layer.effectDiscard(
     const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const selfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const geminiAuth = yield* GeminiAuth.GeminiAuth;
+    const pdfWorkerScope = yield* Effect.scope;
     const http = yield* DirectHttpHandler;
     const defaultSession = yield* Effect.acquireRelease(
       auth.issueSession({ subject: "desktop-direct", label: "T3 Code Desktop" }).pipe(Effect.orDie),
@@ -80,7 +81,14 @@ export const layer = Layer.effectDiscard(
           const protocol = yield* makeDirectRpcProtocol(clientChannel, { preventReopen: false });
           const handlers = yield* Layer.build(
             Layer.mergeAll(
-              makeRpcHandlerLayer(session, broker, selfUpdate, geminiAuth, "desktop-direct"),
+              makeRpcHandlerLayer(
+                session,
+                pdfWorkerScope,
+                broker,
+                selfUpdate,
+                geminiAuth,
+                "desktop-direct",
+              ),
               directHttpGroup.toLayer({
                 "desktop.directHttp": (payload) =>
                   Stream.unwrap(

@@ -133,6 +133,8 @@ function setup(options?: {
   readonly resumeCursor?: unknown;
   readonly submittingFailure?: boolean;
   readonly recovering?: boolean;
+  readonly queuedAtStartup?: boolean;
+  readonly keepLegacyStopped?: boolean;
   readonly goal?: DevelopmentGoal;
   readonly goalUsage?: TokenUsageSummary;
   readonly dailyUsage?: TokenUsageSummary;
@@ -291,13 +293,25 @@ function setup(options?: {
             ...binding,
             runtimeIdentity: stringify(configuredIdentity),
           })),
-          tasks: options?.recovering ? [{ ...task, status: "running", delivery: "accepted" }] : [],
+          tasks: options?.recovering
+            ? [{ ...task, status: "running", delivery: "accepted" }]
+            : options?.queuedAtStartup
+              ? [task]
+              : [],
         }),
     );
     const coreContext = yield* Layer.build(
       DevelopmentLayer.pipe(Layer.provide(Layer.succeedContext(context))),
     );
     const core = Context.get(coreContext, WorkspaceDevelopment);
+    if (!options?.keepLegacyStopped) {
+      yield* store.mutate(
+        state.projectId,
+        CommandId.make("explicit-legacy-test-enable"),
+        { kind: "fixture.explicit-enable", source: "user", payload: {} },
+        (current) => Effect.succeed({ ...current!, enabled: true }),
+      );
+    }
     const session = (running: boolean) =>
       Effect.gen(function* () {
         currentThread = {
@@ -640,20 +654,59 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-it.effect(
-  "restart with an uncertain goal turn blocks automatic redelivery and preserves identity",
-  () =>
-    Effect.gen(function* () {
-      const first = yield* setup();
-      const started = yield* first.core.goal(goalInput);
-      const h = yield* setup({
-        goal: { ...started.goal!, pendingMessageId: "uncertain", phase: "running", steps: 1 },
-      });
-      const recovered = yield* waitForState(h.core, (s) => s.goal?.status === "blocked");
-      expect(recovered.goal?.pendingMessageId).toBeNull();
-      expect(recovered.bindings[0]?.nativeSessionId).toBe("native-main");
-      expect(h.commands).toHaveLength(0);
-    }).pipe(Effect.scoped),
+it.effect("restart stops a legacy goal with an uncertain turn and preserves identity", () =>
+  Effect.gen(function* () {
+    const first = yield* setup();
+    const started = yield* first.core.goal(goalInput);
+    const h = yield* setup({
+      goal: { ...started.goal!, pendingMessageId: "uncertain", phase: "running", steps: 1 },
+      keepLegacyStopped: true,
+    });
+    const recovered = yield* waitForState(
+      h.core,
+      (s) => s.goal?.status === "paused" && !s.goal.pendingMessageId,
+    );
+    expect(recovered.enabled).toBe(false);
+    expect(recovered.goal?.pendingMessageId).toBeNull();
+    expect(recovered.goal?.lastSummary).toContain("기존 지속 작업실의 자동 진행을 중지");
+    expect(recovered.goal?.lastSummary).toContain("자동 재전송하지 않습니다");
+    expect(recovered.bindings[0]?.nativeSessionId).toBe("native-main");
+    expect(h.commands).toHaveLength(0);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("startup preserves legacy work but stops its automatic execution", () =>
+  Effect.gen(function* () {
+    const first = yield* setup();
+    const started = yield* first.core.goal(goalInput);
+    const h = yield* setup({
+      goal: started.goal!,
+      queuedAtStartup: true,
+      keepLegacyStopped: true,
+    });
+    const stopped = yield* h.core.get(state.projectId);
+    expect(stopped?.enabled).toBe(false);
+    expect(stopped?.goal?.status).toBe("paused");
+    expect(stopped?.goal?.objective).toBe(goalInput.objective);
+    expect(stopped?.tasks).toHaveLength(1);
+    expect(stopped?.tasks[0]?.status).toBe("queued");
+    expect(stopped?.tasks[0]?.objective).toBe(task.objective);
+    yield* h.session(false);
+    expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(0);
+    expect(h.executions).toHaveLength(0);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("startup also stops legacy queued work without a goal", () =>
+  Effect.gen(function* () {
+    const h = yield* setup({ queuedAtStartup: true, keepLegacyStopped: true });
+    const stopped = yield* h.core.get(state.projectId);
+    expect(stopped?.enabled).toBe(false);
+    expect(stopped?.tasks[0]).toMatchObject({ status: "queued", objective: task.objective });
+    yield* h.session(false);
+    expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(0);
+    expect(h.executions).toHaveLength(0);
+  }).pipe(Effect.scoped),
 );
 
 it.effect("waiting for an Owner does not poll Main; completion resumes the same goal", () =>
@@ -1435,6 +1488,10 @@ it.effect(
         )
         .pipe(Effect.result);
       expect(denied._tag).toBe("Failure");
+      if (denied._tag === "Failure") {
+        expect(denied.failure.message).toContain("일반 대화의 파일 접근·수정 권한과 무관");
+        expect(denied.failure.message).toContain("현재 대화에서 직접 계속");
+      }
       expect(h.executions).toHaveLength(0);
     }).pipe(Effect.scoped),
 );

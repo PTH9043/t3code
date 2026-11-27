@@ -40,6 +40,38 @@ it("preserves Windows file links through Markdown sanitization without allowing 
   expect(html).not.toContain("javascript:");
 });
 
+it("preserves Windows folder links like [__auto_airdrop](D:/__auto_airdrop/) as directories", () => {
+  const html = renderToStaticMarkup(
+    createElement(
+      ReactMarkdown,
+      {
+        remarkPlugins: [remarkNormalizeWindowsFileLinks],
+        rehypePlugins: [
+          [
+            rehypeSanitize,
+            {
+              ...defaultSchema,
+              protocols: {
+                ...defaultSchema.protocols,
+                href: [...(defaultSchema.protocols?.href ?? []), "file"],
+              },
+            },
+          ],
+        ],
+        urlTransform: (href) => rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href),
+      },
+      "[__auto_airdrop](D:/__auto_airdrop/)",
+    ),
+  );
+  expect(html).toContain('href="D:/__auto_airdrop/"');
+  expect(resolveMarkdownFileLinkMeta("D:/__auto_airdrop/", "D:/__NewAutoUsage")).toMatchObject({
+    filePath: "D:/__auto_airdrop",
+    targetPath: "D:/__auto_airdrop",
+    basename: "__auto_airdrop",
+    isDirectory: true,
+  });
+});
+
 describe("rewriteMarkdownFileUriHref", () => {
   it("rewrites file uri hrefs into direct path hrefs", () => {
     expect(rewriteMarkdownFileUriHref("file:///Users/julius/project/src/main.ts#L42")).toBe(
@@ -296,6 +328,55 @@ describe("resolveInlineCodeFileLinkMeta", () => {
   it("ignores extension-less relative segments like git refs and directories", () => {
     expect(resolveInlineCodeFileLinkMeta("origin/main", "/Users/julius/project")).toBeNull();
     expect(resolveInlineCodeFileLinkMeta("apps/web", "/Users/julius/project")).toBeNull();
+  });
+
+  it("recognizes explicit folder links and Windows directories for Explorer opening", () => {
+    expect(resolveInlineCodeFileLinkMeta("apps/web/", "D:\\__NewAutoUsage")).toMatchObject({
+      basename: "web",
+      isDirectory: true,
+    });
+    expect(
+      resolveInlineCodeFileLinkMeta("D:\\__NewAutoUsage\\apps\\web", "D:\\__NewAutoUsage"),
+    ).toMatchObject({
+      filePath: "D:\\__NewAutoUsage\\apps\\web",
+      basename: "web",
+      isDirectory: true,
+    });
+    expect(
+      resolveMarkdownFileLinkMeta("file:///D:/__NewAutoUsage/apps/web/", "D:/__NewAutoUsage"),
+    ).toMatchObject({
+      filePath: "D:/__NewAutoUsage/apps/web",
+      basename: "web",
+      workspaceRelativePath: "apps/web",
+      isDirectory: true,
+    });
+    expect(
+      resolveInlineCodeFileLinkMeta("D:\\__NewAutoUsage\\Makefile", "D:\\__NewAutoUsage"),
+    ).toMatchObject({
+      basename: "Makefile",
+      isDirectory: false,
+    });
+    expect(
+      resolveInlineCodeFileLinkMeta("D:\\__NewAutoUsage\\.t3", "D:\\__NewAutoUsage"),
+    ).toMatchObject({
+      basename: ".t3",
+      isDirectory: true,
+    });
+    expect(
+      resolveInlineCodeFileLinkMeta("D:\\__job\\지원자료_2026.10.10", "D:\\__job"),
+    ).toMatchObject({
+      basename: "지원자료_2026.10.10",
+      isDirectory: true,
+    });
+    expect(
+      resolveMarkdownFileLinkMeta(
+        "file:///D:/__job/지원/지원자료_최종정리_2026-10-10/09_전체수정_자소서와포트폴리오/02_포트폴리오/",
+        "D:\\__job",
+      ),
+    ).toMatchObject({
+      basename: "02_포트폴리오",
+      isDirectory: true,
+    });
   });
 
   it("ignores external urls", () => {

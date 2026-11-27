@@ -257,6 +257,7 @@ function minutesBefore(now: number, minutes: number): string {
 async function runGit(workspaceRoot: string, args: ReadonlyArray<string>): Promise<void> {
   await execFile("git", [...args], {
     cwd: workspaceRoot,
+    windowsHide: true,
     env: {
       ...process.env,
       GIT_AUTHOR_NAME: "Alex Rivera",

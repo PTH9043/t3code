@@ -24,10 +24,12 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -35,7 +37,29 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { BackgroundAutoCompactorService } from "../BackgroundAutoCompactor.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { activeWorkRegistry } from "../ActiveWorkTracker.ts";
+import {
+  DEFAULT_PERSONA_TRAIT_GENOME,
+  resolveActivePersonaId,
+  resolveEffectiveGlobalAssistant,
+} from "@t3tools/contracts/settings";
+import { auditPersonaDriftWindow } from "../../persona/PersonaDriftAuditor.ts";
+import { runPersonaReflectionJob } from "../../persona/PersonaReflectionWorker.ts";
+import { upsertLivingMemory } from "../../persona/LivingMemoryStore.ts";
+import {
+  EXAONE_QUESTION_ALREADY_SETTLED,
+  matchesExaoneTextQuestions,
+} from "../exaoneTextQuestions.ts";
+import {
+  asksThroughText,
+  isTextQuestionTurn,
+  parseStructuredTextQuestions,
+  parseTextQuestions,
+  textQuestionSummary,
+} from "../textQuestions.ts";
+import { compactActivityData } from "../activityDataCompaction.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -51,6 +75,7 @@ import {
   type ResultSource,
 } from "../../generatedResults.ts";
 import { extractResultFileLinks } from "@t3tools/shared/generatedResults";
+import { makeRecoveryDeliveryJournal } from "../recoveryDeliveryJournal.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -373,6 +398,24 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
   return fields;
 }
 
+function toolActivityIdentity(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  return {
+    provider: event.provider,
+    ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+    ...(event.itemId ? { toolCallId: event.itemId } : {}),
+    ...(event.payload.reportedModel ? { reportedModel: event.payload.reportedModel } : {}),
+    ...(event.payload.status ? { status: event.payload.status } : {}),
+    ...(event.execution
+      ? { executionId: event.execution.executionId, attempt: event.execution.attempt }
+      : {}),
+  };
+}
+
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
@@ -446,7 +489,7 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "error",
           kind: "runtime.error",
-          summary: "Runtime error",
+          summary: truncateDetail(event.payload.message.trim(), 120) || "Runtime error",
           payload: {
             message: truncateDetail(event.payload.message),
           },
@@ -810,10 +853,12 @@ export function runtimeEventToActivities(
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
           payload: {
+            ...toolActivityIdentity(event),
             itemType: event.payload.itemType,
-            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: compactActivityData(event.payload.data) }
+              : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
@@ -837,9 +882,12 @@ export function runtimeEventToActivities(
           kind: "tool.completed",
           summary: event.payload.title ?? "Tool",
           payload: {
+            ...toolActivityIdentity(event),
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: compactActivityData(event.payload.data) }
+              : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
@@ -863,6 +911,7 @@ export function runtimeEventToActivities(
           kind: "tool.started",
           summary: `${event.payload.title ?? "Tool"} started`,
           payload: {
+            ...toolActivityIdentity(event),
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
@@ -886,11 +935,19 @@ export function runtimeEventToActivities(
 const make = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
+  const autoCompactorOpt = yield* Effect.serviceOption(BackgroundAutoCompactorService);
+  const lastContextUsageByThreadId = new Map<
+    ThreadId,
+    { readonly usedTokens: number; readonly maxTokens: number | undefined }
+  >();
+  const lastDriftAuditedTurnCount = new Map<ThreadId, number>();
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const sql = yield* SqlClient.SqlClient;
+  const recoveryDelivery = makeRecoveryDeliveryJournal(sql);
   const serverSettingsService = yield* ServerSettingsService;
   const serverConfig = yield* ServerConfig;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
@@ -1705,6 +1762,175 @@ const make = Effect.gen(function* () {
             },
             createdAt: now,
           });
+
+          if (event.type === "turn.started" && eventTurnId) {
+            const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+            activeWorkRegistry.register({
+              kind: "turn",
+              id: thread.id,
+              threadId: thread.id,
+              summary: `${event.provider}:${eventTurnId}`,
+              startedAtMs,
+            });
+            const pendingMessageId = Option.isSome(pendingTurnStart)
+              ? pendingTurnStart.value.messageId
+              : null;
+            // Blocking adapters (e.g. Antigravity ACP `session/prompt`) emit
+            // `turn.started` right after accepting the prompt but do not return
+            // from `sendTurn()` until the entire turn finishes. Confirm delivery
+            // immediately so a restart mid-turn never strands the journal row in
+            // `'sending'` -> `'unknown'`.
+            yield* recoveryDelivery
+              .acceptForStartedTurn({
+                threadId: thread.id,
+                turnId: eventTurnId,
+                messageId: pendingMessageId,
+                now,
+              })
+              .pipe(Effect.ignoreCause({ log: true }));
+            if (pendingMessageId?.startsWith("recovered-question-")) {
+              // Providers whose `sendTurn()` blocks until the whole turn finishes
+              // (e.g. Antigravity ACP `session/prompt`) emit `turn.started` right
+              // after accepting the prompt. Settle the recovered text-question card
+              // immediately using the same deterministic command IDs that
+              // ProviderCommandReactor uses after `sendTurn()` returns so the card
+              // closes right away without duplicating events.
+              yield* Effect.gen(function* () {
+                const snapshot = yield* projectionSnapshotQuery.getThreadRuntimeContext(thread.id, {
+                  activityKinds: [
+                    "provider.user-input.recovery.queued",
+                    "provider.user-input.delivery.started",
+                    "provider.user-input.delivery.finished",
+                    "user-input.resolved",
+                  ],
+                });
+                if (Option.isNone(snapshot)) return;
+                const activities = snapshot.value.activities;
+                const queued = activities.findLast((activity) => {
+                  const payload = activity.payload as {
+                    messageId?: unknown;
+                    requestId?: unknown;
+                    answers?: unknown;
+                  } | null;
+                  return (
+                    activity.kind === "provider.user-input.recovery.queued" &&
+                    payload?.messageId === pendingMessageId &&
+                    typeof payload.requestId === "string" &&
+                    payload.answers !== null &&
+                    typeof payload.answers === "object"
+                  );
+                });
+                if (!queued) return;
+                const queuedPayload = queued.payload as {
+                  requestId: string;
+                  answers: Record<string, unknown>;
+                };
+                const requestId = queuedPayload.requestId;
+                const finishedAttempts = new Set(
+                  activities
+                    .filter((activity) => {
+                      const payload = activity.payload as {
+                        requestId?: unknown;
+                        attemptId?: unknown;
+                      } | null;
+                      return (
+                        activity.kind === "provider.user-input.delivery.finished" &&
+                        payload?.requestId === requestId &&
+                        typeof payload.attemptId === "string"
+                      );
+                    })
+                    .map((activity) => (activity.payload as { attemptId: string }).attemptId),
+                );
+                const openDelivery = activities.findLast((activity) => {
+                  const payload = activity.payload as {
+                    requestId?: unknown;
+                    attemptId?: unknown;
+                  } | null;
+                  return (
+                    activity.kind === "provider.user-input.delivery.started" &&
+                    payload?.requestId === requestId &&
+                    typeof payload.attemptId === "string" &&
+                    !finishedAttempts.has(payload.attemptId)
+                  );
+                });
+                if (openDelivery) {
+                  const attemptId = (openDelivery.payload as { attemptId: string }).attemptId;
+                  yield* orchestrationEngine.dispatch({
+                    type: "thread.activity.append",
+                    commandId: CommandId.make(`recovered-delivery-accepted:${attemptId}`),
+                    threadId: thread.id,
+                    createdAt: now,
+                    activity: {
+                      id: EventId.make(`recovered-delivery-accepted:${attemptId}`),
+                      kind: "provider.user-input.delivery.finished",
+                      tone: "info",
+                      summary: "복구한 질문 답변 전송 확인",
+                      payload: {
+                        requestId,
+                        attemptId,
+                        outcome: "accepted",
+                      },
+                      turnId: null,
+                      createdAt: now,
+                    },
+                  });
+                }
+                const alreadyResolved = activities.some((activity) => {
+                  const payload = activity.payload as { requestId?: unknown } | null;
+                  return (
+                    activity.kind === "user-input.resolved" && payload?.requestId === requestId
+                  );
+                });
+                if (!alreadyResolved) {
+                  yield* orchestrationEngine.dispatch({
+                    type: "thread.activity.append",
+                    commandId: CommandId.make(`recover-question-resolved:${pendingMessageId}`),
+                    threadId: thread.id,
+                    createdAt: now,
+                    activity: {
+                      id: EventId.make(`recover-question-resolved:${pendingMessageId}`),
+                      kind: "user-input.resolved",
+                      tone: "info",
+                      summary: "재연결 후 질문 답변을 전달했습니다",
+                      payload: {
+                        requestId,
+                        answers: queuedPayload.answers,
+                        recovered: true,
+                      },
+                      turnId: null,
+                      createdAt: now,
+                    },
+                  });
+                }
+              }).pipe(Effect.ignoreCause({ log: true }));
+            }
+
+            const startedModel = event.payload?.model?.trim();
+            const startedInstanceId =
+              event.providerInstanceId ?? thread.session?.providerInstanceId;
+            if (startedModel) {
+              yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.activity.append",
+                  commandId: yield* providerCommandId(event, "turn-assigned"),
+                  threadId: thread.id,
+                  createdAt: now,
+                  activity: {
+                    id: EventId.make(`turn-assigned:${eventTurnId}`),
+                    kind: "conversation.turn-assigned",
+                    tone: "info",
+                    summary: "이번 요청에 지정한 모델",
+                    payload: {
+                      ...(startedInstanceId ? { instanceId: startedInstanceId } : {}),
+                      model: startedModel,
+                    },
+                    turnId: eventTurnId,
+                    createdAt: now,
+                  },
+                })
+                .pipe(Effect.ignoreCause({ log: true }));
+            }
+          }
         }
       }
 
@@ -1919,6 +2145,7 @@ const make = Effect.gen(function* () {
       }
 
       if (event.type === "turn.completed") {
+        activeWorkRegistry.unregister("turn", thread.id);
         const detailedThread = yield* getLoadedThreadDetail();
         const messages = detailedThread?.messages ?? [];
         const proposedPlans = detailedThread?.proposedPlans ?? [];
@@ -1941,6 +2168,80 @@ const make = Effect.gen(function* () {
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
+          const normalizedTurnState = normalizeRuntimeTurnState(event.payload.state);
+          const isCompletedTurn = normalizedTurnState === "completed";
+          const isInterruptedTurn =
+            normalizedTurnState === "interrupted" || normalizedTurnState === "cancelled";
+          const completedTurn =
+            event.provider === "opencode" &&
+            shouldApplyThreadLifecycle &&
+            (isCompletedTurn || isInterruptedTurn)
+              ? yield* projectionTurnRepository.getByTurnId({ threadId: thread.id, turnId })
+              : Option.none();
+          // Antigravity asks through text on every model; OpenCode only on the EXAONE models.
+          let wasTextQuestionTurn = isTextQuestionTurn(event.provider, undefined);
+          if (
+            event.provider === "opencode" &&
+            Option.isSome(completedTurn) &&
+            completedTurn.value.pendingMessageId
+          ) {
+            const selections = yield* sql<{ model: string | null }>`
+              SELECT json_extract(payload_json, ${"$.modelSelection.model"}) AS model
+              FROM orchestration_events
+              WHERE aggregate_kind = ${"thread"} AND stream_id = ${thread.id} AND event_type = ${"thread.turn-start-requested"}
+                AND json_extract(payload_json, ${"$.messageId"}) = ${completedTurn.value.pendingMessageId}
+              ORDER BY sequence DESC LIMIT 1
+            `;
+            wasTextQuestionTurn = isTextQuestionTurn(event.provider, selections[0]?.model);
+          }
+          if (
+            shouldApplyThreadLifecycle &&
+            (isCompletedTurn || isInterruptedTurn) &&
+            wasTextQuestionTurn
+          ) {
+            const snapshot = yield* projectionSnapshotQuery.getThreadRuntimeContext(thread.id, {
+              messages: true,
+              activityKinds: ["user-input.requested"],
+            });
+            if (Option.isSome(snapshot)) {
+              const detail = snapshot.value;
+              const nativeQuestion = detail.activities.some(
+                (activity) =>
+                  activity.kind === "user-input.requested" && sameId(activity.turnId, turnId),
+              );
+              const message = detail.messages.findLast(
+                (entry) => entry.role === "assistant" && sameId(entry.turnId, turnId),
+              );
+              const isLatestThreadMessage =
+                message !== undefined && detail.messages.at(-1)?.id === message.id;
+              const questions =
+                message && !nativeQuestion
+                  ? isCompletedTurn
+                    ? parseTextQuestions(event.provider, message.text)
+                    : isLatestThreadMessage
+                      ? parseStructuredTextQuestions(event.provider, message.text)
+                      : null
+                  : null;
+              if (questions) {
+                const requestId = "text-question:" + turnId;
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.activity.append",
+                  commandId: CommandId.make("text-question-open:" + thread.id + ":" + turnId),
+                  threadId: thread.id,
+                  createdAt: now,
+                  activity: {
+                    id: EventId.make("text-question-open:" + thread.id + ":" + turnId),
+                    kind: "user-input.requested",
+                    tone: "info",
+                    summary: textQuestionSummary(event.provider),
+                    payload: { requestId, questions },
+                    turnId,
+                    createdAt: now,
+                  },
+                });
+              }
+            }
+          }
           yield* clearAssistantMessageIdsForTurn(thread.id, turnId);
           yield* clearAssistantSegmentStateForTurn(thread.id, turnId);
 
@@ -1952,10 +2253,147 @@ const make = Effect.gen(function* () {
             turnId,
             updatedAt: now,
           });
+
+          // Background Auto-Compaction (Track 2) & Living Persona Drift/Reflection (Track 4)
+          // Both run asynchronously off the hot path via `backgroundModelQueue` (0ms turn stall).
+          if (isCompletedTurn && shouldApplyThreadLifecycle && messages.length > 0) {
+            if (Option.isSome(autoCompactorOpt)) {
+              const ctxUsage = lastContextUsageByThreadId.get(thread.id);
+              const usedTokens = ctxUsage?.usedTokens;
+              const maxTokens = ctxUsage?.maxTokens;
+              const estimatedContextRatio =
+                usedTokens !== undefined && maxTokens !== undefined && maxTokens > 0
+                  ? usedTokens / maxTokens
+                  : 0;
+              const turnCount = messages.filter((m) => m.role === "user").length;
+              if (
+                autoCompactorOpt.value.shouldPrecompute({
+                  threadId: thread.id,
+                  turnCount,
+                  estimatedContextRatio,
+                  usedTokens,
+                })
+              ) {
+                const recentTurns = messages
+                  .slice(-16)
+                  .map((m) => ({ role: m.role, text: m.text }));
+                void autoCompactorOpt.value
+                  .schedulePrecompute({
+                    threadId: thread.id,
+                    turnCount,
+                    estimatedContextRatio,
+                    usedTokens,
+                    recentTurns,
+                  })
+                  .catch(() => undefined);
+              }
+            }
+
+            const assistantMsgs = messages.filter(
+              (m) => m.role === "assistant" && m.text.trim().length > 0,
+            );
+            const auditedCount = lastDriftAuditedTurnCount.get(thread.id) ?? 0;
+            if (assistantMsgs.length >= 5 && assistantMsgs.length - auditedCount >= 5) {
+              const currentSettings = yield* serverSettingsService.getSettings.pipe(
+                Effect.orElseSucceed(() => undefined),
+              );
+              const effectiveGlobal = currentSettings
+                ? resolveEffectiveGlobalAssistant(currentSettings)
+                : undefined;
+              if (effectiveGlobal?.enabled && effectiveGlobal.enableLivingAffectEngine !== false) {
+                lastDriftAuditedTurnCount.set(thread.id, assistantMsgs.length);
+                const personaId = resolveActivePersonaId(effectiveGlobal);
+                const traits = effectiveGlobal.traitGenome ?? DEFAULT_PERSONA_TRAIT_GENOME;
+                const voiceText = effectiveGlobal.voiceAndTone ?? "";
+                const primaryLevel = /반말|해체/u.test(voiceText)
+                  ? ("casual_banmal" as const)
+                  : /하십시오체|격식체/u.test(voiceText) && !/해요체/u.test(voiceText)
+                    ? ("formal_hapsipsio" as const)
+                    : ("polite_haeyo" as const);
+                const forbiddenEndings =
+                  primaryLevel === "polite_haeyo" && /관료체|군대식|하십시오/u.test(voiceText)
+                    ? ["하십시오", "사료됩니다", "권고드립니다"]
+                    : [];
+                const driftReport = auditPersonaDriftWindow({
+                  personaId,
+                  register: {
+                    primaryLevel,
+                    userTitle: "",
+                    selfReference: "",
+                    preferredEndings: [],
+                    forbiddenEndings,
+                  },
+                  turns: assistantMsgs.slice(-5).map((m) => ({
+                    turnId: m.turnId ?? m.id,
+                    assistantText: m.text,
+                  })),
+                });
+                const recentPairs: Array<{ readonly user: string; readonly assistant: string }> =
+                  [];
+                for (let i = Math.max(0, messages.length - 10); i < messages.length - 1; i += 1) {
+                  const u = messages[i];
+                  const a = messages[i + 1];
+                  if (u?.role === "user" && a?.role === "assistant") {
+                    recentPairs.push({ user: u.text, assistant: a.text });
+                  }
+                }
+                if (!driftReport.healthy && driftReport.correctiveHint) {
+                  void Effect.runPromise(
+                    upsertLivingMemory({
+                      scope: "persona_isolated",
+                      personaId,
+                      memoryKind: "discriminative_rule",
+                      contentDistilled: driftReport.correctiveHint,
+                      importance: 7,
+                    }).pipe(
+                      Effect.provideService(SqlClient.SqlClient, sql),
+                      Effect.orElseSucceed(() => undefined),
+                    ),
+                  ).catch(() => undefined);
+                }
+                if (recentPairs.length > 0) {
+                  void runPersonaReflectionJob({
+                    personaId,
+                    traits,
+                    recentTurns: recentPairs,
+                    persistRule: (rule) =>
+                      Effect.runPromise(
+                        upsertLivingMemory({
+                          scope: "persona_isolated",
+                          personaId,
+                          memoryKind: "discriminative_rule",
+                          contentDistilled: rule.ruleText,
+                          importance: Math.round(Math.max(5, Math.min(9, rule.confidence * 10))),
+                        }).pipe(
+                          Effect.provideService(SqlClient.SqlClient, sql),
+                          Effect.orElseSucceed(() => undefined),
+                        ),
+                      ).then(() => undefined),
+                  }).catch(() => undefined);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (event.type === "thread.token-usage.updated" && event.payload.usage) {
+        const usedTokens = event.payload.usage.usedTokens;
+        if (typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens > 0) {
+          lastContextUsageByThreadId.set(thread.id, {
+            usedTokens,
+            maxTokens:
+              typeof event.payload.usage.maxTokens === "number" &&
+              Number.isFinite(event.payload.usage.maxTokens)
+                ? event.payload.usage.maxTokens
+                : undefined,
+          });
         }
       }
 
       if (event.type === "session.exited") {
+        lastContextUsageByThreadId.delete(thread.id);
+        lastDriftAuditedTurnCount.delete(thread.id);
         yield* clearTurnStateForSession(thread.id);
       }
 
@@ -2067,13 +2505,45 @@ const make = Effect.gen(function* () {
             taskType?: string;
             status?: string;
             agentId?: string;
+            title?: string;
+            description?: string;
+            summary?: string;
+            lastToolName?: string;
           };
+          const summaryText = payload.summary?.trim() ?? "";
+          const descriptionText = payload.description?.trim() ?? "";
+          const explicitTitle = payload.title?.trim() ?? "";
+          const toolName = payload.lastToolName?.trim() ?? "";
+          const effectiveTitle =
+            explicitTitle || (event.type === "task.started" ? descriptionText : "");
+          const logSource = summaryText || (event.type !== "task.started" ? descriptionText : "");
+          const logTail =
+            toolName && logSource
+              ? `[${toolName}] ${logSource}`.slice(0, 240)
+              : logSource
+                ? logSource.slice(0, 240)
+                : toolName
+                  ? `[${toolName}] 실행 중`
+                  : undefined;
+          const proofPrefix =
+            payload.taskType === "local_bash" || payload.taskType === "shell"
+              ? "shell"
+              : payload.taskType === "monitor"
+                ? "monitor"
+                : payload.agentId
+                  ? "agent"
+                  : "task";
           threadBackgroundLiveness.recordTaskLiveness({
             threadId: thread.id,
             taskId: payload.taskId,
             taskType: payload.taskType,
             status: payload.status,
             agentId: payload.agentId,
+            provider: event.provider,
+            turnId: eventTurnId ?? null,
+            proofHandle: `${proofPrefix}:${payload.taskId}`,
+            ...(effectiveTitle ? { title: effectiveTitle } : {}),
+            ...(logTail !== undefined ? { logTail } : {}),
             kind:
               event.type === "task.started"
                 ? "started"
@@ -2086,6 +2556,7 @@ const make = Effect.gen(function* () {
           break;
         }
         case "session.exited":
+          activeWorkRegistry.unregister("turn", thread.id);
           threadBackgroundLiveness.clearThreadLiveness(thread.id);
           break;
         default:
@@ -2101,7 +2572,171 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = runtimeEventToActivities(event, taskTitle);
+      let deferNativeQuestion = false;
+      if (
+        event.type === "user-input.requested" &&
+        asksThroughText(event.provider) &&
+        !eventTurnId
+      ) {
+        const detail = yield* projectionSnapshotQuery
+          .getThreadRuntimeContext(thread.id, {
+            activityKinds: ["user-input.requested", "provider.user-input.duplicate.deferred"],
+          })
+          .pipe(Effect.map(Option.getOrUndefined));
+        const requestIds = [
+          ...new Set(
+            (detail?.activities ?? []).flatMap((activity) => {
+              const payload = activity.payload as { requestId?: unknown } | null;
+              const requestId = payload?.requestId;
+              return activity.kind === "user-input.requested" &&
+                typeof requestId === "string" &&
+                requestId.startsWith("text-question:") &&
+                matchesExaoneTextQuestions(activity.payload, requestId, event.payload.questions)
+                ? [requestId]
+                : [];
+            }),
+          ),
+        ];
+        if (requestIds.length > 0) {
+          const alreadyRecorded =
+            event.requestId !== undefined &&
+            detail?.activities.some(
+              (activity) =>
+                activity.kind === "provider.user-input.duplicate.deferred" &&
+                (activity.payload as { nativeRequestId?: unknown } | null)?.nativeRequestId ===
+                  event.requestId,
+            );
+          if (!alreadyRecorded) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: yield* providerCommandId(event, "defer-turnless-native-question"),
+              threadId: thread.id,
+              createdAt: now,
+              activity: {
+                id: EventId.make("defer-turnless-native-question:" + event.eventId),
+                kind: "provider.user-input.duplicate.deferred",
+                tone: "info",
+                summary: "기존 질문과 같은 네이티브 질문의 출처를 확인하지 못했습니다",
+                payload: {
+                  requestId: requestIds[0],
+                  requestIds,
+                  nativeRequestId: event.requestId ?? null,
+                  questions: event.payload.questions,
+                  detail:
+                    "질문의 턴을 확인할 수 없어 중복 답변을 보내지 않았습니다. 기존 답변과 실행 상태를 확인해 주세요.",
+                },
+                turnId: null,
+                createdAt: now,
+              },
+            });
+          }
+          deferNativeQuestion = true;
+        }
+      }
+      if (event.type === "user-input.requested" && asksThroughText(event.provider) && eventTurnId) {
+        const fallbackId = "text-question:" + eventTurnId;
+        const detail = yield* projectionSnapshotQuery
+          .getThreadRuntimeContext(thread.id, {
+            activityKinds: [
+              "user-input.requested",
+              "user-input.resolved",
+              "provider.user-input.recovery.queued",
+              "provider.user-input.delivery.started",
+              "provider.user-input.duplicate.deferred",
+            ],
+          })
+          .pipe(Effect.map(Option.getOrUndefined));
+        const fallback = detail?.activities.find(
+          (activity) =>
+            activity.kind === "user-input.requested" &&
+            sameId(activity.turnId, eventTurnId) &&
+            matchesExaoneTextQuestions(activity.payload, fallbackId, event.payload.questions),
+        );
+        const markers =
+          detail?.activities.filter((activity) => {
+            const payload = activity.payload as { requestId?: unknown; reason?: unknown } | null;
+            return (
+              payload?.requestId === fallbackId &&
+              (activity.kind === "provider.user-input.recovery.queued" ||
+                activity.kind === "provider.user-input.delivery.started" ||
+                (activity.kind === "user-input.resolved" && payload.reason !== "superseded"))
+            );
+          }) ?? [];
+        const alreadyRecorded =
+          event.requestId !== undefined &&
+          detail?.activities.some((activity) => {
+            const payload = activity.payload as {
+              requestId?: unknown;
+              nativeRequestId?: unknown;
+            } | null;
+            return (
+              (activity.kind === "user-input.requested" &&
+                payload?.requestId === event.requestId) ||
+              (activity.kind === "provider.user-input.duplicate.deferred" &&
+                payload?.nativeRequestId === event.requestId)
+            );
+          });
+        let shouldDefer = markers.length > 0;
+        if (fallback && !alreadyRecorded && !shouldDefer) {
+          const closedAt = fallback.createdAt > now ? fallback.createdAt : now;
+          const superseded = yield* orchestrationEngine
+            .dispatch({
+              type: "thread.activity.append",
+              commandId: yield* providerCommandId(event, "supersede-text-question"),
+              threadId: thread.id,
+              createdAt: closedAt,
+              activity: {
+                id: EventId.make("supersede-text-question:" + event.eventId),
+                kind: "user-input.resolved",
+                tone: "info",
+                summary: "네이티브 질문으로 전환",
+                payload: { requestId: fallbackId, answers: {}, reason: "superseded" },
+                turnId: eventTurnId,
+                createdAt: closedAt,
+              },
+            })
+            .pipe(
+              Effect.as(true),
+              Effect.catch((error) => {
+                const expected =
+                  (error._tag === "OrchestrationCommandInvariantError" &&
+                    error.detail === EXAONE_QUESTION_ALREADY_SETTLED) ||
+                  (error._tag === "OrchestrationCommandPreviouslyRejectedError" &&
+                    error.detail.endsWith(EXAONE_QUESTION_ALREADY_SETTLED));
+                return expected ? Effect.succeed(false) : Effect.fail(error);
+              }),
+            );
+          shouldDefer = !superseded;
+        }
+        if (fallback && alreadyRecorded) {
+          deferNativeQuestion = true;
+        } else if (fallback && shouldDefer) {
+          const deferredAt = fallback.createdAt > now ? fallback.createdAt : now;
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "defer-duplicate-native-question"),
+            threadId: thread.id,
+            createdAt: deferredAt,
+            activity: {
+              id: EventId.make("defer-duplicate-native-question:" + event.eventId),
+              kind: "provider.user-input.duplicate.deferred",
+              tone: "info",
+              summary: "제출된 답변과 같은 네이티브 질문이 보류됐습니다",
+              payload: {
+                requestId: fallbackId,
+                nativeRequestId: event.requestId ?? null,
+                questions: event.payload.questions,
+                detail: "중복 답변을 보내지 않았습니다. 기존 답변과 실행 상태를 확인해 주세요.",
+              },
+              turnId: eventTurnId,
+              createdAt: deferredAt,
+            },
+          });
+          deferNativeQuestion = true;
+        }
+      }
+
+      const activities = deferNativeQuestion ? [] : runtimeEventToActivities(event, taskTitle);
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>
@@ -2139,8 +2774,85 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
+  // Restore unanswered text questions produced before this compatibility path existed.
+  const restoreExaoneTextQuestions = Effect.fn("restoreExaoneTextQuestions")(function* () {
+    const rows = yield* sql<{
+      thread_id: string;
+      turn_id: string;
+      text: string;
+      turn_state: string;
+      provider: string | null;
+    }>`
+      SELECT t.thread_id, m.turn_id, m.text, u.state AS turn_state,
+        (SELECT s.provider_name FROM projection_thread_sessions s
+         WHERE s.thread_id = t.thread_id) AS provider
+      FROM projection_threads t
+      JOIN projection_thread_messages m ON m.message_id = (
+        SELECT x.message_id FROM projection_thread_messages x
+        WHERE x.thread_id = t.thread_id ORDER BY x.created_at DESC, x.rowid DESC LIMIT 1
+      )
+      JOIN projection_turns u ON u.thread_id = t.thread_id AND u.turn_id = m.turn_id
+      WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+        AND t.pending_user_input_count = 0
+        AND m.role = ${"assistant"} AND m.is_streaming = 0 AND m.turn_id IS NOT NULL
+        AND u.state IN (${"completed"}, ${"interrupted"})
+        AND EXISTS (
+          SELECT 1 FROM orchestration_events e
+          WHERE e.aggregate_kind = ${"thread"} AND e.stream_id = t.thread_id
+            AND e.event_type = ${"thread.turn-start-requested"}
+            AND json_extract(e.payload_json, ${"$.messageId"}) = u.pending_message_id
+            AND (json_extract(e.payload_json, ${"$.modelSelection.model"}) LIKE ${"t3_exaone/%"}
+              OR EXISTS (
+                SELECT 1 FROM projection_thread_sessions s
+                WHERE s.thread_id = t.thread_id AND s.provider_name = ${"gemini"}
+              ))
+        )
+        AND (instr(m.text, ${'"questions"'}) > 0 OR instr(m.text, ${"[1]"}) > 0)
+        AND NOT EXISTS (
+          SELECT 1 FROM projection_thread_activities a
+          WHERE a.thread_id = t.thread_id AND a.turn_id = m.turn_id
+            AND a.kind = ${"user-input.requested"}
+        )
+    `;
+    for (const row of rows) {
+      // The query matches an EXAONE turn by its model; any other row is an Antigravity thread.
+      const provider = row.provider === "gemini" ? "gemini" : "opencode";
+      const questions =
+        row.turn_state === "completed"
+          ? parseTextQuestions(provider, row.text)
+          : parseStructuredTextQuestions(provider, row.text);
+      if (!questions) continue;
+      const threadId = ThreadId.make(row.thread_id);
+      const turnId = TurnId.make(row.turn_id);
+      const requestId = "text-question:" + turnId;
+      const createdAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("text-question-open:" + threadId + ":" + turnId),
+        threadId,
+        createdAt,
+        activity: {
+          id: EventId.make("text-question-open:" + threadId + ":" + turnId),
+          kind: "user-input.requested",
+          tone: "info",
+          summary: textQuestionSummary(provider),
+          payload: { requestId, questions },
+          turnId,
+          createdAt,
+        },
+      });
+    }
+  });
+
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
+      yield* restoreExaoneTextQuestions().pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not restore EXAONE text questions", {
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
       // Subscriptions must exist before start() returns, or events published
       // in the gap are lost to this consumer.
       yield* forkParked(

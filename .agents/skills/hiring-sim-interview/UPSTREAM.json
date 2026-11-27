@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/techeer-sv/Career-Skills",
+  "path": "skills/hiring-sim-interview",
+  "commit": "93ddea75f386033f57c0efb334ef4831d426cfc6",
+  "commitDate": "2026-11-13",
+  "license": "MIT (Copyright (c) 2025 techeer-sv)",
+  "fetched": "2026-11-16",
+  "modifications": [
+    "frontmatter: added disable-model-invocation: true (runs only when the user picks it)",
+    "added hiring-common/ (the repository's shared skills/hiring-common files this skill reads) inside the skill folder"
+  ]
+}

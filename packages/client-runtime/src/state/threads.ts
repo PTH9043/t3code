@@ -47,11 +47,10 @@ function statusWithoutLiveData(data: Option.Option<OrchestrationThread>): Enviro
 
 /**
  * Turn window sizes for paginated thread loads: the initial page covers the
- * last 10 user-anchored turns (subagent/fan-out turns ride along), each
- * "load earlier" tap fetches 20 more. Sized so first paint on the heaviest
- * observed threads stays around 100K gzipped while median threads load fully.
+ * last 4 user-anchored turns so entering a room renders the latest result
+ * immediately, while older turns attach behind it in 20-turn pages.
  */
-export const INITIAL_THREAD_USER_TURN_LIMIT = 10;
+export const INITIAL_THREAD_USER_TURN_LIMIT = 4;
 export const OLDER_THREAD_PAGE_USER_TURN_LIMIT = 20;
 
 function pageStateFromSnapshot(

@@ -121,4 +121,41 @@ describe("chunking", () => {
     expect(chunk?.searchTitle).toBe("배포 체크 크리 리스 스트");
     expect(chunk?.searchBody).toContain("검증 증을");
   });
+
+  it("preserves Parent-Child heading hierarchy and Markdown table headers across split chunks", () => {
+    const doc = [
+      "# 2026년 국내 출장 규정",
+      "임직원 국내 출장 기본 안내문. ".repeat(70),
+      "## 제3조 숙박비 한도",
+      "| 직급 | 서울 숙박비 | 지방 숙박비 |",
+      "| :--- | :--- | :--- |",
+      ...Array.from({ length: 30 }, (_, i) => `| 등급-${i + 1} | 150,000원 | 120,000원 |`),
+      "| 수석연구원 | 180,000원 | 150,000원 |",
+    ].join("\n");
+    const chunks = chunkSearchableContent(doc);
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks.every((chunk) => chunk.length <= 1_200)).toBe(true);
+    const tailTableChunk = chunks.find((chunk) => chunk.includes("수석연구원"));
+    expect(tailTableChunk).toBeDefined();
+    expect(tailTableChunk).toContain("# 2026년 국내 출장 규정");
+    expect(tailTableChunk).toContain("## 제3조 숙박비 한도");
+    expect(tailTableChunk).toContain("| 직급 | 서울 숙박비 | 지방 숙박비 |");
+  });
+
+  it("keeps Korean clause identifiers and hyphenated error/product codes intact and prioritizes them in long queries", () => {
+    const query = buildSearchQuery("2026년 국내 출장 시 제3조에 따른 TS-999 및 A-2201 기준은?");
+    expect(query?.terms).toContain("제3조");
+    expect(query?.terms).toContain("ts-999");
+    expect(query?.terms).toContain("a-2201");
+    expect(query?.match).toContain('"제3조"');
+    expect(query?.match).toContain('"ts 999"');
+    expect(query?.match).toContain('"a 2201"');
+    expect(termCoverage(["제3조"], "제공된 3개의 조건")).toBe(0);
+    expect(termCoverage(["제3조"], "제 3 조 숙박비 한도")).toBe(1);
+
+    const longPreamble = Array.from({ length: 18 }, (_, i) => `일반단어${i + 1}`).join(" ");
+    const capped = buildSearchQuery(`${longPreamble} 제3조 TS-999`, 16);
+    expect(capped?.terms).toContain("제3조");
+    expect(capped?.terms).toContain("ts-999");
+  });
 });

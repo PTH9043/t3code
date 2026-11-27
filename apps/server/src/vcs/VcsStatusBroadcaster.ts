@@ -433,12 +433,17 @@ export const make = Effect.gen(function* () {
           (count) => count + 1,
         );
         const nextDelay = remoteRefreshFailureDelay(consecutiveFailures, activeInterval);
-        yield* Effect.logWarning("VCS remote status refresh failed", {
-          cwdLength: cwd.length,
-          ...remoteRefreshFailureDiagnostics(exit.cause),
-          consecutiveFailures,
-          nextDelayMs: Duration.toMillis(nextDelay),
-        });
+        // One failure is usually a transient network or lock error that the
+        // backoff retry clears; only a repeat is worth a warning.
+        yield* (consecutiveFailures > 1 ? Effect.logWarning : Effect.logInfo)(
+          "VCS remote status refresh failed",
+          {
+            cwdLength: cwd.length,
+            ...remoteRefreshFailureDiagnostics(exit.cause),
+            consecutiveFailures,
+            nextDelayMs: Duration.toMillis(nextDelay),
+          },
+        );
         return nextDelay;
       });
 

@@ -11,6 +11,7 @@ import {
   type OrchestrationProject,
   type OrchestrationReadModel,
   type WorkspaceMonitoringSettings,
+  type WorkspaceMonitoringGuard,
   type WorkspaceOrchestraSettings,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -33,6 +34,8 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { bulkRevisions, nextKnowledgeTimestamp } from "./knowledgeBulkRevisions.ts";
+import type { WorkspaceKnowledgeItem } from "@t3tools/contracts";
 import { taskConditionsError } from "./taskConditions.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -44,7 +47,7 @@ function deliveryOrchestra(
     ? null
     : {
         ...settings,
-        completionCheck: true,
+        completionCheck: settings.completionCheck ?? true,
         ...(commands === undefined ? {} : { verificationCommands: commands }),
       };
 }
@@ -52,7 +55,7 @@ function deliveryOrchestra(
 // Session adoption takes seconds; a user message still unadopted after this
 // window is a failed/stale start, not pending work. Mirrors the client's
 // QUEUED_TURN_START_GRACE_MS in client-runtime threadSettled.ts.
-const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
+export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -131,7 +134,11 @@ function hasOpenBlockingRequest(thread: {
  */
 function threadHasQueuedTurnStart(
   thread: {
-    readonly messages: ReadonlyArray<{ readonly role: string; readonly createdAt: string }>;
+    readonly messages: ReadonlyArray<{
+      readonly id: string;
+      readonly role: string;
+      readonly createdAt: string;
+    }>;
     readonly latestTurn: {
       readonly requestedAt: string;
       readonly startedAt: string | null;
@@ -140,10 +147,13 @@ function threadHasQueuedTurnStart(
     readonly session: { readonly status: string } | null;
   },
   occurredAt: string,
+  excludedMessageId?: string,
 ): boolean {
   const latestUserMessageAtMs = thread.messages.reduce(
     (latest, message) =>
-      message.role === "user" ? Math.max(latest, Date.parse(message.createdAt)) : latest,
+      message.role === "user" && message.id !== excludedMessageId
+        ? Math.max(latest, Date.parse(message.createdAt))
+        : latest,
     Number.NEGATIVE_INFINITY,
   );
   const latestTurnAtMs =
@@ -257,45 +267,155 @@ function orchestraFromWorkspaceDefaults(
   return { maxParallel: defaults.maxParallel, isolateWorktrees: defaults.isolateWorktrees };
 }
 
+function preserveActiveMonitoringPlan(
+  current: WorkspaceMonitoringSettings,
+): WorkspaceMonitoringSettings {
+  const activePlan =
+    current.activePlan !== undefined
+      ? current.activePlan
+      : current.planStatus === "approved" ||
+          current.planStatus === "stale" ||
+          (current.planStatus === "none" && current.plan?.approvedAt != null)
+        ? current.plan
+        : null;
+  return {
+    ...current,
+    activePlan,
+    activePlanStale:
+      activePlan === null ? false : (current.activePlanStale ?? current.planStatus === "stale"),
+  };
+}
+
+function monitoringGuardMatches(
+  project: OrchestrationProject,
+  guard: WorkspaceMonitoringGuard,
+): boolean {
+  const monitoring = preserveActiveMonitoringPlan(
+    project.workspaceControl?.monitoring ?? DEFAULT_WORKSPACE_MONITORING_SETTINGS,
+  );
+  const active = monitoring.activePlan;
+  return (
+    monitoring.enabled &&
+    monitoring.autonomy === "playbooks" &&
+    monitoring.planStatus === "approved" &&
+    monitoring.activePlanStale === false &&
+    (monitoring.proposalGeneration ?? 0) === guard.proposalGeneration &&
+    active != null &&
+    active.revision === guard.planRevision &&
+    active.approvedAt === guard.planApprovedAt &&
+    monitoring.plan?.revision === guard.planRevision &&
+    monitoring.plan.approvedAt === guard.planApprovedAt
+  );
+}
+
+const invalidateMonitoringForProgramChange = Effect.fn("invalidateMonitoringForProgramChange")(
+  function* (
+    project: OrchestrationProject,
+    commandId: OrchestrationCommand["commandId"],
+    occurredAt: string,
+  ) {
+    const control = project.workspaceControl ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS;
+    const current = preserveActiveMonitoringPlan(control.monitoring);
+    return {
+      ...(yield* withEventBase({
+        aggregateKind: "project",
+        aggregateId: project.id,
+        occurredAt,
+        commandId,
+      })),
+      type: "project.workspace-control-updated" as const,
+      payload: {
+        projectId: project.id,
+        workspaceControl: {
+          ...control,
+          monitoring: {
+            ...current,
+            planStatus:
+              current.planStatus === "proposed"
+                ? ("none" as const)
+                : current.planStatus === "approved"
+                  ? ("stale" as const)
+                  : current.planStatus,
+            activePlanStale: current.activePlan != null,
+            proposalGeneration: (current.proposalGeneration ?? 0) + 1,
+          },
+        },
+        updatedAt: occurredAt,
+      },
+    };
+  },
+);
+
 function applyMonitoringUserSettings(
   current: WorkspaceMonitoringSettings,
   update:
     | (Omit<
         WorkspaceMonitoringSettings,
-        "threadId" | "plan" | "planStatus" | "turnLog" | "lastCheckedAt"
+        | "threadId"
+        | "plan"
+        | "planStatus"
+        | "activePlan"
+        | "activePlanStale"
+        | "proposalGeneration"
+        | "turnLog"
+        | "lastCheckedAt"
       > & {
         readonly plan?: WorkspaceMonitoringSettings["plan"];
       })
     | undefined,
   now: string,
 ): WorkspaceMonitoringSettings {
-  if (update === undefined) return current;
+  if (update === undefined) {
+    return current.activePlan == null && current.plan?.approvedAt != null
+      ? preserveActiveMonitoringPlan(current)
+      : current;
+  }
+  const preserved = preserveActiveMonitoringPlan(current);
   const base: WorkspaceMonitoringSettings = {
-    ...current,
+    ...preserved,
     enabled: update.enabled,
     autonomy: update.autonomy,
     checkIntervalSec: update.checkIntervalSec,
     aiTurnBudget: update.aiTurnBudget,
     modelSelection: update.modelSelection,
   };
-  if (update.plan === undefined) return base;
-  if (update.plan === null) return { ...base, plan: null, planStatus: "none" };
+  if (update.plan === undefined) {
+    return current.enabled !== update.enabled || current.autonomy !== update.autonomy
+      ? { ...base, proposalGeneration: (current.proposalGeneration ?? 0) + 1 }
+      : base;
+  }
+  if (update.plan === null) {
+    return {
+      ...base,
+      plan: null,
+      planStatus: "none",
+      activePlan: null,
+      activePlanStale: false,
+      proposalGeneration: (current.proposalGeneration ?? 0) + 1,
+    };
+  }
+  const plan = {
+    ...update.plan,
+    revision: Math.max(current.plan?.revision ?? 0, preserved.activePlan?.revision ?? 0) + 1,
+    proposedAt: current.plan?.proposedAt ?? now,
+    approvedAt: now,
+  };
   return {
     ...base,
-    plan: {
-      ...update.plan,
-      revision: (current.plan?.revision ?? 0) + 1,
-      proposedAt: current.plan?.proposedAt ?? now,
-      approvedAt: now,
-    },
+    plan,
     planStatus: "approved",
+    activePlan: plan,
+    activePlanStale: false,
+    proposalGeneration: (current.proposalGeneration ?? 0) + 1,
   };
 }
 
 export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
+  selectedKnowledge = [],
 }: {
+  readonly selectedKnowledge?: readonly WorkspaceKnowledgeItem[];
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
 }): Effect.fn.Return<
@@ -464,7 +584,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         projectId: command.projectId,
       });
       const control = project.workspaceControl ?? DEFAULT_WORKSPACE_CONTROL_SETTINGS;
-      const current = control.monitoring;
+      const current = preserveActiveMonitoringPlan(control.monitoring);
       const occurredAt = yield* nowIso;
       let monitoring: WorkspaceMonitoringSettings;
       switch (command.type) {
@@ -481,23 +601,44 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               detail: `Monitoring plan revision ${command.revision} was replaced by revision ${current.plan.revision}.`,
             });
           }
+          const plan = { ...current.plan, approvedAt: occurredAt };
           monitoring = {
             ...current,
-            plan: { ...current.plan, approvedAt: occurredAt },
+            plan,
             planStatus: "approved",
+            activePlan: plan,
+            activePlanStale: false,
+            proposalGeneration: (current.proposalGeneration ?? 0) + 1,
           };
           break;
         }
         case "project.monitoring.reanalyze":
           // The old plan stays visible until the new proposal replaces it.
-          monitoring = { ...current, planStatus: "none" };
+          monitoring = {
+            ...current,
+            planStatus: "none",
+            proposalGeneration: (current.proposalGeneration ?? 0) + 1,
+          };
           break;
         case "project.monitoring.plan.propose":
+          if (current.planStatus !== "none") {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Project '${command.projectId}' is no longer awaiting a monitoring plan.`,
+            });
+          }
+          if ((command.expectedGeneration ?? 0) !== (current.proposalGeneration ?? 0)) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Project '${command.projectId}' monitoring proposal request was replaced.`,
+            });
+          }
           monitoring = {
             ...current,
             plan: {
               ...command.plan,
-              revision: (current.plan?.revision ?? 0) + 1,
+              revision:
+                Math.max(current.plan?.revision ?? 0, current.activePlan?.revision ?? 0) + 1,
               proposedAt: occurredAt,
               approvedAt: null,
             },
@@ -514,6 +655,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               : {}),
             ...(command.planStatus !== undefined && current.planStatus === "approved"
               ? { planStatus: command.planStatus }
+              : {}),
+            ...(command.planStatus === "stale" && current.activePlan != null
+              ? { activePlanStale: true }
               : {}),
           };
           break;
@@ -561,6 +705,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "project.pdf-revision.publish":
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "PDF publication requires a database transaction.",
+      });
     case "project.knowledge.item.upsert": {
       if ((command.scope === "folder") !== (command.appliesToFolder != null)) {
         return yield* new OrchestrationCommandInvariantError({
@@ -574,6 +723,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
+      if (command.tags.includes("pdf-page-batch")) {
+        const attachment = command.research?.attachment;
+        if (!attachment) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "PDF page batches require their source attachment.",
+          });
+        }
+        const thread = yield* requireThread({ readModel, command, threadId: attachment.threadId });
+        if (thread.projectId !== command.projectId || thread.deletedAt !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "PDF page batch source does not exist in the active project.",
+          });
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "project",
@@ -595,6 +760,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           appliesToFolder: command.appliesToFolder?.replaceAll("\\", "/") ?? null,
           research: command.research ?? null,
           tags: command.tags,
+          ...(command.provenance ? { provenance: command.provenance } : {}),
+          ...(command.sourceItemId ? { sourceItemId: command.sourceItemId } : {}),
           originalChars: command.originalChars ?? null,
           storedChars: command.storedChars ?? null,
           updatedAt: command.createdAt,
@@ -602,6 +769,51 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "project.knowledge.bulk": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const revisions = yield* bulkRevisions(command, selectedKnowledge);
+      return yield* Effect.forEach(revisions, (payload) =>
+        withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: payload.updatedAt,
+          commandId: command.commandId,
+        }).pipe(
+          Effect.map((base) =>
+            command.operation.type === "archive"
+              ? {
+                  ...base,
+                  type: "project.knowledge-item-archived" as const,
+                  payload: {
+                    projectId: payload.projectId,
+                    itemId: payload.itemId,
+                    archivedAt: payload.updatedAt,
+                  },
+                }
+              : { ...base, type: "project.knowledge-item-upserted" as const, payload },
+          ),
+        ),
+      );
+    }
+    case "project.knowledge.search.save":
+    case "project.knowledge.search.remove": {
+      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const updatedAt = nextKnowledgeTimestamp(command.createdAt, command.expectedUpdatedAt);
+      const base = yield* withEventBase({
+        aggregateKind: "project",
+        aggregateId: command.projectId,
+        occurredAt: updatedAt,
+        commandId: command.commandId,
+      });
+      const { projectId, id } = command;
+      return command.type === "project.knowledge.search.save"
+        ? {
+            ...base,
+            type: "project.knowledge-search-saved",
+            payload: { projectId, id, name: command.name, filters: command.filters, updatedAt },
+          }
+        : { ...base, type: "project.knowledge-search-removed", payload: { projectId, id } };
+    }
     case "project.knowledge.item.archive": {
       yield* requireProject({
         readModel,
@@ -706,6 +918,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         projectId: command.projectId,
       });
       const runThreadId = command.workflow?.threadId ?? command.runContext?.threadId;
+      if (runThreadId && command.meeting?.threadId && runThreadId !== command.meeting.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "실행 채팅방과 회의 채팅방이 다릅니다.",
+        });
+      }
       if (runThreadId) {
         const targetThread = yield* requireThreadNotArchived({
           readModel,
@@ -719,10 +937,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           });
         }
       }
-      const meeting = command.executionProfile
+      const selectedMeetingThreadId = command.meeting?.threadId ?? runThreadId;
+      let meeting = command.executionProfile
         ? {
             ...profileMeeting(command.executionProfile),
-            ...(command.meeting?.threadId ? { threadId: command.meeting.threadId } : {}),
+            ...(selectedMeetingThreadId ? { threadId: selectedMeetingThreadId } : {}),
+            ...(command.meeting?.askFirst === undefined
+              ? {}
+              : { askFirst: command.meeting.askFirst }),
             ...(command.meeting?.runtimeMode === undefined
               ? {}
               : { runtimeMode: command.meeting.runtimeMode }),
@@ -738,6 +960,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "Task and execution profile exceed 20,000 characters.",
         });
       if (meeting !== undefined) {
+        if ((command.source ?? "user") === "user" && meeting.threadId === undefined)
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "현재 프로젝트의 대화를 선택한 뒤 통합 작업을 시작하세요.",
+          });
         yield* requireCoherentMeetingSetup({
           commandType: command.type,
           participantIds: meeting.participants.map((participant) => participant.id),
@@ -753,6 +980,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             return yield* new OrchestrationCommandInvariantError({
               commandType: command.type,
               detail: `Thread '${meeting.threadId}' belongs to another project; a meeting can only run in a conversation of its own project.`,
+            });
+          }
+          meeting = {
+            ...meeting,
+            runtimeMode: command.meeting?.runtimeMode ?? meetingThread.runtimeMode,
+            interactionMode: command.meeting?.interactionMode ?? meetingThread.interactionMode,
+          };
+          const now = yield* nowIso;
+          if (
+            meetingThread.session?.status === "starting" ||
+            meetingThread.session?.status === "running" ||
+            hasOpenBlockingRequest(meetingThread) ||
+            // WorkflowApi records this run's user request without starting a
+            // provider turn. It must not count as a competing queued turn.
+            threadHasQueuedTurnStart(meetingThread, now, `workflow-request:${command.runId}`)
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "현재 대화의 작업이나 질문이 끝난 뒤 통합 작업을 시작하세요.",
+              retryable: true,
             });
           }
         }
@@ -793,6 +1040,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 ? null
                 : {
                     ...meeting,
+                    // Extra seats may reuse only user-selected models and options.
+                    allowAdditionalWorkers: meeting.allowAdditionalWorkers === true,
                     phase: meeting.askFirst === true ? "clarifying" : "discussing",
                     threadId: meeting.threadId ?? null,
                     rounds: [],
@@ -862,6 +1111,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             meeting: meeting
               ? {
                   ...meeting,
+                  allowAdditionalWorkers: meeting.allowAdditionalWorkers === true,
                   phase: meeting.askFirst === true ? "clarifying" : "discussing",
                   threadId: null,
                   rounds: [],
@@ -1134,8 +1384,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.program.upsert": {
-      yield* requireProject({ readModel, command, projectId: command.projectId });
-      return {
+      const project = yield* requireProject({ readModel, command, projectId: command.projectId });
+      const programEvent: PlannedOrchestrationEvent = {
         ...(yield* withEventBase({
           aggregateKind: "project",
           aggregateId: command.projectId,
@@ -1169,13 +1419,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         },
       };
+      return [
+        programEvent,
+        yield* invalidateMonitoringForProgramChange(project, command.commandId, command.createdAt),
+      ];
     }
 
     case "project.program.remove":
     case "project.program.start":
     case "project.program.stop":
     case "project.program.restart": {
-      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const project = yield* requireProject({ readModel, command, projectId: command.projectId });
+      if (
+        command.type !== "project.program.remove" &&
+        command.monitoringGuard !== undefined &&
+        !monitoringGuardMatches(project, command.monitoringGuard)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Monitoring authorization or approved plan changed before dispatch.",
+        });
+      }
       const eventType =
         command.type === "project.program.remove"
           ? "project.program-removed"
@@ -1184,7 +1448,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : command.type === "project.program.stop"
               ? "project.program-stop-requested"
               : "project.program-restart-requested";
-      return {
+      const programEvent = {
         ...(yield* withEventBase({
           aggregateKind: "project",
           aggregateId: command.projectId,
@@ -1205,6 +1469,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 requestedAt: command.createdAt,
               },
       } as OrchestrationEvent;
+      return command.type === "project.program.remove"
+        ? [
+            programEvent,
+            yield* invalidateMonitoringForProgramChange(
+              project,
+              command.commandId,
+              command.createdAt,
+            ),
+          ]
+        : programEvent;
     }
 
     case "project.program.integrity.start":
@@ -1276,7 +1550,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.program.incident.repair.request": {
-      yield* requireProject({ readModel, command, projectId: command.projectId });
+      const project = yield* requireProject({ readModel, command, projectId: command.projectId });
+      if (
+        command.monitoringGuard !== undefined &&
+        !monitoringGuardMatches(project, command.monitoringGuard)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Monitoring authorization or approved plan changed before dispatch.",
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "project",
@@ -1478,7 +1761,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           type: "project.workspace-control-updated",
           payload: {
             projectId: monitoredProject.id,
-            workspaceControl: { ...control, monitoring: { ...control.monitoring, threadId: null } },
+            workspaceControl: {
+              ...control,
+              monitoring: { ...preserveActiveMonitoringPlan(control.monitoring), threadId: null },
+            },
             updatedAt: occurredAt,
           },
         },
@@ -1992,6 +2278,43 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.background-recovery.start": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (
+        thread.archivedAt !== null ||
+        thread.updatedAt !== command.expectedThreadUpdatedAt ||
+        thread.session?.status !== command.expectedSessionStatus ||
+        thread.session.updatedAt !== command.expectedSessionUpdatedAt ||
+        command.turn.threadId !== command.threadId ||
+        command.turn.commandId !== command.commandId ||
+        command.turn.inputOrigin !== "automation"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "대화 상태가 바뀌어 이전 감시의 자동 복구를 시작하지 않았습니다.",
+        });
+      }
+      return yield* decideCommandSequence({
+        readModel,
+        commands: [
+          {
+            type: "thread.session.stop",
+            commandId: command.commandId,
+            threadId: command.threadId,
+            createdAt: command.createdAt,
+          },
+          ...command.activities.map((activity) => ({
+            type: "thread.activity.append" as const,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            activity,
+            createdAt: command.createdAt,
+          })),
+          command.turn,
+        ],
+      });
+    }
+
     case "thread.turn.start": {
       const conditionsError = taskConditionsError(command);
       if (conditionsError !== null)
@@ -2061,6 +2384,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
+          ...(command.customSubordinateTeam !== undefined
+            ? { customSubordinateTeam: command.customSubordinateTeam }
+            : {}),
+          ...(command.initialModelTeams?.length
+            ? { initialModelTeams: command.initialModelTeams }
+            : {}),
+          ...(command.initialResponseStyle
+            ? { initialResponseStyle: command.initialResponseStyle }
+            : {}),
+          ...(command.inputOrigin !== "automation" &&
+          command.desktopAssistantCharacter !== undefined
+            ? { desktopAssistantCharacter: command.desktopAssistantCharacter }
+            : {}),
           ...(command.usageContext !== undefined ? { usageContext: command.usageContext } : {}),
           threadId: command.threadId,
           messageId: command.message.messageId,
@@ -2070,9 +2406,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode:
             command.taskConditions?.mode === "inspect"
               ? "approval-required"
-              : targetThread.runtimeMode,
+              : (command.runtimeMode ?? targetThread.runtimeMode),
           interactionMode:
-            command.taskConditions?.mode === "inspect" ? "plan" : targetThread.interactionMode,
+            command.taskConditions?.mode === "inspect"
+              ? "plan"
+              : (command.interactionMode ?? targetThread.interactionMode),
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           createdAt: command.createdAt,
         },
@@ -2248,6 +2586,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.expectedCurrent !== undefined &&
+        (thread.updatedAt !== command.expectedCurrent.threadUpdatedAt ||
+          thread.session?.updatedAt !== command.expectedCurrent.sessionUpdatedAt ||
+          thread.session?.status !== command.expectedCurrent.status ||
+          thread.session?.activeTurnId !== command.expectedCurrent.activeTurnId)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "대화 세션이 변경되어 이전 상태를 복구하지 않았습니다. 다시 확인해 주세요.",
+        });
+      }
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -2260,6 +2610,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(command.turnRequest ? { turnRequest: command.turnRequest } : {}),
+          ...(command.preservePendingTurnStart === true ? { preservePendingTurnStart: true } : {}),
         },
       };
       // Only a session coming alive is activity worth waking a settled thread

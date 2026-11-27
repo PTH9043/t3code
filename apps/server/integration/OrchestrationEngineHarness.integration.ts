@@ -232,6 +232,8 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  readonly initializeGit?: boolean;
+  readonly serverSettings?: ServerSettingsService["Service"];
 }
 
 export const makeOrchestrationIntegrationHarness = (
@@ -263,7 +265,7 @@ export const makeOrchestrationIntegrationHarness = (
     );
     yield* fileSystem.makeDirectory(workspaceDir, { recursive: true });
     yield* fileSystem.makeDirectory(stateDir, { recursive: true });
-    yield* initializeGitWorkspace(workspaceDir);
+    if (options?.initializeGit !== false) yield* initializeGitWorkspace(workspaceDir);
 
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
@@ -318,7 +320,9 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
     );
-    const serverSettingsLayer = ServerSettingsService.layerTest();
+    const serverSettingsLayer = options?.serverSettings
+      ? Layer.succeed(ServerSettingsService, options.serverSettings)
+      : ServerSettingsService.layerTest();
     const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(serverSettingsLayer),
@@ -410,7 +414,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(providerRegistryLayer),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(serverSettingsLayer),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
       Layer.provideMerge(NodeServices.layer),
     );

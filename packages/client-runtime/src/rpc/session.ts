@@ -11,7 +11,7 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import { makeWsRpcProtocolClient, type WsRpcProtocolClient } from "./protocol.ts";
-import { DirectRpcConnection } from "./directConnection.ts";
+import { LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT } from "../connection/timing.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import type {
   ConnectionAttemptError,
@@ -105,16 +105,18 @@ export const make = Effect.gen(function* () {
         detail: "로컬 직접 연결을 사용할 수 없습니다.",
       });
     }
-    const constructor =
-      connection.transport === "desktop-direct" && Option.isSome(direct) && direct.value.bridge
-        ? () =>
-            new DirectRpcConnection(
-              direct.value.bridge!,
-              connection.directBackendId,
-            ) as unknown as WebSocket
-        : webSocketConstructor;
+    let constructor = webSocketConstructor;
+    if (connection.transport === "desktop-direct" && Option.isSome(direct) && direct.value.bridge) {
+      const bridge = direct.value.bridge;
+      const { DirectRpcConnection } = yield* Effect.promise(() => import("./directConnection.ts"));
+      constructor = () =>
+        new DirectRpcConnection(bridge, connection.directBackendId) as unknown as WebSocket;
+    }
     const socketLayer = Socket.layerWebSocket(connection.socketUrl, {
-      openTimeout: SOCKET_OPEN_TIMEOUT,
+      openTimeout:
+        connection.transport === "desktop-direct"
+          ? LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT
+          : SOCKET_OPEN_TIMEOUT,
     }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, constructor)));
     const protocolLayer = Layer.effect(
       RpcClient.Protocol,

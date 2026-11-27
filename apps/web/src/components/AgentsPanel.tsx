@@ -22,8 +22,8 @@ import {
   formatSubagentTokenCount,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
@@ -136,7 +136,7 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
   );
 }
 
-/** Flat, non-interactive agent status line. No unfold. */
+/** Keep live updates in a fixed-height row. Recorded handoff details open on request. */
 function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
@@ -153,38 +153,58 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   ].filter((value): value is string => value !== null);
 
   return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot status={agent.status} />
-      </span>
-      <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
-        {role ? (
-          <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
-            {role}
-          </span>
-        ) : null}
-      </span>
-      <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
-        <span className="inline-flex items-center gap-1">
-          <AgentElapsed agent={agent} />
-          {agent.status === "completed" ? (
-            <Check aria-hidden className="size-3 text-success" />
+    <div>
+      <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot status={agent.status} />
+        </span>
+        <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
+          <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
+          {role ? (
+            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+              {role}
+            </span>
           ) : null}
         </span>
-      </span>
-      <span
-        className={cn(
-          "col-start-2 col-end-4 row-start-2 block truncate text-xs",
-          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-        )}
-      >
-        {activity ?? visuals.label}
-      </span>
-      <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
-        {metadata.join(" · ")}
-      </span>
-      <span className="sr-only">{visuals.label}</span>
+        <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
+          <span className="inline-flex items-center gap-1">
+            <AgentElapsed agent={agent} />
+            {agent.status === "completed" ? (
+              <Check aria-hidden className="size-3 text-success" />
+            ) : null}
+          </span>
+        </span>
+        <span
+          className={cn(
+            "col-start-2 col-end-4 row-start-2 block truncate text-xs",
+            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+          )}
+        >
+          {activity ?? visuals.label}
+        </span>
+        <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
+          {metadata.join(" · ")}
+        </span>
+        <span className="sr-only">{visuals.label}</span>
+      </div>
+      {(agent.parentAgentId ||
+        agent.result ||
+        agent.error ||
+        agent.outputFile ||
+        agent.recentActivity.length > 0) && (
+        <details className="ml-5 break-words text-xs text-muted-foreground">
+          <summary>{agent.title} 활동 상세</summary>
+          {agent.parentAgentId && <p>상위 에이전트 · {agent.parentAgentId}</p>}
+          {agent.recentActivity.map((entry, index) => (
+            <p key={`${entry.at}:${index}`}>
+              {new Date(entry.at).toLocaleTimeString("ko-KR")} · {entry.summary}
+            </p>
+          ))}
+          {agent.result && <p className="whitespace-pre-wrap">결과 · {agent.result}</p>}
+          {agent.error && <p className="whitespace-pre-wrap">오류 · {agent.error}</p>}
+          {agent.outputFile && <p className="break-all">출력 파일 · {agent.outputFile}</p>}
+        </details>
+      )}
     </div>
   );
 }
@@ -520,30 +540,24 @@ function WorkflowSection({
 
 export function AgentsPanel({
   model,
+  children,
   environmentId = null,
   threadId = null,
 }: {
   model: AgentPanelModel;
+  children?: ReactNode;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
 }) {
-  if (!model.hasAgents) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
-        <Bot aria-hidden className="size-6 text-muted-foreground/60" />
-        <p className="text-sm font-medium">아직 에이전트가 없습니다</p>
-        <p className="max-w-56 text-xs text-muted-foreground">
-          이 대화에서 하위 에이전트나 워크플로를 실행하면 실시간 상태, 활동 및 토큰 사용량이 여기에
-          표시됩니다.
-        </p>
-      </div>
-    );
-  }
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-2 p-2">
+          {children}
+          <h3 className="px-1.5 text-xs font-medium">하위 에이전트</h3>
+          {!model.hasAgents && (
+            <p className="px-1.5 text-xs text-muted-foreground">기록된 하위 에이전트가 없습니다.</p>
+          )}
           {model.workflows.map((group) => (
             <WorkflowSection
               key={group.workflow.id}
@@ -564,18 +578,20 @@ export function AgentsPanel({
           ) : null}
         </div>
       </ScrollArea>
-      <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-[.7rem] text-muted-foreground">
-        <span className="flex items-center gap-2">
-          {model.runningCount + model.waitingCount > 0 ? (
-            <span className="text-info-foreground">
-              ● {model.runningCount + model.waitingCount}개 작업 중
-            </span>
-          ) : null}
-          {model.idleCount > 0 ? <span>{model.idleCount}개 대기</span> : null}
-          {model.settledCount > 0 ? <span>{model.settledCount}개 완료</span> : null}
-        </span>
-        <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} 토큰</span>
-      </footer>
+      {model.hasAgents && (
+        <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-[.7rem] text-muted-foreground">
+          <span className="flex items-center gap-2">
+            {model.runningCount + model.waitingCount > 0 ? (
+              <span className="text-info-foreground">
+                ● {model.runningCount + model.waitingCount}개 작업 중
+              </span>
+            ) : null}
+            {model.idleCount > 0 ? <span>{model.idleCount}개 대기</span> : null}
+            {model.settledCount > 0 ? <span>{model.settledCount}개 완료</span> : null}
+          </span>
+          <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} 토큰</span>
+        </footer>
+      )}
     </div>
   );
 }

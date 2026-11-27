@@ -37,6 +37,7 @@ export type RecordProjectionWorkspaceKnowledgeUsageInput =
 export interface ProjectionWorkspaceKnowledgeRepositoryShape {
   readonly upsert: (
     item: ProjectionWorkspaceKnowledgeItem,
+    bindings?: readonly import("../workspaceWikiLinks.ts").WikiBinding[],
   ) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly archive: (
     input: ArchiveProjectionWorkspaceKnowledgeInput,

@@ -1,8 +1,10 @@
 import { HandoffSettings } from "./HandoffSettings";
 import { GrokResearchPanel } from "./GrokResearchPanel";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ServerProvider, ThreadId } from "@t3tools/contracts";
 import {
   formatTokenCount,
+  providerQuotaSummary,
+  providerQuotaWindows,
   tokenUsageCountLabels,
   tokenUsageIssueLabel,
   tokenUsagePhaseLabel,
@@ -17,10 +19,45 @@ import { AppText as Text } from "../../components/AppText";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
 
+function ProviderQuotaSection(props: {
+  readonly title: string;
+  readonly provider: ServerProvider;
+}) {
+  const windows = providerQuotaWindows(props.provider.usage);
+  if (windows.length === 0) return null;
+  return (
+    <View className="gap-2 rounded-lg border border-border p-3">
+      <View className="flex-row items-center justify-between gap-2">
+        <Text className="font-t3-bold text-sm">{props.title}</Text>
+        <Text className="text-xs text-muted-foreground">5시간 · 주간</Text>
+      </View>
+      {windows.map((window) => (
+        <View key={window.id} className="gap-1">
+          <View className="flex-row items-center justify-between gap-2">
+            <Text className="text-xs font-medium">{window.label}</Text>
+            <Text className="text-xs text-muted-foreground">{window.percentText}</Text>
+          </View>
+          <View className="h-1.5 overflow-hidden rounded-full bg-subtle">
+            <View
+              className="h-full rounded-full bg-foreground"
+              style={{ width: `${window.usedPercent}%` }}
+            />
+          </View>
+          {window.resetText ? (
+            <Text className="text-[11px] text-muted-foreground">{window.resetText}</Text>
+          ) : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function TokenUsageButton(props: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   busy: boolean;
+  selectedProvider?: ServerProvider | null | undefined;
+  providers?: ReadonlyArray<ServerProvider> | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const [workId, setWorkId] = useState<string | undefined>();
@@ -43,19 +80,27 @@ export function TokenUsageButton(props: {
     }
   }, [props.busy, query.refresh]);
   const report = query.data;
+  const quotaSummary = providerQuotaSummary(props.selectedProvider?.usage);
+  const workSummary = query.error ? "사용량 조회 실패" : tokenUsageSummary(report);
+  const buttonLabel = quotaSummary ? `${quotaSummary} · ${workSummary}` : workSummary;
+  const otherProvidersWithQuota = (props.providers ?? []).filter(
+    (provider) =>
+      provider.instanceId !== props.selectedProvider?.instanceId &&
+      providerQuotaWindows(provider.usage).length > 0,
+  );
   return (
     <>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="작업 토큰 사용량 상세"
+        accessibilityLabel="작업 토큰 및 계정 한도 사용량 상세"
         className="self-end px-4 py-2"
         onPress={() => {
           setOpen(true);
           query.refresh();
         }}
       >
-        <Text className="text-xs text-muted-foreground">
-          {query.error ? "사용량 조회 실패" : tokenUsageSummary(report)}
+        <Text className="text-xs text-muted-foreground" numberOfLines={1}>
+          {buttonLabel}
         </Text>
       </Pressable>
       <Modal
@@ -66,7 +111,7 @@ export function TokenUsageButton(props: {
       >
         <SafeAreaView className="flex-1 bg-background">
           <View className="flex-row items-center justify-between border-b border-border px-5 py-3">
-            <Text className="font-t3-bold text-base">작업 토큰 사용량</Text>
+            <Text className="font-t3-bold text-base">작업 토큰 · 계정 한도</Text>
             <Pressable
               accessibilityRole="button"
               onPress={() => setOpen(false)}
@@ -76,6 +121,19 @@ export function TokenUsageButton(props: {
             </Pressable>
           </View>
           <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
+            {props.selectedProvider ? (
+              <ProviderQuotaSection
+                title={`${props.selectedProvider.displayName} 계정 한도`}
+                provider={props.selectedProvider}
+              />
+            ) : null}
+            {otherProvidersWithQuota.map((provider) => (
+              <ProviderQuotaSection
+                key={provider.instanceId}
+                title={`${provider.displayName} 계정 한도`}
+                provider={provider}
+              />
+            ))}
             <HandoffSettings {...props} />
             <GrokResearchPanel {...props} />
             <Pressable

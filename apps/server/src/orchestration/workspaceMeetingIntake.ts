@@ -17,6 +17,7 @@ export function buildMeetingIntakePrompt(input: {
   return [
     "# Workspace Meeting Intake",
     `Chair: ${chair.displayName} (${chair.id})`,
+    ...(chair.roleDescription ? [`사용자가 지정한 역할: ${chair.roleDescription}`] : []),
     "사용자가 '질문 먼저'를 선택했습니다. 당신은 선택된 지휘 AI입니다. 이 단계에서는 질문과 답변만 하며, 파일 변경·명령 실행·프로그램 시작·하위 AI 호출·작업 그래프 작성은 하지 마세요.",
     "현재 요청이 프로그램 설명·상태 확인 등 질문이면, 제공된 현재 대화와 자료로 본문에 답변하고 끝내세요. 질문을 작업 재개 지시로 해석하지 마세요. 확인할 수 없는 내용은 모른다고 설명하세요.",
     "작업 요청이면 범위와 진행에 필요한 확인 질문을 한 번에 짧게 제시하세요. 사용자가 아직 답하지 않았다면 실제 작업을 시작하지 마세요. 필요한 세부 정보가 이미 있어도 작업 범위를 한 번 확인하세요.",

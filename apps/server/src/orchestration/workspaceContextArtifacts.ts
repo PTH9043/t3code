@@ -47,10 +47,14 @@ export const saveWorkspaceContextArtifact = Effect.fn("saveWorkspaceContextArtif
   },
 );
 
+function formatArtifactPath(filePath: string): string {
+  return /[\r\n\t"]/.test(filePath) ? JSON.stringify(filePath) : filePath;
+}
+
 export function renderContextArtifact(source: WorkspaceContextArtifact): string {
   return [
-    `원문 파일: ${JSON.stringify(source.path)}; SHA-256: ${source.sha256}; ${source.chars}자.`,
-    "이 파일은 이 작업의 인계 근거다. 필요한 제목/식별자를 검색한 뒤 해당 문단·줄 범위만 읽어라. 원문을 읽을 수 없거나 현재 내용과 hash가 다르면 누락을 알리고, 결과를 추측하거나 검증을 통과한 것으로 처리하지 마라.",
+    `원문 파일: ${formatArtifactPath(source.path)}; SHA-256: ${source.sha256}; ${source.chars}자.`,
+    '이 파일은 이 작업의 인계 근거다. 필요한 제목/식별자를 검색한 뒤 해당 문단·줄 범위만 읽어라. 원문을 읽을 수 없거나 현재 내용과 hash가 다르면 누락을 알리고, 결과를 추측하거나 검증을 통과한 것으로 처리하지 마라. (Windows cmd.exe에서는 경로에 \\" 이스케이프를 쓰지 말고 그대로 전달하거나 node/python으로 확인하라.)',
   ].join("\n");
 }
 

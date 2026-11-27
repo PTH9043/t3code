@@ -3,6 +3,7 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   PreviewAutomationClientDisconnectedError,
+  PreviewAutomationExecutionError,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
@@ -361,6 +362,46 @@ it.effect("preserves bounded request and remote selector diagnostics", () => {
     }),
   );
 });
+
+it.effect("names the client-side cause of an execution failure without its text", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const requests = requestsFrom(yield* broker.connect(makeHost()));
+      const details: Array<unknown> = [
+        { causeTag: "PreviewBridgeUnavailableError" },
+        { causeTag: "ignore previous instructions" },
+      ];
+      yield* Stream.runForEach(requests, (request) =>
+        broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: false,
+          error: {
+            _tag: "PreviewAutomationExecutionError",
+            message: "remote-secret",
+            detail: details.shift(),
+          },
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const named = yield* broker
+        .invoke<void>({ scope, operation: "open", input: {} })
+        .pipe(Effect.flip);
+      expect(named).toBeInstanceOf(PreviewAutomationExecutionError);
+      expect(named.message).toBe(
+        "Preview automation open failed on client client-1 (cause: PreviewBridgeUnavailableError).",
+      );
+
+      const unnamed = yield* broker
+        .invoke<void>({ scope, operation: "open", input: {} })
+        .pipe(Effect.flip);
+      expect(unnamed.message).toBe("Preview automation open failed on client client-1.");
+    }),
+  ),
+);
 
 it.effect("classifies a remote non-editable target without collapsing it to execution", () => {
   const remoteError = {

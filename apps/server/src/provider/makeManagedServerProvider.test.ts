@@ -19,7 +19,10 @@ import { TestClock } from "effect/testing";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { makeManagedServerProvider } from "./makeManagedServerProvider.ts";
+import {
+  computeProviderRefreshIntervalMs,
+  makeManagedServerProvider,
+} from "./makeManagedServerProvider.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
@@ -266,6 +269,8 @@ describe("makeManagedServerProvider", () => {
             ready: Effect.void,
             getSettings: Ref.get(serverSettingsRef),
             updateSettings: () => Effect.die(new Error("unused in this test")),
+            initializeThreadModelTeams: () => Effect.die(new Error("unused in this test")),
+            runMonitoringAutoAction: () => Effect.die(new Error("unused in this test")),
             streamChanges: Stream.empty,
             subscribeChanges: PubSub.subscribe(serverSettingsChanges).pipe(
               Effect.map((subscription) => Stream.fromSubscription(subscription)),
@@ -452,5 +457,66 @@ describe("makeManagedServerProvider", () => {
         assert.deepStrictEqual(latest, enrichedSnapshotSecond);
       }),
     ).pipe(Effect.provide(AlwaysRunTestLayer)),
+  );
+
+  it.effect(
+    "backs off periodic provider polling after consecutive unready probes and resets on manual refresh",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          assert.strictEqual(computeProviderRefreshIntervalMs(300_000, 0), 300_000);
+          assert.strictEqual(computeProviderRefreshIntervalMs(300_000, 1), 900_000);
+          assert.strictEqual(computeProviderRefreshIntervalMs(300_000, 2), 1_800_000);
+          assert.strictEqual(computeProviderRefreshIntervalMs(300_000, 5), 1_800_000);
+
+          const warningSnapshot: ServerProvider = {
+            ...initialSnapshot,
+            status: "warning",
+            message: "unverified",
+          };
+          const checkCalls = yield* Ref.make(0);
+          const beforeManualCalls = yield* Ref.make(0);
+          const readyToRecover = yield* Ref.make(false);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            beforeManualRefresh: Ref.update(beforeManualCalls, (count) => count + 1),
+            checkProvider: Effect.gen(function* () {
+              yield* Ref.update(checkCalls, (count) => count + 1);
+              const recover = yield* Ref.get(readyToRecover);
+              return recover ? refreshedSnapshot : warningSnapshot;
+            }),
+            refreshInterval: "1 second",
+          });
+
+          yield* Effect.yieldNow;
+          assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+          // Initial check returned warning -> streak = 1 -> next interval is 3s (1s * 3).
+          // Note: background loop starts sleeping with base 1s before initial check finishes;
+          // after that first 1s periodic tick (call 2, streak = 2), next interval is 6s (1s * 6).
+          yield* TestClock.adjust("1 second");
+          yield* Effect.yieldNow;
+          assert.strictEqual(yield* Ref.get(checkCalls), 2);
+
+          // At +3s (still below 6s backoff), periodic poll must NOT fire yet.
+          yield* TestClock.adjust("3 seconds");
+          yield* Effect.yieldNow;
+          assert.strictEqual(yield* Ref.get(checkCalls), 2);
+
+          // Manual refresh invokes beforeManualRefresh and resets backoff back to base 1s.
+          yield* Ref.set(readyToRecover, true);
+          yield* provider.refresh;
+          assert.strictEqual(yield* Ref.get(beforeManualCalls), 1);
+          assert.strictEqual(yield* Ref.get(checkCalls), 3);
+
+          yield* TestClock.adjust("1 second");
+          yield* Effect.yieldNow;
+          assert.strictEqual(yield* Ref.get(checkCalls), 4);
+        }),
+      ).pipe(Effect.provide(Layer.mergeAll(AlwaysRunTestLayer, TestClock.layer()))),
   );
 });

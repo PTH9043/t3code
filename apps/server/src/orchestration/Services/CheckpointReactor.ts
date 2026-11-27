@@ -8,7 +8,11 @@
  */
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import type * as PlatformError from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
+import type { MessageId, ThreadId, TurnId } from "@t3tools/contracts";
+import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
+import type { OrchestrationDispatchError } from "../Errors.ts";
 
 /**
  * CheckpointReactorShape - Service API for checkpoint reactor lifecycle.
@@ -30,6 +34,16 @@ export interface CheckpointReactorShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  readonly captureDetachedTurn: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly assistantMessageId: MessageId;
+    readonly completedAt: string;
+  }) => Effect.Effect<
+    void,
+    CheckpointStoreError | OrchestrationDispatchError | PlatformError.PlatformError
+  >;
 }
 
 /**

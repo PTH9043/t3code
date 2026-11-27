@@ -64,6 +64,12 @@ const ReadFromSequenceRequestSchema = Schema.Struct({
   sequenceExclusive: NonNegativeInt,
   limit: Schema.Number,
 });
+const ReadTypesRequestSchema = Schema.Struct({
+  sequenceExclusive: NonNegativeInt,
+  sequenceInclusive: NonNegativeInt,
+  types: Schema.Array(OrchestrationEventType),
+  limit: Schema.Number,
+});
 const DEFAULT_READ_FROM_SEQUENCE_LIMIT = 1_000;
 const READ_PAGE_SIZE = 500;
 
@@ -181,6 +187,22 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
+  const readEventRowsByType = SqlSchema.findAll({
+    Request: ReadTypesRequestSchema,
+    Result: OrchestrationEventPersistedRowSchema,
+    execute: (request) => sql`
+      SELECT sequence, event_id AS "eventId", event_type AS "type",
+        aggregate_kind AS "aggregateKind", stream_id AS "aggregateId",
+        occurred_at AS "occurredAt", command_id AS "commandId",
+        causation_event_id AS "causationEventId", correlation_id AS "correlationId",
+        payload_json AS "payload", metadata_json AS "metadata"
+      FROM orchestration_events
+      WHERE sequence > ${request.sequenceExclusive} AND sequence <= ${request.sequenceInclusive}
+        AND event_type IN ${sql.in([...request.types])}
+      ORDER BY sequence ASC LIMIT ${request.limit}
+    `,
+  });
+
   const append: OrchestrationEventStoreShape["append"] = (event) =>
     appendEventRow({
       eventId: event.eventId,
@@ -260,9 +282,55 @@ const makeEventStore = Effect.gen(function* () {
     return readPage(sequenceExclusive, normalizedLimit);
   };
 
+  const readTypesThroughSequence: NonNullable<
+    OrchestrationEventStoreShape["readTypesThroughSequence"]
+  > = (sequenceExclusive, sequenceInclusive, types) => {
+    if (types.length === 0 || sequenceInclusive <= sequenceExclusive) return Stream.empty;
+    const readPage = (
+      cursor: number,
+    ): Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError> =>
+      Stream.fromEffect(
+        readEventRowsByType({
+          sequenceExclusive: cursor,
+          sequenceInclusive,
+          types,
+          limit: READ_PAGE_SIZE,
+        }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "OrchestrationEventStore.readTypesThroughSequence:query",
+              "OrchestrationEventStore.readTypesThroughSequence:decodeRows",
+            ),
+          ),
+          Effect.flatMap((rows) =>
+            Effect.forEach(rows, (row) =>
+              decodeEvent(row).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError(
+                    "OrchestrationEventStore.readTypesThroughSequence:rowToEvent",
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ).pipe(
+        Stream.flatMap((events) =>
+          events.length === 0
+            ? Stream.empty
+            : Stream.concat(
+                Stream.fromIterable(events),
+                readPage(events[events.length - 1]!.sequence),
+              ),
+        ),
+      );
+    return readPage(sequenceExclusive);
+  };
+
   return {
     append,
     readFromSequence,
+    readTypesThroughSequence,
     readAll: () => readFromSequence(0, Number.MAX_SAFE_INTEGER),
   } satisfies OrchestrationEventStoreShape;
 });

@@ -10,6 +10,10 @@
 - 모드가 이미 명확하면 다시 묻지 않는다. "전체"를 부하 절감 또는 편의 때문에 다른 모드로 축소하지 않는다.
 - `--home-dir`가 필요하면 기존 운영 홈 `E:/NewAutoUsage`를 명시한다. 포트는 `[dev-runner]` 로그를 기준으로 확인한다.
 
+## 운영 중 웹 화면 변경
+
+운영 Vite는 파일을 쓰는 즉시 열린 창의 모듈을 다시 읽습니다. 새 화면은 분리 작업 트리에서 먼저 빌드하고, 운영에 전송할 때는 그 화면이 가져오는 모듈을 먼저 설치합니다. 화면 파일, 라우트 등록, 기존 제어센터에서 화면으로 연결하는 변경은 의존 모듈을 모두 확인한 뒤 반영합니다. 적용 후에는 운영 주소의 경로 목록과 제어센터 모듈 응답을 확인하고 별도 숨김 브라우저에서 화면 렌더링과 오류 표시 여부를 점검합니다.
+
 ## 실행 순서
 
 이 사용자는 PowerShell 실행을 금지했다. 이 PC에서 확인된 Python 실행기 `.t3/honey-upgrade-20261011/runtime.py`를 CMD에서 호출한다. 웹·백엔드는 `start --production --mode dev`, 데스크톱 포함은 `start --production --mode dev:desktop`, 현재 상태 확인은 `status --production`을 사용한다. 모드 생략 시 기록된 기존 모드를 유지하며 최초 기본값은 데스크톱 포함이다. 실행기는 정상 `scripts/dev-runner.ts`를 숨김으로 시작하고 `.t3/runtime-launch.json`에 PID·생성 시각·명령·로그를 기록한다. 이미 실행 중인 같은 프로그램을 중복 시작하지 않는다.
@@ -30,11 +34,16 @@
 4. 아래 표준 진입점으로 기존 실행기를 시작한다. 실행기는 숨김 프로세스, PID·생성 시각과 두 로그 파일을 기록한다. `status`와 준비 완료 로그로 실제 기동을 검사한다. 모드는 1단계에서 확인한 요청 범위를 사용한다.
 
 ```cmd
+python .t3\honey-upgrade-20261011\runtime.py active-work --production
 python .t3\honey-upgrade-20261011\runtime.py start --production --mode dev
-rem 데스크톱 포함 요청은 기존 실행의 신원 확인·종료 후:
-python .t3\honey-upgrade-20261011\runtime.py start --production --mode dev:desktop
+rem 데스크톱 포함 요청은 활성 작업 0건 확인·대기 후 1회만 재시작:
+python .t3\honey-upgrade-20261011\runtime.py start --production --mode dev:desktop --wait-idle 60
 python .t3\honey-upgrade-20261011\runtime.py status --production
 ```
+
+> **활성 작업 중 재시작 보호 (2026-11-22 추가 — 이중 검증 · Fail-Closed)**: `runtime.py active-work --production`과 `runtime.py start --production`은 `E:\NewAutoUsage\userdata\active-work.json`(실행 중 서버 PID 확인 포함)과 읽기 전용 `state.sqlite?mode=ro`(`workspace_delegations`, `projection_workspace_collaboration_runs`)를 함께 교차 확인합니다. 진행 중인 대화 턴·하위 위임·오케스트라가 1건이라도 있거나, 상태 파일·DB를 판독할 수 없는 경우(Fail-Closed) 종료 코드 `2`(`restartBlocked: true`)로 재시작을 차단합니다. `--exclude-thread <thread_id>`로 호출자 방을 제외할 수 있고, `--wait-idle <초>`(또는 `--wait-drain <초>`)로 활성 작업이 0건이 될 때까지 대기한 뒤 재시작할 수 있습니다. 사용자가 중단을 명시적으로 승인한 경우에만 `--force`를 사용하며, 이때 중단된 작업 목록이 로그에 출력됩니다. 개발·실험 변경은 항상 테스트·빌드·분리 worktree에서 먼저 검증하고, 최종 반영 시에만 운영을 1회 재시작합니다.
+>
+> **운영 교체 전 의무 부팅 스모크 게이트 (`test:boot-smoke`, 2026-11-22 추가)**: `desktop` 정적 번들 모드로 `runtime.py start --production`을 실행하면, 기존 운영 프로세스를 종료하기 전에 `scripts/boot-smoke.mjs`(`vp run test:boot-smoke`)가 임시 `--base-dir`와 랜덤 루프백 포트에서 `apps/server/dist/bin.mjs serve`를 실제로 1회 기동해 `/.well-known/t3/environment`·`/` HTTP 200과 `Service not found` 0건을 사전 확인합니다. 스모크 검증이 실패하면 종료 코드 `3`(`reason: "boot_smoke_failed"`)으로 기존 운영 프로세스를 건드리지 않고 즉시 차단합니다(비상 복구 시에만 `--skip-boot-smoke` 사용).
 
 5. 로그에서 실제 포트와 준비 완료를 확인하고 웹·백엔드 HTTP 응답을 검사한다. `dev:desktop`이면 데스크톱 메인 프로세스·창 준비 로그도 확인한다. 웹 접속 안내는 현재 실행에서 발급된 `pairingUrl`을 사용한다.
 6. 실패하면 실행 전 도구 거부인지, 셸/경로 문제인지, 앱 시작 오류인지 구분한다. 도구 거부의 구체적 사유가 없으면 "원인 미확인"으로 기록한다. 같은 실패를 반복 설명하며 작업을 방치하지 않는다.
@@ -71,3 +80,17 @@ python .t3\honey-upgrade-20261011\runtime.py status --production
 ## 화면 표시 없이 개발 빌드 반영
 
 워크스페이스의 `.t3/desktop-background.flag`는 비활성 표시를 명시하지 않은 개발 실행을 숨긴다. `T3CODE_DESKTOP_START_INACTIVE=true`인 일반 운영 실행은 남은 표시 파일보다 우선하여 `showInactive()`로 창을 표시한다. 분리 테스트의 명시적인 `T3CODE_DESKTOP_START_HIDDEN=true`는 계속 우선하므로 테스트 창은 표시되지 않는다. 이 표시 파일을 운영 데이터 홈에 쓰지 않는다. 운영 교체 후 창 표시는 항상 수행하되 포커스 변경·입력 주입·최상위 고정은 하지 않는다.
+
+## 재시작해도 업그레이드 방 작업이 이어지는 방식
+
+업그레이드 방의 작업 프로세스는 백엔드와 운영 재시작보다 오래 살아야 한다. 그런데 `vp run`은 자신이 실행한 작업을 Windows 작업 개체(Job Object)에 넣고, `vp`가 끝나면 그 안의 프로세스를 모두 종료한다. `detached`로 띄워도, 작업 개체 이탈 플래그를 줘도 벗어나지 못한다. 2026-11-19 21:27과 2026-11-20 11:52에 운영 재시작이 진행 중이던 작업을 끊은 원인이다.
+
+그래서 Windows에서는 작업 프로세스를 WMI(`Win32_Process.Create`)로 만든다. WMI 서비스가 만들어 주므로 어떤 작업 개체에도 속하지 않는다.
+
+- 실행: `%SystemRoot%\System32\cscript.exe`로 서버와 함께 배포되는 고정 스크립트 `watchdog-wmi-launch.vbs`를 실행한다. 명령줄·작업 폴더·시작 환경 변수는 스크립트 프로세스의 환경 변수로만 넘기고, 창은 항상 숨긴다(`ShowWindow = 0`). `cmd.exe`를 거치지 않으므로 경로의 공백·`&`·`%`·괄호·한글이 그대로 전달된다.
+- 시작 환경: 새 프로세스는 `SystemRoot`·`TEMP` 같은 기본 변수와 `NODE_OPTIONS`·`NODE_EXTRA_CA_CERTS`, Electron이면 `ELECTRON_RUN_AS_NODE=1`만 가지고 시작한다. 비밀값은 넣지 않는다.
+- 전달: 백엔드가 일회용 이름의 파이프(`\\.\pipe\t3-watchdog-…`)를 열고 연결을 하나만 받는다. 작업 프로세스가 일회용 토큰을 내놓기 전에는 아무것도 보내지 않는다. 토큰이 맞으면 실행 내용(자격 증명 포함)과 백엔드의 환경 변수 전체를 보내고, 작업 프로세스는 그 환경을 적용한 뒤에야 본체 모듈을 불러온다. 파이프 이름과 토큰은 작업 프로세스의 인자로 전달되어 같은 사용자의 다른 프로세스가 볼 수 있지만, 한 번 쓰면 끝나고 몇 초 안에 무효가 된다.
+- 대체 규칙: 실행 내용을 한 바이트도 보내기 전에 실패한 경우(스크립트 실행 실패, 프로세스 생성 거부, 만든 프로세스가 연결 없이 종료, 3초 안에 연결 없음)에만 파이프를 닫고 기존 방식(백엔드의 자식 프로세스)으로 한 번 시작한다. 이 경우 작업은 예전처럼 `vp` 종료와 함께 끝난다. 실행 내용을 보낸 뒤 확인 응답이 없으면 다시 시작하지 않고 "확인 불가"로 남긴다. 같은 작업을 두 번 실행하지 않기 위해서다.
+- 확인: 새 방식으로 시작한 작업은 `logs/watchdog-worker.log`에 `started outside the backend process tree`로 기록되고, 부모 프로세스가 `WmiPrvSE.exe`다.
+
+작업 프로세스 번들(`dist/watchdog-worker.mjs`)은 운영을 시작할 때 한 번만 빌드된다. 실행 중 감시 빌드는 `dist/bin.mjs`만 다시 만든다. 작업 프로세스 쪽 코드를 고친 뒤에는 운영을 정식으로 다시 시작해야 반영된다.

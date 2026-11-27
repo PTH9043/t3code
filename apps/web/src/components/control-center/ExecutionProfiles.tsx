@@ -6,6 +6,7 @@ import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   configFromExecutionProfile,
+  meetingConversationKeyForFolder,
   meetingSetupFromConfig,
   useMeetingComposerConfigForFolder,
   useMeetingComposerStore,
@@ -90,7 +91,7 @@ export function ExecutionProfiles(props: { environmentId: EnvironmentId; folderK
     if (decoded._tag === "None") {
       toastManager.add({
         type: "warning",
-        title: "이름과 AI 2–8개를 설정하세요.",
+        title: "이름과 감독 AI를 설정하세요.",
         description: "지침은 4,000자, 검증 명령은 줄마다 500자·최대 8개입니다.",
       });
       return;
@@ -124,10 +125,15 @@ export function ExecutionProfiles(props: { environmentId: EnvironmentId; folderK
   const apply = () => {
     const profile = profiles[selectedId];
     if (!profile) return;
+    const target = meetingConversationKeyForFolder(props.folderKey);
     useMeetingComposerStore
       .getState()
-      .updateConfig(props.folderKey, (current) => configFromExecutionProfile(current, profile));
-    notifySuccess("현재 폴더의 협업 설정에 적용했습니다.");
+      .updateConfig(target, (current) => configFromExecutionProfile(current, profile));
+    notifySuccess(
+      target === props.folderKey
+        ? "대화가 없어 폴더의 기본 협업 설정에 저장했습니다."
+        : "이 폴더에서 마지막으로 사용한 대화의 협업 설정에 적용했습니다.",
+    );
   };
   return (
     <div className="grid gap-3 rounded-xl border border-border p-3">

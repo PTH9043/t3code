@@ -19,10 +19,47 @@ import {
   errorTag,
   makeLocalFileTracer,
   makeTraceSink,
+  resolveLoopbackOnlyOtlpUrl,
   type TraceRecord,
   type TraceSinkFlushStats,
   truncateTraceAttributes,
 } from "./observability.ts";
+
+describe("resolveLoopbackOnlyOtlpUrl", () => {
+  it("blocks external hosts and honors T3CODE_OTEL_SDK_DISABLED / OTEL_SDK_DISABLED", () => {
+    assert.equal(resolveLoopbackOnlyOtlpUrl("https://ingest.t3.codes/v1/traces", {}), undefined);
+    assert.equal(resolveLoopbackOnlyOtlpUrl("https://api.axiom.co/v1/traces", {}), undefined);
+    assert.equal(resolveLoopbackOnlyOtlpUrl("http://192.168.1.50:4318/v1/traces", {}), undefined);
+    assert.equal(resolveLoopbackOnlyOtlpUrl("ftp://127.0.0.1:4318/v1/traces", {}), undefined);
+    assert.equal(resolveLoopbackOnlyOtlpUrl("not-a-url", {}), undefined);
+
+    assert.equal(
+      resolveLoopbackOnlyOtlpUrl("http://127.0.0.1:4318/v1/traces", {}),
+      "http://127.0.0.1:4318/v1/traces",
+    );
+    assert.equal(
+      resolveLoopbackOnlyOtlpUrl("http://localhost:4318/v1/metrics", {}),
+      "http://localhost:4318/v1/metrics",
+    );
+    assert.equal(
+      resolveLoopbackOnlyOtlpUrl("http://[::1]:4318/v1/traces", {}),
+      "http://[::1]:4318/v1/traces",
+    );
+
+    assert.equal(
+      resolveLoopbackOnlyOtlpUrl("http://127.0.0.1:4318/v1/traces", {
+        T3CODE_OTEL_SDK_DISABLED: "true",
+      }),
+      undefined,
+    );
+    assert.equal(
+      resolveLoopbackOnlyOtlpUrl("http://localhost:4318/v1/traces", {
+        OTEL_SDK_DISABLED: "1",
+      }),
+      undefined,
+    );
+  });
+});
 
 describe("errorTag", () => {
   it("reports structural tags without retaining arbitrary values", () => {

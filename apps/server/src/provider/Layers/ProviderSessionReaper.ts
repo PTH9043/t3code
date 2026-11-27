@@ -7,6 +7,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { ProviderExecutionContext } from "@t3tools/contracts";
 
+import { activeWorkRegistry } from "../../orchestration/ActiveWorkTracker.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
@@ -19,6 +20,8 @@ import { ProviderService } from "../Services/ProviderService.ts";
 const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
 const DEFAULT_ERROR_INACTIVITY_THRESHOLD_MS = 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
+/** Only reap orphaned execution sessions after sustained inactivity (4h+ and absent from activeWorkRegistry). */
+const ORPHAN_EXECUTION_MIN_IDLE_MS = 4 * 60 * 60 * 1000;
 const isExecutionContext = Schema.is(ProviderExecutionContext);
 
 export interface ProviderSessionReaperLiveOptions {
@@ -53,18 +56,6 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           continue;
         }
 
-        // Orchestra session keys have no conversation row. Their executor owns
-        // completion and cleanup, including long turns and unanswered questions.
-        const payload = binding.runtimePayload;
-        if (
-          payload !== null &&
-          typeof payload === "object" &&
-          "execution" in payload &&
-          isExecutionContext(payload.execution)
-        ) {
-          continue;
-        }
-
         const lastSeenMs = Date.parse(binding.lastSeenAt);
         if (Number.isNaN(lastSeenMs)) {
           yield* Effect.logWarning("provider.session.reaper.invalid-last-seen", {
@@ -76,6 +67,57 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         }
 
         const idleDurationMs = now - lastSeenMs;
+
+        // Orchestra/delegation execution sessions are owned by their executor while running,
+        // so skip active ones — but reap orphaned execution bindings left idle beyond
+        // `inactivityThresholdMs` (30m) when no matching active work exists, preventing
+        // unbounded session accumulation (770-session OOM guard).
+        const payload = binding.runtimePayload;
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          "execution" in payload &&
+          isExecutionContext(payload.execution)
+        ) {
+          const execId = payload.execution.executionId;
+          const activeItems = activeWorkRegistry.snapshot(now).items;
+          const isActiveExecution = activeItems.some(
+            (item) => item.id === execId || item.threadId === binding.threadId,
+          );
+          const orphanThresholdMs = Math.max(
+            inactivityThresholdMs * 6,
+            ORPHAN_EXECUTION_MIN_IDLE_MS,
+          );
+          if (isActiveExecution || idleDurationMs < orphanThresholdMs) {
+            continue;
+          }
+          const reapedOrphan = yield* providerService
+            .stopSession({ threadId: binding.threadId })
+            .pipe(
+              Effect.tap(() =>
+                Effect.logInfo("provider.session.reaped", {
+                  threadId: binding.threadId,
+                  provider: binding.provider,
+                  idleDurationMs,
+                  reason: "orphaned_execution_inactivity",
+                }),
+              ),
+              Effect.as(true),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider.session.reaper.stop-failed", {
+                  threadId: binding.threadId,
+                  provider: binding.provider,
+                  idleDurationMs,
+                  cause,
+                }).pipe(Effect.as(false)),
+              ),
+            );
+          if (reapedOrphan) {
+            reapedCount += 1;
+          }
+          continue;
+        }
+
         if (idleDurationMs < Math.min(inactivityThresholdMs, errorInactivityThresholdMs)) {
           continue;
         }

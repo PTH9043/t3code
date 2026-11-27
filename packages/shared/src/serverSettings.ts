@@ -1,6 +1,8 @@
 import {
+  findThreadModelTeam,
   isProviderDriverKind,
   isProviderAvailable,
+  toLegacyResponseStyle,
   type ModelSelection,
   type ProviderDriverKind,
   type ServerProvider,
@@ -130,6 +132,8 @@ export function applyServerSettingsPatch(
     automaticGitFetchInterval,
     providerHealthRefreshInterval,
     backgroundActivityProfile,
+    globalAssistant,
+    threadAssistantProfiles,
     backgroundActivity,
     providerInstancesToUpsert,
     executionProfilesToUpsert,
@@ -138,6 +142,12 @@ export function applyServerSettingsPatch(
     customMcpServerIdsToRemove,
     mcpProjectProfilesToUpsert,
     mcpProjectProfileRootsToRemove,
+    threadSettingsPresetSave,
+    threadSettingsPresetRemove,
+    threadModelTeamUpdate,
+    threadSubordinateTeamUpdate,
+    globalSubordinateTeam,
+    backgroundWatchThreadUpdate,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -175,7 +185,79 @@ export function applyServerSettingsPatch(
             },
           }
         : undefined;
-  const next = deepMerge(current, patchForMerge);
+  let next = deepMerge(current, patchForMerge);
+  if (globalAssistant !== undefined) {
+    // Unified global AI profile replaces per-room styles, profiles, and subordinate overrides.
+    next = {
+      ...next,
+      globalAssistant,
+      globalResponseStyle: toLegacyResponseStyle(globalAssistant),
+      threadResponseStyles: {},
+      threadSubordinateTeams: {},
+      threadAssistantProfiles: {},
+    };
+  }
+  if (threadAssistantProfiles !== undefined) {
+    // Older clients save a custom profile without a mode. Replace each submitted row in full.
+    next = {
+      ...next,
+      threadAssistantProfiles: { ...current.threadAssistantProfiles, ...threadAssistantProfiles },
+    };
+  }
+  if (globalSubordinateTeam !== undefined) next = { ...next, globalSubordinateTeam };
+  if (threadSubordinateTeamUpdate) {
+    const { threadId, members } = threadSubordinateTeamUpdate;
+    next = {
+      ...next,
+      threadSubordinateTeams: { ...next.threadSubordinateTeams, [threadId]: members },
+    };
+  }
+  if (threadSettingsPresetSave || threadSettingsPresetRemove) {
+    const presets = current.threadSettingsPresets.filter(
+      (preset) =>
+        preset.id !== threadSettingsPresetRemove && preset.id !== threadSettingsPresetSave?.id,
+    );
+    if (threadSettingsPresetSave) presets.push(threadSettingsPresetSave);
+    next = { ...next, threadSettingsPresets: presets };
+  }
+  if (backgroundWatchThreadUpdate) {
+    const { threadId, enabled } = backgroundWatchThreadUpdate;
+    const ids = current.backgroundWatchThreadIds;
+    if (ids.includes(threadId) !== enabled) {
+      next = {
+        ...next,
+        backgroundWatchThreadIds: enabled
+          ? [...ids, threadId]
+          : ids.filter((id) => id !== threadId),
+      };
+    }
+  }
+  if (threadModelTeamUpdate) {
+    const { members, ...scope } = threadModelTeamUpdate;
+    const existing = findThreadModelTeam(current.threadModelTeams, scope);
+    const teams = (current.threadModelTeams ?? []).filter((team) => team !== existing);
+    if (members !== null) teams.push({ ...scope, members });
+    const inherited = current.threadSettingsInheritedTeamScopes.filter(
+      (row) => !findThreadModelTeam([row], scope),
+    );
+    if (members === null) inherited.push(scope);
+    next = { ...next, threadModelTeams: teams, threadSettingsInheritedTeamScopes: inherited };
+    // A reset removes the override. Remember that choice until this thread's first seed.
+    const initialization = current.threadModelTeamInitialization;
+    if (
+      members === null &&
+      !initialization?.initializedThreads.includes(scope.threadId) &&
+      !findThreadModelTeam(initialization?.resetScopes, scope)
+    ) {
+      next = {
+        ...next,
+        threadModelTeamInitialization: {
+          initializedThreads: initialization?.initializedThreads ?? [],
+          resetScopes: [...(initialization?.resetScopes ?? []), scope],
+        },
+      };
+    }
+  }
   const customMcpServers = { ...current.customMcpServers };
   for (const id of customMcpServerIdsToRemove ?? []) delete customMcpServers[id];
   for (const [id, server] of Object.entries(customMcpServersToUpsert ?? {}))

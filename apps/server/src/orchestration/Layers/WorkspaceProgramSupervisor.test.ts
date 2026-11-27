@@ -403,6 +403,7 @@ it.effect("starts and stops only the PTY process created for the requested Works
       expect(runningCommand.run.pid).toBe(4321);
       expect(spawnInput?.shell.toLowerCase()).toMatch(/cmd\.exe$/);
       expect(spawnInput).toMatchObject({
+        useConptyDll: true,
         args: ["/d", "/s", "/c", "npm run dev"],
         cwd: "D:\\workspace-supervisor\\apps\\web",
       });

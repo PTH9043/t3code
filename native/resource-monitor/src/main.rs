@@ -318,10 +318,125 @@ impl HistoryRecorder {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CachedProcessMetadata {
+    name: String,
+    command: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WinProcessRow {
+    pid: u32,
+    ppid: u32,
+    start_time_ms: u64,
+    name: String,
+    cpu_time_ms: u64,
+    resident_bytes: u64,
+    virtual_bytes: u64,
+    io_read_bytes: u64,
+    io_write_bytes: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_filetime_to_unix_ms(filetime_100ns: i64) -> u64 {
+    if filetime_100ns <= 0 {
+        return 0;
+    }
+    const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+    let secs = (filetime_100ns as u64) / 10_000_000;
+    secs.saturating_sub(WINDOWS_TO_UNIX_EPOCH_SECS)
+        .saturating_mul(1_000)
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_process_table(buffer: &mut Vec<u8>) -> Option<Vec<WinProcessRow>> {
+    use ntapi::ntexapi::{NtQuerySystemInformation, SYSTEM_PROCESS_INFORMATION, SystemProcessInformation};
+    use winapi::shared::ntstatus::STATUS_INFO_LENGTH_MISMATCH;
+
+    if buffer.len() < 512 * 1024 {
+        buffer.resize(512 * 1024, 0);
+    }
+
+    let mut return_length: u32 = 0;
+    loop {
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SystemProcessInformation,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut return_length,
+            )
+        };
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            let needed = (return_length as usize).max(buffer.len().saturating_mul(2));
+            let target = needed.saturating_add(128 * 1024);
+            if target > 64 * 1024 * 1024 {
+                return None;
+            }
+            buffer.resize(target, 0);
+            continue;
+        }
+        if status < 0 {
+            return None;
+        }
+        break;
+    }
+
+    let mut rows = Vec::with_capacity(512);
+    let mut offset = 0usize;
+    let entry_size = std::mem::size_of::<SYSTEM_PROCESS_INFORMATION>();
+    while offset.saturating_add(entry_size) <= buffer.len() {
+        let info = unsafe { &*(buffer.as_ptr().add(offset) as *const SYSTEM_PROCESS_INFORMATION) };
+        let pid = info.UniqueProcessId as usize as u32;
+        let ppid = info.InheritedFromUniqueProcessId as usize as u32;
+        let create_time = unsafe { *info.CreateTime.QuadPart() };
+        let user_time = unsafe { *info.UserTime.QuadPart() };
+        let kernel_time = unsafe { *info.KernelTime.QuadPart() };
+        let read_bytes = unsafe { *info.ReadTransferCount.QuadPart() };
+        let write_bytes = unsafe { *info.WriteTransferCount.QuadPart() };
+
+        let name = if !info.ImageName.Buffer.is_null() && info.ImageName.Length > 0 {
+            let len_u16 = (info.ImageName.Length as usize) / 2;
+            let slice = unsafe { std::slice::from_raw_parts(info.ImageName.Buffer, len_u16) };
+            String::from_utf16_lossy(slice)
+        } else if pid == 0 {
+            "System Idle Process".to_owned()
+        } else {
+            String::new()
+        };
+
+        let cpu_100ns = (user_time.max(0) as u64).saturating_add(kernel_time.max(0) as u64);
+        rows.push(WinProcessRow {
+            pid,
+            ppid,
+            start_time_ms: windows_filetime_to_unix_ms(create_time),
+            name,
+            cpu_time_ms: cpu_100ns / 10_000,
+            resident_bytes: info.WorkingSetSize as u64,
+            virtual_bytes: info.PrivatePageCount as u64,
+            io_read_bytes: read_bytes.max(0) as u64,
+            io_write_bytes: write_bytes.max(0) as u64,
+        });
+
+        if info.NextEntryOffset == 0 {
+            break;
+        }
+        offset = offset.saturating_add(info.NextEntryOffset as usize);
+    }
+
+    Some(rows)
+}
+
 struct Collector {
     system: System,
     sequence: u64,
     cpu_baseline_refreshed_at: Option<Instant>,
+    metadata_cache: HashMap<(u32, u64), CachedProcessMetadata>,
+    #[cfg(target_os = "windows")]
+    win_query_buffer: Vec<u8>,
+    #[cfg(target_os = "windows")]
+    win_cpu_baseline: HashMap<(u32, u64), (u64, Instant)>,
 }
 
 impl Collector {
@@ -330,53 +445,89 @@ impl Collector {
             system: System::new(),
             sequence: 0,
             cpu_baseline_refreshed_at: None,
+            metadata_cache: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            win_query_buffer: Vec::new(),
+            #[cfg(target_os = "windows")]
+            win_cpu_baseline: HashMap::new(),
         }
     }
 
-    fn prime_cpu_usage(&mut self) {
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            process_refresh_kind(),
-        );
+    #[cfg(target_os = "windows")]
+    fn prime_cpu_usage(&mut self, config: &CollectorConfig) {
+        if let Some(win_rows) = query_windows_process_table(&mut self.win_query_buffer) {
+            let now = Instant::now();
+            let rows = win_rows
+                .iter()
+                .map(|row| (row.pid, row.ppid, row.start_time_ms))
+                .collect::<Vec<_>>();
+            let start_time_by_pid = rows
+                .iter()
+                .map(|(pid, _, start_time_ms)| (*pid, *start_time_ms))
+                .collect::<HashMap<_, _>>();
+            let mut roots = config
+                .external_processes
+                .iter()
+                .filter_map(|(pid, expected_start_time_ms)| {
+                    let actual_start_time_ms = *start_time_by_pid.get(pid)?;
+                    matches_external_identity(actual_start_time_ms, *expected_start_time_ms)
+                        .then_some(*pid)
+                })
+                .collect::<HashSet<_>>();
+            roots.insert(config.root_pid);
+            let tracked = select_tracked_pids(&rows, &roots);
+            self.win_cpu_baseline.clear();
+            for row in win_rows {
+                if tracked.contains(&row.pid) {
+                    self.win_cpu_baseline
+                        .insert((row.pid, row.start_time_ms), (row.cpu_time_ms, now));
+                }
+            }
+            self.cpu_baseline_refreshed_at = Some(now);
+            return;
+        }
+        let (_, _, tracked) = self.discover_tracked_processes(config);
+        self.refresh_tracked_details(&tracked, false);
         self.cpu_baseline_refreshed_at = Some(Instant::now());
     }
 
-    fn sample(&mut self, config: &CollectorConfig, request_id: Option<String>) -> SnapshotEvent {
-        if let Some(delay) =
-            remaining_cpu_measurement_delay(self.cpu_baseline_refreshed_at.take(), Instant::now())
-        {
-            thread::sleep(delay);
-        }
-        let collection_started = Instant::now();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            process_refresh_kind(),
-        );
+    #[cfg(not(target_os = "windows"))]
+    fn prime_cpu_usage(&mut self, config: &CollectorConfig) {
+        let (_, _, tracked) = self.discover_tracked_processes(config);
+        self.refresh_tracked_details(&tracked, false);
         self.cpu_baseline_refreshed_at = Some(Instant::now());
+    }
 
-        let rows = self
-            .system
-            .processes()
+    #[cfg(target_os = "windows")]
+    fn sample_windows_fast(
+        &mut self,
+        config: &CollectorConfig,
+        request_id: Option<String>,
+        collection_started: Instant,
+    ) -> Option<SnapshotEvent> {
+        let win_rows = query_windows_process_table(&mut self.win_query_buffer)?;
+        let sampled_instant = Instant::now();
+        let now_unix_ms = unix_time_ms();
+        let scanned_process_count = win_rows.len();
+
+        let rows = win_rows
             .iter()
-            .map(|(pid, process)| {
-                let pid = pid.as_u32();
-                let ppid = process.parent().map(Pid::as_u32).unwrap_or(0);
-                (pid, ppid, process.start_time().saturating_mul(1_000))
-            })
+            .map(|row| (row.pid, row.ppid, row.start_time_ms))
             .collect::<Vec<_>>();
+        let by_pid = win_rows
+            .into_iter()
+            .map(|row| (row.pid, row))
+            .collect::<HashMap<_, _>>();
+
         let external_processes = config
             .external_processes
             .iter()
             .filter_map(|(pid, expected_start_time_ms)| {
-                let (_, _, actual_start_time_ms) = rows
-                    .iter()
-                    .find(|(candidate_pid, _, _)| candidate_pid == pid)?;
-                matches_external_identity(*actual_start_time_ms, *expected_start_time_ms).then_some(
+                let actual_start_time_ms = by_pid.get(pid)?.start_time_ms;
+                matches_external_identity(actual_start_time_ms, *expected_start_time_ms).then_some(
                     ExternalProcess {
                         pid: *pid,
-                        start_time_ms: Some(*actual_start_time_ms),
+                        start_time_ms: Some(actual_start_time_ms),
                     },
                 )
             })
@@ -388,32 +539,250 @@ impl Collector {
         roots.insert(config.root_pid);
         let tracked = select_tracked_pids(&rows, &roots);
         let tracked_process_count = tracked.len();
+
+        let active_identities = tracked
+            .iter()
+            .filter_map(|pid| by_pid.get(pid).map(|row| (*pid, row.start_time_ms)))
+            .collect::<HashSet<_>>();
+        prune_metadata_cache(&mut self.metadata_cache, &active_identities);
+        self.win_cpu_baseline
+            .retain(|identity, _| active_identities.contains(identity));
+
+        let pids_needing_cmd = active_identities
+            .iter()
+            .filter(|identity| !self.metadata_cache.contains_key(identity))
+            .map(|(pid, _)| Pid::from_u32(*pid))
+            .collect::<Vec<_>>();
+        if !pids_needing_cmd.is_empty() {
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids_needing_cmd),
+                false,
+                ProcessRefreshKind::nothing()
+                    .with_cmd(UpdateKind::Always)
+                    .without_tasks(),
+            );
+        }
+
         let mut processes = tracked
             .into_iter()
             .filter_map(|pid| {
+                let row = by_pid.get(&pid)?;
+                let identity = (pid, row.start_time_ms);
+                let metadata = self.metadata_cache.entry(identity).or_insert_with(|| {
+                    let name = truncate_utf8(row.name.clone(), MAX_PROCESS_NAME_BYTES);
+                    let sys_cmd = self
+                        .system
+                        .process(Pid::from_u32(pid))
+                        .map(|process| process.cmd())
+                        .unwrap_or(&[]);
+                    let command = if sys_cmd.is_empty() {
+                        name.clone()
+                    } else {
+                        truncate_utf8(
+                            sys_cmd
+                                .iter()
+                                .map(|part| part.to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                            MAX_PROCESS_COMMAND_BYTES,
+                        )
+                    };
+                    CachedProcessMetadata { name, command }
+                });
+
+                let cpu_percent = self
+                    .win_cpu_baseline
+                    .insert(identity, (row.cpu_time_ms, sampled_instant))
+                    .map(|(prev_cpu_ms, prev_instant)| {
+                        let elapsed_ms = sampled_instant
+                            .saturating_duration_since(prev_instant)
+                            .as_secs_f64()
+                            * 1_000.0;
+                        if elapsed_ms <= 0.0 || row.cpu_time_ms < prev_cpu_ms {
+                            0.0
+                        } else {
+                            (((row.cpu_time_ms - prev_cpu_ms) as f64 / elapsed_ms) * 100.0) as f32
+                        }
+                    })
+                    .unwrap_or(0.0);
+
+                Some(ProcessSample {
+                    pid,
+                    ppid: row.ppid,
+                    start_time_ms: row.start_time_ms,
+                    run_time_ms: now_unix_ms.saturating_sub(row.start_time_ms),
+                    name: metadata.name.clone(),
+                    command: metadata.command.clone(),
+                    status: "Run".to_owned(),
+                    cpu_percent,
+                    cpu_time_ms: row.cpu_time_ms,
+                    resident_bytes: row.resident_bytes,
+                    virtual_bytes: row.virtual_bytes,
+                    io_read_bytes: row.io_read_bytes,
+                    io_write_bytes: row.io_write_bytes,
+                    io_semantics: io_semantics(),
+                })
+            })
+            .collect::<Vec<_>>();
+        processes.sort_by_key(|process| process.pid);
+        self.sequence = self.sequence.saturating_add(1);
+        self.cpu_baseline_refreshed_at = Some(sampled_instant);
+
+        Some(SnapshotEvent {
+            version: PROTOCOL_VERSION,
+            event_type: "snapshot",
+            sequence: self.sequence,
+            sampled_at_unix_ms: now_unix_ms,
+            collection_duration_micros: collection_started.elapsed().as_micros() as u64,
+            scanned_process_count,
+            retained_process_count: processes.len(),
+            inaccessible_process_count: inaccessible_process_count(
+                tracked_process_count,
+                processes.len(),
+            ),
+            request_id,
+            external_processes,
+            processes,
+        })
+    }
+
+    fn discover_tracked_processes(
+        &mut self,
+        config: &CollectorConfig,
+    ) -> (usize, Vec<ExternalProcess>, Vec<(u32, u64)>) {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            discovery_refresh_kind(),
+        );
+        let scanned_process_count = self.system.processes().len();
+
+        let rows = self
+            .system
+            .processes()
+            .iter()
+            .map(|(pid, process)| {
+                let pid = pid.as_u32();
+                let ppid = process.parent().map(Pid::as_u32).unwrap_or(0);
+                (pid, ppid, process.start_time().saturating_mul(1_000))
+            })
+            .collect::<Vec<_>>();
+        let start_time_by_pid = rows
+            .iter()
+            .map(|(pid, _, start_time_ms)| (*pid, *start_time_ms))
+            .collect::<HashMap<_, _>>();
+        let external_processes = config
+            .external_processes
+            .iter()
+            .filter_map(|(pid, expected_start_time_ms)| {
+                let actual_start_time_ms = *start_time_by_pid.get(pid)?;
+                matches_external_identity(actual_start_time_ms, *expected_start_time_ms).then_some(
+                    ExternalProcess {
+                        pid: *pid,
+                        start_time_ms: Some(actual_start_time_ms),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut roots = external_processes
+            .iter()
+            .map(|process| process.pid)
+            .collect::<HashSet<_>>();
+        roots.insert(config.root_pid);
+        let tracked = select_tracked_pids(&rows, &roots)
+            .into_iter()
+            .filter_map(|pid| start_time_by_pid.get(&pid).map(|start| (pid, *start)))
+            .collect::<Vec<_>>();
+
+        (scanned_process_count, external_processes, tracked)
+    }
+
+    fn refresh_tracked_details(&mut self, tracked: &[(u32, u64)], refresh_metadata: bool) {
+        let mut pids_with_cmd = Vec::new();
+        let mut pids_metrics_only = Vec::new();
+
+        for &(pid, start_time_ms) in tracked {
+            let pid_handle = Pid::from_u32(pid);
+            if refresh_metadata && !self.metadata_cache.contains_key(&(pid, start_time_ms)) {
+                pids_with_cmd.push(pid_handle);
+            } else {
+                pids_metrics_only.push(pid_handle);
+            }
+        }
+
+        if !pids_with_cmd.is_empty() {
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids_with_cmd),
+                false,
+                detail_refresh_kind(true),
+            );
+        }
+        if !pids_metrics_only.is_empty() {
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids_metrics_only),
+                false,
+                detail_refresh_kind(false),
+            );
+        }
+    }
+
+    fn sample(&mut self, config: &CollectorConfig, request_id: Option<String>) -> SnapshotEvent {
+        if let Some(delay) =
+            remaining_cpu_measurement_delay(self.cpu_baseline_refreshed_at.take(), Instant::now())
+        {
+            thread::sleep(delay);
+        }
+        let collection_started = Instant::now();
+        #[cfg(target_os = "windows")]
+        if let Some(event) = self.sample_windows_fast(config, request_id.clone(), collection_started)
+        {
+            return event;
+        }
+        let (scanned_process_count, external_processes, tracked) =
+            self.discover_tracked_processes(config);
+        let tracked_process_count = tracked.len();
+        self.refresh_tracked_details(&tracked, true);
+        self.cpu_baseline_refreshed_at = Some(Instant::now());
+
+        let active_identities = tracked.iter().copied().collect::<HashSet<_>>();
+        prune_metadata_cache(&mut self.metadata_cache, &active_identities);
+
+        let mut processes = tracked
+            .into_iter()
+            .filter_map(|(pid, start_time_ms)| {
                 let process = self.system.process(Pid::from_u32(pid))?;
                 let disk_usage = process.disk_usage();
-                let command = if process.cmd().is_empty() {
-                    process.name().to_string_lossy().into_owned()
-                } else {
-                    process
-                        .cmd()
-                        .iter()
-                        .map(|part| part.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                };
+                let metadata = self
+                    .metadata_cache
+                    .entry((pid, start_time_ms))
+                    .or_insert_with(|| {
+                        let name = truncate_utf8(
+                            process.name().to_string_lossy().into_owned(),
+                            MAX_PROCESS_NAME_BYTES,
+                        );
+                        let command = if process.cmd().is_empty() {
+                            name.clone()
+                        } else {
+                            truncate_utf8(
+                                process
+                                    .cmd()
+                                    .iter()
+                                    .map(|part| part.to_string_lossy())
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                                MAX_PROCESS_COMMAND_BYTES,
+                            )
+                        };
+                        CachedProcessMetadata { name, command }
+                    });
 
                 Some(ProcessSample {
                     pid,
                     ppid: process.parent().map(Pid::as_u32).unwrap_or(0),
-                    start_time_ms: process.start_time().saturating_mul(1_000),
+                    start_time_ms,
                     run_time_ms: process.run_time().saturating_mul(1_000),
-                    name: truncate_utf8(
-                        process.name().to_string_lossy().into_owned(),
-                        MAX_PROCESS_NAME_BYTES,
-                    ),
-                    command: truncate_utf8(command, MAX_PROCESS_COMMAND_BYTES),
+                    name: metadata.name.clone(),
+                    command: metadata.command.clone(),
                     status: truncate_utf8(
                         format!("{:?}", process.status()),
                         MAX_PROCESS_STATUS_BYTES,
@@ -437,7 +806,7 @@ impl Collector {
             sequence: self.sequence,
             sampled_at_unix_ms: unix_time_ms(),
             collection_duration_micros: collection_started.elapsed().as_micros() as u64,
-            scanned_process_count: self.system.processes().len(),
+            scanned_process_count,
             retained_process_count: processes.len(),
             inaccessible_process_count: inaccessible_process_count(
                 tracked_process_count,
@@ -450,13 +819,33 @@ impl Collector {
     }
 }
 
-fn process_refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::nothing()
+fn discovery_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().without_tasks()
+}
+
+fn detail_refresh_kind(include_cmd: bool) -> ProcessRefreshKind {
+    let base = ProcessRefreshKind::nothing()
         .with_memory()
         .with_cpu()
         .with_disk_usage()
-        .with_cmd(UpdateKind::Always)
-        .without_tasks()
+        .without_tasks();
+    if include_cmd {
+        base.with_cmd(UpdateKind::Always)
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+fn process_refresh_kind() -> ProcessRefreshKind {
+    detail_refresh_kind(true)
+}
+
+fn prune_metadata_cache(
+    cache: &mut HashMap<(u32, u64), CachedProcessMetadata>,
+    active_identities: &HashSet<(u32, u64)>,
+) {
+    cache.retain(|identity, _| active_identities.contains(identity));
 }
 
 fn inaccessible_process_count(selected: usize, materialized: usize) -> usize {
@@ -741,15 +1130,16 @@ fn main() -> io::Result<()> {
                         ..
                     } => {
                         let sample_interval = clamp_sample_interval(sample_interval_ms);
-                        config = Some(CollectorConfig {
+                        let next_config = CollectorConfig {
                             root_pid,
                             sample_interval,
                             external_processes: external_processes
                                 .into_iter()
                                 .map(|process| (process.pid, process.start_time_ms))
                                 .collect(),
-                        });
-                        collector.prime_cpu_usage();
+                        };
+                        collector.prime_cpu_usage(&next_config);
+                        config = Some(next_config);
                         next_sample_at = sample_interval.map(|_| Instant::now());
                     }
                     Command::SetExternalProcesses { processes, .. } => {
@@ -1134,13 +1524,51 @@ mod tests {
 
     #[test]
     fn refreshes_commands_without_enumerating_linux_tasks() {
-        let refresh_kind = process_refresh_kind();
+        let discovery = discovery_refresh_kind();
+        assert!(!discovery.tasks());
+        assert!(!discovery.cpu());
+        assert!(!discovery.memory());
+        assert!(!discovery.disk_usage());
+        assert_eq!(discovery.cmd(), UpdateKind::Never);
 
+        let metrics_only = detail_refresh_kind(false);
+        assert!(!metrics_only.tasks());
+        assert!(metrics_only.cpu());
+        assert!(metrics_only.memory());
+        assert!(metrics_only.disk_usage());
+        assert_eq!(metrics_only.cmd(), UpdateKind::Never);
+
+        let refresh_kind = process_refresh_kind();
         assert_eq!(refresh_kind.cmd(), UpdateKind::Always);
         assert!(!refresh_kind.tasks());
         assert!(refresh_kind.cpu());
         assert!(refresh_kind.memory());
         assert!(refresh_kind.disk_usage());
+    }
+
+    #[test]
+    fn prunes_dead_entries_from_metadata_cache_by_pid_and_start_time() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            (100, 1_000),
+            CachedProcessMetadata {
+                name: "node.exe".to_owned(),
+                command: "node server.js".to_owned(),
+            },
+        );
+        cache.insert(
+            (200, 2_000),
+            CachedProcessMetadata {
+                name: "agy.exe".to_owned(),
+                command: "agy acp".to_owned(),
+            },
+        );
+        // Reused PID 200 with a newer start_time_ms must invalidate the old entry.
+        let active = HashSet::from([(100, 1_000), (200, 5_000)]);
+        prune_metadata_cache(&mut cache, &active);
+
+        assert!(cache.contains_key(&(100, 1_000)));
+        assert!(!cache.contains_key(&(200, 2_000)));
     }
 
     #[test]

@@ -129,4 +129,19 @@ describe("buildTraitsTriggerDisplay", () => {
       }),
     ).toEqual({ label: "울트라싱크", showFastModeIcon: true });
   });
+
+  it("localizes Thinking Level and Extra effort labels into Korean", () => {
+    const thinkingLevel = selectDescriptor(
+      "thinkingLevel",
+      [
+        { id: "extra", label: "Extra" },
+        { id: "xhigh", label: "Extra High" },
+      ],
+      "extra",
+    );
+    expect(display([thinkingLevel])).toEqual({
+      label: "매우 높음",
+      showFastModeIcon: false,
+    });
+  });
 });

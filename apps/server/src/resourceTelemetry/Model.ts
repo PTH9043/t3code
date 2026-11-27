@@ -10,8 +10,94 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-const MAX_DELTA_INTERVAL_MS = 30_000;
+const MAX_DELTA_INTERVAL_MS = 60_000;
 const ELECTRON_IDENTITY_TOLERANCE_MS = 2_000;
+
+const PROVIDER_CLI_BASENAMES = new Set([
+  "agy",
+  "antigravity",
+  "claude",
+  "codex",
+  "opencode",
+  "gemini",
+  "grok",
+  "cursor-agent",
+]);
+
+const TERMINAL_TOOL_BASENAMES = new Set([
+  "cmd",
+  "conhost",
+  "openconsole",
+  "powershell",
+  "pwsh",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "wsl",
+  "wslhost",
+  "mintty",
+  "wt",
+  "python",
+  "python3",
+  "pythonw",
+  "py",
+  "git",
+  "rg",
+  "ripgrep",
+  "fd",
+  "uv",
+  "pip",
+  "pip3",
+  "winpty-agent",
+]);
+
+function normalizeExecutableBasename(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const unquoted = trimmed.replace(/^['"]|['"]$/g, "");
+  const segment = unquoted.split(/[\\/]/).findLast((part) => part.length > 0) ?? unquoted;
+  return segment.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/i, "");
+}
+
+function firstCommandToken(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return "";
+  const quoted = trimmed.match(/^["']([^"']+)["']/);
+  if (quoted?.[1]) return quoted[1];
+  return trimmed.split(/\s+/)[0] ?? "";
+}
+
+function isPythonExecutable(basename: string): boolean {
+  return /^python(\d+(\.\d+)*)?w?$/.test(basename);
+}
+
+export function classifyNonElectronToolOrProvider(
+  process: Pick<ResourceMonitorProcessSample, "name" | "command">,
+): "provider-root" | "terminal-root" | null {
+  const nameBase = normalizeExecutableBasename(process.name);
+  const cmdBase = normalizeExecutableBasename(firstCommandToken(process.command));
+  const candidates = [nameBase, cmdBase].filter((value) => value.length > 0);
+  const lowerCmd = process.command.toLowerCase();
+
+  for (const candidate of candidates) {
+    if (PROVIDER_CLI_BASENAMES.has(candidate)) {
+      return "provider-root";
+    }
+  }
+  if (
+    /\b(agy|antigravity)\b/.test(lowerCmd) &&
+    (/\bacp\b/.test(lowerCmd) || /\bagy(\.exe)?\b/.test(lowerCmd))
+  ) {
+    return "provider-root";
+  }
+  for (const candidate of candidates) {
+    if (TERMINAL_TOOL_BASENAMES.has(candidate) || isPythonExecutable(candidate)) {
+      return "terminal-root";
+    }
+  }
+  return null;
+}
 
 export interface ProcessState {
   readonly process: ResourceTelemetryProcess;
@@ -473,6 +559,7 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
       (pid) => processesByPid.has(pid) && !electronPids.has(pid) && pid !== input.serverPid,
     ),
   );
+  const serverRootPids = new Set([input.serverPid]);
   const rootPids = [input.serverPid, ...electronRootPids, ...externalRootPids];
   const roots = new Set(rootPids);
   const depths = processDepths(processes, roots);
@@ -514,6 +601,7 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
         })
       : 0;
     const electronMetric = matchElectronMetric(process, metricsByPid);
+    const nonElectronCategory = classifyNonElectronToolOrProvider(process);
     const category: ResourceTelemetryProcessCategory =
       process.pid === input.serverPid
         ? "server"
@@ -523,11 +611,13 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
             ? "electron-main"
             : electronMetric
               ? electronCategory(electronMetric)
-              : isDescendantOf(process.pid, processesByPid, electronPids)
-                ? inferredElectronCategory(process)
-                : isDescendantOf(process.pid, processesByPid, externalRootPids)
-                  ? "external"
-                  : "server-child";
+              : isDescendantOf(process.pid, processesByPid, serverRootPids)
+                ? (nonElectronCategory ?? "server-child")
+                : isDescendantOf(process.pid, processesByPid, electronPids)
+                  ? (nonElectronCategory ?? inferredElectronCategory(process))
+                  : isDescendantOf(process.pid, processesByPid, externalRootPids)
+                    ? "external"
+                    : (nonElectronCategory ?? "server-child");
     const firstSeenAt = previous?.process.firstSeenAt ?? DateTime.makeUnsafe(sampledAtMs);
     const preservePreviousRates = !input.updatePrevious && previous !== undefined;
     const cpuPercent = preservePreviousRates

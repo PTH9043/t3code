@@ -12,6 +12,8 @@ import {
   WorkspaceTaskGraph,
   WorkspaceWorkflowContext,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -22,10 +24,11 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
   PersistenceDecodeError,
+  type ProjectionRepositoryError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
 } from "../Errors.ts";
-import { reviewWorkspaceOrchestraPlan } from "../../orchestration/workspaceOrchestraReview.ts";
+import { reviewWorkspaceOrchestraRun } from "../../orchestration/workspaceOrchestraReview.ts";
 import {
   ProjectionWorkspaceCollaborationRunRepository,
   type ProjectionWorkspaceCollaborationRunRepositoryShape,
@@ -68,6 +71,29 @@ const decodeWorkflow = Schema.decodeUnknownEffect(WorkflowColumn);
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const LIST_CACHE_TTL_MS = 5_000;
+  const listCache = new Map<
+    string,
+    {
+      readonly runs: ReadonlyArray<WorkspaceCollaborationRun>;
+      readonly expiresAtMs: number;
+    }
+  >();
+  const inFlightLists = new Map<
+    string,
+    Deferred.Deferred<ReadonlyArray<WorkspaceCollaborationRun>, ProjectionRepositoryError>
+  >();
+  const invalidateListCache = (projectId?: string) => {
+    if (!projectId) {
+      listCache.clear();
+      return;
+    }
+    for (const key of listCache.keys()) {
+      if (key.startsWith(`${projectId}\u0000`)) {
+        listCache.delete(key);
+      }
+    }
+  };
   const workflowStore = yield* makeWorkflowStore;
   const selectColumns = sql`
     run_id AS "id",
@@ -167,10 +193,47 @@ const make = Effect.gen(function* () {
         schedule_id = excluded.schedule_id,
         incident_id = excluded.incident_id,
         task = excluded.task,
-        status = excluded.status,
+        status = CASE
+          WHEN excluded.status = 'completed' AND excluded.meeting_json IS NOT NULL
+            AND (SELECT count(*) FROM projection_workspace_collaboration_interjections
+              WHERE project_id = excluded.project_id AND run_id = excluded.run_id)
+              > COALESCE(json_extract(excluded.meeting_json, '$.supervisorReviewedInterjections'), 0)
+          THEN 'running'
+          ELSE excluded.status
+        END,
         steps_json = excluded.steps_json,
         graph_json = excluded.graph_json,
-        meeting_json = excluded.meeting_json,
+        meeting_json = CASE
+          WHEN excluded.status = 'completed' AND excluded.meeting_json IS NOT NULL
+            AND (SELECT count(*) FROM projection_workspace_collaboration_interjections
+              WHERE project_id = excluded.project_id AND run_id = excluded.run_id)
+              > COALESCE(json_extract(excluded.meeting_json, '$.supervisorReviewedInterjections'), 0)
+          THEN json_set(
+            excluded.meeting_json,
+            '$.phase', 'executing',
+            '$.pendingSupervisorReview', json('true'),
+            '$.answers', json(CASE
+              WHEN COALESCE(json_array_length(json_extract(projection_workspace_collaboration_runs.meeting_json, '$.answers')), 0)
+                > COALESCE(json_array_length(json_extract(excluded.meeting_json, '$.answers')), 0)
+              THEN json_extract(projection_workspace_collaboration_runs.meeting_json, '$.answers')
+              ELSE json_extract(excluded.meeting_json, '$.answers') END),
+            '$.pendingQuestion', json(CASE
+              WHEN COALESCE(json_array_length(json_extract(projection_workspace_collaboration_runs.meeting_json, '$.answers')), 0)
+                > COALESCE(json_array_length(json_extract(excluded.meeting_json, '$.answers')), 0)
+              THEN json_extract(projection_workspace_collaboration_runs.meeting_json, '$.pendingQuestion')
+              ELSE json_extract(excluded.meeting_json, '$.pendingQuestion') END)
+          )
+          WHEN excluded.meeting_json IS NOT NULL
+            AND projection_workspace_collaboration_runs.meeting_json IS NOT NULL
+            AND COALESCE(json_array_length(json_extract(projection_workspace_collaboration_runs.meeting_json, '$.answers')), 0)
+              > COALESCE(json_array_length(json_extract(excluded.meeting_json, '$.answers')), 0)
+          THEN json_set(
+            excluded.meeting_json,
+            '$.answers', json(json_extract(projection_workspace_collaboration_runs.meeting_json, '$.answers')),
+            '$.pendingQuestion', json_extract(projection_workspace_collaboration_runs.meeting_json, '$.pendingQuestion')
+          )
+          ELSE excluded.meeting_json
+        END,
         orchestra_json = excluded.orchestra_json,
         workflow_json = CASE WHEN excluded.workflow_json IS NULL OR COALESCE(json_extract(projection_workspace_collaboration_runs.workflow_json,'$.controlRevision'),0) > COALESCE(json_extract(excluded.workflow_json,'$.controlRevision'),0) THEN projection_workspace_collaboration_runs.workflow_json ELSE excluded.workflow_json END,
         run_control_json = CASE WHEN excluded.run_control_json IS NULL OR COALESCE(json_extract(projection_workspace_collaboration_runs.run_control_json,'$.controlRevision'),json_extract(projection_workspace_collaboration_runs.workflow_json,'$.controlRevision'),0) > COALESCE(json_extract(excluded.run_control_json,'$.controlRevision'),json_extract(excluded.workflow_json,'$.controlRevision'),0) THEN projection_workspace_collaboration_runs.run_control_json ELSE excluded.run_control_json END,
@@ -206,6 +269,7 @@ const make = Effect.gen(function* () {
             )
           : Effect.void,
       ),
+      Effect.tap(() => Effect.sync(() => invalidateListCache(run.projectId))),
       Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.upsert")),
     );
 
@@ -226,6 +290,7 @@ const make = Effect.gen(function* () {
       Effect.asVoid,
       Effect.andThen(
         Effect.gen(function* () {
+          invalidateListCache(input.projectId);
           const current = yield* getRow(input);
           if (Option.isSome(current) && current.value.workflow)
             yield* workflowStore.projectRunSummary(current.value);
@@ -296,6 +361,7 @@ const make = Effect.gen(function* () {
         WHERE project_id = ${input.projectId} AND run_id = ${input.runId}
       `.pipe(
         Effect.asVoid,
+        Effect.tap(() => Effect.sync(() => invalidateListCache(input.projectId))),
         Effect.mapError(
           toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordAnswer:update"),
         ),
@@ -342,6 +408,7 @@ const make = Effect.gen(function* () {
           )
         `.pipe(
           Effect.asVoid,
+          Effect.tap(() => Effect.sync(() => invalidateListCache(input.projectId))),
           Effect.mapError(
             toPersistenceSqlError("ProjectionWorkspaceCollaborationRuns.recordInterjection:insert"),
           ),
@@ -360,15 +427,47 @@ const make = Effect.gen(function* () {
     );
 
   const list: ProjectionWorkspaceCollaborationRunRepositoryShape["list"] = (input) =>
-    listRows(input).pipe(
-      Effect.map((runs) => {
-        if (input.statuses === undefined) return runs;
-        const statuses = new Set(input.statuses);
-        return runs.filter((run) => statuses.has(run.status));
-      }),
-      Effect.flatMap((runs) => Effect.forEach(runs, hydrateInterjections)),
-      Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.list")),
-    );
+    Effect.gen(function* () {
+      const cacheKey = `${input.projectId}\u0000${input.runId ?? ""}\u0000${input.workflowOnly ? "1" : "0"}\u0000${(input.statuses ?? []).slice().sort().join(",")}`;
+      const nowMs = yield* Clock.currentTimeMillis;
+      const cached = listCache.get(cacheKey);
+      if (cached !== undefined && nowMs < cached.expiresAtMs) {
+        return cached.runs;
+      }
+      const existingInFlight = inFlightLists.get(cacheKey);
+      if (existingInFlight !== undefined) {
+        return yield* Deferred.await(existingInFlight);
+      }
+      const deferred = yield* Deferred.make<
+        ReadonlyArray<WorkspaceCollaborationRun>,
+        ProjectionRepositoryError
+      >();
+      inFlightLists.set(cacheKey, deferred);
+      return yield* listRows(input).pipe(
+        Effect.map((runs) => {
+          if (input.statuses === undefined) return runs;
+          const statuses = new Set(input.statuses);
+          return runs.filter((run) => statuses.has(run.status));
+        }),
+        Effect.flatMap((runs) => Effect.forEach(runs, hydrateInterjections)),
+        Effect.mapError(decodeError("ProjectionWorkspaceCollaborationRuns.list")),
+        Effect.tap((hydrated) =>
+          Effect.gen(function* () {
+            const doneMs = yield* Clock.currentTimeMillis;
+            listCache.set(cacheKey, { runs: hydrated, expiresAtMs: doneMs + LIST_CACHE_TTL_MS });
+            yield* Deferred.succeed(deferred, hydrated);
+          }),
+        ),
+        Effect.tapError((cause) => Deferred.fail(deferred, cause).pipe(Effect.ignore)),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (inFlightLists.get(cacheKey) === deferred) {
+              inFlightLists.delete(cacheKey);
+            }
+          }),
+        ),
+      );
+    });
 
   const listResumable: ProjectionWorkspaceCollaborationRunRepositoryShape["listResumable"] = () =>
     listResumableRows(undefined).pipe(
@@ -414,6 +513,7 @@ const make = Effect.gen(function* () {
           }),
       });
       yield* sql`UPDATE projection_workspace_collaboration_runs SET status=${next.status}, graph_json=${encodeGraph(next.graph)}, workflow_json=${encodeWorkflow(next.workflow ?? null)}, run_control_json=${encodeRunControl(next.runControl ?? null)}, error=${next.error},updated_at=${next.updatedAt} WHERE project_id=${input.projectId} AND run_id=${input.runId}`.pipe(
+        Effect.tap(() => Effect.sync(() => invalidateListCache(input.projectId))),
         Effect.mapError(toPersistenceSqlError("workflow.control")),
       );
       yield* workflowStore
@@ -432,8 +532,8 @@ const make = Effect.gen(function* () {
           operation: "recordReview",
           issue: "실행을 찾을 수 없습니다.",
         });
-      const graph = yield* Effect.try({
-        try: () => reviewWorkspaceOrchestraPlan(current.value, input),
+      const reviewed = yield* Effect.try({
+        try: () => reviewWorkspaceOrchestraRun(current.value, input),
         catch: (cause) =>
           new PersistenceDecodeError({
             operation: "ProjectionWorkspaceCollaborationRuns.recordReview",
@@ -441,12 +541,12 @@ const make = Effect.gen(function* () {
             cause,
           }),
       });
-      if (graph === null)
+      if (reviewed === null)
         return yield* new PersistenceDecodeError({
           operation: "recordReview",
           issue: "실행 계획이 변경되었거나 이미 시작되었습니다. 최신 계획을 확인하세요.",
         });
-      yield* upsert({ ...current.value, graph, updatedAt: input.reviewedAt });
+      yield* upsert(reviewed);
     });
   const requestVerification: NonNullable<
     ProjectionWorkspaceCollaborationRunRepositoryShape["requestVerification"]

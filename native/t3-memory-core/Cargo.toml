@@ -1,0 +1,26 @@
+[package]
+name = "t3-memory-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bumpalo = { version = "3.20", features = ["collections"] }
+crc32fast = "1.4"
+memmap2 = "0.9"
+napi = { version = "2.16", default-features = false, features = ["napi8"] }
+napi-derive = "2.16"
+
+[build-dependencies]
+napi-build = "2.1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+panic = "unwind"
+strip = true

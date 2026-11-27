@@ -65,6 +65,11 @@ describe("searchSettings", () => {
   });
 
   it("serves anchor props to panels from the catalog", () => {
+    expect(searchSettings("중단 알림 표시 시간")).toContainEqual({
+      id: "background-watch-notice",
+      title: "감시 중단 알림 표시 시간",
+      to: "/settings/general",
+    });
     expect(searchableSetting("word-wrap")).toEqual({ id: "word-wrap", title: "자동 줄 바꿈" });
     expect(searchableSetting("archive")).toEqual({ id: "archive", title: "보관된 대화" });
   });
@@ -83,16 +88,24 @@ describe("searchSettings", () => {
       to: "/settings/appearance",
       targetId: "appearance",
     });
+    expect(searchSettings("대화방 좌우 여백")[0]).toMatchObject({
+      id: "setting-chat-horizontal-inset",
+      to: "/settings/appearance",
+    });
+    expect(searchSettings("폭")[0]).toMatchObject({
+      id: "setting-chat-horizontal-inset",
+      to: "/settings/appearance",
+    });
   });
 
-  it("routes automatic update permissions to the permissions tab", () => {
+  it("routes automatic update settings to general and program permissions to permissions", () => {
     expect(searchSettings("자동 다운로드")[0]).toMatchObject({
       id: "automatic-update-download",
-      to: "/settings/permissions",
+      to: "/settings/general",
     });
     expect(searchSettings("자동 설치")[0]).toMatchObject({
       id: "automatic-update-install",
-      to: "/settings/permissions",
+      to: "/settings/general",
     });
     expect(searchSettings("프로그램 자동 시작")[0]).toMatchObject({
       id: "workspace-program-auto-start",

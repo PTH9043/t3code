@@ -274,4 +274,46 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(resetPatch).not.toHaveProperty("favorites");
     expect(resetPatch).not.toHaveProperty("providerModelPreferences");
   });
+
+  it("supports status filtering (전체/활성/미설정) and collapsing/expanding provider groups (ERR-48)", () => {
+    atoms.providers = [provider()];
+    let panel = renderPanel();
+
+    const activeFilterButton = visitElements(
+      panel,
+      (element) =>
+        element.props["aria-pressed"] !== undefined &&
+        Array.isArray(element.props.children) &&
+        element.props.children.join("").startsWith("활성"),
+    );
+    expect(activeFilterButton).not.toBeNull();
+    (activeFilterButton!.props.onClick as () => void)();
+
+    panel = renderPanel();
+    const codexCardWhenActive = visitElements(
+      panel,
+      (element) => element.props.instanceId === codexId,
+    );
+    expect(codexCardWhenActive).not.toBeNull();
+
+    const collapseAllButton = visitElements(
+      panel,
+      (element) => element.props.children === "모두 접기",
+    );
+    expect(collapseAllButton).not.toBeNull();
+    (collapseAllButton!.props.onClick as () => void)();
+
+    panel = renderPanel();
+    expect(visitElements(panel, (element) => element.props.instanceId === codexId)).toBeNull();
+
+    const expandAllButton = visitElements(
+      panel,
+      (element) => element.props.children === "모두 펼치기",
+    );
+    expect(expandAllButton).not.toBeNull();
+    (expandAllButton!.props.onClick as () => void)();
+
+    panel = renderPanel();
+    expect(visitElements(panel, (element) => element.props.instanceId === codexId)).not.toBeNull();
+  });
 });

@@ -1,3 +1,6 @@
+import { readKnowledgeDashboard } from "../knowledgeDashboard.ts";
+import { visibleKnowledge } from "../../persistence/knowledgeVisibility.ts";
+import { readWorkspaceWikiLinks } from "../../persistence/workspaceWikiLinks.ts";
 import {
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   ChatAttachment,
@@ -32,8 +35,10 @@ import {
   TrimmedNonEmptyString,
   WorkspaceKnowledgeItem,
   WorkspaceResearchRecord,
+  WorkspaceKnowledgeProvenance,
   WorkspaceKnowledgeListInput,
 } from "@t3tools/contracts";
+import { makeKnowledgeDocumentQueries } from "../knowledgeDocuments.ts";
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -41,12 +46,17 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ServerConfig } from "../../config.ts";
 import {
+  recoverSavedToolActivityEvidence,
+  withSavedToolTurnStates,
+} from "../SavedToolActivityEvidence.ts";
+import {
   renderContextArtifact,
   saveWorkspaceContextArtifact,
 } from "../workspaceContextArtifacts.ts";
 import { knowledgeAppliesToContext } from "../workspaceKnowledgeScope.ts";
 import { excludedRagSourceKeys } from "../workspaceKnowledgeSelection.ts";
 import { workspaceRetrievalQuery } from "../workspaceSearchVocabulary.ts";
+import { readWorkspaceArchiveFiles } from "../workspaceArchiveFiles.ts";
 import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -60,6 +70,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
   isPersistenceError,
+  PersistenceSqlError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
   type ProjectionRepositoryError,
@@ -117,6 +128,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
 const ProjectionWorkspaceKnowledgeDbRowSchema = WorkspaceKnowledgeItem.mapFields(
   Struct.assign({
     research: Schema.NullOr(Schema.fromJsonString(WorkspaceResearchRecord)),
+    provenance: Schema.NullOr(Schema.fromJsonString(WorkspaceKnowledgeProvenance)),
     tags: Schema.fromJsonString(Schema.Array(TrimmedNonEmptyString)),
   }),
 );
@@ -439,6 +451,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     hasPendingUserInput: row.pendingUserInputCount > 0,
     hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
     backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(row.threadId),
+    backgroundTasks: threadBackgroundLiveness.getThreadBackgroundTasks(row.threadId),
     planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
   });
   const repositoryIdentityResolutionConcurrency = 4;
@@ -498,14 +511,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listWorkspaceKnowledgeRows = SqlSchema.findAll({
     Request: WorkspaceKnowledgeListInput,
     Result: ProjectionWorkspaceKnowledgeDbRowSchema,
-    execute: ({ projectId, includeShared }) =>
+    execute: ({ projectId, includeShared, sourceRunId, itemId, sourceItemId, summariesOnly }) =>
       sql`
         SELECT
           item_id AS "id",
+          superseded_by AS "supersededBy",
           project_id AS "projectId",
           kind,
           title,
-          content,
+          ${summariesOnly ? sql`''` : sql`content`} AS content,
           status,
           origin,
           relative_folder AS "relativeFolder",
@@ -515,12 +529,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           tags_json AS "tags",
           prompt_uses AS "promptUses",
           last_used_at AS "lastUsedAt",
+          provenance_json AS "provenance",
+          source_item_id AS "sourceItemId",
           original_chars AS "originalChars",
           stored_chars AS "storedChars",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
         FROM projection_workspace_knowledge_items
-        WHERE project_id = ${projectId} OR (${includeShared === true ? 1 : 0} = 1 AND scope = 'environment')
+        WHERE (project_id = ${projectId} OR (${includeShared === true && !sourceRunId ? 1 : 0} = 1 AND scope = 'environment'))
+          ${itemId === undefined ? sql`` : sql`AND item_id = ${itemId} AND project_id = ${projectId}`}
+          ${sourceItemId ? sql`AND project_id=${projectId} AND source_item_id=${sourceItemId}` : sql``}
+          ${sourceRunId ? sql`AND project_id=${projectId} AND json_extract(provenance_json, '$.runId')=${sourceRunId}` : sql``}
+          AND ${visibleKnowledge(sql)}
         ORDER BY updated_at DESC, item_id ASC
       `,
   });
@@ -1471,48 +1491,68 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId, minAnchorAt, minTurnKey, beforeAnchorAt, beforeTurnKey }) =>
       sql`
-        SELECT
-          activity_id AS "activityId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          tone,
-          kind,
-          summary,
-          payload_json AS "payload",
-          sequence,
-          created_at AS "createdAt"
-        FROM projection_thread_activities
-        WHERE thread_id = ${threadId}
-          AND (
-            turn_id IN (
-              SELECT turn_id FROM projection_turns
-              WHERE thread_id = ${threadId}
-                AND turn_id IS NOT NULL
-                AND (
-                  requested_at > ${minAnchorAt}
-                  OR (
-                    requested_at = ${minAnchorAt}
-                    AND turn_id >= ${minTurnKey}
+        SELECT * FROM (
+          SELECT
+            activity_id AS "activityId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            tone,
+            kind,
+            summary,
+            payload_json AS "payload",
+            sequence,
+            created_at AS "createdAt"
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+            AND (
+              turn_id IN (
+                SELECT turn_id FROM projection_turns
+                WHERE thread_id = ${threadId}
+                  AND turn_id IS NOT NULL
+                  AND (
+                    requested_at > ${minAnchorAt}
+                    OR (
+                      requested_at = ${minAnchorAt}
+                      AND turn_id >= ${minTurnKey}
+                    )
                   )
-                )
-                AND (
-                  requested_at < ${beforeAnchorAt}
-                  OR (
-                    requested_at = ${beforeAnchorAt}
-                    AND turn_id < ${beforeTurnKey}
+                  AND (
+                    requested_at < ${beforeAnchorAt}
+                    OR (
+                      requested_at = ${beforeAnchorAt}
+                      AND turn_id < ${beforeTurnKey}
+                    )
                   )
-                )
+              )
+              OR (
+                turn_id IS NULL
+                AND created_at >= ${minAnchorAt}
+                AND created_at < ${beforeAnchorAt}
+              )
             )
-            OR (
-              turn_id IS NULL
-              AND created_at >= ${minAnchorAt}
-              AND created_at < ${beforeAnchorAt}
+          UNION
+          SELECT
+            activity_id AS "activityId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            tone,
+            kind,
+            summary,
+            payload_json AS "payload",
+            sequence,
+            created_at AS "createdAt"
+          FROM projection_thread_activities INDEXED BY idx_projection_recovery_activity_kind
+          WHERE thread_id = ${threadId}
+            AND kind IN (
+              'user-input.resolved',
+              'approval.resolved',
+              'provider.user-input.delivery.finished'
             )
-          )
+        )
         ORDER BY
           sequence ASC,
-          created_at ASC,
-          activity_id ASC
+          createdAt ASC,
+          activityId ASC
       `,
   });
 
@@ -2291,6 +2331,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
                     row.threadId,
                   ),
+                  backgroundTasks: threadBackgroundLiveness.getThreadBackgroundTasks(row.threadId),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
                 }),
               ),
@@ -2403,8 +2444,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
-  const listWorkspaceKnowledge: ProjectionSnapshotQueryShape["listWorkspaceKnowledge"] = (input) =>
-    listWorkspaceKnowledgeRows(input).pipe(
+  const listWorkspaceKnowledge: ProjectionSnapshotQueryShape["listWorkspaceKnowledge"] = (
+    input,
+  ) => {
+    const list = listWorkspaceKnowledgeRows(input).pipe(
       Effect.map((items) => {
         const kinds = input.kinds === undefined ? null : new Set(input.kinds);
         const statuses = input.statuses === undefined ? null : new Set(input.statuses);
@@ -2416,13 +2459,110 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         };
       }),
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProjectionSnapshotQuery.listWorkspaceKnowledge:query",
-          "ProjectionSnapshotQuery.listWorkspaceKnowledge:decodeRows",
-        ),
-      ),
     );
+    const mapKnowledgeError = (cause: unknown) =>
+      isPersistenceError(cause)
+        ? cause
+        : toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listWorkspaceKnowledge:query",
+            "ProjectionSnapshotQuery.listWorkspaceKnowledge:decodeRows",
+          )(cause);
+    const snapshot =
+      input.includeArchiveSnapshot &&
+      !input.summariesOnly &&
+      !input.itemId &&
+      !input.sourceRunId &&
+      !input.sourceItemId
+        ? sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const result = yield* list;
+                const projectId = input.projectId;
+                const memories = yield* sql`SELECT * FROM workspace_memory_v2
+            WHERE project_id=${projectId} AND status <> 'forgotten' ORDER BY created_at,id`;
+                const threads = yield* sql`SELECT * FROM projection_threads
+            WHERE project_id=${projectId} AND deleted_at IS NULL ORDER BY created_at,thread_id`;
+                const messages =
+                  yield* sql`SELECT m.rowid AS _export_rowid,m.* FROM projection_thread_messages m
+            JOIN projection_threads t ON t.thread_id=m.thread_id
+            WHERE t.project_id=${projectId} AND t.deleted_at IS NULL ORDER BY m.thread_id,m.rowid`;
+                const activities =
+                  yield* sql`SELECT a.rowid AS _export_rowid,a.* FROM projection_thread_activities a
+            JOIN projection_threads t ON t.thread_id=a.thread_id
+            WHERE t.project_id=${projectId} AND t.deleted_at IS NULL ORDER BY a.thread_id,a.rowid`;
+                const plans =
+                  yield* sql`SELECT a.rowid AS _export_rowid,a.* FROM projection_thread_proposed_plans a
+            JOIN projection_threads t ON t.thread_id=a.thread_id
+            WHERE t.project_id=${projectId} AND t.deleted_at IS NULL ORDER BY a.thread_id,a.rowid`;
+                const turns = yield* sql`SELECT a.* FROM projection_turns a
+            JOIN projection_threads t ON t.thread_id=a.thread_id
+            WHERE t.project_id=${projectId} AND t.deleted_at IS NULL ORDER BY a.thread_id,a.row_id`;
+                const archives = yield* sql<{
+                  thread_id: string;
+                  path: string;
+                  sha256: string;
+                  records: number;
+                  created_at: string;
+                }>`
+            SELECT a.thread_id,a.path,a.sha256,a.records,a.created_at FROM workspace_memory_source_archives a
+            JOIN projection_threads t ON t.thread_id=a.thread_id
+            WHERE a.project_id=${projectId} AND t.project_id=${projectId} AND t.deleted_at IS NULL
+            ORDER BY a.created_at,a.sha256`;
+                const imports = yield* sql<{ thread_id: string; payload_json: string }>`
+            SELECT a.thread_id,a.payload_json FROM projection_thread_activities a
+            JOIN projection_threads t ON t.thread_id=a.thread_id
+            WHERE t.project_id=${projectId} AND t.deleted_at IS NULL AND a.kind='conversation.imported'
+            ORDER BY a.thread_id,a.rowid`;
+                return {
+                  ...result,
+                  archiveSnapshot: { memories, threads, messages, activities, plans, turns },
+                  archives,
+                  imports,
+                };
+              }),
+            )
+            .pipe(
+              Effect.flatMap((snapshot) =>
+                Effect.gen(function* () {
+                  const { archives, imports, ...result } = snapshot;
+                  if (archives.length === 0 && imports.length === 0)
+                    return {
+                      ...result,
+                      archiveSnapshot: {
+                        ...result.archiveSnapshot,
+                        sourceArchives: [],
+                        importedSources: [],
+                      },
+                    };
+                  if (Option.isNone(artifactConfig))
+                    return yield* new PersistenceSqlError({
+                      operation: "workspace-archive",
+                      detail: "전체 대화 원본의 데이터 경로를 확인할 수 없습니다.",
+                    });
+                  const stateDir = artifactConfig.value.stateDir;
+                  const files = yield* Effect.tryPromise({
+                    try: () =>
+                      readWorkspaceArchiveFiles({
+                        stateDir,
+                        projectId: input.projectId,
+                        archives,
+                        imports,
+                      }),
+                    catch: (cause) =>
+                      new PersistenceSqlError({
+                        operation: "workspace-archive",
+                        detail: "대화 원본이 없거나 손상되어 전체 내보내기를 중단했습니다.",
+                        cause,
+                      }),
+                  });
+                  return { ...result, archiveSnapshot: { ...result.archiveSnapshot, ...files } };
+                }),
+              ),
+              Effect.mapError(mapKnowledgeError),
+            )
+        : list.pipe(Effect.mapError(mapKnowledgeError));
+    return snapshot;
+  };
 
   const searchWorkspaceRag: NonNullable<ProjectionSnapshotQueryShape["searchWorkspaceRag"]> = (
     input,
@@ -3089,13 +3229,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
       };
 
-      return Option.some(
-        yield* decodeThread(thread).pipe(
-          Effect.mapError(
-            toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadDetailById:decodeThread"),
-          ),
+      const decoded = yield* decodeThread(thread).pipe(
+        Effect.mapError(
+          toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadDetailById:decodeThread"),
         ),
       );
+      if (read !== undefined) return Option.some(decoded);
+      const activities = yield* withSavedToolTurnStates(sql, threadId, decoded.activities).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailById:toolTurnStates"),
+        ),
+      );
+      return Option.some({ ...decoded, activities });
     });
 
   const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
@@ -3251,7 +3396,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     window,
   ) => {
     const read = getThreadDetailSnapshotUnserialized(threadId, window);
-    return window === undefined ? fullThreadReadLock.withPermits(1)(read) : read;
+    const snapshot = window === undefined ? fullThreadReadLock.withPermits(1)(read) : read;
+    return snapshot.pipe(
+      Effect.flatMap((result) => {
+        if (Option.isNone(result) || Option.isNone(artifactConfig)) return Effect.succeed(result);
+        const { thread } = result.value;
+        // Read optional historical receipts after releasing the SQLite transaction and read permit.
+        return Effect.tryPromise(() =>
+          recoverSavedToolActivityEvidence(
+            artifactConfig.value.providerLogsDir,
+            threadId,
+            thread.activities,
+          ),
+        ).pipe(
+          Effect.map((activities) =>
+            Option.some({ ...result.value, thread: { ...thread, activities } }),
+          ),
+          Effect.orElseSucceed(() => result),
+        );
+      }),
+    );
   };
 
   const readHandoffDecisions = SqlSchema.findAll({
@@ -3270,19 +3434,86 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const readRateLimitedAccounts = SqlSchema.findAll({
-    Request: Schema.Struct({ since: IsoDateTime }),
+    Request: Schema.Struct({ since: IsoDateTime, quotaExhaustionOnly: Schema.Boolean }),
     Result: Schema.Struct({ instanceId: TrimmedNonEmptyString }),
-    execute: ({ since }) => sql`
+    execute: ({ since, quotaExhaustionOnly }) => sql`
       SELECT DISTINCT json_extract(payload_json, '$.instanceId') AS "instanceId"
       FROM projection_thread_activities
       WHERE kind = 'provider.account.rate-limited' AND created_at >= ${since}
         AND json_type(payload_json, '$.instanceId') = 'text'
+        AND (${quotaExhaustionOnly ? 1 : 0} = 0 OR json_extract(payload_json, '$.quotaExhausted') = 1)
     `,
   });
 
   return {
-    getRateLimitedAccountIds: (since) =>
-      readRateLimitedAccounts({ since }).pipe(
+    getWatchdogActivitySequences: (threadId) =>
+      sql<{ id: string; sequence: number }>`SELECT
+          json_extract(payload_json, '$.activity.id') AS id, MAX(sequence) AS sequence
+        FROM orchestration_events
+        WHERE aggregate_kind='thread' AND stream_id=${threadId}
+          AND event_type='thread.activity-appended'
+          AND json_extract(payload_json, '$.activity.kind')='orchestra.block'
+          AND json_extract(payload_json, '$.activity.payload.nodeId') LIKE 'watchdog-%'
+        GROUP BY json_extract(payload_json, '$.activity.id')`.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getWatchdogActivitySequences"),
+        ),
+      ),
+    // Driven from the thread list so each thread's blocks come from the
+    // (thread_id, kind) index; the activity table itself is far too large to scan.
+    getUnfinishedDelegationBlocks: () =>
+      sql<{ threadId: string; createdAt: string; payload: string }>`SELECT
+          a.thread_id AS "threadId", a.created_at AS "createdAt", a.payload_json AS payload
+        FROM projection_threads t
+        CROSS JOIN projection_thread_activities a INDEXED BY idx_projection_recovery_activity_kind
+        WHERE a.thread_id = t.thread_id AND a.kind = 'orchestra.block'
+          AND json_extract(a.payload_json, '$.nodeId') LIKE 'delegate-%'
+          AND json_extract(a.payload_json, '$.status') IN ('running', 'awaiting-user')`.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getUnfinishedDelegationBlocks"),
+        ),
+      ),
+    getHandoffOutOfScopeMessageIds: ({ projectId, threadId, messageId }) =>
+      Effect.gen(function* () {
+        const [current] = yield* sql<{ folder: string }>`SELECT f.folder
+          FROM projection_thread_messages m
+          JOIN projection_threads t ON t.thread_id=m.thread_id AND t.project_id=${projectId}
+          JOIN workspace_memory_v2_message_folders f
+            ON f.message_id=m.message_id AND f.project_id=${projectId} AND f.thread_id=${threadId}
+          WHERE m.thread_id=${threadId} AND m.message_id=${messageId} AND m.role='user'`;
+        if (!current) return null;
+        const rows = yield* sql<{ message_id: string }>`SELECT m.message_id
+          FROM projection_thread_messages m
+          WHERE m.thread_id=${threadId} AND NOT EXISTS (
+            SELECT 1 FROM workspace_memory_v2_message_folders f
+            WHERE f.project_id=${projectId} AND f.thread_id=${threadId} AND f.folder=${current.folder}
+              AND f.message_id=(SELECT u.message_id FROM projection_thread_messages u
+                WHERE u.thread_id=m.thread_id AND u.role='user' AND u.rowid<=m.rowid
+                ORDER BY u.rowid DESC LIMIT 1)
+          ) ORDER BY m.rowid`;
+        return rows.map((row) => row.message_id);
+      }).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getHandoffOutOfScopeMessageIds"),
+        ),
+      ),
+    getForgottenThreadMessageIds: ({ projectId, threadId }) =>
+      sql<{ message_id: string }>`SELECT m.message_id
+        FROM workspace_memory_v2 forgotten
+        JOIN projection_thread_messages m ON m.message_id = CASE
+          WHEN json_valid(forgotten.source_json)
+            AND json_extract(forgotten.source_json,'$.kind')='message'
+          THEN json_extract(forgotten.source_json,'$.id') END
+        JOIN projection_threads t ON t.thread_id=m.thread_id
+        WHERE forgotten.project_id=${projectId} AND forgotten.status='forgotten'
+          AND m.thread_id=${threadId} AND t.project_id=${projectId}`.pipe(
+        Effect.map((rows) => rows.map((row) => row.message_id)),
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getForgottenThreadMessageIds"),
+        ),
+      ),
+    getRateLimitedAccountIds: (since, quotaExhaustionOnly = false) =>
+      readRateLimitedAccounts({ since, quotaExhaustionOnly }).pipe(
         Effect.map((rows) => rows.map((row) => row.instanceId)),
         Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getRateLimitedAccountIds")),
       ),
@@ -3297,7 +3528,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     searchThreads,
     getSnapshotSequence,
     getCounts,
+    getWorkspaceKnowledgeDashboard: (input) => readKnowledgeDashboard(sql, input),
+    getWorkspaceWikiLinks: (input) =>
+      sql
+        .withTransaction(readWorkspaceWikiLinks(sql, input))
+        .pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getWorkspaceWikiLinks")),
+        ),
     listWorkspaceKnowledge,
+    ...makeKnowledgeDocumentQueries(sql, listWorkspaceKnowledge),
     getThreadTokenUsage: tokenUsage.getReport,
     getProjectTokenUsage: tokenUsage.getProjectReport,
     searchWorkspaceRag,

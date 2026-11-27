@@ -43,7 +43,7 @@ function humanizeInstanceId(instanceId: string): string {
 function providerDriverLabel(driver: string): string {
   if (driver === "codex") return "코덱스";
   if (driver === "claudeAgent") return "클로드";
-  if (driver === "gemini") return "Gemini";
+  if (driver === "gemini") return "Antigravity CLI";
   return humanizeInstanceId(driver) || driver;
 }
 
@@ -100,6 +100,20 @@ export function resolveSelectableModelSelection(
     provider.enabled &&
     provider.installed &&
     provider.auth.status !== "unauthenticated"
+    ? selection
+    : null;
+}
+
+/** Imported models may only use the exact saved account, model and options. */
+export function resolveImportedModelSelection(
+  config: T3ServerConfig | null | undefined,
+  selection: ModelSelection | null,
+): ModelSelection | null {
+  if (!config || !selection) return selection;
+  return resolveSelectableModelSelection(config, selection) &&
+    config.providers
+      .find((p) => p.instanceId === selection.instanceId)
+      ?.models.some((m) => m.slug === selection.model)
     ? selection
     : null;
 }
@@ -196,7 +210,7 @@ export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyAr
   }
 
   return [...groups.entries()]
-    .toSorted(
+    .sort(
       ([leftKey, left], [rightKey, right]) =>
         driverOrder.indexOf(left.providerDriver) - driverOrder.indexOf(right.providerDriver) ||
         Number(Boolean(right.providerLabel)) - Number(Boolean(left.providerLabel)) ||

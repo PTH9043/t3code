@@ -42,7 +42,11 @@ import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  MENU_ACTION_CHANNEL,
+  OPEN_UPGRADE_ROOM_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
@@ -79,6 +83,7 @@ function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContentsListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContents = {
+    ipc: { handle: vi.fn(), on: vi.fn() },
     copyImageAt: vi.fn(),
     getURL: vi.fn(() => "t3code-dev://app/"),
     isLoadingMainFrame: vi.fn(() => false),
@@ -179,8 +184,12 @@ const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronTheme["Service"]);
 
-const makeDesktopEnvironmentLayer = (startHidden = false, startInactive = false) =>
-  DesktopEnvironment.layer(environmentInput).pipe(
+const makeDesktopEnvironmentLayer = (
+  startHidden = false,
+  startInactive = false,
+  platform: NodeJS.Platform = environmentInput.platform,
+) =>
+  DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
     Layer.provide(
       Layer.mergeAll(
         NodeServices.layer,
@@ -203,6 +212,7 @@ const desktopWindowBoundsEquivalence = Schema.toEquivalence(
 function makeTestLayer(input: {
   readonly startHidden?: boolean;
   readonly startInactive?: boolean;
+  readonly platform?: NodeJS.Platform;
   readonly revealCalls?: Electron.BrowserWindow[];
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
@@ -279,7 +289,7 @@ function makeTestLayer(input: {
     Layer.provide(
       Layer.mergeAll(
         desktopAssetsLayer,
-        makeDesktopEnvironmentLayer(input.startHidden, input.startInactive),
+        makeDesktopEnvironmentLayer(input.startHidden, input.startInactive, input.platform),
         desktopAppSettingsLayer,
         desktopServerExposureLayer,
         DesktopState.layer,
@@ -1151,6 +1161,29 @@ describe("DesktopWindow", () => {
       }),
     );
   });
+
+  it.effect(
+    "registers the Windows room launcher when the main window uses WebSocket transport",
+    () =>
+      Effect.gen(function* () {
+        const { window } = makeFakeBrowserWindow();
+        const layer = makeTestLayer({
+          platform: "win32",
+          window,
+          createCount: yield* Ref.make(0),
+          mainWindow: yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none()),
+        });
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+          assert.isTrue(
+            vi
+              .mocked(window.webContents.ipc.handle)
+              .mock.calls.some(([channel]) => channel === OPEN_UPGRADE_ROOM_CHANNEL),
+          );
+        }).pipe(Effect.provide(layer));
+      }),
+  );
 
   it.effect("opens safe off-origin renderer navigations in the system browser", () =>
     Effect.gen(function* () {

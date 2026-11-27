@@ -1,5 +1,10 @@
 import { httpHeaderRedactionLayer } from "@t3tools/shared/httpObservability";
-import { makeLocalFileTracer, makeTraceSink, type TraceSink } from "@t3tools/shared/observability";
+import {
+  makeLocalFileTracer,
+  makeTraceSink,
+  resolveLoopbackOnlyOtlpUrl,
+  type TraceSink,
+} from "@t3tools/shared/observability";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
@@ -14,6 +19,7 @@ import { serverSelfSignals } from "../../diagnostics/ServerSelfSignals.ts";
 import * as ResourceAttribution from "../../resourceTelemetry/ResourceAttribution.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import * as BrowserTraceCollector from "../BrowserTraceCollector.ts";
+import { shouldPersistTraceRecord } from "../traceRetention.ts";
 
 const otlpSerializationLayer = OtlpSerialization.layerJson;
 
@@ -44,11 +50,15 @@ export const ObservabilityLive = Layer.unwrap(
               durationMs: stats.durationMs,
             }),
         });
+        const safeOtlpTracesUrl = resolveLoopbackOnlyOtlpUrl(config.otlpTracesUrl);
+        if (config.otlpTracesUrl !== undefined && safeOtlpTracesUrl === undefined) {
+          yield* Effect.logWarning("Blocked external or disabled OTLP traces export URL");
+        }
         const delegate =
-          config.otlpTracesUrl === undefined
+          safeOtlpTracesUrl === undefined
             ? undefined
             : yield* OtlpTracer.make({
-                url: config.otlpTracesUrl,
+                url: safeOtlpTracesUrl,
                 exportInterval: `${config.otlpExportIntervalMs} millis`,
                 resource: {
                   serviceName: config.otlpServiceName,
@@ -61,14 +71,15 @@ export const ObservabilityLive = Layer.unwrap(
 
         // Server spans also feed the self-monitoring counters (slow / failed
         // per minute). Browser spans go straight to the sink: they are not
-        // this process's health.
+        // this process's health. Only spans that carry signal reach the file;
+        // the counters above and the OTLP delegate still see all of them.
         const tappedSink: TraceSink = {
           filePath: sink.filePath,
           flush: sink.flush,
           close: sink.close,
           push: (record) => {
             serverSelfSignals.recordSpan(record);
-            sink.push(record);
+            if (shouldPersistTraceRecord(record)) sink.push(record);
           },
         };
         const tracer = yield* makeLocalFileTracer({
@@ -87,11 +98,15 @@ export const ObservabilityLive = Layer.unwrap(
       }),
     ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(otlpSerializationLayer));
 
+    const safeOtlpMetricsUrl = resolveLoopbackOnlyOtlpUrl(config.otlpMetricsUrl);
+    if (config.otlpMetricsUrl !== undefined && safeOtlpMetricsUrl === undefined) {
+      yield* Effect.logWarning("Blocked external or disabled OTLP metrics export URL");
+    }
     const metricsLayer =
-      config.otlpMetricsUrl === undefined
+      safeOtlpMetricsUrl === undefined
         ? Layer.empty
         : OtlpMetrics.layer({
-            url: config.otlpMetricsUrl,
+            url: safeOtlpMetricsUrl,
             exportInterval: `${config.otlpExportIntervalMs} millis`,
             resource: {
               serviceName: config.otlpServiceName,

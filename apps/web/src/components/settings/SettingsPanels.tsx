@@ -1,3 +1,4 @@
+import { usePrimaryEnvironmentId } from "~/state/environments";
 import { ArchiveIcon, ArchiveX, ChevronRightIcon, LoaderIcon, SettingsIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -17,15 +18,18 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  DEFAULT_CHAT_HORIZONTAL_INSET_PX,
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type EnvironmentIdentificationMode,
+  MAX_CHAT_HORIZONTAL_INSET_PX,
   MAX_CODE_FONT_SIZE,
   MAX_GLASS_OPACITY,
   MAX_INTERFACE_FONT_SIZE,
   MAX_PROMPT_FONT_SIZE,
   MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   MAX_TERMINAL_FONT_SIZE,
+  MIN_CHAT_HORIZONTAL_INSET_PX,
   MIN_CODE_FONT_SIZE,
   MIN_GLASS_OPACITY,
   MIN_INTERFACE_FONT_SIZE,
@@ -77,10 +81,16 @@ import {
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../../state/server";
-import { useProjects } from "../../state/entities";
+import { useListedThreadShells, useProjects } from "../../state/entities";
+import { useDesktopAssistant } from "../../hooks/useDesktopAssistant";
+import { ThreadCharacter } from "../chat/ThreadCharacter";
+import { ThreadAssistantProfile } from "../chat/ThreadAssistantProfile";
+import { RoomModelSettings } from "../chat/RoomModelSettings";
+import { AssistantVoiceSampleSettings } from "../chat/AssistantVoiceInput";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
+import { DesktopUpdatePermissionsSection } from "./PermissionsSettings";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
   Dialog,
@@ -142,6 +152,8 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { AiSearchSettingsSection } from "./AiSearchSettings";
+import { SearchModelsSettingsSection } from "./SearchModelsSettings";
+import { UpgradeRoomSettingsSection } from "./UpgradeRoomSettings";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "배경 그림",
@@ -456,6 +468,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity
         ? ["유리 효과 투명도"]
         : []),
+      ...((settings.chatHorizontalInsetPx ?? DEFAULT_CHAT_HORIZONTAL_INSET_PX) !==
+      DEFAULT_CHAT_HORIZONTAL_INSET_PX
+        ? ["대화방 좌우 여백"]
+        : []),
       ...(settings.environmentIdentificationMode !==
       DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
         ? ["실행 환경 표시"]
@@ -614,6 +630,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
+      chatHorizontalInsetPx: DEFAULT_CHAT_HORIZONTAL_INSET_PX,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
@@ -943,6 +960,15 @@ export function AppearanceSettingsPanel() {
     "--settings-slider-progress": `${glassOpacityRatio * 100}%`,
     "--settings-slider-fill-offset": `${0.5 - glassOpacityRatio}rem`,
   } as CSSProperties;
+  const chatHorizontalInsetPx = settings.chatHorizontalInsetPx ?? DEFAULT_CHAT_HORIZONTAL_INSET_PX;
+  const chatHorizontalInsetSliderValue = chatHorizontalInsetPx ?? 48;
+  const chatHorizontalInsetRatio =
+    (chatHorizontalInsetSliderValue - MIN_CHAT_HORIZONTAL_INSET_PX) /
+    (MAX_CHAT_HORIZONTAL_INSET_PX - MIN_CHAT_HORIZONTAL_INSET_PX);
+  const chatHorizontalInsetSliderStyle = {
+    "--settings-slider-progress": `${chatHorizontalInsetRatio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - chatHorizontalInsetRatio}rem`,
+  } as CSSProperties;
 
   return (
     <SettingsPageContainer>
@@ -1005,6 +1031,78 @@ export function AppearanceSettingsPanel() {
                 type="range"
                 value={settings.glassOpacity}
               />
+            </div>
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("setting-chat-horizontal-inset")}
+          description="대화방 본문·입력창과 양옆 경계선 사이의 간격을 조절합니다. 자동은 창 너비에 맞춰 기존 반응형 여백을 유지합니다."
+          resetAction={
+            chatHorizontalInsetPx !== DEFAULT_CHAT_HORIZONTAL_INSET_PX ? (
+              <SettingResetButton
+                label="대화방 좌우 여백"
+                onClick={() =>
+                  updateSettings({ chatHorizontalInsetPx: DEFAULT_CHAT_HORIZONTAL_INSET_PX })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full flex-col gap-2 sm:w-64">
+              <div className="flex items-center gap-3">
+                <output
+                  className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                  htmlFor="chat-horizontal-inset"
+                >
+                  {chatHorizontalInsetPx === null ? "자동" : `${chatHorizontalInsetPx}px`}
+                </output>
+                <input
+                  aria-label="대화방 좌우 여백"
+                  className="settings-slider min-w-0 flex-1"
+                  id="chat-horizontal-inset"
+                  max={MAX_CHAT_HORIZONTAL_INSET_PX}
+                  min={MIN_CHAT_HORIZONTAL_INSET_PX}
+                  onChange={(event) => {
+                    const nextInsetPx = Number(event.currentTarget.value);
+                    if (
+                      Number.isInteger(nextInsetPx) &&
+                      nextInsetPx >= MIN_CHAT_HORIZONTAL_INSET_PX &&
+                      nextInsetPx <= MAX_CHAT_HORIZONTAL_INSET_PX
+                    ) {
+                      updateSettings({ chatHorizontalInsetPx: nextInsetPx });
+                    }
+                  }}
+                  step={4}
+                  style={chatHorizontalInsetSliderStyle}
+                  type="range"
+                  value={chatHorizontalInsetSliderValue}
+                />
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                {(
+                  [
+                    { label: "자동", value: null },
+                    { label: "12px", value: 12 },
+                    { label: "48px", value: 48 },
+                    { label: "96px", value: 96 },
+                  ] as const
+                ).map((preset) => {
+                  const active = chatHorizontalInsetPx === preset.value;
+                  return (
+                    <Button
+                      key={preset.label}
+                      type="button"
+                      size="xs"
+                      variant={active ? "secondary" : "outline"}
+                      aria-pressed={active}
+                      onClick={() => updateSettings({ chatHorizontalInsetPx: preset.value })}
+                    >
+                      {preset.label}
+                    </Button>
+                  );
+                })}
+              </div>
             </div>
           }
         />
@@ -1244,6 +1342,38 @@ function WordWrapRow() {
   );
 }
 
+function TimelineMinimapRow() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  return (
+    <SettingsRow
+      {...searchableSetting("timeline-minimap")}
+      description="대화 오른쪽에 표시되는 막대를 클릭해 이전 메시지로 바로 이동합니다. 끄면 막대가 완전히 숨겨집니다."
+      resetAction={
+        settings.timelineMinimapEnabled !== DEFAULT_UNIFIED_SETTINGS.timelineMinimapEnabled ? (
+          <SettingResetButton
+            label="메시지 이동 막대"
+            onClick={() =>
+              updateSettings({
+                timelineMinimapEnabled: DEFAULT_UNIFIED_SETTINGS.timelineMinimapEnabled,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          checked={settings.timelineMinimapEnabled}
+          onCheckedChange={(checked) =>
+            updateSettings({ timelineMinimapEnabled: Boolean(checked) })
+          }
+          aria-label="메시지 이동 막대"
+        />
+      }
+    />
+  );
+}
+
 function FontSettingsGroup() {
   return (
     <>
@@ -1341,6 +1471,7 @@ function TypographySection() {
     >
       {advanced ? <FontSettingsGroup /> : <SimpleFontRows />}
       <WordWrapRow />
+      <TimelineMinimapRow />
     </SettingsSection>
   );
 }
@@ -1668,7 +1799,232 @@ function LegacyFeaturesSection() {
   );
 }
 
+function AssistantSettingsSection() {
+  const threads = useListedThreadShells();
+  const projects = useProjects();
+  const [selection, setSelection] = useState("");
+  const selected = threads.find((thread) => `${thread.environmentId}:${thread.id}` === selection);
+  return (
+    <SettingsSection title="대화 비서 설정">
+      <label className="flex flex-col gap-2 px-4 py-3 text-sm">
+        설정할 대화
+        <select
+          className="rounded border border-border bg-background px-2 py-1 text-foreground"
+          value={selection}
+          onChange={(event) => setSelection(event.currentTarget.value)}
+        >
+          <option value="">대화를 선택하세요</option>
+          {threads.map((thread) => {
+            const project = projects.find(
+              (item) => item.environmentId === thread.environmentId && item.id === thread.projectId,
+            );
+            return (
+              <option
+                key={`${thread.environmentId}:${thread.id}`}
+                value={`${thread.environmentId}:${thread.id}`}
+              >
+                {project?.title ?? "프로젝트"} · {thread.title}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+      {selected ? (
+        <div key={selection}>
+          <ThreadCharacter
+            environmentId={selected.environmentId}
+            threadId={selected.id}
+            isWorking={false}
+            settingsMode
+          />
+          <ThreadAssistantProfile
+            environmentId={selected.environmentId}
+            threadId={selected.id}
+            computerAvailable
+          />
+        </div>
+      ) : null}
+    </SettingsSection>
+  );
+}
+
+function MonitorAssistantSettingsSection() {
+  const assistant = useDesktopAssistant();
+  const appSettings = usePrimarySettings();
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
+  const entries = sortProviderInstanceEntries(
+    applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), appSettings),
+  ).filter((entry) => entry.enabled);
+  const selectedProviderId =
+    pendingProviderId ?? assistant.settings?.modelSelection?.instanceId ?? "";
+  const selectedProvider = entries.find((entry) => entry.instanceId === selectedProviderId);
+  const modelOptions = selectedProvider
+    ? (getCustomModelOptionsByInstance(appSettings, providers).get(selectedProvider.instanceId) ??
+      [])
+    : [];
+  if (!assistant.available) return null;
+  const settings = assistant.settings;
+  return (
+    <SettingsSection title="모니터 비서">
+      {assistant.error ? (
+        <p role="alert" className="px-4 py-2 text-sm text-destructive">
+          {assistant.error}
+        </p>
+      ) : null}
+      {!settings ? (
+        <p className="px-4 py-2 text-sm">비서 설정을 불러오는 중…</p>
+      ) : (
+        <div className="flex flex-col gap-3 px-4 py-3 text-sm">
+          <label className="flex items-center gap-3">
+            비서 AI 연결
+            <select
+              aria-label="비서 AI 연결"
+              value={selectedProviderId}
+              onChange={(event) => setPendingProviderId(event.currentTarget.value)}
+              className="rounded border border-border bg-background px-2 py-1 text-foreground"
+            >
+              <option value="">연결 선택</option>
+              {!selectedProvider && selectedProviderId ? (
+                <option value={selectedProviderId}>
+                  사용할 수 없는 연결 · {selectedProviderId}
+                </option>
+              ) : null}
+              {entries.map((entry) => (
+                <option key={entry.instanceId} value={entry.instanceId}>
+                  {entry.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-3">
+            비서 모델
+            <select
+              aria-label="비서 모델"
+              value={
+                settings.modelSelection?.instanceId === selectedProviderId
+                  ? settings.modelSelection.model
+                  : ""
+              }
+              disabled={!selectedProvider}
+              onChange={(event) => {
+                if (!selectedProvider || !event.currentTarget.value) return;
+                void assistant.update({
+                  modelSelection: createModelSelection(
+                    selectedProvider.instanceId,
+                    event.currentTarget.value,
+                  ),
+                });
+                setPendingProviderId(null);
+              }}
+              className="min-w-0 max-w-full rounded border border-border bg-background px-2 py-1 text-foreground"
+            >
+              <option value="">모델 선택</option>
+              {settings.modelSelection?.instanceId === selectedProviderId &&
+              !modelOptions.some((model) => model.slug === settings.modelSelection?.model) ? (
+                <option value={settings.modelSelection.model}>
+                  사용할 수 없는 모델 · {settings.modelSelection.model}
+                </option>
+              ) : null}
+              {modelOptions.map((model) => (
+                <option key={model.slug} value={model.slug}>
+                  {model.slug}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-muted-foreground">비서 모델은 일반 대화의 모델과 별도로 사용합니다.</p>
+          <label className="flex items-center gap-3">
+            음성 전사 후 전송
+            <select
+              aria-label="음성 전사 후 전송"
+              value={settings.voiceSendMode ?? "confirm"}
+              onChange={(event) =>
+                void assistant.update({
+                  voiceSendMode: event.currentTarget.value as "confirm" | "auto",
+                })
+              }
+              className="rounded border border-border bg-background px-2 py-1 text-foreground"
+            >
+              <option value="confirm">확인 후 전송</option>
+              <option value="auto">자동 전송</option>
+            </select>
+          </label>
+          <p className="text-muted-foreground">
+            자동 전송은 음성 전사만 보내며 작성 중인 초안과 첨부는 보존합니다.
+          </p>
+          <AssistantVoiceSampleSettings />
+          <label className="flex items-center gap-3">
+            공통 캐릭터
+            <select
+              aria-label="모니터 비서 공통 캐릭터"
+              value={settings.character}
+              onChange={(event) =>
+                void assistant.update({
+                  character: event.currentTarget.value as typeof settings.character,
+                })
+              }
+              className="rounded border border-border bg-background px-2 py-1 text-foreground"
+            >
+              <option value="off">표시 안 함</option>
+              <option value="type95">1번 · 95식</option>
+              <option value="k2">2번 · K2</option>
+              <option value="ots14">3번 · OTs-14</option>
+              <option value="agustina">2D Agustina</option>
+              <option value="pixel">2D 픽셀 캐릭터</option>
+              <option value="livliv">2.5D LivLiv 캐릭터</option>
+              <option value="vrm">3D Polybot</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={settings.alwaysOnTop}
+              onChange={(event) =>
+                void assistant.update({ alwaysOnTop: event.currentTarget.checked })
+              }
+            />
+            항상 위에 표시
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={settings.openAtStartup}
+              onChange={(event) =>
+                void assistant.update({ openAtStartup: event.currentTarget.checked })
+              }
+            />
+            T3 시작 시 비서 열기
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={settings.keepOnMainClose}
+              onChange={(event) =>
+                void assistant.update({ keepOnMainClose: event.currentTarget.checked })
+              }
+            />
+            메인 창을 닫아도 비서 유지
+          </label>
+          <p className="text-muted-foreground">
+            캐릭터 말투는 모니터 비서에서 보낸 요청에만 적용됩니다.
+          </p>
+          <div className="flex gap-2">
+            <Button size="xs" onClick={() => void assistant.open()}>
+              비서 열기
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => void assistant.close()}>
+              비서 닫기
+            </Button>
+          </div>
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
 export function GeneralSettingsPanel() {
+  const teamEnvironmentId = usePrimaryEnvironmentId();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
@@ -1723,7 +2079,34 @@ export function GeneralSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <DesktopUpdatePermissionsSection />
       <SettingsSection title="일반">
+        <SettingsRow
+          {...searchableSetting("background-watch-notice")}
+          description="감시가 중단된 시각부터 알림을 표시합니다. 0초로 설정하면 알림을 숨기고 대화 기록은 유지합니다."
+          control={
+            <div className="flex items-center gap-2">
+              <NumberField
+                value={settings.backgroundWatchNoticeSeconds}
+                min={0}
+                step={1}
+                size="sm"
+                className="w-32"
+                onValueChange={(value) => {
+                  if (value !== null && Number.isInteger(value) && value >= 0)
+                    updateSettings({ backgroundWatchNoticeSeconds: value });
+                }}
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="감시 중단 알림 표시 시간 줄이기" />
+                  <NumberFieldInput aria-label="감시 중단 알림 표시 시간(초)" />
+                  <NumberFieldIncrement aria-label="감시 중단 알림 표시 시간 늘리기" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">초</span>
+            </div>
+          }
+        />
         <SettingsRow
           {...searchableSetting("project-grouping")}
           description="여러 실행 환경에서 같은 저장소를 하나로 묶어 표시합니다."
@@ -2209,7 +2592,20 @@ export function GeneralSettingsPanel() {
         />
       </SettingsSection>
 
+      {teamEnvironmentId && (
+        <SettingsSection id="thread-response-style" title="전역 AI · 비서 설정">
+          <RoomModelSettings
+            key={teamEnvironmentId}
+            environmentId={teamEnvironmentId}
+            showMonitorControls
+          />
+        </SettingsSection>
+      )}
+      {/* 대화별 비서·모니터 비서는 위의 전역 AI·비서 설정으로 통합되었습니다. */}
+
+      <SearchModelsSettingsSection />
       <AiSearchSettingsSection />
+      <UpgradeRoomSettingsSection />
       <SettingsSection title="정보">
         {isElectron || HOSTED_APP_CHANNEL ? (
           <AboutVersionSection />

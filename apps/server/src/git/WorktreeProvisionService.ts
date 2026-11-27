@@ -60,6 +60,8 @@ export type WorktreeSetupGateResult =
     };
 
 const SETUP_TIMEOUT = "10 minutes";
+const VALIDATE_TIMEOUT = "5 minutes";
+const CLEANUP_TIMEOUT = "2 minutes";
 const SETUP_OUTPUT_TAIL = 2_000;
 
 /**
@@ -82,7 +84,24 @@ export class WorktreeProvisionService extends Context.Service<
     readonly provision: (
       input: WorktreeProvisionInput,
     ) => Effect.Effect<WorktreeProvisionResult, GitCommandError | GitManagerServiceError>;
+    readonly verifyExisting?: (input: {
+      readonly projectCwd: string;
+      readonly worktreePath: string;
+      readonly branch: string;
+    }) => Effect.Effect<boolean, GitCommandError>;
     readonly runSetupGate: (input: {
+      readonly script: WorktreeSetupScript;
+      readonly env?: NodeJS.ProcessEnv | undefined;
+      readonly worktreePath: string;
+    }) => Effect.Effect<WorktreeSetupGateResult>;
+    /** Declarative worktree validation gate (`t3.json` `runOnWorktreeValidate`). */
+    readonly runValidateGate?: (input: {
+      readonly script: WorktreeSetupScript;
+      readonly env?: NodeJS.ProcessEnv | undefined;
+      readonly worktreePath: string;
+    }) => Effect.Effect<WorktreeSetupGateResult>;
+    /** Declarative best-effort worktree cleanup gate (`t3.json` `runOnWorktreeCleanup`). */
+    readonly runCleanupGate?: (input: {
       readonly script: WorktreeSetupScript;
       readonly env?: NodeJS.ProcessEnv | undefined;
       readonly worktreePath: string;
@@ -121,6 +140,33 @@ export const make = Effect.gen(function* () {
       fallbackRemoteName: "origin",
     });
     return resolved.commitSha;
+  });
+
+  const verifyExisting = Effect.fn("WorktreeProvisionService.verifyExisting")(function* (input: {
+    readonly projectCwd: string;
+    readonly worktreePath: string;
+    readonly branch: string;
+  }) {
+    if (!(yield* directoryExists(input.worktreePath))) return false;
+    const refs = yield* gitWorkflow.listRefs({
+      cwd: input.projectCwd,
+      query: input.branch,
+      refKind: "local",
+      refresh: true,
+    });
+    const ref = refs.refs.find((item) => !item.isRemote && item.name === input.branch);
+    if (!ref?.worktreePath) return false;
+    const paths = yield* Effect.all([
+      fileSystem.realPath(input.worktreePath),
+      fileSystem.realPath(ref.worktreePath),
+    ]).pipe(
+      Effect.map((values) => values as readonly [string, string]),
+      Effect.orElseSucceed(() => null),
+    );
+    if (!paths) return false;
+    return platform === "win32"
+      ? paths[0].toLowerCase() === paths[1].toLowerCase()
+      : paths[0] === paths[1];
   });
 
   const provision = Effect.fn("WorktreeProvisionService.provision")(function* (
@@ -183,47 +229,63 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const runSetupGate = Effect.fn("WorktreeProvisionService.runSetupGate")(function* (input: {
-    readonly script: WorktreeSetupScript;
-    readonly env?: NodeJS.ProcessEnv | undefined;
-    readonly worktreePath: string;
-  }) {
-    const shell =
-      platform === "win32"
-        ? {
-            command: process.env.ComSpec?.trim() || "cmd.exe",
-            args: ["/d", "/s", "/c", input.script.command],
-          }
-        : { command: process.env.SHELL?.trim() || "/bin/sh", args: ["-lc", input.script.command] };
-    const result = yield* processRunner
-      .run({
-        command: shell.command,
-        args: shell.args,
-        cwd: input.worktreePath,
-        ...(input.env !== undefined ? { env: input.env } : {}),
-        timeout: SETUP_TIMEOUT,
-        timeoutBehavior: "timedOutResult",
-        outputMode: "truncate",
-      })
-      .pipe(
-        Effect.catch((error) =>
-          Effect.succeed({ code: null, timedOut: false, stdout: "", stderr: String(error) }),
-        ),
-      );
-    if (!result.timedOut && result.code === 0) {
-      return { status: "ok" } satisfies WorktreeSetupGateResult;
-    }
-    return {
-      status: "failed",
-      exitCode: typeof result.code === "number" ? result.code : null,
-      timedOut: result.timedOut,
-      outputTail: (result.stderr || result.stdout).slice(-SETUP_OUTPUT_TAIL).trim(),
-    } satisfies WorktreeSetupGateResult;
-  });
+  const runLifecycleGate = (
+    phase: "setup" | "validate" | "cleanup",
+    timeout: typeof SETUP_TIMEOUT | typeof VALIDATE_TIMEOUT | typeof CLEANUP_TIMEOUT,
+  ) =>
+    Effect.fn(`WorktreeProvisionService.run${phase[0]!.toUpperCase()}${phase.slice(1)}Gate`)(
+      function* (input: {
+        readonly script: WorktreeSetupScript;
+        readonly env?: NodeJS.ProcessEnv | undefined;
+        readonly worktreePath: string;
+      }) {
+        const shell =
+          platform === "win32"
+            ? {
+                command: process.env.ComSpec?.trim() || "cmd.exe",
+                args: ["/d", "/s", "/c", input.script.command],
+              }
+            : {
+                command: process.env.SHELL?.trim() || "/bin/sh",
+                args: ["-lc", input.script.command],
+              };
+        const result = yield* processRunner
+          .run({
+            command: shell.command,
+            args: shell.args,
+            cwd: input.worktreePath,
+            ...(input.env !== undefined ? { env: input.env } : {}),
+            timeout,
+            timeoutBehavior: "timedOutResult",
+            outputMode: "truncate",
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.succeed({ code: null, timedOut: false, stdout: "", stderr: String(error) }),
+            ),
+          );
+        if (!result.timedOut && result.code === 0) {
+          return { status: "ok" } satisfies WorktreeSetupGateResult;
+        }
+        return {
+          status: "failed",
+          exitCode: typeof result.code === "number" ? result.code : null,
+          timedOut: result.timedOut,
+          outputTail: (result.stderr || result.stdout).slice(-SETUP_OUTPUT_TAIL).trim(),
+        } satisfies WorktreeSetupGateResult;
+      },
+    );
+
+  const runSetupGate = runLifecycleGate("setup", SETUP_TIMEOUT);
+  const runValidateGate = runLifecycleGate("validate", VALIDATE_TIMEOUT);
+  const runCleanupGate = runLifecycleGate("cleanup", CLEANUP_TIMEOUT);
 
   return WorktreeProvisionService.of({
     provision,
+    verifyExisting,
     runSetupGate: (input) => setupGateLock.withPermits(1)(runSetupGate(input)),
+    runValidateGate: (input) => runValidateGate(input),
+    runCleanupGate: (input) => setupGateLock.withPermits(1)(runCleanupGate(input)),
   });
 });
 

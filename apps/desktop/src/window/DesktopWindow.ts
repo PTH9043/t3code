@@ -1,5 +1,6 @@
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -7,6 +8,12 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import * as Electron from "electron";
+import type {
+  DesktopAssistantConversationRef,
+  DesktopAssistantModelUpdate,
+  DesktopAssistantSettings,
+  DesktopAssistantSettingsPatch,
+} from "@t3tools/contracts";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -18,12 +25,19 @@ import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  ASSISTANT_SETTINGS_CHANGED_CHANNEL,
+  MENU_ACTION_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { installDesktopFileDrop } from "./DesktopFileDrop.ts";
 import { installDesktopDirectRpcIpc } from "./DesktopDirectRpcIpc.ts";
+import { installDesktopUpgradeRoomIpc } from "./DesktopUpgradeRoomIpc.ts";
 import * as DesktopSavedEnvironments from "../settings/DesktopSavedEnvironments.ts";
+import { DesktopAssistantState } from "../settings/DesktopAssistantState.ts";
+import { DesktopAssistantController } from "./DesktopAssistantController.ts";
 import { directHttpRequest } from "../backend/DesktopDirectHttpClient.ts";
 import { selectRestoredGoogleBearerToken } from "../backend/DesktopLocalEnvironmentAuth.ts";
 
@@ -68,6 +82,10 @@ type DesktopWindowRuntimeServices =
 export type DesktopWindowError =
   | ElectronWindow.ElectronWindowCreateError
   | PreviewManager.PreviewManagerError;
+
+export class DesktopAssistantError extends Data.TaggedError("DesktopAssistantError")<{
+  readonly cause: unknown;
+}> {}
 
 export type MainWindowZoomDirection = "in" | "out" | "reset";
 
@@ -140,6 +158,18 @@ export class DesktopWindow extends Context.Service<
     // the main window.
     readonly zoomMain: (direction: MainWindowZoomDirection) => Effect.Effect<void>;
     readonly syncAppearance: Effect.Effect<void>;
+    readonly getAssistantSettings: Effect.Effect<DesktopAssistantSettings, DesktopAssistantError>;
+    readonly setAssistantSettings: (
+      patch: DesktopAssistantSettingsPatch,
+    ) => Effect.Effect<DesktopAssistantSettings, DesktopAssistantError>;
+    readonly openAssistant: Effect.Effect<void, DesktopAssistantError>;
+    readonly closeAssistant: Effect.Effect<void, DesktopAssistantError>;
+    readonly getAssistantModel: (
+      ref: DesktopAssistantConversationRef,
+    ) => Effect.Effect<DesktopAssistantModelUpdate | null, DesktopAssistantError>;
+    readonly setAssistantModel: (
+      update: DesktopAssistantModelUpdate,
+    ) => Effect.Effect<void, DesktopAssistantError>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
 
@@ -265,6 +295,7 @@ function syncWindowAppearance(
   window: Electron.BrowserWindow,
   shouldUseDarkColors: boolean,
   platform: NodeJS.Platform,
+  isMainWindow: boolean,
 ): Effect.Effect<void> {
   return Effect.sync(() => {
     if (window.isDestroyed()) {
@@ -273,7 +304,7 @@ function syncWindowAppearance(
 
     window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
-    if (typeof titleBarOverlay === "object") {
+    if (isMainWindow && typeof titleBarOverlay === "object") {
       window.setTitleBarOverlay(titleBarOverlay);
     }
   });
@@ -324,6 +355,58 @@ export const make = Effect.gen(function* () {
   const runPromise = Effect.runPromiseWith(context);
   let flushMainWindowBounds: Effect.Effect<void> = Effect.void;
 
+  const assistant = new DesktopAssistantController(
+    new DesktopAssistantState(
+      environment.path.join(environment.stateDir, "desktop-assistant.json"),
+    ),
+    async (settings) => {
+      const window = await runPromise(
+        electronWindow.create({
+          width: 760,
+          height: 700,
+          minWidth: 420,
+          minHeight: 360,
+          show: false,
+          autoHideMenuBar: true,
+          alwaysOnTop: settings.alwaysOnTop,
+          title: "T3 비서",
+          webPreferences: {
+            preload: environment.preloadPath,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            backgroundThrottling: false,
+          },
+        }),
+      );
+      if (Option.isSome(directRpcHub)) installDesktopDirectRpcIpc(window, directRpcHub.value);
+      window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      const origin = new URL(getDesktopUrl(environment.isDevelopment));
+      window.webContents.on("will-navigate", (event, target) => {
+        try {
+          const url = new URL(target);
+          if (url.protocol !== origin.protocol || url.host !== origin.host) event.preventDefault();
+        } catch {
+          event.preventDefault();
+        }
+      });
+      window.once("ready-to-show", () => {
+        if (!environment.startHidden && !window.isDestroyed()) window.showInactive();
+      });
+      const url = new URL(getDesktopUrl(environment.isDevelopment));
+      url.searchParams.set("desktopAssistant", "1");
+      void window.loadURL(url.href).catch(() => undefined);
+      return window;
+    },
+    (settings) =>
+      void runPromise(electronWindow.sendAll(ASSISTANT_SETTINGS_CHANGED_CHANNEL, settings)).catch(
+        () => undefined,
+      ),
+    (window) => {
+      if (!environment.startHidden) window.showInactive();
+    },
+  );
+
   const dismissConnectingSplash = Effect.gen(function* () {
     const splash = yield* Ref.getAndSet(splashWindowRef, Option.none());
     if (Option.isSome(splash) && !splash.value.isDestroyed()) {
@@ -341,7 +424,9 @@ export const make = Effect.gen(function* () {
   const withoutSplash = (window: Option.Option<Electron.BrowserWindow>) =>
     Ref.get(splashWindowRef).pipe(
       Effect.map((splash) =>
-        Option.isSome(splash) && Option.isSome(window) && window.value === splash.value
+        Option.isSome(window) &&
+        ((Option.isSome(splash) && window.value === splash.value) ||
+          assistant.isAssistant(window.value))
           ? Option.none<Electron.BrowserWindow>()
           : window,
       ),
@@ -531,6 +616,7 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    if (environment.platform === "win32") installDesktopUpgradeRoomIpc(window, applicationUrl);
     if (Option.isSome(directRpcHub)) installDesktopDirectRpcIpc(window, directRpcHub.value);
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       if (
@@ -808,6 +894,7 @@ export const make = Effect.gen(function* () {
       clearDevelopmentLoadRetry();
       clearBoundsPersist();
       void runPromise(electronWindow.clearMain(Option.some(window)));
+      void assistant.onMainClosed().catch(() => undefined);
     });
 
     return window;
@@ -931,6 +1018,7 @@ export const make = Effect.gen(function* () {
       yield* Ref.set(backendReadyRef, true);
       yield* logWindowInfo("backend ready", { source: "http", url: httpBaseUrl.href });
       yield* createMainIfBackendReady;
+      yield* Effect.promise(() => assistant.openOnStartup().catch(() => undefined));
     }),
     handleBackendNotReady: Ref.set(backendReadyRef, false).pipe(
       Effect.withSpan("desktop.window.handleBackendNotReady"),
@@ -938,6 +1026,33 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds: Effect.suspend(() => flushMainWindowBounds).pipe(
       Effect.withSpan("desktop.window.flushMainWindowBounds"),
     ),
+    getAssistantSettings: Effect.tryPromise({
+      try: () => assistant.getSettings(),
+      catch: (cause) => new DesktopAssistantError({ cause }),
+    }),
+    setAssistantSettings: (patch) =>
+      Effect.tryPromise({
+        try: () => assistant.updateSettings(patch),
+        catch: (cause) => new DesktopAssistantError({ cause }),
+      }),
+    openAssistant: Effect.tryPromise({
+      try: () => assistant.open(),
+      catch: (cause) => new DesktopAssistantError({ cause }),
+    }),
+    closeAssistant: Effect.tryPromise({
+      try: () => assistant.close(),
+      catch: (cause) => new DesktopAssistantError({ cause }),
+    }),
+    getAssistantModel: (ref) =>
+      Effect.tryPromise({
+        try: () => assistant.getModel(ref),
+        catch: (cause) => new DesktopAssistantError({ cause }),
+      }),
+    setAssistantModel: (update) =>
+      Effect.tryPromise({
+        try: () => assistant.setModel(update),
+        catch: (cause) => new DesktopAssistantError({ cause }),
+      }),
     dispatchMenuAction: Effect.fn("desktop.window.dispatchMenuAction")(function* (action) {
       yield* Effect.annotateCurrentSpan({ action });
       const existingWindow = yield* focusedMainWindow;
@@ -973,8 +1088,14 @@ export const make = Effect.gen(function* () {
     }),
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+      const mainWindow = yield* electronWindow.main;
       yield* electronWindow.syncAllAppearance((window) =>
-        syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
+        syncWindowAppearance(
+          window,
+          shouldUseDarkColors,
+          environment.platform,
+          Option.isSome(mainWindow) && window === mainWindow.value,
+        ),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
   });

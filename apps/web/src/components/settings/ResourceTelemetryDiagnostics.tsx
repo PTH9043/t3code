@@ -28,7 +28,7 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -44,7 +44,6 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTime } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
@@ -78,7 +77,102 @@ function formatRate(value: number): string {
   return `${formatBytes(value)}/초`;
 }
 
+const HISTORY_AUTO_REFRESH_INTERVAL_MS = 15_000;
+const LIVE_SPARKLINE_MAX_POINTS = 30;
+
+interface LiveTelemetryPoint {
+  readonly cpuPercent: number;
+  readonly rssMb: number;
+  readonly writeMbPerSec: number;
+}
+
+function LiveSparkline({
+  label,
+  values,
+  unit,
+  strokeClass,
+  metricKey,
+}: {
+  readonly label: string;
+  readonly values: ReadonlyArray<number>;
+  readonly unit: string;
+  readonly strokeClass: string;
+  readonly metricKey: string;
+}) {
+  const maxVal = Math.max(1, ...values);
+  const latest = values.at(-1) ?? 0;
+  const peak = values.length > 0 ? Math.max(...values) : 0;
+  const width = 140;
+  const height = 28;
+  const points =
+    values.length <= 1
+      ? `0,${height - 2} ${width},${height - 2}`
+      : values
+          .map((value, idx) => {
+            const x = (idx / (values.length - 1)) * width;
+            const y = height - 2 - Math.min(1, Math.max(0, value / maxVal)) * (height - 4);
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+          })
+          .join(" ");
+
+  return (
+    <div
+      data-resource-sparkline={metricKey}
+      className="flex items-center justify-between gap-3 px-4 py-2.5 sm:px-5"
+    >
+      <div className="min-w-0">
+        <div className="text-[11px] font-medium text-muted-foreground">{label} (최근 60초)</div>
+        <div className="mt-0.5 font-mono text-xs tabular-nums text-foreground">
+          현재 {latest.toFixed(1)}
+          {unit} · 최대 {peak.toFixed(1)}
+          {unit}
+        </div>
+      </div>
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        aria-hidden="true"
+        className="shrink-0 overflow-visible"
+      >
+        <polyline
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={strokeClass}
+          points={points}
+        />
+      </svg>
+    </div>
+  );
+}
+
+function getLogicalCpuCoreCount(): number {
+  if (typeof navigator !== "undefined") {
+    const cores = navigator.hardwareConcurrency;
+    if (Number.isFinite(cores) && cores >= 1) {
+      return Math.floor(cores);
+    }
+  }
+  return 1;
+}
+
+function normalizeSystemCpuPercent(rawCpuPercent: number, logicalCores: number): number {
+  if (!Number.isFinite(rawCpuPercent) || rawCpuPercent <= 0) return 0;
+  const divisor = Math.max(1, logicalCores);
+  return Math.min(100, rawCpuPercent / divisor);
+}
+
+function formatCoreEquivalent(rawCpuPercent: number): string {
+  const cores = Number.isFinite(rawCpuPercent) ? Math.max(0, rawCpuPercent) / 100 : 0;
+  return `${cores.toFixed(2)}코어`;
+}
+
 function formatCpuTime(valueMs: number): string {
+  if (!Number.isFinite(valueMs) || valueMs <= 0) return "0.00초";
+  if (valueMs < 10) return `${Math.max(1, Math.round(valueMs))} ms`;
   const seconds = valueMs / 1_000;
   if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}초`;
   const minutes = seconds / 60;
@@ -120,9 +214,9 @@ function categoryLabel(category: ResourceTelemetryProcessCategory): string {
     case "server-child":
       return "백엔드 하위 프로세스";
     case "provider-root":
-      return "제공자";
+      return "에이전트 CLI";
     case "terminal-root":
-      return "터미널";
+      return "터미널·도구";
     case "electron-main":
       return "Electron 메인";
     case "electron-renderer":
@@ -304,11 +398,14 @@ function AggregateCard({
   label,
   accentClass,
   aggregate,
+  logicalCores,
 }: {
   label: string;
   accentClass: string;
   aggregate: ResourceTelemetryAggregate;
+  logicalCores: number;
 }) {
+  const normalizedCpu = normalizeSystemCpuPercent(aggregate.currentCpuPercent, logicalCores);
   return (
     <div className="relative overflow-hidden border-t border-border/60 px-4 py-4 first:border-t-0 md:border-t-0 md:border-l md:first:border-l-0 sm:px-5">
       <span className={cn("absolute inset-x-5 top-0 h-0.5 rounded-full opacity-75", accentClass)} />
@@ -321,7 +418,10 @@ function AggregateCard({
         </div>
       </div>
       <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-2.5">
-        <MetricPair label="CPU" value={`${aggregate.currentCpuPercent.toFixed(1)}%`} />
+        <MetricPair
+          label="CPU"
+          value={`${normalizedCpu.toFixed(1)}% · ${formatCoreEquivalent(aggregate.currentCpuPercent)}`}
+        />
         <MetricPair label="메모리" value={formatBytes(aggregate.currentRssBytes)} />
         <MetricPair label="읽기" value={formatRate(aggregate.ioReadBytesPerSecond)} />
         <MetricPair label="쓰기" value={formatRate(aggregate.ioWriteBytesPerSecond)} />
@@ -428,17 +528,30 @@ function HistoryWindowSelector({
 
 function ResourceHistoryChart({
   buckets,
+  logicalCores,
 }: {
   buckets: ReadonlyArray<ResourceTelemetryHistoryBucket>;
+  logicalCores: number;
 }) {
-  const maxCpu = resourceHistoryCpuScaleMax(buckets);
+  const normalizedBuckets = useMemo(
+    () =>
+      buckets.map((bucket) => ({
+        bucket,
+        avgNormalizedCpu: normalizeSystemCpuPercent(bucket.avgCpuPercent, logicalCores),
+        maxNormalizedCpu: normalizeSystemCpuPercent(bucket.maxCpuPercent, logicalCores),
+      })),
+    [buckets, logicalCores],
+  );
+  const maxCpu = resourceHistoryCpuScaleMax(
+    normalizedBuckets.map((entry) => ({ avgCpuPercent: entry.avgNormalizedCpu })),
+  );
   const maxIo = Math.max(1, ...buckets.map((bucket) => bucket.ioReadBytes + bucket.ioWriteBytes));
 
   return (
     <div className="border-t border-border/60 px-4 py-4 sm:px-5">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground/65">
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-1.5 w-3 rounded-full bg-foreground/70" /> CPU 평균
+          <span className="h-1.5 w-3 rounded-full bg-foreground/70" /> CPU 평균 (전체 기준)
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-1.5 w-3 rounded-full bg-sky-500/70" /> I/O 읽기
@@ -448,9 +561,9 @@ function ResourceHistoryChart({
         </span>
       </div>
       <div className="flex h-32 items-end gap-1 overflow-hidden rounded-lg border border-border/40 bg-muted/8 px-2 pt-3 pb-2">
-        {buckets.map((bucket) => {
+        {normalizedBuckets.map(({ bucket, avgNormalizedCpu, maxNormalizedCpu }) => {
           const cpuHeight = resourceHistoryBarHeight({
-            value: bucket.avgCpuPercent,
+            value: avgNormalizedCpu,
             max: maxCpu,
             minimumVisiblePercent: 2,
           });
@@ -485,8 +598,14 @@ function ResourceHistoryChart({
                 }
               />
               <TooltipPopup side="top" className="space-y-0.5 text-left">
-                <div>CPU 평균 {bucket.avgCpuPercent.toFixed(1)}%</div>
-                <div>CPU 최대 {bucket.maxCpuPercent.toFixed(1)}%</div>
+                <div>
+                  CPU 평균 {avgNormalizedCpu.toFixed(1)}% (
+                  {formatCoreEquivalent(bucket.avgCpuPercent)})
+                </div>
+                <div>
+                  CPU 최대 {maxNormalizedCpu.toFixed(1)}% (
+                  {formatCoreEquivalent(bucket.maxCpuPercent)})
+                </div>
                 <div>읽기 {formatBytes(bucket.ioReadBytes)}</div>
                 <div>쓰기 {formatBytes(bucket.ioWriteBytes)}</div>
               </TooltipPopup>
@@ -588,10 +707,12 @@ function ProcessActions({
 
 function ProcessTable({
   processes,
+  logicalCores,
   signalingKeys,
   onSignal,
 }: {
   processes: ReadonlyArray<ResourceTelemetryProcess>;
+  logicalCores: number;
   signalingKeys: ReadonlySet<string>;
   onSignal: (process: ResourceTelemetryProcess, signal: ServerProcessSignal) => void;
 }) {
@@ -614,39 +735,41 @@ function ProcessTable({
   }, []);
 
   return (
-    <ScrollArea
-      chainVerticalScroll
-      scrollFade
-      hideScrollbars
-      className="max-h-[min(68vh,48rem)] w-full max-w-full border-t border-border/60"
-    >
-      <table className="w-full min-w-[1320px] table-fixed text-left text-xs">
-        <colgroup>
-          <col className="w-[20%]" />
-          <col className="w-[10%]" />
-          <col className="w-[7%]" />
-          <col className="w-[8%]" />
-          <col className="w-[9%]" />
-          <col className="w-[9%]" />
-          <col className="w-[9%]" />
-          <col className="w-[10%]" />
-          <col className="w-[8%]" />
-          <col className="w-[6%]" />
-          <col className="w-[4%]" />
-        </colgroup>
+    <div className="max-h-[min(68vh,48rem)] w-full overflow-x-auto overflow-y-auto border-t border-border/60">
+      <table className="w-full min-w-[1180px] border-collapse text-left text-xs">
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[10px] uppercase tracking-[0.08em] text-muted-foreground/65">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">프로세스</th>
-            <th className="px-3 py-2 font-semibold">분류</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU 시간</th>
-            <th className="px-3 py-2 text-right font-semibold">메모리</th>
-            <th className="px-3 py-2 text-right font-semibold">초당 읽기</th>
-            <th className="px-3 py-2 text-right font-semibold">초당 쓰기</th>
-            <th className="px-3 py-2 text-right font-semibold">총 읽기</th>
-            <th className="px-3 py-2 text-right font-semibold">총 쓰기</th>
-            <th className="px-3 py-2 text-right font-semibold">PID</th>
-            <th className="px-2 py-2 text-right font-semibold sm:pr-4">종료</th>
+            <th className="min-w-[220px] whitespace-nowrap px-4 py-2 font-semibold sm:pl-5">
+              프로세스
+            </th>
+            <th className="min-w-[116px] whitespace-nowrap px-3 py-2 font-semibold">분류</th>
+            <th className="min-w-[84px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              CPU
+            </th>
+            <th className="min-w-[92px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              CPU 시간
+            </th>
+            <th className="min-w-[96px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              메모리
+            </th>
+            <th className="min-w-[108px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              초당 읽기
+            </th>
+            <th className="min-w-[108px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              초당 쓰기
+            </th>
+            <th className="min-w-[96px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              총 읽기
+            </th>
+            <th className="min-w-[96px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              총 쓰기
+            </th>
+            <th className="min-w-[80px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              PID
+            </th>
+            <th className="min-w-[84px] whitespace-nowrap px-3 py-2 text-right font-semibold sm:pr-5">
+              종료
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
@@ -657,95 +780,106 @@ function ProcessTable({
               </td>
             </tr>
           ) : null}
-          {visible.map((process) => (
-            <tr key={processIdentityKey(process)} className="hover:bg-muted/20">
-              <td className="px-4 py-2 sm:pl-5">
-                <ProcessTreeName
-                  process={process}
-                  collapsed={collapsed.has(processIdentityKey(process))}
-                  onToggle={toggle}
-                />
-              </td>
-              <td className="truncate px-3 py-2 text-[11px] text-muted-foreground">
-                {categoryLabel(process.category)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {process.cpuPercent.toFixed(1)}%
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {formatCpuTime(process.cpuTimeMs)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {formatBytes(process.residentBytes)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-sky-700 dark:text-sky-300">
-                {formatRate(process.ioReadBytesPerSecond)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-amber-700 dark:text-amber-300">
-                {formatRate(process.ioWriteBytesPerSecond)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                {formatBytes(process.ioReadBytes)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                <Tooltip>
-                  <TooltipTrigger render={<span>{formatBytes(process.ioWriteBytes)}</span>} />
-                  <TooltipPopup side="top">{ioSemanticsLabel(process.ioSemantics)}</TooltipPopup>
-                </Tooltip>
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                {process.identity.pid}
-              </td>
-              <td className="px-2 py-2 text-right sm:pr-4">
-                <ProcessActions
-                  process={process}
-                  signalingKeys={signalingKeys}
-                  onSignal={onSignal}
-                />
-              </td>
-            </tr>
-          ))}
+          {visible.map((process) => {
+            const normalizedCpu = normalizeSystemCpuPercent(process.cpuPercent, logicalCores);
+            return (
+              <tr key={processIdentityKey(process)} className="hover:bg-muted/20">
+                <td className="max-w-[300px] px-4 py-2 sm:pl-5">
+                  <ProcessTreeName
+                    process={process}
+                    collapsed={collapsed.has(processIdentityKey(process))}
+                    onToggle={toggle}
+                  />
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
+                  {categoryLabel(process.category)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  <Tooltip>
+                    <TooltipTrigger render={<span>{normalizedCpu.toFixed(1)}%</span>} />
+                    <TooltipPopup side="top">
+                      코어 합산 {process.cpuPercent.toFixed(1)}% (
+                      {formatCoreEquivalent(process.cpuPercent)})
+                    </TooltipPopup>
+                  </Tooltip>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  {formatCpuTime(process.cpuTimeMs)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  {formatBytes(process.residentBytes)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-sky-700 dark:text-sky-300">
+                  {formatRate(process.ioReadBytesPerSecond)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-amber-700 dark:text-amber-300">
+                  {formatRate(process.ioWriteBytesPerSecond)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                  {formatBytes(process.ioReadBytes)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                  <Tooltip>
+                    <TooltipTrigger render={<span>{formatBytes(process.ioWriteBytes)}</span>} />
+                    <TooltipPopup side="top">{ioSemanticsLabel(process.ioSemantics)}</TooltipPopup>
+                  </Tooltip>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                  {process.identity.pid}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right sm:pr-5">
+                  <ProcessActions
+                    process={process}
+                    signalingKeys={signalingKeys}
+                    onSignal={onSignal}
+                  />
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
-    </ScrollArea>
+    </div>
   );
 }
 
 function HistoryProcessTable({
   processes,
+  logicalCores,
 }: {
   processes: ReadonlyArray<ResourceTelemetryProcessSummary>;
+  logicalCores: number;
 }) {
   return (
-    <ScrollArea
-      chainVerticalScroll
-      scrollFade
-      hideScrollbars
-      className="max-h-[28rem] w-full max-w-full border-t border-border/60"
-    >
-      <table className="w-full min-w-[1020px] table-fixed text-left text-xs">
-        <colgroup>
-          <col className="w-[24%]" />
-          <col className="w-[11%]" />
-          <col className="w-[10%]" />
-          <col className="w-[10%]" />
-          <col className="w-[11%]" />
-          <col className="w-[11%]" />
-          <col className="w-[11%]" />
-          <col className="w-[7%]" />
-          <col className="w-[5%]" />
-        </colgroup>
+    <div className="max-h-[28rem] w-full overflow-x-auto overflow-y-auto border-t border-border/60">
+      <table className="w-full min-w-[980px] border-collapse text-left text-xs">
         <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[10px] uppercase tracking-[0.08em] text-muted-foreground/65">
           <tr>
-            <th className="px-4 py-2 font-semibold sm:pl-5">프로세스</th>
-            <th className="px-3 py-2 font-semibold">분류</th>
-            <th className="px-3 py-2 text-right font-semibold">CPU 시간</th>
-            <th className="px-3 py-2 text-right font-semibold">최대 CPU</th>
-            <th className="px-3 py-2 text-right font-semibold">최대 메모리</th>
-            <th className="px-3 py-2 text-right font-semibold">읽기</th>
-            <th className="px-3 py-2 text-right font-semibold">쓰기</th>
-            <th className="px-3 py-2 text-right font-semibold">샘플</th>
-            <th className="px-3 py-2 text-right font-semibold sm:pr-5">PID</th>
+            <th className="min-w-[200px] whitespace-nowrap px-4 py-2 font-semibold sm:pl-5">
+              프로세스
+            </th>
+            <th className="min-w-[116px] whitespace-nowrap px-3 py-2 font-semibold">분류</th>
+            <th className="min-w-[92px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              CPU 시간
+            </th>
+            <th className="min-w-[88px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              최대 CPU
+            </th>
+            <th className="min-w-[100px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              최대 메모리
+            </th>
+            <th className="min-w-[96px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              읽기
+            </th>
+            <th className="min-w-[96px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              쓰기
+            </th>
+            <th className="min-w-[68px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums">
+              샘플
+            </th>
+            <th className="min-w-[76px] whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums sm:pr-5">
+              PID
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
@@ -756,54 +890,63 @@ function HistoryProcessTable({
               </td>
             </tr>
           ) : null}
-          {processes.map((process) => (
-            <tr key={processSummaryIdentityKey(process)} className="hover:bg-muted/20">
-              <td className="px-4 py-2 sm:pl-5">
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <span className="block truncate font-medium text-foreground">
-                        {process.name || process.command}
-                      </span>
-                    }
-                  />
-                  <TooltipPopup
-                    side="top"
-                    className="max-w-[min(520px,calc(100vw-2rem))] whitespace-normal break-words text-left font-mono text-[11px]"
-                  >
-                    {process.command || process.name}
-                  </TooltipPopup>
-                </Tooltip>
-              </td>
-              <td className="truncate px-3 py-2 text-[11px] text-muted-foreground">
-                {categoryLabel(process.category)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {formatCpuTime(process.cpuTimeMs)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {process.maxCpuPercent.toFixed(1)}%
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums">
-                {formatBytes(process.peakRssBytes)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-sky-700 dark:text-sky-300">
-                {formatBytes(process.ioReadBytes)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-amber-700 dark:text-amber-300">
-                {formatBytes(process.ioWriteBytes)}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                {process.sampleCount}
-              </td>
-              <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground sm:pr-5">
-                {process.identity.pid}
-              </td>
-            </tr>
-          ))}
+          {processes.map((process) => {
+            const maxNormalizedCpu = normalizeSystemCpuPercent(process.maxCpuPercent, logicalCores);
+            return (
+              <tr key={processSummaryIdentityKey(process)} className="hover:bg-muted/20">
+                <td className="max-w-[280px] px-4 py-2 sm:pl-5">
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <span className="block truncate font-medium text-foreground">
+                          {process.name || process.command}
+                        </span>
+                      }
+                    />
+                    <TooltipPopup
+                      side="top"
+                      className="max-w-[min(520px,calc(100vw-2rem))] whitespace-normal break-words text-left font-mono text-[11px]"
+                    >
+                      {process.command || process.name}
+                    </TooltipPopup>
+                  </Tooltip>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
+                  {categoryLabel(process.category)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  {formatCpuTime(process.cpuTimeMs)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  <Tooltip>
+                    <TooltipTrigger render={<span>{maxNormalizedCpu.toFixed(1)}%</span>} />
+                    <TooltipPopup side="top">
+                      코어 합산 {process.maxCpuPercent.toFixed(1)}% (
+                      {formatCoreEquivalent(process.maxCpuPercent)})
+                    </TooltipPopup>
+                  </Tooltip>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums">
+                  {formatBytes(process.peakRssBytes)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-sky-700 dark:text-sky-300">
+                  {formatBytes(process.ioReadBytes)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-amber-700 dark:text-amber-300">
+                  {formatBytes(process.ioWriteBytes)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                  {process.sampleCount}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground sm:pr-5">
+                  {process.identity.pid}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
-    </ScrollArea>
+    </div>
   );
 }
 
@@ -877,8 +1020,20 @@ export function ResourceTelemetryDiagnostics() {
   });
   const [signalingKeys, setSignalingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [isRetrying, setIsRetrying] = useState(false);
+  const [liveSeries, setLiveSeries] = useState<ReadonlyArray<LiveTelemetryPoint>>([]);
   const snapshot = telemetry.data;
   const allT3 = snapshot?.groups.allT3;
+  const logicalCoresForSeries = useMemo(() => getLogicalCpuCoreCount(), []);
+
+  useEffect(() => {
+    if (!snapshot || !allT3) return;
+    const nextPoint: LiveTelemetryPoint = {
+      cpuPercent: normalizeSystemCpuPercent(allT3.currentCpuPercent, logicalCoresForSeries),
+      rssMb: allT3.currentRssBytes / (1_024 * 1_024),
+      writeMbPerSec: allT3.ioWriteBytesPerSecond / (1_024 * 1_024),
+    };
+    setLiveSeries((previous) => [...previous, nextPoint].slice(-LIVE_SPARKLINE_MAX_POINTS));
+  }, [snapshot?.readAt, allT3, logicalCoresForSeries, snapshot]);
 
   const signalProcess = useCallback(
     (process: ResourceTelemetryProcess, signal: ServerProcessSignal) => {
@@ -954,7 +1109,50 @@ export function ResourceTelemetryDiagnostics() {
       });
   }, [retryTelemetry]);
 
+  const logicalCores = useMemo(() => getLogicalCpuCoreCount(), []);
   const speedLimit = snapshot ? Option.getOrNull(snapshot.speedLimitPercent) : null;
+  const hasThermalOrSpeedLimit =
+    snapshot !== null && (speedLimit !== null || snapshot.power.thermalState !== "unknown");
+  const totalProcessCpuTimeMs = useMemo(
+    () =>
+      snapshot
+        ? snapshot.processes
+            .filter((process) => process.category !== "external")
+            .reduce((total, process) => total + process.cpuTimeMs, 0)
+        : 0,
+    [snapshot],
+  );
+  const historyRefreshRef = useRef(history.refresh);
+  historyRefreshRef.current = history.refresh;
+  const emptyHistoryRetryRef = useRef<number | null>(null);
+  const liveProcessCount = snapshot?.processes.length ?? 0;
+  const retainedHistorySampleCount = history.data?.retainedSampleCount ?? 0;
+
+  useEffect(() => {
+    if (
+      liveProcessCount > 0 &&
+      history.data !== null &&
+      retainedHistorySampleCount === 0 &&
+      !history.isPending
+    ) {
+      if (emptyHistoryRetryRef.current !== windowMs) {
+        emptyHistoryRetryRef.current = windowMs;
+        historyRefreshRef.current();
+      }
+    } else if (retainedHistorySampleCount > 0) {
+      emptyHistoryRetryRef.current = null;
+    }
+  }, [history.data, history.isPending, liveProcessCount, retainedHistorySampleCount, windowMs]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      historyRefreshRef.current();
+    }, HISTORY_AUTO_REFRESH_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [windowMs]);
+
   const collectorNeedsRetry = shouldShowResourceMonitorRetry({
     nativeStatus: snapshot?.health.native.status ?? null,
     error: telemetry.error,
@@ -965,6 +1163,7 @@ export function ResourceTelemetryDiagnostics() {
       snapshot.power.lowPowerMode !== "unknown" ||
       snapshot.power.idle !== "unknown" ||
       snapshot.power.locked !== "unknown" ||
+      snapshot.power.suspended ||
       snapshot.power.thermalState !== "unknown");
 
   return (
@@ -1020,8 +1219,22 @@ export function ResourceTelemetryDiagnostics() {
             <IconStat
               icon={<CpuIcon className="size-3.5" />}
               label="현재 CPU"
-              value={allT3 ? `${allT3.currentCpuPercent.toFixed(1)}%` : "..."}
-              detail={allT3 ? `관측된 CPU 시간 ${formatCpuTime(allT3.cpuTimeMs)}` : undefined}
+              value={
+                allT3
+                  ? `${normalizeSystemCpuPercent(allT3.currentCpuPercent, logicalCores).toFixed(1)}%`
+                  : "..."
+              }
+              detail={
+                allT3
+                  ? `${formatCoreEquivalent(allT3.currentCpuPercent)} (${logicalCores}코어) · ${
+                      allT3.cpuTimeMs > 0
+                        ? `관측 ${formatCpuTime(allT3.cpuTimeMs)}`
+                        : totalProcessCpuTimeMs > 0
+                          ? `누적 ${formatCpuTime(totalProcessCpuTimeMs)}`
+                          : "관측 0.00초"
+                    }`
+                  : undefined
+              }
             />
             <IconStat
               icon={<MemoryStickIcon className="size-3.5" />}
@@ -1047,7 +1260,11 @@ export function ResourceTelemetryDiagnostics() {
               icon={<DatabaseIcon className="size-3.5" />}
               label="쓰기 처리량"
               value={allT3 ? formatRate(allT3.ioWriteBytesPerSecond) : "..."}
-              detail={allT3 ? `관측값 ${formatBytes(allT3.ioWriteBytes)}` : undefined}
+              detail={
+                allT3
+                  ? `관측값 ${formatBytes(allT3.ioWriteBytes)} · 기준 ≥1MB/s 주의 · ≥10MB/s 높음`
+                  : undefined
+              }
               tone={
                 allT3 && allT3.ioWriteBytesPerSecond >= 10 * 1_024 * 1_024
                   ? "danger"
@@ -1056,22 +1273,61 @@ export function ResourceTelemetryDiagnostics() {
                     : "default"
               }
             />
-            <IconStat
-              icon={<GaugeIcon className="size-3.5" />}
-              label="CPU 속도 제한"
-              value={
-                snapshot
-                  ? speedLimit === null
-                    ? "알 수 없음"
-                    : `${speedLimit.toFixed(0)}%`
-                  : "..."
-              }
-              detail={
-                snapshot ? `열 상태: ${thermalStateLabel(snapshot.power.thermalState)}` : undefined
-              }
-              tone={speedLimit !== null && speedLimit < 80 ? "warning" : "default"}
-            />
+            {hasThermalOrSpeedLimit ? (
+              <IconStat
+                icon={<GaugeIcon className="size-3.5" />}
+                label="CPU 속도 제한"
+                value={speedLimit === null ? "지원됨" : `${speedLimit.toFixed(0)}%`}
+                detail={
+                  snapshot && snapshot.power.thermalState !== "unknown"
+                    ? `열 상태: ${thermalStateLabel(snapshot.power.thermalState)} · 기준 <80% 주의`
+                    : "기준 <80% 주의 (OS 전원·열 스로틀링)"
+                }
+                tone={speedLimit !== null && speedLimit < 80 ? "warning" : "default"}
+              />
+            ) : (
+              <IconStat
+                icon={<GaugeIcon className="size-3.5" />}
+                label="수집 시간"
+                value={
+                  snapshot ? formatDurationMicros(snapshot.health.collectionDurationMicros) : "..."
+                }
+                detail={
+                  snapshot
+                    ? `추적 ${snapshot.health.retainedProcessCount}개 / 전체 ${snapshot.health.scannedProcessCount}개`
+                    : undefined
+                }
+              />
+            )}
           </div>
+          {liveSeries.length > 0 ? (
+            <div
+              data-resource-sparkline-strip=""
+              className="grid divide-y divide-border/55 border-t border-border/60 bg-muted/15 md:grid-cols-3 md:divide-x md:divide-y-0"
+            >
+              <LiveSparkline
+                metricKey="cpu"
+                label="CPU 추이"
+                values={liveSeries.map((point) => point.cpuPercent)}
+                unit="%"
+                strokeClass="text-emerald-500"
+              />
+              <LiveSparkline
+                metricKey="memory"
+                label="메모리 추이"
+                values={liveSeries.map((point) => point.rssMb)}
+                unit=" MB"
+                strokeClass="text-sky-500"
+              />
+              <LiveSparkline
+                metricKey="io"
+                label="쓰기 I/O 추이"
+                values={liveSeries.map((point) => point.writeMbPerSec)}
+                unit=" MB/s"
+                strokeClass="text-amber-500"
+              />
+            </div>
+          ) : null}
           {telemetry.error ? (
             <div className="flex items-start gap-2 border-t border-destructive/20 bg-destructive/5 px-4 py-3 text-xs text-destructive sm:px-5">
               <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
@@ -1084,16 +1340,19 @@ export function ResourceTelemetryDiagnostics() {
                 label="백엔드 및 에이전트"
                 accentClass="bg-emerald-500/80"
                 aggregate={snapshot.groups.backend}
+                logicalCores={logicalCores}
               />
               <AggregateCard
                 label="데스크톱"
                 accentClass="bg-sky-500/80"
                 aggregate={snapshot.groups.electron}
+                logicalCores={logicalCores}
               />
               <AggregateCard
                 label="모니터 부하"
                 accentClass="bg-amber-500/80"
                 aggregate={snapshot.groups.monitor}
+                logicalCores={logicalCores}
               />
             </div>
           ) : null}
@@ -1122,52 +1381,62 @@ export function ResourceTelemetryDiagnostics() {
             </div>
             {hasHostPowerSignal && snapshot ? (
               <>
-                <DetailRow
-                  label="전원"
-                  value={booleanStateLabel(snapshot.power.onBattery, {
-                    true: "배터리",
-                    false: "외부 전원",
-                  })}
-                />
-                <DetailRow
-                  label="저전력 모드"
-                  value={booleanStateLabel(snapshot.power.lowPowerMode, {
-                    true: "켜짐",
-                    false: "꺼짐",
-                  })}
-                />
-                <DetailRow
-                  label="유휴 상태"
-                  value={`${booleanStateLabel(snapshot.power.idle, {
-                    true: "유휴",
-                    false: "활성",
-                  })}${
-                    snapshot.power.idleSeconds === null
-                      ? ""
-                      : ` · ${Math.round(snapshot.power.idleSeconds)}초`
-                  }`}
-                />
-                <DetailRow
-                  label="세션"
-                  value={
-                    snapshot.power.suspended
-                      ? "일시 중단됨"
-                      : booleanStateLabel(snapshot.power.locked, {
-                          true: "잠김",
-                          false: "잠금 해제",
-                        })
-                  }
-                />
-                <DetailRow
-                  label="열 상태"
-                  value={thermalStateLabel(snapshot.power.thermalState)}
-                  valueClassName={
-                    snapshot.power.thermalState === "serious" ||
-                    snapshot.power.thermalState === "critical"
-                      ? "text-destructive"
-                      : undefined
-                  }
-                />
+                {snapshot.power.onBattery !== "unknown" ? (
+                  <DetailRow
+                    label="전원"
+                    value={booleanStateLabel(snapshot.power.onBattery, {
+                      true: "배터리",
+                      false: "외부 전원",
+                    })}
+                  />
+                ) : null}
+                {snapshot.power.lowPowerMode !== "unknown" ? (
+                  <DetailRow
+                    label="저전력 모드"
+                    value={booleanStateLabel(snapshot.power.lowPowerMode, {
+                      true: "켜짐",
+                      false: "꺼짐",
+                    })}
+                  />
+                ) : null}
+                {snapshot.power.idle !== "unknown" ? (
+                  <DetailRow
+                    label="유휴 상태"
+                    value={`${booleanStateLabel(snapshot.power.idle, {
+                      true: "유휴",
+                      false: "활성",
+                    })}${
+                      snapshot.power.idleSeconds === null
+                        ? ""
+                        : ` · ${Math.round(snapshot.power.idleSeconds)}초`
+                    }`}
+                  />
+                ) : null}
+                {snapshot.power.suspended || snapshot.power.locked !== "unknown" ? (
+                  <DetailRow
+                    label="세션"
+                    value={
+                      snapshot.power.suspended
+                        ? "일시 중단됨"
+                        : booleanStateLabel(snapshot.power.locked, {
+                            true: "잠김",
+                            false: "잠금 해제",
+                          })
+                    }
+                  />
+                ) : null}
+                {snapshot.power.thermalState !== "unknown" ? (
+                  <DetailRow
+                    label="열 상태"
+                    value={thermalStateLabel(snapshot.power.thermalState)}
+                    valueClassName={
+                      snapshot.power.thermalState === "serious" ||
+                      snapshot.power.thermalState === "critical"
+                        ? "text-destructive"
+                        : undefined
+                    }
+                  />
+                ) : null}
               </>
             ) : (
               <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-5">
@@ -1236,6 +1505,11 @@ export function ResourceTelemetryDiagnostics() {
         icon={<HardDriveIcon className="size-4 text-muted-foreground" />}
         headerAction={
           <div className="flex items-center gap-2">
+            {history.data ? (
+              <span className="font-mono text-[10px] tabular-nums text-muted-foreground/60">
+                샘플 {history.data.retainedSampleCount}건
+              </span>
+            ) : null}
             <HistoryWindowSelector selectedWindowMs={windowMs} onSelect={setWindowMs} />
             <Button
               size="icon-xs"
@@ -1257,8 +1531,11 @@ export function ResourceTelemetryDiagnostics() {
               <span>{history.error}</span>
             </div>
           ) : null}
-          <ResourceHistoryChart buckets={history.data?.buckets ?? []} />
-          <HistoryProcessTable processes={history.data?.topProcesses ?? []} />
+          <ResourceHistoryChart buckets={history.data?.buckets ?? []} logicalCores={logicalCores} />
+          <HistoryProcessTable
+            processes={history.data?.topProcesses ?? []}
+            logicalCores={logicalCores}
+          />
         </div>
       </SettingsSection>
 
@@ -1276,6 +1553,7 @@ export function ResourceTelemetryDiagnostics() {
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-[0_1px_1px_rgb(0_0_0/0.03)]">
           <ProcessTable
             processes={snapshot?.processes ?? []}
+            logicalCores={logicalCores}
             signalingKeys={signalingKeys}
             onSignal={signalProcess}
           />

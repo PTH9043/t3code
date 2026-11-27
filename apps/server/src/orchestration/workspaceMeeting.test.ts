@@ -23,6 +23,7 @@ import {
   nodeInterventionQuestion,
   nodeRefusalQuestion,
   parseNodeInterventionDecision,
+  parseNodeRefusalDecision,
   parseWrapUpDecision,
   parseMeetingQuestion,
   parseStatementRespondsTo,
@@ -102,6 +103,32 @@ describe("resolveChairParticipantId", () => {
       WorkspaceMeetingError,
     );
   });
+});
+
+it("passes user-assigned supervisor and worker roles into the meeting prompts", () => {
+  const configured = meeting({
+    participants: [
+      { ...participant("p1", "Supervisor"), roleDescription: "개발 방향 결정" },
+      { ...participant("p2", "Worker"), roleDescription: "검증 담당" },
+    ],
+    chairParticipantId: seat("p1"),
+  });
+  const plan = buildMeetingPlanPrompt({
+    task: "기능 구현",
+    workspacePrompt: "",
+    meeting: configured,
+  });
+  expect(plan).toContain("개발 방향 결정");
+  expect(plan).toContain("검증 담당");
+  expect(plan).toContain("work outside their usual role");
+  const statement = buildMeetingStatementPrompt({
+    task: "기능 구현",
+    workspacePrompt: "",
+    meeting: configured,
+    participantId: seat("p2"),
+    roundIndex: 0,
+  });
+  expect(statement).toContain("사용자가 지정한 역할: 검증 담당");
 });
 
 describe("nextMeetingStep", () => {
@@ -306,6 +333,18 @@ describe("nextMeetingStep", () => {
       expect(parseWrapUpDecision("여기서 종료 (실행 없음)")).toEqual({ kind: "conclude" });
     });
 
+    it("requires an explicit action for safety refusals", () => {
+      expect(parseNodeRefusalDecision("다시 시도")).toEqual({ kind: "retry" });
+      expect(parseNodeRefusalDecision("재시도해줘")).toEqual({ kind: "retry" });
+      expect(parseNodeRefusalDecision("이 단계 건너뛰고 계속")).toEqual({ kind: "skip" });
+      expect(parseNodeRefusalDecision("여기서 종료")).toEqual({ kind: "stop" });
+      expect(parseNodeRefusalDecision("중지해줘")).toEqual({ kind: "stop" });
+      expect(parseNodeRefusalDecision("재시도하지 말고 다른 일을 계속해")).toBeNull();
+      expect(parseNodeRefusalDecision("건너뛰지 마")).toBeNull();
+      expect(parseNodeRefusalDecision("다른 모델에게 맡겨")).toBeNull();
+      expect(parseNodeRefusalDecision("계속해")).toBeNull();
+    });
+
     it("reads a round count out of free text", () => {
       expect(parseWrapUpDecision("3라운드 더 진행해")).toEqual({ kind: "more-rounds", count: 3 });
       expect(parseWrapUpDecision("회의를 더 하자")).toEqual({ kind: "more-rounds", count: 1 });
@@ -342,7 +381,29 @@ describe("nextMeetingStep", () => {
         ),
       ).toBe(true);
       expect(isProviderContentRefusal("Missing <t3_validation> JSON payload.")).toBe(false);
+      expect(isProviderContentRefusal("Your message was flagged by Claude's safeguards.")).toBe(
+        true,
+      );
+      expect(
+        isProviderContentRefusal(
+          "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). Details: `[cyber]`",
+        ),
+      ).toBe(true);
+      expect(
+        isProviderContentRefusal(
+          "Opus 5.5's safeguards stopped the response above · continuing once with that noted",
+        ),
+      ).toBe(false);
+      expect(isProviderContentRefusal("model_refusal_no_fallback")).toBe(true);
+      expect(isProviderContentRefusal("HTTP 429 Too Many Requests")).toBe(false);
       expect(isNodeInterventionQuestion(nodeRefusalQuestion("Codex 교차 검증"))).toBe(true);
+    });
+
+    it("does not interpret a prohibition on changing models as a reassignment", () => {
+      expect(parseNodeInterventionDecision("다른 모델로 바꾸지 말고 다시 시도해")).toEqual({
+        kind: "retry",
+      });
+      expect(parseNodeInterventionDecision("다른 계정은 사용하지 마").kind).not.toBe("reassign");
     });
 
     it("reads skip and stop intent out of free text", () => {
@@ -884,6 +945,15 @@ describe("meeting prompts", () => {
     expect(prompt).toContain("Do not add validation or synthesis nodes.");
     expect(prompt).toContain("<t3_question>");
   });
+
+  it("preserves the requested work without instructing the chair to evade refusals", () => {
+    const task = "지정된 보안 연구 범위의 계약을 분석하고 재현 근거를 기록하세요.";
+    const prompt = buildMeetingPlanPrompt({ workspacePrompt: "", task, meeting: spoken });
+    expect(prompt).toContain(task);
+    expect(prompt).toContain("Do not change the task description to evade");
+    expect(prompt).toContain("report a refusal and continue independent permitted work");
+    expect(prompt).not.toContain("providers refuse such requests on policy");
+  });
 });
 
 it("prioritizes conductor clarification and its pending question even with zero rounds", () => {
@@ -926,7 +996,7 @@ for (const runtimeMode of [
   });
 }
 
-it("keeps app-selected policies for an additional worker assigned by role", () => {
+it("does not route an unassigned meeting node to a model outside the selected roster", () => {
   const route = resolveNodeAssignmentRoute({
     node: { participantId: null, role: "researcher" },
     meeting: meeting({ runtimeMode: "full-access", interactionMode: "plan" }),
@@ -944,5 +1014,5 @@ it("keeps app-selected policies for an additional worker assigned by role", () =
       },
     ],
   });
-  expect(route).toMatchObject({ runtimeMode: "full-access", interactionMode: "plan" });
+  expect(route).toBeNull();
 });

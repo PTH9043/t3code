@@ -303,11 +303,11 @@ export function WorkspaceMonitoringSection({ project }: { project: EnvironmentPr
           </div>
           <div className="grid gap-3">
             <span className="text-sm font-medium">감시 AI</span>
-            <div className="grid gap-2 md:grid-cols-2">
-              <label className="grid gap-1 text-xs text-muted-foreground">
+            <div className="grid gap-2 md:grid-cols-1 xl:grid-cols-2">
+              <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
                 CLI 계정
                 <select
-                  className={WATCHER_SELECT_CLASS}
+                  className={`${WATCHER_SELECT_CLASS} w-full min-w-[220px]`}
                   value={watcherInstanceId}
                   onChange={(event) => {
                     const next = providerEntries.find(

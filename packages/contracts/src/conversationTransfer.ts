@@ -81,9 +81,15 @@ export const ConversationImportInput = Schema.Struct({
   title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(180)),
   modelSelection: Schema.suspend(() => ModelSelection),
 });
+export const ConversationExportScope = Schema.Literals(["all", "user_only", "ai_only"]);
+export type ConversationExportScope = typeof ConversationExportScope.Type;
+export const ConversationExportFileFormat = Schema.Literals(["json", "markdown"]);
+export type ConversationExportFileFormat = typeof ConversationExportFileFormat.Type;
 export const ConversationExportInput = Schema.Struct({
   threadId: ThreadId,
   original: Schema.optionalKey(Schema.Boolean),
+  scope: Schema.optionalKey(ConversationExportScope),
+  outputFormat: Schema.optionalKey(ConversationExportFileFormat),
 });
 export const ConversationExport = Schema.Struct({
   fileName: Schema.String,

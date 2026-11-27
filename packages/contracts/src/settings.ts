@@ -2,7 +2,13 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+} from "./baseSchemas.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
@@ -11,6 +17,24 @@ import {
 import { ModelSelection, WorkspaceExecutionProfile } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
 import { ManagedMcpServerConfig, McpProjectProfile, McpServerName } from "./mcpTools.ts";
+import { WorkspaceSearchModel } from "./workspaceResearch.ts";
+import { ThreadCharacter } from "./threadCharacter.ts";
+import { GlobalAssistantConfig } from "./globalAssistant.ts";
+import { ThreadResponseStyle } from "./threadResponseStyle.ts";
+import { ThreadSettingsPreset } from "./threadSettingsLibrary.ts";
+import {
+  ThreadTeamMember,
+  ThreadTeamRole,
+  ThreadModelTeam,
+  ThreadModelTeamScope,
+  ThreadModelTeamUpdate,
+  ThreadSubordinateTeamUpdate,
+} from "./threadModelTeam.ts";
+export * from "./threadModelTeam.ts";
+export * from "./threadResponseStyle.ts";
+export * from "./globalAssistant.ts";
+export * from "./livingPersona.ts";
+export { ThreadCharacter } from "./threadCharacter.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -63,6 +87,18 @@ export const GlassOpacity = Schema.Int.check(
 );
 export type GlassOpacity = typeof GlassOpacity.Type;
 export const DEFAULT_GLASS_OPACITY: GlassOpacity = 80;
+export const MIN_CHAT_HORIZONTAL_INSET_PX = 0;
+export const MAX_CHAT_HORIZONTAL_INSET_PX = 160;
+export const ChatHorizontalInsetPx = Schema.NullOr(
+  Schema.Int.check(
+    Schema.isBetween({
+      minimum: MIN_CHAT_HORIZONTAL_INSET_PX,
+      maximum: MAX_CHAT_HORIZONTAL_INSET_PX,
+    }),
+  ),
+);
+export type ChatHorizontalInsetPx = typeof ChatHorizontalInsetPx.Type;
+export const DEFAULT_CHAT_HORIZONTAL_INSET_PX: ChatHorizontalInsetPx = null;
 /**
  * Font size preferences, in CSS pixels. The upper bounds reach well past a
  * comfortable reading size so low-vision and high-DPI setups are usable. The
@@ -124,6 +160,11 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
+  ),
+  // Custom horizontal inset (px) between the chat column and the left/right
+  // pane dividers. `null` keeps the responsive auto inset (20px / 48px).
+  chatHorizontalInsetPx: ChatHorizontalInsetPx.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_HORIZONTAL_INSET_PX)),
   ),
   fontSizeInterface: InterfaceFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_FONT_SIZE)),
@@ -200,6 +241,9 @@ export const ClientSettingsSchema = Schema.Struct({
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
   ),
+  // Chat timeline minimap (the clickable left-edge rail that jumps to a user
+  // message). On by default; disabling hides the rail entirely.
+  timelineMinimapEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
@@ -295,6 +339,75 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
+/** What a subordinate model is for; it decides the instructions the subordinate works under. */
+export const SubordinateRole = ThreadTeamRole;
+export type SubordinateRole = typeof SubordinateRole.Type;
+
+/**
+ * A model the user placed under an answering model. The subordinate may belong
+ * to any provider account; the answering model hands it work through the
+ * `workspace_delegate` tool. Stored server-wide rather than in the account's
+ * own config, because changing an account's config restarts its sessions.
+ */
+export const SubordinateAssignment = Schema.Struct({
+  /** Account of the answering model. */
+  answeringInstanceId: ProviderInstanceId,
+  /** Answering model this applies to; absent means every model of that account. */
+  forModel: Schema.optionalKey(TrimmedNonEmptyString),
+  /** Account and model of the subordinate. */
+  instanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+  role: SubordinateRole,
+});
+export type SubordinateAssignment = typeof SubordinateAssignment.Type;
+
+/**
+ * Assigns a low-cost helper API (a registered API account) to this account's
+ * answering models, for research and routine chores via the `workspace_helper`
+ * tool. Optional keys: an account that sets none of them has no helper.
+ */
+const helperSettingsFields = {
+  helperAccount: Schema.optionalKey(TrimmedString).pipe(
+    Schema.annotateKey({
+      title: "잡일용 하위 API",
+      description:
+        "리서치·요약·번역 같은 잡일을 맡길 API 계정과 모델입니다. '계정이름:모델' 형식으로 적습니다(예: Baidu:ernie-5.1). 계정은 API 연결로 등록한 계정의 이름이어야 합니다. 비우면 사용하지 않습니다.",
+      providerSettingsForm: {
+        hidden: true,
+        placeholder: "Baidu:ernie-5.1",
+        clearWhenEmpty: "omit",
+      },
+    }),
+  ),
+  helperForModels: Schema.optionalKey(TrimmedString).pipe(
+    Schema.annotateKey({
+      title: "하위 API를 쓸 답변 모델",
+      description:
+        "하위 API를 쓸 수 있는 답변 모델을 쉼표로 구분해 적습니다. 모델 이름의 일부만 적어도 됩니다(예: opus, sonnet). 비우면 이 계정의 모든 모델이 쓸 수 있습니다.",
+      providerSettingsForm: {
+        hidden: true,
+        placeholder: "비우면 모든 모델",
+        clearWhenEmpty: "omit",
+      },
+    }),
+  ),
+  helperScope: Schema.optionalKey(Schema.Literals(["public", "project"])).pipe(
+    Schema.annotateKey({
+      title: "하위 API에 보낼 수 있는 내용",
+      description:
+        "보낸 내용은 하위 API 제공사 서버로 나갑니다. 기본값은 공개 정보와 일반 잡일만 보내도록 답변 모델에 지시합니다. '프로젝트 내용도 허용'을 고르면 코드와 파일 내용도 보낼 수 있습니다.",
+      providerSettingsForm: {
+        hidden: true,
+        control: "select",
+        options: [
+          { value: "public", label: "공개 정보·일반 잡일만 (기본)" },
+          { value: "project", label: "프로젝트 내용도 허용" },
+        ],
+      },
+    }),
+  ),
+};
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -338,19 +451,67 @@ export const CodexSettings = makeProviderSettingsSchema(
         description: "세션 시작 시 codex app-server에 전달할 추가 CLI 인수입니다.",
       }),
     ),
+    subagentModel: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "하위 에이전트 모델",
+        description:
+          "Codex가 일을 나눠 맡기는 하위 에이전트가 쓸 모델입니다(예: gpt-6-luna). 비우면 Codex 기본 동작대로 답변 모델과 같은 모델을 씁니다. 에이전트 정의 파일(.codex/agents)에 모델을 적어 둔 에이전트는 그 모델을 그대로 씁니다. 새 세션부터 적용됩니다.",
+        providerSettingsForm: { hidden: true, placeholder: "gpt-6-luna", clearWhenEmpty: "omit" },
+      }),
+    ),
+    subagentModelByModel: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "답변 모델별 하위 에이전트 모델",
+        description:
+          "답변 모델마다 다른 하위 모델을 쓰려면 '답변모델=하위모델'을 쉼표로 구분해 적습니다(예: gpt-6-sol=gpt-6-luna, terra=inherit). 답변 모델은 이름의 일부만 적어도 되고, 하위 모델은 정확한 모델 이름이나 inherit(답변 모델과 같음)을 적습니다. 적지 않은 모델은 위의 하위 에이전트 모델 설정을 따릅니다.",
+        providerSettingsForm: {
+          hidden: true,
+          placeholder: "gpt-6-sol=gpt-6-luna, terra=inherit",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    ...helperSettingsFields,
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "launchArgs",
+      "subagentModel",
+      "subagentModelByModel",
+      "helperAccount",
+      "helperForModels",
+      "helperScope",
+    ],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
 
+/** Model of the `worker` subagent a Claude conductor delegates to; `off` disables conductor mode. */
+export const ClaudeConductorWorkerModel = Schema.Literals([
+  "opus",
+  "sonnet",
+  "haiku",
+  "fable",
+  "inherit",
+  "off",
+]);
+export type ClaudeConductorWorkerModel = typeof ClaudeConductorWorkerModel.Type;
+
+export const CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY";
+export const CLAUDE_API_WORKSPACE_ENV = "T3_CLAUDE_API_WORKSPACE_ID";
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
+    authMode: Schema.optionalKey(Schema.Literal("api-key")).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -401,6 +562,38 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    conductorWorkerModel: Schema.optionalKey(ClaudeConductorWorkerModel).pipe(
+      Schema.annotateKey({
+        title: "지휘자 모드 · 일꾼 모델",
+        description:
+          "대화에서 고른 모델이 무엇이든 지휘자로 계획·검토를 맡고, 큰 구현은 이 모델로 실행되는 worker 하위 에이전트에 나눠 맡깁니다. 작은 수정은 지휘자가 바로 처리합니다. 일꾼 사용량은 모델별로 집계됩니다. 새 세션부터 적용됩니다.",
+        providerSettingsForm: {
+          hidden: true,
+          control: "select",
+          options: [
+            { value: "opus", label: "Opus (기본)" },
+            { value: "sonnet", label: "Sonnet" },
+            { value: "haiku", label: "Haiku" },
+            { value: "fable", label: "Fable" },
+            { value: "inherit", label: "지휘자와 같은 모델" },
+            { value: "off", label: "끄기 (지휘자 모드 사용 안 함)" },
+          ],
+        },
+      }),
+    ),
+    conductorWorkerByModel: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "답변 모델별 일꾼 모델",
+        description:
+          "답변 모델마다 다른 일꾼을 쓰려면 '답변모델=일꾼모델'을 쉼표로 구분해 적습니다(예: opus=sonnet, sonnet=haiku, fable=off). 일꾼은 opus, sonnet, haiku, fable, inherit(같은 모델), off(끄기) 중 하나입니다. 적지 않은 모델은 위의 일꾼 모델 설정을 따릅니다. 새 세션부터 적용됩니다.",
+        providerSettingsForm: {
+          hidden: true,
+          placeholder: "opus=sonnet, sonnet=haiku",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    ...helperSettingsFields,
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -418,7 +611,18 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs", "promptCacheTtl", "subagentPromptCacheTtl"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "launchArgs",
+      "conductorWorkerModel",
+      "conductorWorkerByModel",
+      "helperAccount",
+      "helperForModels",
+      "helperScope",
+      "promptCacheTtl",
+      "subagentPromptCacheTtl",
+    ],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -471,34 +675,102 @@ export const GrokSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "grok", clearWhenEmpty: "omit" },
       }),
     ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Grok 계정 홈 경로 (GROK_HOME)",
+        description:
+          "계정별 Grok 로그인(auth.json)·설정·플러그인을 분리할 GROK_HOME 경로입니다. 비워 두면 기본 ~/.grok을 사용합니다.",
+        providerSettingsForm: { placeholder: "자동 관리 또는 ~/.grok", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath"],
+    order: ["binaryPath", "homePath"],
   },
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
-export const GeminiSettings = makeProviderSettingsSchema(
+export const MuseBackendMode = Schema.Literals(["code", "cloud"]);
+export type MuseBackendMode = typeof MuseBackendMode.Type;
+
+export const MuseSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
-      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    binaryPath: makeBinaryPathSetting("gemini").pipe(
+    backendMode: Schema.optionalKey(MuseBackendMode).pipe(
+      Schema.annotateKey({
+        title: "연결 백엔드",
+        description:
+          "code: Meta 공식 Muse Code 로컬 코딩 에이전트(dev.meta.ai), cloud: muse.ai 웹 클라우드 에이전트(Google 로그인).",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "code", label: "Muse Code (Meta 로컬 CLI)" },
+            { value: "cloud", label: "muse.ai 클라우드 (Google 로그인)" },
+          ],
+        },
+      }),
+    ),
+    binaryPath: makeBinaryPathSetting("muse").pipe(
       Schema.annotateKey({
         title: "실행 파일 경로",
-        description: "Google Gemini CLI 실행 파일 경로입니다.",
-        providerSettingsForm: { placeholder: "gemini", clearWhenEmpty: "omit" },
+        description:
+          "Meta Muse Code CLI 실행 파일 경로입니다. 비워 두면 %LOCALAPPDATA%\\Programs\\muse의 네이티브 바이너리를 자동 탐색합니다.",
+        providerSettingsForm: { placeholder: "muse", clearWhenEmpty: "omit" },
+      }),
+    ),
+    cloudBinaryPath: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "muse.ai CLI 경로 (muse-cli)",
+        description:
+          "muse.ai 클라우드 백엔드용 muse-cli 실행 파일 경로입니다. 비워 두면 PATH 및 ~/.local/bin/muse-cli에서 자동 탐색합니다.",
+        providerSettingsForm: { placeholder: "muse-cli", clearWhenEmpty: "omit" },
       }),
     ),
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Gemini 계정 홈 경로",
+        title: "Muse 계정 홈 경로",
+        description:
+          "계정별 Muse 로그인(auth.json 또는 muse-cli cookies.txt)과 설정을 분리할 경로입니다. 비워 두면 기본 사용자 홈을 사용합니다.",
+        providerSettingsForm: { placeholder: "자동 관리 또는 기본 홈", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: ["backendMode", "binaryPath", "cloudBinaryPath", "homePath"],
+  },
+);
+export type MuseSettings = typeof MuseSettings.Type;
+
+export const GeminiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("agy").pipe(
+      Schema.annotateKey({
+        title: "실행 파일 경로",
+        description: "Antigravity CLI (agy) 실행 파일 경로입니다.",
+        providerSettingsForm: { placeholder: "agy", clearWhenEmpty: "omit" },
+      }),
+    ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Antigravity 계정 홈 경로",
         description:
           "Google 로그인과 세션을 이 계정에만 저장할 경로입니다. 비워 두면 T3 Code가 계정별 경로를 관리합니다.",
         providerSettingsForm: {
@@ -507,25 +779,29 @@ export const GeminiSettings = makeProviderSettingsSchema(
         },
       }),
     ),
-    googleCloudProject: TrimmedString.pipe(
-      Schema.withDecodingDefault(Effect.succeed("")),
+    autoOptimizeThoughtLevel: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({
-        title: "Google Cloud 프로젝트",
+        title: "사고 수준(thought_level) 자동 절감",
         description:
-          "회사·학교 계정처럼 Gemini Code Assist에 Cloud 프로젝트가 필요한 경우에만 입력합니다.",
-        providerSettingsForm: {
-          placeholder: "선택 사항",
-          clearWhenEmpty: "omit",
-        },
+          "대화 입력에서 사고 수준을 직접 지정하지 않은 경우 질문 난이도에 따라 low·medium·high로 자동 조절해 Gemini/Neon 토큰과 쿼터를 절감합니다.",
       }),
     ),
+    ...helperSettingsFields,
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "homePath", "googleCloudProject"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "autoOptimizeThoughtLevel",
+      "helperAccount",
+      "helperForModels",
+      "helperScope",
+    ],
   },
 );
 export type GeminiSettings = typeof GeminiSettings.Type;
@@ -660,11 +936,24 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+export const AiSearchEmbeddingMode = Schema.Literals(["embedding", "rerank"]);
+export type AiSearchEmbeddingMode = typeof AiSearchEmbeddingMode.Type;
+
 export const AiSearchSettings = Schema.Struct({
   semanticEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   embeddingEndpoint: TrimmedNonEmptyString.pipe(
     Schema.withDecodingDefault(Effect.succeed("http://127.0.0.1:11434")),
   ),
+  /**
+   * Optional registered provider instance ID used for document semantic search.
+   * `null` or omitted uses the local Ollama server at `embeddingEndpoint`.
+   */
+  embeddingInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+  /**
+   * `"embedding"` uses vector embeddings (`/api/embed` or OpenAI-compatible `/embeddings`);
+   * `"rerank"` uses a registered chat/reasoning model to semantically score search candidates.
+   */
+  embeddingMode: Schema.optionalKey(AiSearchEmbeddingMode),
   embeddingModel: TrimmedNonEmptyString.pipe(
     Schema.withDecodingDefault(Effect.succeed("embeddinggemma:300m-qat-q4_0")),
   ),
@@ -681,7 +970,93 @@ export const AiSearchSettings = Schema.Struct({
 });
 export type AiSearchSettings = typeof AiSearchSettings.Type;
 
+/** User-authored assistant identity, independent of the model or provider. */
+export const ThreadAssistantProfile = Schema.Struct({
+  name: Schema.String,
+  instructions: Schema.String,
+});
+export type ThreadAssistantProfile = typeof ThreadAssistantProfile.Type;
+
+const ThreadAssistantOverride = Schema.Struct({
+  ...ThreadAssistantProfile.fields,
+  mode: Schema.optionalKey(Schema.Literals(["global", "custom"])),
+});
+
+/**
+ * The role a conversation saved for itself. A conversation set to "global" has none: it
+ * follows the global answer style, which replaced the global assistant profile.
+ */
+export function resolveAssistantProfile(
+  override: typeof ThreadAssistantOverride.Type | undefined,
+): ThreadAssistantProfile | undefined {
+  return override && override.mode !== "global" ? override : undefined;
+}
+
+export const ThreadAssistantComputer = Schema.Struct({
+  containerId: TrimmedNonEmptyString,
+  ownerId: TrimmedNonEmptyString,
+  image: TrimmedNonEmptyString,
+  network: Schema.Literals(["none", "bridge"]),
+  kind: Schema.optionalKey(Schema.Literals(["container", "vm"])),
+});
+export type ThreadAssistantComputer = typeof ThreadAssistantComputer.Type;
+
+export const UpgradeRoomOfflineQuestions = Schema.Literals(["decide", "wait"]);
+export type UpgradeRoomOfflineQuestions = typeof UpgradeRoomOfflineQuestions.Type;
+
 export const ServerSettings = Schema.Struct({
+  globalAssistant: Schema.NullOr(GlobalAssistantConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  globalResponseStyle: Schema.NullOr(ThreadResponseStyle).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  globalSubordinateTeam: Schema.Array(ThreadTeamMember).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadSubordinateTeams: Schema.Record(
+    ThreadId,
+    Schema.NullOr(Schema.Array(ThreadTeamMember)),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Stored with the team overrides. Only the settings service writes initialization receipts.
+  threadModelTeamInitialization: Schema.optionalKey(
+    Schema.Struct({
+      initializedThreads: Schema.Array(ThreadId),
+      resetScopes: Schema.Array(ThreadModelTeamScope),
+    }),
+  ),
+  threadSettingsInheritedTeamScopes: Schema.Array(ThreadModelTeamScope).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadSettingsPresets: Schema.Array(ThreadSettingsPreset).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadModelTeams: Schema.Array(ThreadModelTeam).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadResponseStyles: Schema.Record(TrimmedNonEmptyString, ThreadResponseStyle).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  threadCharacters: Schema.Record(TrimmedNonEmptyString, ThreadCharacter).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  // Retired: the global answer style replaced it. Kept so settings saved earlier still decode.
+  globalAssistantProfile: Schema.NullOr(ThreadAssistantProfile).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  threadAssistantProfiles: Schema.Record(TrimmedNonEmptyString, ThreadAssistantOverride).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  threadAssistantComputers: Schema.Record(
+    TrimmedNonEmptyString,
+    Schema.NullOr(ThreadAssistantComputer),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  threadCreatorModes: Schema.Record(TrimmedNonEmptyString, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  searchModels: Schema.Array(WorkspaceSearchModel).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   aiSearch: AiSearchSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   customMcpServers: Schema.Record(McpServerName, ManagedMcpServerConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -698,6 +1073,10 @@ export const ServerSettings = Schema.Struct({
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   executionProfiles: Schema.Record(TrimmedNonEmptyString, WorkspaceExecutionProfile).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /** Which models work under which answering model; edited in account settings ("하위 모델"). */
+  subordinateModels: Schema.Array(SubordinateAssignment).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -767,6 +1146,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     gemini: GeminiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    muse: MuseSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -781,6 +1161,23 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   selfMonitoring: SelfMonitoringSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  backgroundWatchThreadIds: Schema.Array(ThreadId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Server-written revocation times prevent stale watch work from surviving a later opt-in. */
+  backgroundWatchRevokedAtMs: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, NonNegativeInt),
+  ),
+  /** Visibility of the background watch interruption banner, in seconds. Zero hides it. */
+  backgroundWatchNoticeSeconds: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(30))),
+  /** Shows the "T3가 꺼진 동안 한 작업" window in the upgrade room after a restart. */
+  upgradeRoomDowntimeSummary: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** While T3 is off: "decide" tells the model the user is away; "wait" holds questions until T3 returns. */
+  upgradeRoomOfflineQuestions: UpgradeRoomOfflineQuestions.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed("decide" as const satisfies UpgradeRoomOfflineQuestions),
+    ),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -846,6 +1243,7 @@ const CodexSettingsPatch = Schema.Struct({
 });
 
 const ClaudeSettingsPatch = Schema.Struct({
+  authMode: Schema.optionalKey(Schema.Literal("api-key")),
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
@@ -863,6 +1261,7 @@ const CursorSettingsPatch = Schema.Struct({
 const GrokSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
@@ -870,7 +1269,10 @@ const GeminiSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
-  googleCloudProject: Schema.optionalKey(TrimmedString),
+  autoOptimizeThoughtLevel: Schema.optionalKey(Schema.Boolean),
+  helperAccount: Schema.optionalKey(TrimmedString),
+  helperForModels: Schema.optionalKey(TrimmedString),
+  helperScope: Schema.optionalKey(Schema.Literals(["public", "project"])),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
@@ -883,11 +1285,33 @@ const OpenCodeSettingsPatch = Schema.Struct({
   apiConnection: Schema.optionalKey(OpenCodeApiConnection),
 });
 
+const MuseSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  backendMode: Schema.optionalKey(MuseBackendMode),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  cloudBinaryPath: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 export const ServerSettingsPatch = Schema.Struct({
+  globalAssistant: Schema.optionalKey(Schema.NullOr(GlobalAssistantConfig)),
+  globalResponseStyle: Schema.optionalKey(Schema.NullOr(ThreadResponseStyle)),
+  globalSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  threadSubordinateTeamUpdate: Schema.optionalKey(ThreadSubordinateTeamUpdate),
+  threadSettingsPresetSave: Schema.optionalKey(ThreadSettingsPreset),
+  threadSettingsPresetRemove: Schema.optionalKey(TrimmedNonEmptyString),
+  threadModelTeamUpdate: Schema.optionalKey(ThreadModelTeamUpdate),
+  threadResponseStyles: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, ThreadResponseStyle),
+  ),
+  searchModels: Schema.optionalKey(Schema.Array(WorkspaceSearchModel)),
   aiSearch: Schema.optionalKey(
     Schema.Struct({
       semanticEnabled: Schema.optionalKey(Schema.Boolean),
       embeddingEndpoint: Schema.optionalKey(TrimmedNonEmptyString),
+      embeddingInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+      embeddingMode: Schema.optionalKey(AiSearchEmbeddingMode),
       embeddingModel: Schema.optionalKey(TrimmedNonEmptyString),
       ocrEnabled: Schema.optionalKey(Schema.Boolean),
       documentCacheEnabled: Schema.optionalKey(Schema.Boolean),
@@ -901,6 +1325,15 @@ export const ServerSettingsPatch = Schema.Struct({
       ),
     }),
   ),
+  threadCharacters: Schema.optionalKey(Schema.Record(TrimmedNonEmptyString, ThreadCharacter)),
+  globalAssistantProfile: Schema.optionalKey(Schema.NullOr(ThreadAssistantProfile)),
+  threadAssistantProfiles: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, ThreadAssistantOverride),
+  ),
+  threadAssistantComputers: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(ThreadAssistantComputer)),
+  ),
+  threadCreatorModes: Schema.optionalKey(Schema.Record(TrimmedNonEmptyString, Schema.Boolean)),
   customMcpServersToUpsert: Schema.optionalKey(
     Schema.Record(McpServerName, ManagedMcpServerConfig),
   ),
@@ -922,6 +1355,8 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(TrimmedNonEmptyString, WorkspaceExecutionProfile),
   ),
   executionProfileIdsToRemove: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  /** Replaces the whole list. */
+  subordinateModels: Schema.optionalKey(Schema.Array(SubordinateAssignment)),
   providerAutoSwitch: Schema.optionalKey(
     Schema.Struct({
       codex: Schema.optionalKey(Schema.Boolean),
@@ -970,6 +1405,12 @@ export const ServerSettingsPatch = Schema.Struct({
       monitoringAutoActions: Schema.optionalKey(Schema.Boolean),
     }),
   ),
+  backgroundWatchThreadUpdate: Schema.optionalKey(
+    Schema.Struct({ threadId: ThreadId, enabled: Schema.Boolean }),
+  ),
+  backgroundWatchNoticeSeconds: Schema.optionalKey(NonNegativeInt),
+  upgradeRoomDowntimeSummary: Schema.optionalKey(Schema.Boolean),
+  upgradeRoomOfflineQuestions: Schema.optionalKey(UpgradeRoomOfflineQuestions),
   selfMonitoring: Schema.optionalKey(
     Schema.Struct({
       enabled: Schema.optionalKey(Schema.Boolean),
@@ -984,6 +1425,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       gemini: Schema.optionalKey(GeminiSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
+      muse: Schema.optionalKey(MuseSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
@@ -1004,6 +1446,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   glassOpacity: Schema.optionalKey(GlassOpacity),
+  chatHorizontalInsetPx: Schema.optionalKey(ChatHorizontalInsetPx),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),
   fontSizeCode: Schema.optionalKey(CodeFontSize),
@@ -1045,6 +1488,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  timelineMinimapEnabled: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

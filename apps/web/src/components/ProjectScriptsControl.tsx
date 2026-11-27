@@ -100,6 +100,8 @@ export interface NewProjectScriptInput {
   command: string;
   icon: ProjectScriptIcon;
   runOnWorktreeCreate: boolean;
+  runOnWorktreeValidate?: boolean;
+  runOnWorktreeCleanup?: boolean;
   keybinding: string | null;
   /** Optional URL to open in the in-app preview when this script runs. */
   previewUrl: string | null;
@@ -148,6 +150,8 @@ export default function ProjectScriptsControl({
   const [icon, setIcon] = useState<ProjectScriptIcon>("play");
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
+  const [runOnWorktreeValidate, setRunOnWorktreeValidate] = useState(false);
+  const [runOnWorktreeCleanup, setRunOnWorktreeCleanup] = useState(false);
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
@@ -221,6 +225,8 @@ export default function ProjectScriptsControl({
         command: trimmedCommand,
         icon,
         runOnWorktreeCreate,
+        runOnWorktreeValidate,
+        runOnWorktreeCleanup,
         keybinding: keybindingRule?.key ?? null,
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
@@ -251,6 +257,8 @@ export default function ProjectScriptsControl({
     setIcon("play");
     setIconPickerOpen(false);
     setRunOnWorktreeCreate(false);
+    setRunOnWorktreeValidate(false);
+    setRunOnWorktreeCleanup(false);
     setKeybinding("");
     setPreviewUrl("");
     setAutoOpenPreview(false);
@@ -266,6 +274,8 @@ export default function ProjectScriptsControl({
     setIcon(script.icon);
     setIconPickerOpen(false);
     setRunOnWorktreeCreate(script.runOnWorktreeCreate);
+    setRunOnWorktreeValidate(script.runOnWorktreeValidate === true);
+    setRunOnWorktreeCleanup(script.runOnWorktreeCleanup === true);
     setKeybinding(keybindingValueForCommand(keybindings, commandForProjectScript(script.id)) ?? "");
     setPreviewUrl(script.previewUrl ?? "");
     setAutoOpenPreview(script.autoOpenPreview ?? false);
@@ -286,6 +296,8 @@ export default function ProjectScriptsControl({
       command: fileScript.command,
       icon: fileScript.icon ?? "play",
       runOnWorktreeCreate: fileScript.runOnWorktreeCreate ?? false,
+      runOnWorktreeValidate: fileScript.runOnWorktreeValidate ?? false,
+      runOnWorktreeCleanup: fileScript.runOnWorktreeCleanup ?? false,
       keybinding: null,
       previewUrl: fileScript.previewUrl ?? null,
       autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
@@ -301,6 +313,8 @@ export default function ProjectScriptsControl({
       setIcon(payload.icon);
       setIconPickerOpen(false);
       setRunOnWorktreeCreate(payload.runOnWorktreeCreate);
+      setRunOnWorktreeValidate(payload.runOnWorktreeValidate === true);
+      setRunOnWorktreeCleanup(payload.runOnWorktreeCleanup === true);
       setKeybinding("");
       setPreviewUrl(payload.previewUrl ?? "");
       setAutoOpenPreview(payload.autoOpenPreview);
@@ -382,7 +396,16 @@ export default function ProjectScriptsControl({
                   >
                     <ScriptIcon icon={script.icon} className="size-4" />
                     <span className="truncate">
-                      {script.runOnWorktreeCreate ? `${script.name} (설정)` : script.name}
+                      {(() => {
+                        const hooks = [
+                          ...(script.runOnWorktreeCreate ? ["설정"] : []),
+                          ...(script.runOnWorktreeValidate ? ["검증"] : []),
+                          ...(script.runOnWorktreeCleanup ? ["정리"] : []),
+                        ];
+                        return hooks.length > 0
+                          ? `${script.name} (${hooks.join("·")})`
+                          : script.name;
+                      })()}
                     </span>
                     <span className="relative ms-auto flex h-6 min-w-6 items-center justify-end">
                       {shortcutLabel && (
@@ -480,6 +503,8 @@ export default function ProjectScriptsControl({
           setCommand("");
           setIcon("play");
           setRunOnWorktreeCreate(false);
+          setRunOnWorktreeValidate(false);
+          setRunOnWorktreeCleanup(false);
           setKeybinding("");
           setPreviewUrl("");
           setAutoOpenPreview(false);
@@ -586,6 +611,20 @@ export default function ProjectScriptsControl({
                 <Switch
                   checked={runOnWorktreeCreate}
                   onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+                <span>워크트리 검증 게이트로 사용</span>
+                <Switch
+                  checked={runOnWorktreeValidate}
+                  onCheckedChange={(checked) => setRunOnWorktreeValidate(Boolean(checked))}
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+                <span>워크트리 제거 전 자동 정리 실행</span>
+                <Switch
+                  checked={runOnWorktreeCleanup}
+                  onCheckedChange={(checked) => setRunOnWorktreeCleanup(Boolean(checked))}
                 />
               </label>
               <label

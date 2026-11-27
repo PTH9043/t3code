@@ -51,7 +51,20 @@ export const providerTurnsTotal = Metric.counter("t3_provider_turns_total", {
 });
 
 export const providerTurnDuration = Metric.timer("t3_provider_turn_duration", {
-  description: "Provider turn request duration.",
+  description:
+    "Provider turn dispatch duration; excludes response processing after dispatch returns.",
+});
+
+export const memorySearchesTotal = Metric.counter("t3_memory_searches_total", {
+  description: "Memory search operations by success or failure; excludes search text.",
+});
+
+export const memorySearchDuration = Metric.timer("t3_memory_search_duration", {
+  description: "Memory search operation duration; excludes search text.",
+});
+
+export const memorySearchResultsTotal = Metric.counter("t3_memory_search_results_total", {
+  description: "Memory search results by hit, miss, or empty query; excludes search text.",
 });
 
 export const providerRuntimeEventsTotal = Metric.counter("t3_provider_runtime_events_total", {

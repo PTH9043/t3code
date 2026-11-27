@@ -11,6 +11,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { randomUUID } from "~/lib/utils";
 import { notifyCommandFailure, notifySuccess } from "../control-center/controlCenterShared";
 import { Button } from "../ui/button";
+import { ThreadCharacter } from "./ThreadCharacter";
 import { Dialog, DialogPopup, DialogHeader, DialogTitle, DialogDescription } from "../ui/dialog";
 type Run = Pick<WorkspaceCollaborationRun, "id" | "projectId" | "graph" | "status">;
 const INPUT = "w-full rounded-md border border-input bg-background p-2 text-xs";
@@ -63,6 +64,7 @@ function Mailbox({ environmentId, run }: { environmentId: EnvironmentId; run: Ru
       (n) => !["completed", "failed", "cancelled", "skipped"].includes(n.status),
     ) ?? [];
   const destination = targets.find((n) => n.id === target)?.id ?? targets[0]?.id;
+  const characterNode = targets.find((node) => node.id === destination);
   const mutate = async (input: WorkspaceAgentControlAction) => {
     setBusy(true);
     try {
@@ -115,6 +117,14 @@ function Mailbox({ environmentId, run }: { environmentId: EnvironmentId; run: Ru
               ))}
             </select>
           </label>
+          {characterNode?.threadId ? (
+            <ThreadCharacter
+              key={`${environmentId}:${characterNode.threadId}`}
+              environmentId={environmentId}
+              threadId={characterNode.threadId}
+              isWorking={characterNode.status === "running"}
+            />
+          ) : null}
           <textarea
             aria-label="작업자 메시지"
             placeholder="작업자에게 전달할 내용을 입력하세요"

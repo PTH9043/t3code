@@ -149,6 +149,7 @@ const METRIC_GUIDE = [
   "- memory / slope: limit = 분당 증가 바이트. 창 안의 선형 기울기가 넘으면 이상(누수 의심).",
   "- latency / p95-vs-baseline: limit = 배율(1.5 = 직전 창보다 50% 느림). 프로그램은 상태검사 응답시간, self-server는 이벤트 루프 지연(p99 ms) 기준. self-server에는 threshold(limit = ms, 예: 200)도 적절.",
   "- slow-spans / threshold: limit = 분당 1초 이상 걸린 span 수. self-server 대상 전용.",
+  "- failed-spans / threshold: limit = 분당 실패한 내부 처리(span) 수. self-server 대상 전용. 같은 오류가 여러 span에 잡힐 수 있으므로 실패한 사용자 요청 수와 동일하지 않습니다.",
   "- health / threshold: limit = 연속 실패 횟수.",
   "- regression / threshold: limit = 1. 코드 변경 후 검증 명령이 실패하면 이상.",
   "- log-matches / threshold: limit = 창 안에서 patterns에 맞은 줄 수(보통 1). log 대상 전용. 서버가 파일을 직접 tail 하므로 AI 세션이 끝나거나 서버가 재시작돼도 감시가 유지됩니다.",
@@ -255,12 +256,11 @@ export function buildMonitoringFindingPrompt(input: MonitoringFindingPromptInput
     "## 서버가 이미 실행한 플레이북",
     ...playbookLines,
     input.autonomy === "ask"
-      ? "## 할 일\n읽기 전용으로 원인 후보·영향·권장 조치를 정리하세요. 재시작·중지·시작 같은 행동이 필요하면 직접 실행하지 말고, 질문 도구로 사람에게 어떤 조치를 원하는지 물어보세요. 사람이 이 대화에서 답하면 그 결정을 아래 행동 블록으로 응답 마지막에 출력하세요. 서버가 그 블록을 읽어 실행합니다."
-      : "## 할 일\n실행된 플레이북이 적절했는지 평가하고, 남은 위험과 추가로 필요한 사람의 결정을 정리하세요. 플레이북 밖의 행동은 질문 도구로 먼저 물어보고, 사람이 답하면 아래 행동 블록으로 응답 마지막에 출력하세요.",
+      ? "## 할 일\n읽기 전용으로 원인 후보·영향·권장 조치를 정리하세요. 재시작·중지·시작은 직접 실행하지 말고 필요한 조치를 제안하세요. 제안 행동 블록만으로 서버가 프로그램을 제어하지 않습니다. 로그·파일·상태 소스를 읽지 못했거나 접근에 실패했다면 '이상 없음'이나 '변경 없음'으로 추측하지 말고 반드시 `[UNREADABLE]`과 대상 경로·오류 사유를 명시하세요."
+      : "## 할 일\n실행된 플레이북이 적절했는지 평가하고, 남은 위험과 필요한 조치를 제안하세요. 플레이북 밖의 제안 행동 블록만으로 서버가 프로그램을 제어하지 않습니다. 로그·파일·상태 소스를 읽지 못했거나 접근에 실패했다면 '이상 없음'이나 '변경 없음'으로 추측하지 말고 반드시 `[UNREADABLE]`과 대상 경로·오류 사유를 명시하세요.",
     [
-      "## 행동 블록",
-      "사람이 프로그램 재시작·중지·시작을 결정한 경우에만, 응답 맨 마지막에 정확히 한 번 출력하세요. 결정이 '그대로 두기'나 조사 계속이면 블록을 출력하지 마세요. 프로그램을 직접 실행하지 마세요 — 서버가 합니다.",
-      "이 스레드의 이전 턴에서 사람이 이미 같은 이상에 대해 결정을 내렸고 그 결정이 아직 실행되지 않은 상태라면(예: 프로그램이 여전히 내려가 있음), 다시 묻지 말고 그 결정을 바로 행동 블록으로 출력하세요.",
+      "## 제안 행동 블록",
+      "프로그램 재시작·중지·시작을 제안할 때만 응답 맨 마지막에 정확히 한 번 출력하세요. 이 블록은 제안이며 서버가 블록만으로 프로그램을 제어하지 않습니다.",
       WORKSPACE_MONITORING_ACTION_OPEN_MARKER,
       JSON.stringify([{ action: "restart-program", programId: "감지된 이상의 programId" }]),
       WORKSPACE_MONITORING_ACTION_CLOSE_MARKER,
@@ -270,7 +270,7 @@ export function buildMonitoringFindingPrompt(input: MonitoringFindingPromptInput
   ].join("\n\n");
 }
 
-/** What the AI may ask the server to do once the person has answered in the thread. */
+/** A program action suggested by the monitoring AI. */
 const RequestedAction = Schema.Struct({
   action: Schema.Literals(["restart-program", "stop-program", "start-program"]),
   programId: WorkspaceProgramId,
@@ -282,16 +282,14 @@ const decodeRequestedActions = Schema.decodeUnknownResult(
 
 export interface ParsedMonitoringActions {
   readonly actions: ReadonlyArray<MonitoringRequestedAction>;
-  /** Why something was not executed — shown in the thread, never guessed around. */
+  /** Why a suggestion was not accepted — shown in the thread, never guessed around. */
   readonly rejected: string | null;
 }
 
 /**
- * Actions the AI requests at the end of a finding turn. The AI never runs
- * programs itself (its turn is read-only); it relays the person's answer as an
- * action block and the server executes it with the same commands the
- * control-center buttons use. Only programs named in the approved plan are
- * accepted.
+ * Parse suggestions from the AI at the end of a finding turn. A suggestion is
+ * not proof of a person's decision and does not itself execute a command.
+ * Only programs named in the approved plan are accepted.
  */
 export function parseMonitoringActions(
   output: string,
@@ -331,7 +329,7 @@ export function parseMonitoringActions(
 
 /** Staleness hint posted once per stale transition, without spending the AI budget. */
 export const MONITORING_STALE_NOTICE =
-  "프로그램 구성이 바뀌어 승인된 감시 계획이 더 이상 현재 상태와 맞지 않을 수 있습니다. 제어센터에서 **다시 분석**을 누르면 새 계획을 제안합니다.";
+  "프로그램 구성이 바뀌어 승인된 감시 계획이 더 이상 현재 상태와 맞지 않을 수 있습니다. 기존 계획의 관찰은 계속하지만 자동 조치는 실행하지 않습니다. 제어센터에서 **다시 분석**을 누르면 새 계획을 제안합니다.";
 
 export function findFirstMonitoredProjectId<T extends { readonly id: string }>(
   projects: ReadonlyArray<T & { readonly monitoringEnabled: boolean }>,

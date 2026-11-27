@@ -1,5 +1,6 @@
 import type { AuthSessionState } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon, TerminalIcon } from "lucide-react";
 import React, { startTransition, useEffect, useRef, useState, useCallback } from "react";
 
 import { APP_DISPLAY_NAME } from "../../branding";
@@ -26,9 +27,29 @@ export function PairingPendingSurface() {
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+            {APP_DISPLAY_NAME}
+          </p>
+          <span
+            data-pairing-security-meta=""
+            className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 px-2.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+          >
+            <span>
+              {typeof window !== "undefined" && window.location?.host
+                ? window.location.host
+                : "127.0.0.1"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {typeof window !== "undefined" && window.location?.protocol === "https:"
+                ? "TLS 암호화"
+                : "로컬 루프백"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>Rate-Limit 보호</span>
+          </span>
+        </div>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           이 환경과 페어링하는 중
         </h1>
@@ -51,6 +72,8 @@ export function PairingRouteSurface({
 }) {
   const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
   const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
+  const [showToken, setShowToken] = useState(false);
+  const [copiedCliCommand, setCopiedCliCommand] = useState(false);
   const [errorMessage, setErrorMessage] = useState(
     initialErrorMessage ? "인증에 실패했습니다. 페어링 정보를 확인하세요." : "",
   );
@@ -130,9 +153,29 @@ export function PairingRouteSurface({
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+            {APP_DISPLAY_NAME}
+          </p>
+          <span
+            data-pairing-security-meta=""
+            className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 px-2.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+          >
+            <span>
+              {typeof window !== "undefined" && window.location?.host
+                ? window.location.host
+                : "127.0.0.1"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {typeof window !== "undefined" && window.location?.protocol === "https:"
+                ? "TLS 암호화"
+                : "로컬 루프백"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>Rate-Limit 보호</span>
+          </span>
+        </div>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">이 환경과 페어링</h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           {describeAuthGate(auth.bootstrapMethods)}
@@ -143,18 +186,33 @@ export function PairingRouteSurface({
             <label className="text-sm font-medium" htmlFor="pairing-token">
               페어링 토큰
             </label>
-            <Input
-              id="pairing-token"
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              disabled={isSubmitting}
-              nativeInput
-              onChange={(event) => setCredential(event.currentTarget.value)}
-              placeholder="일회용 토큰 또는 페어링 비밀키 붙여넣기"
-              spellCheck={false}
-              value={credential}
-            />
+            <div className="relative flex items-center gap-2">
+              <Input
+                id="pairing-token"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                className="min-h-11 flex-1 pr-12"
+                disabled={isSubmitting}
+                nativeInput
+                onChange={(event) => setCredential(event.currentTarget.value)}
+                placeholder="일회용 토큰 또는 페어링 비밀키 붙여넣기"
+                spellCheck={false}
+                type={showToken ? "text" : "password"}
+                value={credential}
+              />
+              <Button
+                aria-label={showToken ? "토큰 숨기기" : "토큰 표시"}
+                aria-pressed={showToken}
+                className="min-h-11 min-w-11 shrink-0"
+                disabled={isSubmitting}
+                onClick={() => setShowToken((prev) => !prev)}
+                type="button"
+                variant="outline"
+              >
+                {showToken ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
+              </Button>
+            </div>
           </div>
 
           {errorMessage ? (
@@ -164,21 +222,22 @@ export function PairingRouteSurface({
           ) : null}
 
           <div className="flex flex-wrap gap-2">
-            <Button disabled={isSubmitting} size="sm" type="submit">
+            <Button className="min-h-11 px-4" disabled={isSubmitting} type="submit">
               {isSubmitting ? "페어링 중..." : "계속"}
             </Button>
             <Button
+              className="min-h-11 px-4"
               disabled={isSubmitting}
               onClick={() => window.location.reload()}
-              size="sm"
+              type="button"
               variant="outline"
             >
               앱 새로고침
             </Button>
             {window.desktopBridge?.googleSignIn?.loginT3 ? (
               <Button
+                className="min-h-11 px-4"
                 disabled={isSubmitting}
-                size="sm"
                 type="button"
                 variant="outline"
                 onClick={() => void handleGoogleLogin()}
@@ -188,7 +247,7 @@ export function PairingRouteSurface({
             ) : null}
             {isGoogleSubmitting ? (
               <Button
-                size="sm"
+                className="min-h-11 px-4"
                 type="button"
                 variant="outline"
                 onClick={() => void window.desktopBridge?.googleSignIn?.cancel()}
@@ -199,8 +258,43 @@ export function PairingRouteSurface({
           </div>
         </form>
 
-        <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-          {describeSupportedMethods(auth.bootstrapMethods)}
+        <div className="mt-6 space-y-2.5 rounded-lg border border-border/70 bg-background/55 px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
+          <p>{describeSupportedMethods(auth.bootstrapMethods)}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/70 bg-muted/40 px-2.5 py-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <TerminalIcon className="size-3.5 shrink-0 text-foreground/70" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="font-medium text-foreground">CLI에서 페어링 토큰 확인하기</p>
+                <code className="block break-all font-mono text-[11px] text-foreground/85">
+                  t3 pair --token
+                </code>
+              </div>
+            </div>
+            <Button
+              aria-label="CLI 토큰 확인 명령 복사"
+              className="min-h-11 shrink-0 px-3 text-xs"
+              onClick={() => {
+                void navigator.clipboard?.writeText("t3 pair --token").then(() => {
+                  setCopiedCliCommand(true);
+                  window.setTimeout(() => setCopiedCliCommand(false), 1800);
+                });
+              }}
+              type="button"
+              variant="outline"
+            >
+              {copiedCliCommand ? (
+                <>
+                  <CheckIcon className="size-3.5" />
+                  복사됨
+                </>
+              ) : (
+                <>
+                  <CopyIcon className="size-3.5" />
+                  명령 복사
+                </>
+              )}
+            </Button>
+          </div>
         </div>
       </section>
     </div>
@@ -285,9 +379,29 @@ export function HostedPairingRouteSurface() {
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+            {APP_DISPLAY_NAME}
+          </p>
+          <span
+            data-pairing-security-meta=""
+            className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 px-2.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+          >
+            <span>
+              {typeof window !== "undefined" && window.location?.host
+                ? window.location.host
+                : "127.0.0.1"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {typeof window !== "undefined" && window.location?.protocol === "https:"
+                ? "TLS 암호화"
+                : "로컬 루프백"}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>Rate-Limit 보호</span>
+          </span>
+        </div>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           {status === "paired"
             ? "백엔드 페어링 완료"

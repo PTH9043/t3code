@@ -30,8 +30,19 @@ export function updateThreadOutboxMessage(message: QueuedThreadMessage): Promise
   return threadOutboxManager.update(message);
 }
 
+export function updateThreadOutboxMessageIfCurrent(
+  expected: QueuedThreadMessage,
+  replacement: QueuedThreadMessage,
+): Promise<boolean> {
+  return threadOutboxManager.updateIfCurrent(expected, replacement);
+}
+
 export function removeThreadOutboxMessage(message: QueuedThreadMessage): Promise<void> {
   return threadOutboxManager.remove(message);
+}
+
+export function removeThreadOutboxMessageIfCurrent(message: QueuedThreadMessage): Promise<boolean> {
+  return threadOutboxManager.removeIfCurrent(message);
 }
 
 export function clearThreadOutboxEnvironment(environmentId: EnvironmentId): Promise<void> {

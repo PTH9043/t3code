@@ -15,7 +15,12 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { ASSET_ROUTE_PREFIX, issueAssetUrl, resolveAsset } from "./AssetAccess.ts";
+import {
+  ASSET_ROUTE_PREFIX,
+  issueAssetUrl,
+  resolveAsset,
+  resolveRegisteredWorkspaceRootForAssetPath,
+} from "./AssetAccess.ts";
 
 const configLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
@@ -387,6 +392,25 @@ describe("AssetAccess", () => {
       expect(error.cause).toBe(resolutionCause);
     }).pipe(Effect.provide(testLayer)),
   );
+
+  it.effect("returns fallback favicon URL when project workspace directory no longer exists", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parent = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-favicon-missing-",
+      });
+      const missingRoot = path.join(parent, "deleted-project-dir");
+
+      const fallbackResult = yield* issueAssetUrl({
+        resource: { _tag: "project-favicon", cwd: missingRoot },
+      });
+      expect(fallbackResult.relativeUrl.endsWith(`/${PROJECT_FAVICON_FALLBACK_MARKER}`)).toBe(true);
+      const suffix = fallbackResult.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const sep = suffix.indexOf("/");
+      expect(yield* resolveAsset(suffix.slice(0, sep), suffix.slice(sep + 1))).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
   it.effect("signs bounded text preview and original download capabilities separately", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -416,4 +440,43 @@ describe("AssetAccess", () => {
       expect(preview.relativeUrl).not.toBe(download.relativeUrl);
     }).pipe(Effect.provide(testLayer)),
   );
+
+  it("resolves cross-project absolute asset paths to the longest matching registered workspace root while keeping relative and arbitrary OS paths scoped", () => {
+    const roots = ["D:\\__job", "D:\\__NewAutoUsage", "D:\\__NewAutoUsage\\__XPeed"];
+    // Cross-project HTML gallery clicked from D:\__job thread matches D:\__NewAutoUsage
+    expect(
+      resolveRegisteredWorkspaceRootForAssetPath({
+        primaryWorkspaceRoot: "D:\\__job",
+        requestedPath: "D:/__NewAutoUsage/.t3/t3-ppt-screenshots-2026-11-21/index.html",
+        registeredWorkspaceRoots: roots,
+      }),
+    ).toBe("D:\\__NewAutoUsage");
+
+    // Longest matching registered root wins for nested projects
+    expect(
+      resolveRegisteredWorkspaceRootForAssetPath({
+        primaryWorkspaceRoot: "D:\\__job",
+        requestedPath: "D:\\__NewAutoUsage\\__XPeed\\report.html",
+        registeredWorkspaceRoots: roots,
+      }),
+    ).toBe("D:\\__NewAutoUsage\\__XPeed");
+
+    // Arbitrary OS paths outside all registered projects fall back to primary root (and are rejected downstream)
+    expect(
+      resolveRegisteredWorkspaceRootForAssetPath({
+        primaryWorkspaceRoot: "D:\\__job",
+        requestedPath: "C:\\Windows\\System32\\drivers\\etc\\hosts",
+        registeredWorkspaceRoots: roots,
+      }),
+    ).toBe("D:\\__job");
+
+    // Relative paths never escape the thread's own primary workspace root
+    expect(
+      resolveRegisteredWorkspaceRootForAssetPath({
+        primaryWorkspaceRoot: "D:\\__job",
+        requestedPath: "..\\__NewAutoUsage\\.t3\\index.html",
+        registeredWorkspaceRoots: roots,
+      }),
+    ).toBe("D:\\__job");
+  });
 });

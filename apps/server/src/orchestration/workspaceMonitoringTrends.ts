@@ -92,13 +92,14 @@ export function evaluateTrend(
   switch (metric.trend) {
     case "threshold": {
       if (current.length === 0) return null;
-      // Health and regression count consecutive failures / failed runs, and
-      // log-matches already counts lines inside the window: the latest value
-      // is the count. Everything else is judged on the window mean.
+      // Count metrics and span rates already summarize their own window; using
+      // their latest value avoids averaging the same window a second time.
+      const spanRate = metric.metric === "slow-spans" || metric.metric === "failed-spans";
       const counting =
         metric.metric === "health" ||
         metric.metric === "regression" ||
-        metric.metric === "log-matches";
+        metric.metric === "log-matches" ||
+        spanRate;
       const value = counting
         ? current.at(-1)!.value
         : current.reduce((sum, sample) => sum + sample.value, 0) / current.length;
@@ -107,7 +108,9 @@ export function evaluateTrend(
         observed: counting
           ? metric.metric === "log-matches"
             ? `창 안 ${formatNumber(value)}줄 (한도 ${formatNumber(metric.limit)})`
-            : `${formatNumber(value)}회 (한도 ${formatNumber(metric.limit)})`
+            : spanRate
+              ? `분당 ${formatNumber(value)}건 (한도 ${formatNumber(metric.limit)})`
+              : `${formatNumber(value)}회 (한도 ${formatNumber(metric.limit)})`
           : `창 평균 ${formatNumber(value)} (한도 ${formatNumber(metric.limit)})`,
         direction: "over",
       };

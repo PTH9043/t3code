@@ -424,6 +424,7 @@ function spawnProcess(
     env: NodeProcess.env,
     stdio: "inherit",
     ...options,
+    windowsHide: true,
   });
 }
 
@@ -458,7 +459,13 @@ async function commandOutput(
     NodeChildProcess.execFile(
       command,
       [...args],
-      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 10 * 1024 * 1024, ...options },
+      {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+        ...options,
+        windowsHide: true,
+      },
       (error, stdout) => {
         if (error) reject(error);
         else resolve(String(stdout));
@@ -1221,7 +1228,7 @@ async function captureAndroid(
       NodeChildProcess.execFile(
         androidSdkTool("platform-tools/adb"),
         ["-s", serial, "exec-out", "screencap", "-p"],
-        { cwd: REPO_ROOT, encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+        { cwd: REPO_ROOT, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, windowsHide: true },
         (error, stdout) => {
           if (error) reject(error);
           else resolve(stdout);

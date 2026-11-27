@@ -302,6 +302,9 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           const sessions = yield* adapter.listSessions();
           const session = sessions.find((entry) => entry.threadId === threadId);
           if (session?.activeTurnId !== undefined) {
+            assert.equal(session.status, "running");
+            // This ACP fixture advertises loadSession only.
+            assert.isFalse(adapter.capabilities.workspaceDelegate?.(threadId));
             return;
           }
           yield* TestClock.adjust("10 millis");
@@ -329,6 +332,9 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       assert.equal(String(turnStartedEvents[0]?.turnId), String(firstTurn.turnId));
       assert.equal(turnCompletedEvents.length, 1);
       assert.equal(String(turnCompletedEvents[0]?.turnId), String(firstTurn.turnId));
+      const idle = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      assert.equal(idle?.status, "ready");
+      assert.isUndefined(idle?.activeTurnId);
 
       yield* adapter.stopSession(threadId);
     }),

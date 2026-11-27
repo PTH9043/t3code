@@ -193,9 +193,11 @@ dependencies = [
 name = "t3-resource-monitor"
 version = "0.1.0"
 dependencies = [
+ "ntapi",
  "serde",
  "serde_json",
  "sysinfo",
+ "winapi",
 ]
 
 [[package]]

@@ -1,5 +1,12 @@
+import * as Schema from "effect/Schema";
+import { WorkspaceCollaborationRunId } from "@t3tools/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 
+import {
+  resolveControlCenterTabSearch,
+  type ControlCenterDomainId,
+  type ControlCenterSectionId,
+} from "~/components/control-center/WorkspaceSectionNav";
 import { useSyncWorkspaceTabRoute } from "~/components/tabs/WorkspaceTabsHost";
 
 /**
@@ -18,6 +25,24 @@ function WorkspaceControlCenterRoute() {
   return null;
 }
 
+const validId = Schema.is(WorkspaceCollaborationRunId);
+
+export interface ControlCenterProjectSearch {
+  knowledgeRun?: string;
+  domain?: ControlCenterDomainId;
+  section?: ControlCenterSectionId;
+}
+
 export const Route = createFileRoute("/control-center/$environmentId/$projectId")({
+  validateSearch: (search): ControlCenterProjectSearch => {
+    const next: ControlCenterProjectSearch = {};
+    if (validId(search.knowledgeRun)) {
+      next.knowledgeRun = search.knowledgeRun;
+    }
+    const resolved = resolveControlCenterTabSearch(search);
+    if (resolved.domain) next.domain = resolved.domain;
+    if (resolved.section) next.section = resolved.section;
+    return next;
+  },
   component: WorkspaceControlCenterRoute,
 });

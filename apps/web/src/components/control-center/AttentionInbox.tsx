@@ -21,13 +21,18 @@ export function AttentionInbox({ project }: { project?: EnvironmentProject }) {
   const navigate = useNavigate();
   const [filter, setFilter] = useState<AttentionKind | "all">("all");
   const [expanded, setExpanded] = useState(false);
-  const items = threadAttentionItems(
+  const allItems = threadAttentionItems(
     threads.filter(
       (thread) =>
         !project ||
         (thread.environmentId === project.environmentId && thread.projectId === project.id),
     ),
-  ).filter((item) => filter === "all" || item.kind === filter);
+  );
+  const countByKind = allItems.reduce<Partial<Record<AttentionKind, number>>>((acc, item) => {
+    acc[item.kind] = (acc[item.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+  const items = allItems.filter((item) => filter === "all" || item.kind === filter);
   const visible = expanded ? items : items.slice(0, 12);
   return (
     <Card id="attention-inbox" data-attention-inbox>
@@ -46,17 +51,22 @@ export function AttentionInbox({ project }: { project?: EnvironmentProject }) {
             onClick={() => setFilter("all")}
           >
             전체
+            <span className="ml-1 font-mono text-[10px] opacity-80">{allItems.length}</span>
           </Button>
-          {(Object.keys(attentionKindLabels) as AttentionKind[]).map((kind) => (
-            <Button
-              key={kind}
-              size="xs"
-              variant={filter === kind ? "default" : "outline"}
-              onClick={() => setFilter(kind)}
-            >
-              {attentionKindLabels[kind]}
-            </Button>
-          ))}
+          {(Object.keys(attentionKindLabels) as AttentionKind[]).map((kind) => {
+            const count = countByKind[kind] ?? 0;
+            return (
+              <Button
+                key={kind}
+                size="xs"
+                variant={filter === kind ? "default" : "outline"}
+                onClick={() => setFilter(kind)}
+              >
+                {attentionKindLabels[kind]}
+                <span className="ml-1 font-mono text-[10px] opacity-80">{count}</span>
+              </Button>
+            );
+          })}
         </div>
         {visible.map(({ id, kind, thread }) => (
           <button
@@ -146,7 +156,7 @@ function RunAttention({
             void navigate({
               to: "/control-center/$environmentId/$projectId",
               params: { environmentId, projectId: item.projectId },
-              hash: "project-runs",
+              search: { domain: "execution", section: "project-runs" },
             })
           }
         >

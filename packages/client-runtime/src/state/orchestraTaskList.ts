@@ -1,3 +1,5 @@
+import { diagnoseOrchestraFailure, type OrchestraFailureDiagnostic } from "./orchestraFailure.ts";
+import { redactToolActivityText } from "@t3tools/shared/toolActivity";
 import type {
   MessageId,
   ModelSelection,
@@ -13,7 +15,7 @@ export type OrchestraRunSnapshot = Pick<
   WorkspaceCollaborationRun,
   "id" | "task" | "status" | "createdAt" | "meeting" | "graph"
 > &
-  Partial<Pick<WorkspaceCollaborationRun, "projectId" | "orchestra">>;
+  Partial<Pick<WorkspaceCollaborationRun, "projectId" | "orchestra" | "workflow" | "runContext">>;
 type TaskMessage = {
   readonly id: MessageId;
   readonly text: string;
@@ -50,6 +52,7 @@ export interface OrchestraTaskView {
   readonly question: string | null;
   readonly output: string | null;
   readonly progress: TaskProgress | null;
+  readonly diagnostic?: OrchestraFailureDiagnostic | null;
   readonly waitReason?: string | null;
   /** Sum of completed attempt durations, excluding queue/answer time and an in-flight attempt. */
   readonly completedAttemptMs?: number | null;
@@ -64,6 +67,26 @@ export interface OrchestraTaskList {
   readonly conductor: string | null;
   readonly question?: string | null;
   readonly tasks: ReadonlyArray<OrchestraTaskView>;
+}
+
+function summarizeOrchestraMessageProgress(text: string): string {
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const cleaned = rawLine
+      .replace(/^\s*(?:#{1,6}\s*|[-*+]\s+|\d+\.\s+|>\s*)/u, "")
+      .replace(/[`*_~]/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (
+      cleaned.length < 4 ||
+      /^\[보고\]$/u.test(cleaned) ||
+      /^\[비서실장의 조언\]$/u.test(cleaned) ||
+      /^[-=*]{3,}$/u.test(cleaned)
+    ) {
+      continue;
+    }
+    return `AI 응답 수신 · ${redactToolActivityText(cleaned, 60)}`;
+  }
+  return "AI 응답 수신";
 }
 
 export const orchestraTaskStatusLabels: Record<WorkspaceTaskNodeStatus, string> = {
@@ -159,20 +182,35 @@ export function deriveOrchestraTaskLists(input: {
         blocksByNode.set(block.nodeId, existing);
       }
       const nodes = new Map(run?.graph?.nodes.map((node) => [String(node.id), node]) ?? []);
+      const validationByTarget = new Map<string, NonNullable<WorkspaceTaskNode["validation"]>>();
+      for (const candidate of nodes.values()) {
+        const receipt = candidate.validation;
+        if (!receipt) continue;
+        const previous = validationByTarget.get(receipt.targetNodeId);
+        if (!previous || receipt.recordedAt > previous.recordedAt)
+          validationByTarget.set(receipt.targetNodeId, receipt);
+      }
       // Planning/discussion messages precede graph nodes. Status never controls ordering.
       const nodeIds = new Set([
         ...[...blocksByNode.keys()].filter((nodeId) => !nodes.has(nodeId)),
-        ...[...nodes.values()].toSorted((a, b) => a.order - b.order).map((node) => String(node.id)),
+        ...[...nodes.values()].sort((a, b) => a.order - b.order).map((node) => String(node.id)),
       ]);
       const tasks = [...nodeIds].map((nodeId): OrchestraTaskView => {
         const node = nodes.get(nodeId);
-        const nodeBlocks = (blocksByNode.get(nodeId) ?? []).toSorted(
+        const nodeBlocks = [...(blocksByNode.get(nodeId) ?? [])].sort(
           (a, b) => a.attempt - b.attempt,
         );
         const latestBlock = nodeBlocks.at(-1);
         const participant = run?.meeting?.participants.find(
           (seat) => seat.id === node?.participantId,
         );
+        const binding = run?.meeting
+          ? undefined
+          : (run?.workflow?.roleBindings ?? run?.runContext?.roleBindings)?.find(
+              (entry) => entry.role === node?.role && entry.enabled,
+            );
+        const localStep =
+          node?.status === "completed" && node.attempts.length === 0 && nodeBlocks.length === 0;
         const attempts = new Map<number, OrchestraTaskAttemptView>();
         for (const attempt of node?.attempts ?? []) {
           attempts.set(attempt.number, {
@@ -183,7 +221,7 @@ export function deriveOrchestraTaskLists(input: {
             streaming: !terminal && attempt.status === "running",
             status: settleStatus(attempt.status),
             modelSelection: attempt.modelSelection,
-            displayName: participant?.displayName ?? node?.agent ?? "AI",
+            displayName: participant?.displayName ?? "AI",
             instruction: node?.handoff.task ?? "",
             isSummary: true,
           });
@@ -207,13 +245,18 @@ export function deriveOrchestraTaskLists(input: {
             isSummary: message === undefined,
           });
         }
-        const ordered = [...attempts.values()].toSorted((a, b) => a.number - b.number);
+        const ordered = [...attempts.values()].sort((a, b) => a.number - b.number);
         const latest = ordered.at(-1);
         const latestMessage = latestBlock ? messages.get(latestBlock.messageId) : undefined;
         let progress = latestBlock ? (progressByMessage.get(latestBlock.messageId) ?? null) : null;
         const messageAt = latestMessage?.updatedAt ?? latestMessage?.createdAt;
         if (latestMessage?.text && messageAt && (!progress || messageAt > progress.createdAt)) {
-          progress = { summary: "AI 응답 수신", createdAt: messageAt };
+          progress = {
+            summary: latestMessage.streaming
+              ? summarizeOrchestraMessageProgress(latestMessage.text)
+              : "AI 응답 수신",
+            createdAt: messageAt,
+          };
         }
         // Native streaming can precede the graph query's refresh, especially on a retry.
         const nativeIsAhead =
@@ -238,15 +281,17 @@ export function deriveOrchestraTaskLists(input: {
           ? null
           : status === "awaiting-user"
             ? (node?.parkedQuestion?.question ?? "사용자 확인·답변 대기")
-            : ["queued", "blocked"].includes(status) && run?.meeting?.pendingQuestion
-              ? "회의의 사용자 답변 대기"
-              : ["queued", "blocked"].includes(status) && dependencies.length
-                ? `선행 작업 대기: ${dependencies.join(", ")}`
-                : ["queued", "blocked"].includes(status)
-                  ? "실행 순서 배정 대기"
-                  : status === "awaiting-validation"
-                    ? "검증 단계의 결과 대기"
-                    : null;
+            : ["queued", "blocked"].includes(status) && run?.graph?.planReview?.status === "pending"
+              ? "실행 계획 확인 대기: 계획을 확인한 뒤 시작합니다."
+              : ["queued", "blocked"].includes(status) && run?.meeting?.pendingQuestion
+                ? "회의의 사용자 답변 대기"
+                : ["queued", "blocked"].includes(status) && dependencies.length
+                  ? `선행 작업 대기: ${dependencies.join(", ")}`
+                  : ["queued", "blocked"].includes(status)
+                    ? "실행 순서 배정 대기"
+                    : status === "awaiting-validation"
+                      ? "검증 단계의 결과 대기"
+                      : null;
         const durations = (node?.attempts ?? []).flatMap((attempt) => {
           if (attempt.completedAt === null) return [];
           const duration = Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt);
@@ -257,8 +302,17 @@ export function deriveOrchestraTaskLists(input: {
           title: node?.title ?? latestBlock?.title ?? "작업",
           kind: node?.kind ?? latestBlock?.kind ?? "orchestration",
           status: settleStatus(status),
-          displayName: latest?.displayName ?? participant?.displayName ?? node?.agent ?? "AI",
-          modelSelection: latest?.modelSelection ?? participant?.modelSelection ?? null,
+          displayName:
+            latest?.displayName ??
+            (localStep
+              ? "내부 처리"
+              : (participant?.displayName ?? binding?.displayName ?? "담당 배정 전")),
+          modelSelection: localStep
+            ? null
+            : (latest?.modelSelection ??
+              participant?.modelSelection ??
+              binding?.modelSelection ??
+              null),
           instruction: latest?.instruction ?? node?.handoff.task ?? "",
           attempts: ordered,
           validation: node?.validation ?? null,
@@ -266,6 +320,7 @@ export function deriveOrchestraTaskLists(input: {
           question: terminal ? null : (node?.parkedQuestion?.question ?? null),
           output: node?.output ?? null,
           progress,
+          diagnostic: diagnoseOrchestraFailure(node, validationByTarget.get(nodeId)),
           waitReason,
           completedAttemptMs: durations.length
             ? durations.reduce((sum, value) => sum + value, 0)
@@ -292,5 +347,5 @@ export function deriveOrchestraTaskLists(input: {
         },
       ];
     })
-    .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }

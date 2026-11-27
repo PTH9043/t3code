@@ -18,6 +18,9 @@ vi.mock("@legendapp/list/react", async () => {
     data: Array<{ id: string }>;
     keyExtractor: (item: { id: string }) => string;
     renderItem: (args: { item: { id: string } }) => ReactNode;
+    estimatedItemSize?: number;
+    estimatedHeaderSize?: number;
+    drawDistance?: number;
     ListHeaderComponent?: ReactNode;
     ListFooterComponent?: ReactNode;
     anchoredEndSpace?: {
@@ -53,6 +56,9 @@ vi.mock("@legendapp/list/react", async () => {
     return (
       <div
         data-testid={legendListTestId}
+        data-estimated-item-size={props.estimatedItemSize}
+        data-estimated-header-size={props.estimatedHeaderSize}
+        data-draw-distance={props.drawDistance}
         data-anchor-index={props.anchoredEndSpace?.anchorIndex}
         data-anchor-max-size={props.anchoredEndSpace?.anchorMaxSize}
         data-anchor-offset={props.anchoredEndSpace?.anchorOffset}
@@ -157,6 +163,7 @@ beforeAll(async () => {
     clear: () => {},
   });
   vi.stubGlobal("window", {
+    location: { href: "http://localhost/" },
     matchMedia,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -309,9 +316,13 @@ describe("MessagesTimeline", () => {
     );
 
     expect(compactMarkup).toContain('class="h-3 sm:h-4"');
+    expect(compactMarkup).toContain("scroll-pt-4");
     expect(compactMarkup).not.toContain("chat-timeline-scroll-fade");
+    expect(compactMarkup).toContain('data-estimated-header-size="16"');
     expect(fadedMarkup).toContain('class="h-10 sm:h-12"');
     expect(fadedMarkup).toContain("chat-timeline-scroll-fade");
+    expect(fadedMarkup).toContain("scroll-pt-10 sm:scroll-pt-12");
+    expect(fadedMarkup).toContain('data-estimated-header-size="48"');
   });
 
   it("keeps assistant changed-files headers sticky below the thread header", () => {
@@ -435,16 +446,17 @@ describe("MessagesTimeline", () => {
     expect(resolveTimelineMinimapHasPersistentGutter(863)).toBe(false);
     expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
 
-    // No usable gutter (zoomed in / narrow pane): the strip must go inert
-    // instead of overlaying the centered content column.
+    // No gutter (zoomed in / narrow pane): the message column runs to the
+    // pane's padding, so the strip must go inert instead of overlaying it.
     expect(resolveTimelineMinimapHitStripWidth(768)).toBe(0);
     expect(resolveTimelineMinimapHitStripWidth(792)).toBe(0);
-    // Partial gutter: strip shrinks to what fits between the viewport edge
-    // and the content column.
-    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(14);
-    // Full gutter: unchanged 40px-wide strip.
-    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(1400)).toBe(40);
+    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(0);
+    expect(resolveTimelineMinimapHitStripWidth(863)).toBe(0);
+    // Gutter kept: the strip fills it up to the content column, however wide
+    // the pane grows.
+    expect(resolveTimelineMinimapHitStripWidth(864)).toBe(36);
+    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(36);
+    expect(resolveTimelineMinimapHitStripWidth(1400)).toBe(36);
     expect(resolveTimelineMinimapHitStripWidth(0)).toBe(0);
     expect(resolveTimelineMinimapHitStripWidth(Number.NaN)).toBe(0);
 
@@ -753,5 +765,74 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="도구 호출 실패"');
+  });
+
+  it("renders only the latest turns on initial tailFirstRevealKey paint and hides out-of-window settled orchestra runs", () => {
+    const entries = Array.from({ length: 5 }, (_, idx) => [
+      {
+        id: `entry-user-${idx}`,
+        kind: "message" as const,
+        createdAt: `2026-11-24T00:0${idx}:00.000Z`,
+        message: {
+          id: MessageId.make(`user-${idx}`),
+          role: "user" as const,
+          text: `Prompt turn ${idx}`,
+          turnId: null,
+          createdAt: `2026-11-24T00:0${idx}:00.000Z`,
+          updatedAt: `2026-11-24T00:0${idx}:00.000Z`,
+          streaming: false,
+        },
+      },
+      {
+        id: `entry-assistant-${idx}`,
+        kind: "message" as const,
+        createdAt: `2026-11-24T00:0${idx}:10.000Z`,
+        message: {
+          id: MessageId.make(`assistant-${idx}`),
+          role: "assistant" as const,
+          text: `Result turn ${idx}`,
+          turnId: TurnId.make(`turn-${idx}`),
+          createdAt: `2026-11-24T00:0${idx}:10.000Z`,
+          updatedAt: `2026-11-24T00:0${idx}:10.000Z`,
+          streaming: false,
+        },
+      },
+    ]).flat();
+
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        tailFirstRevealKey="thread-1:0"
+        loadEarlier={{ loading: false, onLoadEarlier: () => {} }}
+        orchestraRuns={[
+          {
+            id: "old-run" as never,
+            task: "Ancient completed orchestra",
+            status: "completed",
+            createdAt: "2026-11-20T00:00:00.000Z",
+            meeting: {
+              threadId: "thread-1" as never,
+              style: "collaboration",
+              coordinator: {
+                id: "coord",
+                displayName: "Chair",
+                role: "coordinator",
+                modelSelection: { instanceId: "codex" as never, model: "gpt-5" },
+              },
+              participants: [],
+              interjections: [],
+              pendingQuestion: null,
+            },
+            graph: { nodes: [] },
+          } as never,
+        ]}
+        timelineEntries={entries}
+      />,
+    );
+
+    expect(markup).toContain("Result turn 4");
+    expect(markup).toContain("Result turn 3");
+    expect(markup).not.toContain("Prompt turn 0");
+    expect(markup).not.toContain("Ancient completed orchestra");
   });
 });

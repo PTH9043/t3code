@@ -27,6 +27,128 @@ import {
 
 let nextActivityId = 0;
 
+it("keeps the question and shows the restart delivery warning", () => {
+  const requestId = "async:delivery-unknown";
+  const detail = "답변이 전달됐는지 확인할 수 없습니다.";
+  const activities = [
+    makeActivity({
+      kind: "user-input.requested",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      payload: {
+        requestId,
+        questions: [{ id: "q", header: "Q", question: "Which year?", options: [] }],
+      },
+    }),
+    makeActivity({
+      kind: "provider.user-input.respond.failed",
+      summary: "질문 답변의 전달 여부를 확인해 주세요",
+      tone: "error",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      payload: { requestId, code: "delivery-unknown-after-restart", detail },
+    }),
+  ];
+  expect(derivePendingUserInputs(activities).map((question) => question.requestId)).toEqual([
+    requestId,
+  ]);
+  expect(deriveWorkLogEntries(activities)).toContainEqual(
+    expect.objectContaining({ sourceActivityKind: "provider.user-input.respond.failed", detail }),
+  );
+});
+
+it("hides internal question delivery markers while keeping delivery failures visible", () => {
+  const entries = deriveWorkLogEntries([
+    makeActivity({ kind: "provider.user-input.recovery.queued", summary: "Queued" }),
+    makeActivity({ kind: "provider.user-input.delivery.started", summary: "Sending" }),
+    makeActivity({ kind: "provider.user-input.delivery.finished", summary: "Accepted" }),
+    makeActivity({ kind: "provider.turn.start.failed", summary: "Failed", tone: "error" }),
+  ]);
+  expect(entries.map((entry) => entry.label)).toEqual(["Failed"]);
+});
+
+it("retains a folder RAG save failure in the conversation work log", () => {
+  const entries = deriveWorkLogEntries([
+    makeActivity({
+      kind: "workspace.memory.save-failed",
+      tone: "error",
+      summary: "통합 작업의 폴더 RAG 저장을 확인하지 못했습니다. 작업 기록을 확인하세요.",
+      payload: { runId: "run-a", cycle: 0, status: "complete" },
+    }),
+  ]);
+  expect(entries).toHaveLength(1);
+  expect(entries[0]).toMatchObject({
+    sourceActivityKind: "workspace.memory.save-failed",
+    tone: "error",
+  });
+});
+
+it("keeps unavailable project memory visible in the conversation timeline", () => {
+  const summary =
+    "프로젝트 자동 기억 설정 또는 기억 구성을 불러오지 못해 AI에 누락 가능성을 알렸습니다.";
+  const work = deriveWorkLogEntries([
+    makeActivity({ kind: "workspace.memory.unavailable", tone: "error", summary }),
+  ]);
+  expect(deriveTimelineEntries([], [], work)).toEqual([
+    expect.objectContaining({
+      kind: "work",
+      entry: expect.objectContaining({
+        label: summary,
+        tone: "error",
+        sourceActivityKind: "workspace.memory.unavailable",
+      }),
+    }),
+  ]);
+});
+
+it("keeps a failed conversation handoff visible in the timeline", () => {
+  const summary = "이전 대화 인계 준비에 실패해 AI에 누락을 알렸습니다.";
+  const work = deriveWorkLogEntries([
+    makeActivity({ kind: "conversation.handoff.unavailable", tone: "error", summary }),
+  ]);
+  expect(deriveTimelineEntries([], [], work)).toEqual([
+    expect.objectContaining({
+      kind: "work",
+      entry: expect.objectContaining({ label: summary, tone: "error" }),
+    }),
+  ]);
+});
+
+it.each(["document-rag.search-failed", "document-rag.preparation-failed"])(
+  "keeps %s visible in the conversation timeline",
+  (kind) => {
+    const summary = "첨부 문서를 확인하지 못했습니다.";
+    const work = deriveWorkLogEntries([makeActivity({ kind, tone: "error", summary })]);
+    expect(deriveTimelineEntries([], [], work)).toEqual([
+      expect.objectContaining({
+        kind: "work",
+        entry: expect.objectContaining({ label: summary, tone: "error", sourceActivityKind: kind }),
+      }),
+    ]);
+  },
+);
+
+it("shows the provider's reason for an older generic runtime error", () => {
+  const entries = deriveWorkLogEntries([
+    makeActivity({
+      kind: "runtime.error",
+      tone: "error",
+      summary: "Runtime error",
+      payload: { message: "You're out of usage credits." },
+    }),
+  ]);
+  expect(entries[0]?.label).toBe("You're out of usage credits.");
+});
+
+it("keeps the recovery notice visible for a question that can no longer be answered", () => {
+  const closed = makeActivity({
+    kind: "user-input.resolved",
+    summary: "서버 재시작으로 이전 질문이 만료됐습니다. 필요한 경우 다시 질문을 요청하세요.",
+    payload: { requestId: "old-question", answers: {}, abandoned: true },
+  });
+  expect(deriveWorkLogEntries([closed])).toEqual([
+    expect.objectContaining({ label: closed.summary, sourceActivityKind: "user-input.resolved" }),
+  ]);
+});
+
 it("shows a free-text question card and clears only its matching response", () => {
   const question = makeActivity({
     kind: "user-input.requested",
@@ -239,6 +361,45 @@ describe("derivePendingApprovals", () => {
 
     expect(derivePendingApprovals(activities)).toEqual([]);
   });
+
+  it("surfaces unknown requestType approvals as actionable and clears them on abandoned resolution without timeline spam", () => {
+    const opened = makeActivity({
+      id: "approval-open-unknown",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "approval.requested",
+      summary: "Approval requested",
+      tone: "approval",
+      payload: {
+        requestId: "req-unknown-glob",
+        requestType: "unknown",
+        detail: "glob",
+      },
+    });
+    expect(derivePendingApprovals([opened])).toEqual([
+      {
+        requestId: "req-unknown-glob",
+        requestKind: "command",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "glob",
+      },
+    ]);
+
+    const resolved = makeActivity({
+      id: "approval-resolved-abandoned",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "approval.resolved",
+      summary: "서버 재시작으로 이전 승인 요청이 만료되어 닫혔습니다.",
+      tone: "info",
+      payload: {
+        requestId: "req-unknown-glob",
+        decision: "cancel",
+        abandoned: true,
+        timelineBypass: true,
+      },
+    });
+    expect(derivePendingApprovals([opened, resolved])).toEqual([]);
+    expect(deriveWorkLogEntries([resolved])).toEqual([]);
+  });
 });
 
 describe("derivePendingUserInputs", () => {
@@ -370,6 +531,64 @@ describe("derivePendingUserInputs", () => {
     ];
 
     expect(derivePendingUserInputs(activities)).toEqual([]);
+  });
+
+  it("clears resurrected text-question prompts when accepted delivery or Korean already-delivered failure is present", () => {
+    const requested = makeActivity({
+      id: "text-question-open-995a",
+      createdAt: "2026-11-22T01:04:29.900Z",
+      kind: "user-input.requested",
+      summary: "Antigravity 질문",
+      tone: "info",
+      payload: {
+        requestId: "text-question:995a8d93-7ef3-45fb-96cd-cf07fe1a4789",
+        questions: [
+          {
+            id: "question-1",
+            header: "다음 실행 범위",
+            question: "이어서 어떤 범위까지 바로 진행할까요?",
+            options: [{ label: "권장안", description: "설명" }],
+            multiSelect: false,
+          },
+        ],
+      },
+    });
+
+    expect(
+      derivePendingUserInputs([
+        requested,
+        makeActivity({
+          id: "recovered-delivery-accepted-995a",
+          createdAt: "2026-11-22T01:07:51.367Z",
+          kind: "provider.user-input.delivery.finished",
+          summary: "복구한 질문 답변 전송 확인",
+          tone: "info",
+          payload: {
+            requestId: "text-question:995a8d93-7ef3-45fb-96cd-cf07fe1a4789",
+            attemptId: "f01fb4a7",
+            outcome: "accepted",
+          },
+        }),
+      ]),
+    ).toEqual([]);
+
+    expect(
+      derivePendingUserInputs([
+        requested,
+        makeActivity({
+          id: "respond-failed-already-delivered",
+          createdAt: "2026-11-24T05:32:23.242Z",
+          kind: "provider.user-input.respond.failed",
+          summary: "질문 답변을 전달하지 못했습니다",
+          tone: "error",
+          payload: {
+            requestId: "text-question:995a8d93-7ef3-45fb-96cd-cf07fe1a4789",
+            detail:
+              "이전 답변이 이미 전달됐을 수 있습니다. 중복 전송을 막기 위해 대화 기록에서 처리 여부를 확인해 주세요.",
+          },
+        }),
+      ]),
+    ).toEqual([]);
   });
 });
 
@@ -1042,7 +1261,13 @@ describe("deriveWorkLogEntries", () => {
     );
     expect(cut.monitors).toEqual([]);
     expect(cut.nextWakeAt).toBeNull();
-    expect(cut.interrupted).toEqual({ at: T(15, now), monitorCount: 1, lostWakeup: true });
+    expect(cut.interrupted).toEqual({
+      eventId: "recovered",
+      at: T(15, now),
+      taskCount: 1,
+      monitorCount: 0,
+      lostWakeup: true,
+    });
 
     const rearmed = deriveBackgroundWatchStatus(
       [
@@ -1061,6 +1286,53 @@ describe("deriveWorkLogEntries", () => {
     );
     expect(rearmed.interrupted).toBeNull();
     expect(rearmed.monitors.map((monitor) => monitor.taskId)).toEqual(["m3"]);
+  });
+
+  it("uses the interruption timestamp on a delayed receipt and preserves its history", () => {
+    const at = "2026-11-12T10:20:00+09:00";
+    const replay = "2026-11-19T10:20:00+09:00";
+    const receipt = makeActivity({
+      id: "replayed",
+      kind: "session.recovered",
+      summary: "서버 재시작으로 백그라운드 감시 2개가 끊겼습니다",
+      createdAt: replay,
+      payload: {
+        interruptedAt: at,
+        interruptedTasks: [{ taskId: "shell", taskType: "local_bash" }, { taskId: "legacy" }],
+      },
+    });
+    expect(deriveBackgroundWatchStatus([receipt], Date.parse(replay)).interrupted).toEqual({
+      eventId: "replayed",
+      at,
+      taskCount: 2,
+      monitorCount: 0,
+      lostWakeup: false,
+    });
+    expect(deriveWorkLogEntries([receipt])[0]).toMatchObject({
+      id: receipt.id,
+      createdAt: replay,
+      label: "서버 재시작으로 중단된 항목 · 백그라운드 작업 2개",
+    });
+    const mixed = makeActivity({
+      id: "mixed",
+      kind: "session.recovered",
+      createdAt: at,
+      payload: { interruptedTasks: [{ taskType: "monitor_mcp" }, { taskType: "shell" }] },
+    });
+    expect(deriveBackgroundWatchStatus([mixed], Date.parse(replay)).interrupted).toMatchObject({
+      at,
+      monitorCount: 1,
+      taskCount: 2,
+    });
+    const verify = makeActivity({
+      id: "verify",
+      kind: "session.recovered",
+      createdAt: replay,
+      summary: "MCP 감시 상태 확인 필요",
+      payload: { possibleMcpMonitors: [{ taskId: "m" }] },
+    });
+    expect(deriveBackgroundWatchStatus([verify], Date.parse(replay)).interrupted).toBeNull();
+    expect(deriveWorkLogEntries([verify])[0]?.label).toBe(verify.summary);
   });
 
   it("still sorts when a streamed tail lands out of order behind an ordered prefix", () => {

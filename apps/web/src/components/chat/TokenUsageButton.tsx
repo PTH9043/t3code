@@ -1,8 +1,10 @@
 import { HandoffSettings } from "./HandoffSettings";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ServerProviderUsage, ThreadId } from "@t3tools/contracts";
 import {
   formatTokenCount,
+  providerQuotaWindows,
   tokenUsageCountLabels,
+  tokenUsageEfficiencyDiagnostics,
   tokenUsageIssueLabel,
   tokenUsagePhaseLabel,
   tokenUsageSummary,
@@ -10,14 +12,52 @@ import {
   tokenUsageDiagnosticRows,
 } from "@t3tools/client-runtime/state/token-usage";
 import { useEffect, useRef, useState } from "react";
+import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+
+function quotaToneClass(usedPercent: number): string {
+  if (usedPercent >= 95) return "text-error";
+  if (usedPercent >= 80) return "text-warning";
+  return "text-foreground/90";
+}
+
+/** Compact read-only quota pill shown in draft composers before a thread exists. */
+export function ProviderQuotaPill(props: {
+  usage: ServerProviderUsage | undefined;
+  providerDisplayName?: string | null | undefined;
+  selectedModel?: string | null | undefined;
+}) {
+  const quotaWindows = providerQuotaWindows(props.usage, { model: props.selectedModel });
+  if (quotaWindows.length === 0) return null;
+  return (
+    <div
+      className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border/50 bg-muted/35 px-2 text-xs font-medium tabular-nums text-foreground/85"
+      aria-label={`${props.providerDisplayName ?? "계정"} 사용 한도`}
+      data-composer-quota-windows="true"
+    >
+      {quotaWindows.map((window, index) => (
+        <span
+          key={window.id}
+          className={cn("inline-flex items-center gap-0.5", quotaToneClass(window.usedPercent))}
+        >
+          {index > 0 ? <span className="mr-1 text-muted-foreground">·</span> : null}
+          <span className="text-muted-foreground">{window.shortLabel}</span>
+          <span>{window.percentText}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 export function TokenUsageButton(props: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   busy: boolean;
+  providerUsage?: ServerProviderUsage | undefined;
+  providerDisplayName?: string | null | undefined;
+  selectedModel?: string | null | undefined;
 }) {
   const [workId, setWorkId] = useState<string | undefined>();
   const [beforeSequence, setBeforeSequence] = useState<number | undefined>();
@@ -39,6 +79,9 @@ export function TokenUsageButton(props: {
     }
   }, [props.busy, query.refresh]);
   const report = query.data;
+  const quotaWindows = providerQuotaWindows(props.providerUsage, { model: props.selectedModel });
+  const allQuotaWindows = providerQuotaWindows(props.providerUsage, { includeExtra: true });
+  const workSummary = query.error ? "사용량 조회 실패" : tokenUsageSummary(report);
   return (
     <Popover
       onOpenChange={(open) => {
@@ -49,15 +92,82 @@ export function TokenUsageButton(props: {
         render={
           <button
             type="button"
-            aria-label="작업 토큰 사용량 상세"
-            className="max-w-40 truncate rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-accent focus-visible:outline-ring"
+            aria-label="작업 토큰 및 계정 한도 사용량 상세"
+            className="inline-flex h-7 max-w-[28rem] items-center gap-1.5 rounded-md border border-border/50 bg-muted/35 px-2 text-xs font-medium tabular-nums text-foreground/85 transition-colors hover:bg-accent focus-visible:outline-ring"
           >
-            {query.error ? "사용량 조회 실패" : tokenUsageSummary(report)}
+            {quotaWindows.length > 0 ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-1.5"
+                data-composer-quota-windows="true"
+              >
+                {quotaWindows.map((window, index) => (
+                  <span
+                    key={window.id}
+                    className={cn(
+                      "inline-flex items-center gap-0.5",
+                      quotaToneClass(window.usedPercent),
+                    )}
+                  >
+                    {index > 0 ? <span className="mr-1 text-muted-foreground">·</span> : null}
+                    <span className="text-muted-foreground">{window.shortLabel}</span>
+                    <span>{window.percentText}</span>
+                  </span>
+                ))}
+              </span>
+            ) : null}
+            {quotaWindows.length > 0 ? (
+              <span aria-hidden="true" className="text-border">
+                |
+              </span>
+            ) : null}
+            <span className="truncate text-muted-foreground">{workSummary}</span>
           </button>
         }
       />
       <PopoverPopup side="top" align="end" className="w-[min(440px,calc(100vw-24px))] p-4">
         <div className="max-h-[65vh] space-y-3 overflow-y-auto text-xs">
+          {allQuotaWindows.length > 0 ? (
+            <div className="space-y-2 rounded-md border border-border/70 bg-muted/25 p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <strong className="text-foreground">
+                  {props.providerDisplayName
+                    ? `${props.providerDisplayName} 계정 한도`
+                    : "계정 한도"}
+                </strong>
+                <span className="text-[11px] text-muted-foreground">5시간 · 주간</span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {allQuotaWindows.map((window) => (
+                  <div key={window.id} className="grid gap-1">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-medium text-foreground">{window.label}</span>
+                      <span
+                        className={cn("font-mono tabular-nums", quotaToneClass(window.usedPercent))}
+                      >
+                        {window.percentText}
+                      </span>
+                    </div>
+                    <div
+                      className="h-1.5 overflow-hidden rounded-full bg-muted"
+                      role="progressbar"
+                      aria-label={`${window.label} 사용량`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(window.usedPercent)}
+                    >
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${window.usedPercent}%` }}
+                      />
+                    </div>
+                    {window.resetText ? (
+                      <span className="text-[10px] text-muted-foreground">{window.resetText}</span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="flex items-center justify-between gap-3">
             <strong>작업 토큰 사용량</strong>
             <button
@@ -143,6 +253,17 @@ export function TokenUsageButton(props: {
                       </div>
                     ))}
                   </dl>
+                  {(() => {
+                    const eff = tokenUsageEfficiencyDiagnostics(report);
+                    return eff.cacheWarningMessage ? (
+                      <p
+                        role="status"
+                        className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-300"
+                      >
+                        {eff.cacheWarningMessage}
+                      </p>
+                    ) : null;
+                  })()}
                   {report.breakdown.length > 0 ? (
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
@@ -186,7 +307,8 @@ export function TokenUsageButton(props: {
               ))}
               <p className="text-muted-foreground">
                 캐시·추론은 입력·출력에 포함됩니다. —는 미보고이며, 항목별 숫자는 보고된 범위의
-                합입니다. 모델은 실행 요청 당시 선택값입니다.
+                합입니다. Claude는 하위 에이전트(일꾼)까지 실제 실행 모델별로 나뉘고, 그 외 제공자는
+                실행 요청 당시 선택한 모델로 표시됩니다.
               </p>
               <p className="text-muted-foreground">
                 계측 시작: {new Date(report.collectedSince).toLocaleString("ko-KR")}

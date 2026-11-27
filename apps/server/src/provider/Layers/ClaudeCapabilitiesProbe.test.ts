@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 
 import {
   buildClaudeCapabilitiesProbeQueryOptions,
+  checkClaudeProviderStatus,
   CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES,
   isLegacyClaudeModel,
   probeClaudeCapabilities,
@@ -68,8 +69,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-probe-sdk-" });
       const executablePath = path.join(tempDir, "fake-claude.mjs");
       const invocationPath = path.join(tempDir, "invocation.json");
-      const workspaceCwd = path.join(tempDir, "workspace");
-      yield* fs.makeDirectory(workspaceCwd, { recursive: true });
+      const workspaceCwd = path.resolve(".");
 
       yield* fs.writeFileString(
         executablePath,
@@ -131,7 +131,9 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
         email: "dev@example.com",
         subscriptionType: "pro",
         tokenSource: "oauth",
+        apiKeySource: undefined,
         apiProvider: undefined,
+        models: [],
         slashCommands: [
           {
             name: "review",
@@ -156,5 +158,170 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
 
       assert.equal(invocation.args.includes("--setting-sources=user,project,local"), true);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "reads 5-hour and weekly subscription limits from get_usage on the same probe process",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-probe-usage-" });
+        const executablePath = path.join(tempDir, "fake-claude-usage.mjs");
+        const workspaceCwd = path.resolve(".");
+
+        yield* fs.writeFileString(
+          executablePath,
+          [
+            "#!/usr/bin/env node",
+            'import { createInterface } from "node:readline";',
+            "const lines = createInterface({ input: process.stdin });",
+            'lines.on("line", (line) => {',
+            "  const message = JSON.parse(line);",
+            '  if (message.type !== "control_request") return;',
+            '  if (message.request?.subtype === "initialize") {',
+            "    process.stdout.write(JSON.stringify({",
+            '      type: "control_response",',
+            "      response: {",
+            '        subtype: "success",',
+            "        request_id: message.request_id,",
+            "        response: {",
+            "          commands: [],",
+            "          agents: [],",
+            '          output_style: "default",',
+            '          available_output_styles: ["default"],',
+            "          models: [],",
+            '          account: { email: "sub@example.com", subscriptionType: "max", tokenSource: "oauth", apiProvider: "firstParty" },',
+            "        },",
+            "      },",
+            '    }) + "\\n");',
+            "    return;",
+            "  }",
+            '  if (message.request?.subtype === "get_usage") {',
+            "    process.stdout.write(JSON.stringify({",
+            '      type: "control_response",',
+            "      response: {",
+            '        subtype: "success",',
+            "        request_id: message.request_id,",
+            "        response: {",
+            "          rate_limits_available: true,",
+            "          rate_limits: {",
+            '            five_hour: { utilization: 28, resets_at: "2026-11-20T15:00:00.000Z" },',
+            '            seven_day: { utilization: 64.5, resets_at: "2026-11-25T00:00:00.000Z" },',
+            "          },",
+            "        },",
+            "      },",
+            '    }) + "\\n");',
+            "  }",
+            "});",
+            "setInterval(() => {}, 1_000);",
+            "",
+          ].join("\n"),
+        );
+        yield* fs.chmod(executablePath, 0o755);
+
+        const capabilities = yield* probeClaudeCapabilities(
+          decodeClaudeSettings({ binaryPath: executablePath }),
+          process.env,
+          workspaceCwd,
+        );
+
+        assert.equal(capabilities?.email, "sub@example.com");
+        assert.deepEqual(capabilities?.usage?.rateLimits, {
+          primary: {
+            label: "5시간",
+            usedPercent: 28,
+            resetsAt: Date.UTC(2026, 10, 20, 15, 0, 0) / 1_000,
+            windowDurationMinutes: 300,
+          },
+          secondary: {
+            label: "7일",
+            usedPercent: 64.5,
+            resetsAt: Date.UTC(2026, 10, 25, 0, 0, 0) / 1_000,
+            windowDurationMinutes: 10_080,
+          },
+        });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "leaves provider status ready and capabilities intact when get_usage returns an error",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-probe-usage-err-" });
+        const executablePath = path.join(tempDir, "fake-claude-usage-err.mjs");
+        const workspaceCwd = path.resolve(".");
+
+        yield* fs.writeFileString(
+          executablePath,
+          [
+            "#!/usr/bin/env node",
+            'if (process.argv.includes("--version")) {',
+            '  process.stdout.write("2.1.81 (Claude Code)\\n");',
+            "  process.exit(0);",
+            "}",
+            'import { createInterface } from "node:readline";',
+            "const lines = createInterface({ input: process.stdin });",
+            'lines.on("line", (line) => {',
+            "  const message = JSON.parse(line);",
+            '  if (message.type !== "control_request") return;',
+            '  if (message.request?.subtype === "initialize") {',
+            "    process.stdout.write(JSON.stringify({",
+            '      type: "control_response",',
+            "      response: {",
+            '        subtype: "success",',
+            "        request_id: message.request_id,",
+            "        response: {",
+            "          commands: [],",
+            "          agents: [],",
+            '          output_style: "default",',
+            '          available_output_styles: ["default"],',
+            "          models: [],",
+            '          account: { email: "err@example.com", subscriptionType: "pro", tokenSource: "oauth" },',
+            "        },",
+            "      },",
+            '    }) + "\\n");',
+            "    return;",
+            "  }",
+            '  if (message.request?.subtype === "get_usage") {',
+            "    process.stdout.write(JSON.stringify({",
+            '      type: "control_response",',
+            "      response: {",
+            '        subtype: "error",',
+            "        request_id: message.request_id,",
+            '        error: "unsupported control request",',
+            "      },",
+            '    }) + "\\n");',
+            "  }",
+            "});",
+            "setInterval(() => {}, 1_000);",
+            "",
+          ].join("\n"),
+        );
+        yield* fs.chmod(executablePath, 0o755);
+
+        const settings = decodeClaudeSettings({ binaryPath: executablePath });
+        const capabilities = yield* probeClaudeCapabilities(settings, process.env, workspaceCwd);
+        assert.equal(capabilities?.email, "err@example.com");
+        assert.equal(capabilities?.usage, undefined);
+
+        const versionShimPath =
+          process.platform === "win32"
+            ? path.join(tempDir, "fake-claude-version.cmd")
+            : executablePath;
+        if (process.platform === "win32") {
+          yield* fs.writeFileString(versionShimPath, "@echo 2.1.81 (Claude Code)\r\n");
+        }
+        const status = yield* checkClaudeProviderStatus(
+          decodeClaudeSettings({ binaryPath: versionShimPath }),
+          () => Effect.succeed(capabilities),
+          process.env,
+          workspaceCwd,
+        );
+        assert.equal(status.status, "ready");
+        assert.equal(status.usage, undefined);
+      }).pipe(Effect.scoped),
   );
 });

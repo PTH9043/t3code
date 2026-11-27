@@ -30,6 +30,7 @@ import {
   parseSessionUpdateEvent,
   sessionUpdateIsReplay,
   waitForSessionLoadReplayIdle,
+  type AcpAvailableCommand,
   type SessionLoadGate,
   type AcpParsedSessionEvent,
   type AcpSessionModeState,
@@ -55,6 +56,7 @@ export interface AcpSpawnInput {
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  readonly extendEnv?: boolean;
 }
 
 export interface AcpSessionRuntimeOptions {
@@ -68,8 +70,15 @@ export interface AcpSessionRuntimeOptions {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  readonly authMethodId?: string;
+  readonly closeSessionOnRelease?: boolean;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /**
+   * Optional system prompt appendix sent via ACP `_meta.antigravity.systemPrompt.append`
+   * only when the agent explicitly advertises `_meta.antigravity.systemPrompt.append === true`
+   * in its `initialize` response.
+   */
+  readonly systemPromptAppend?: string | undefined;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
     readonly logIncoming?: boolean;
@@ -86,6 +95,18 @@ export interface AcpSessionRequestLogEvent {
   readonly cause?: Cause.Cause<EffectAcpErrors.AcpError>;
 }
 
+function agentSupportsAntigravitySystemPromptAppend(
+  initializeResult: EffectAcpSchema.InitializeResponse,
+): boolean {
+  const meta = initializeResult.agentCapabilities?._meta;
+  if (!meta || typeof meta !== "object") return false;
+  const ag = (meta as Record<string, unknown>).antigravity;
+  if (!ag || typeof ag !== "object") return false;
+  const sp = (ag as Record<string, unknown>).systemPrompt;
+  if (!sp || typeof sp !== "object") return false;
+  return (sp as Record<string, unknown>).append === true;
+}
+
 export interface AcpSessionRuntimeStartResult {
   readonly sessionId: string;
   readonly initializeResult: EffectAcpSchema.InitializeResponse;
@@ -94,6 +115,7 @@ export interface AcpSessionRuntimeStartResult {
     | EffectAcpSchema.NewSessionResponse
     | EffectAcpSchema.ResumeSessionResponse;
   readonly modelConfigId: string | undefined;
+  readonly nativeSystemPromptApplied: boolean;
 }
 
 export class AcpSessionRuntime extends Context.Service<
@@ -187,6 +209,8 @@ export class AcpSessionRuntime extends Context.Service<
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
     /** Latest configuration options observed from session setup and configuration writes. */
     readonly getConfigOptions: Effect.Effect<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
+    /** Latest slash commands advertised via `available_commands_update`. */
+    readonly getAvailableCommands: Effect.Effect<ReadonlyArray<AcpAvailableCommand>>;
     /**
      * Sends a prompt turn to the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/prompt
@@ -291,12 +315,14 @@ export const make = (
     );
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
+    const availableCommandsRef = yield* Ref.make<ReadonlyArray<AcpAvailableCommand>>([]);
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
     const promptSerializationSemaphore = yield* Semaphore.make(1);
     const activePromptFiberRef = yield* Ref.make<
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const replayLogSuppressedRef = yield* Ref.make({ frames: 0, approxBytes: 0 });
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -332,13 +358,17 @@ export const make = (
     const spawnCommand = yield* resolveSpawnCommand(
       options.spawn.command,
       options.spawn.args,
-      options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {},
+      options.spawn.env
+        ? { env: options.spawn.env, extendEnv: options.spawn.extendEnv ?? true }
+        : {},
     );
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
+          ...(options.spawn.env
+            ? { env: options.spawn.env, extendEnv: options.spawn.extendEnv ?? true }
+            : {}),
           shell: spawnCommand.shell,
         }),
       )
@@ -353,6 +383,29 @@ export const make = (
         ),
       );
 
+    const protocolLogger = options.protocolLogging?.logger
+      ? (event: EffectAcpProtocol.AcpProtocolLogEvent) =>
+          Effect.gen(function* () {
+            if (event.direction === "incoming") {
+              const gate = yield* Ref.get(sessionLoadGateRef);
+              if (Option.isSome(gate) && gate.value.active) {
+                const payloadLen =
+                  typeof event.payload === "string"
+                    ? event.payload.length
+                    : event.payload instanceof Uint8Array
+                      ? event.payload.byteLength
+                      : 128;
+                yield* Ref.update(replayLogSuppressedRef, (prev) => ({
+                  frames: prev.frames + 1,
+                  approxBytes: prev.approxBytes + payloadLen,
+                }));
+                return;
+              }
+            }
+            yield* options.protocolLogging!.logger!(event);
+          })
+      : undefined;
+
     const acpContext = yield* Layer.build(
       EffectAcpClient.layerChildProcess(child, {
         ...(options.protocolLogging?.logIncoming !== undefined
@@ -361,7 +414,7 @@ export const make = (
         ...(options.protocolLogging?.logOutgoing !== undefined
           ? { logOutgoing: options.protocolLogging.logOutgoing }
           : {}),
-        ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
+        ...(protocolLogger ? { logger: protocolLogger } : {}),
       }),
     ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
 
@@ -369,6 +422,17 @@ export const make = (
 
     yield* acp.handleSessionUpdate((notification) =>
       Effect.gen(function* () {
+        if (notification.update.sessionUpdate === "config_option_update") {
+          yield* Ref.set(configOptionsRef, notification.update.configOptions);
+        } else if (notification.update.sessionUpdate === "available_commands_update") {
+          const parsedCommands = parseSessionUpdateEvent(notification).events.find(
+            (item): item is Extract<AcpParsedSessionEvent, { _tag: "AvailableCommandsUpdated" }> =>
+              item._tag === "AvailableCommandsUpdated",
+          );
+          if (parsedCommands) {
+            yield* Ref.set(availableCommandsRef, parsedCommands.commands);
+          }
+        }
         const gate = yield* Ref.get(sessionLoadGateRef);
         if (Option.isSome(gate) && gate.value.active) {
           const lastActivityAtMillis = yield* Clock.currentTimeMillis;
@@ -396,6 +460,8 @@ export const make = (
         yield* handleSessionUpdate({
           queue: eventQueue,
           modeStateRef,
+          configOptionsRef,
+          availableCommandsRef,
           toolCallsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
@@ -541,15 +607,51 @@ export const make = (
         acp.agent.initialize(initializePayload),
       );
 
-      const authenticatePayload = {
-        methodId: options.authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
+      if (options.authMethodId) {
+        const authenticatePayload = { methodId: options.authMethodId };
+        yield* runLoggedRequest(
+          "authenticate",
+          authenticatePayload,
+          acp.agent.authenticate(authenticatePayload),
+        );
+      }
 
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+      const nativeSystemPromptAppend =
+        options.systemPromptAppend?.trim() &&
+        agentSupportsAntigravitySystemPromptAppend(initializeResult)
+          ? options.systemPromptAppend.trim()
+          : undefined;
+      const sessionMeta = nativeSystemPromptAppend
+        ? {
+            _meta: {
+              antigravity: {
+                systemPrompt: {
+                  append: nativeSystemPromptAppend,
+                },
+              },
+            },
+          }
+        : {};
+
+      const createFreshSession = Effect.gen(function* () {
+        const createPayload = {
+          cwd: options.cwd,
+          mcpServers: options.mcpServers ?? [],
+          ...sessionMeta,
+        } satisfies EffectAcpSchema.NewSessionRequest;
+        const created = yield* runLoggedRequest(
+          "session/new",
+          createPayload,
+          acp.agent.createSession(createPayload),
+        );
+        return {
+          sessionId: created.sessionId,
+          sessionSetupResult: created as
+            | EffectAcpSchema.LoadSessionResponse
+            | EffectAcpSchema.NewSessionResponse
+            | EffectAcpSchema.ResumeSessionResponse,
+        };
+      });
 
       let sessionId: string;
       let sessionSetupResult:
@@ -561,6 +663,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...sessionMeta,
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
@@ -579,8 +682,7 @@ export const make = (
           }),
         );
 
-        sessionId = options.resumeSessionId;
-        sessionSetupResult = yield* Effect.gen(function* () {
+        const loadAttempt = yield* Effect.gen(function* () {
           yield* logRequest({
             method: "session/load",
             payload: loadPayload,
@@ -628,30 +730,90 @@ export const make = (
             ),
           );
 
-          return loaded;
-        }).pipe(Effect.ensuring(Ref.set(sessionLoadGateRef, Option.none())));
-      } else {
-        const createPayload = {
-          cwd: options.cwd,
-          mcpServers: options.mcpServers ?? [],
-        } satisfies EffectAcpSchema.NewSessionRequest;
-        const created = yield* runLoggedRequest(
-          "session/new",
-          createPayload,
-          acp.agent.createSession(createPayload),
+          const capturedConfigOptions = yield* Ref.get(configOptionsRef);
+          const mergedLoaded =
+            (loaded.configOptions?.length ?? 0) === 0 && capturedConfigOptions.length > 0
+              ? { ...loaded, configOptions: capturedConfigOptions }
+              : loaded;
+          return {
+            sessionId: options.resumeSessionId!,
+            sessionSetupResult: mergedLoaded,
+          };
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* Ref.set(sessionLoadGateRef, Option.none());
+              const suppressed = yield* Ref.getAndSet(replayLogSuppressedRef, {
+                frames: 0,
+                approxBytes: 0,
+              });
+              if (suppressed.frames > 0) {
+                yield* logRequest({
+                  method: "session/load.replay_summary",
+                  payload: {
+                    sessionId: options.resumeSessionId,
+                    suppressedFrames: suppressed.frames,
+                    approxBytes: suppressed.approxBytes,
+                  },
+                  status: "succeeded",
+                });
+              }
+            }),
+          ),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              return Effect.failCause(cause);
+            }
+            const isAuthRequired = cause.reasons.some(
+              (reason) =>
+                Cause.isFailReason(reason) &&
+                typeof reason.error === "object" &&
+                reason.error !== null &&
+                "_tag" in reason.error &&
+                reason.error._tag === "AcpRequestError" &&
+                "code" in reason.error &&
+                reason.error.code === -32000,
+            );
+            if (isAuthRequired) {
+              return Effect.failCause(cause);
+            }
+            return createFreshSession;
+          }),
         );
+        // If replay_idle won before configOptions arrived and initializeResult had no
+        // modelState either, fall back to a fresh session when the agent supports configOptions
+        // via session/new only if needed — otherwise preserve captured options.
+        sessionId = loadAttempt.sessionId;
+        sessionSetupResult = loadAttempt.sessionSetupResult;
+      } else {
+        const created = yield* createFreshSession;
         sessionId = created.sessionId;
-        sessionSetupResult = created;
+        sessionSetupResult = created.sessionSetupResult;
       }
 
+      if (
+        options.closeSessionOnRelease &&
+        initializeResult.agentCapabilities?.sessionCapabilities?.close
+      ) {
+        yield* Scope.addFinalizer(
+          runtimeScope,
+          acp.agent
+            .closeSession({ sessionId })
+            .pipe(Effect.timeoutOption(Duration.seconds(2)), Effect.ignore),
+        );
+      }
       yield* Ref.set(modeStateRef, parseSessionModeState(sessionSetupResult));
-      yield* Ref.set(configOptionsRef, sessionConfigOptionsFromSetup(sessionSetupResult));
+      const setupConfigOptions = sessionConfigOptionsFromSetup(sessionSetupResult);
+      if (setupConfigOptions.length > 0) {
+        yield* Ref.set(configOptionsRef, setupConfigOptions);
+      }
 
       const nextState = {
         sessionId,
         initializeResult,
         sessionSetupResult,
         modelConfigId: extractModelConfigId(sessionSetupResult),
+        nativeSystemPromptApplied: nativeSystemPromptAppend !== undefined,
       } satisfies AcpStartedState;
       return nextState;
     });
@@ -716,6 +878,7 @@ export const make = (
       }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
+      getAvailableCommands: Ref.get(availableCommandsRef),
       prompt: (payload) =>
         promptSerializationSemaphore.withPermit(
           Effect.gen(function* () {
@@ -844,6 +1007,8 @@ function configOptionCurrentValueMatches(
 const handleSessionUpdate = ({
   queue,
   modeStateRef,
+  configOptionsRef,
+  availableCommandsRef,
   toolCallsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
@@ -851,6 +1016,8 @@ const handleSessionUpdate = ({
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
+  readonly configOptionsRef: Ref.Ref<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
+  readonly availableCommandsRef: Ref.Ref<ReadonlyArray<AcpAvailableCommand>>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
@@ -864,6 +1031,16 @@ const handleSessionUpdate = ({
       );
     }
     for (const event of parsed.events) {
+      if (event._tag === "ConfigOptionsUpdated") {
+        yield* Ref.set(configOptionsRef, event.configOptions);
+        yield* Queue.offer(queue, event);
+        continue;
+      }
+      if (event._tag === "AvailableCommandsUpdated") {
+        yield* Ref.set(availableCommandsRef, event.commands);
+        yield* Queue.offer(queue, event);
+        continue;
+      }
       if (event._tag === "ToolCallUpdated") {
         yield* closeActiveAssistantSegment({
           queue,

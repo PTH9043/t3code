@@ -1,5 +1,12 @@
 import type { DesktopDirectRpcBridge, DesktopDirectRpcOutput } from "@t3tools/contracts";
 
+// The shared RPC socket expects a pong within five seconds. Local backend work
+// can briefly block the event loop, so allow the same 15-second window used by
+// the foreground probe while still closing a genuinely unresponsive connection.
+const LOCAL_HEALTH_TIMEOUT_MS = 15_000;
+const RPC_PING = '{"_tag":"Ping"}';
+const RPC_PONG = '{"_tag":"Pong"}';
+
 /** Adapts desktop IPC to Effect RPC's framed connection interface without opening a socket. */
 export class DirectRpcConnection extends EventTarget {
   readonly url = "desktop-direct://primary";
@@ -12,6 +19,7 @@ export class DirectRpcConnection extends EventTarget {
   private readonly unsubscribe: () => void;
   private readonly bridge: DesktopDirectRpcBridge;
   private sendChain: Promise<void> = Promise.resolve();
+  private healthTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(bridge: DesktopDirectRpcBridge, backendId?: string) {
     super();
@@ -47,6 +55,7 @@ export class DirectRpcConnection extends EventTarget {
         break;
       case "data":
         if (this.readyState === 1) {
+          this.clearHealthTimeout();
           this.dispatchEvent(new MessageEvent("message", { data: frame.data }));
         }
         break;
@@ -56,9 +65,17 @@ export class DirectRpcConnection extends EventTarget {
     }
   }
 
+  private clearHealthTimeout() {
+    if (this.healthTimeout !== undefined) {
+      clearTimeout(this.healthTimeout);
+      this.healthTimeout = undefined;
+    }
+  }
+
   private finish(code: number, reason: string) {
     if (this.readyState === 3) return;
     this.readyState = 3;
+    this.clearHealthTimeout();
     this.unsubscribe();
     const event = new Event("close");
     Object.defineProperties(event, { code: { value: code }, reason: { value: reason } });
@@ -79,8 +96,24 @@ export class DirectRpcConnection extends EventTarget {
     }
     if (typeof data !== "string") throw new TypeError("Direct RPC expects a framed text message.");
     const clientId = this.clientId;
+    if (data.trim() === RPC_PING) {
+      if (this.healthTimeout === undefined) {
+        // @effect-diagnostics-next-line globalTimers:off -- This EventTarget follows the browser socket lifecycle.
+        this.healthTimeout = setTimeout(() => this.fail(), LOCAL_HEALTH_TIMEOUT_MS);
+      }
+      // Keep the shared five-second socket heartbeat alive only while this
+      // direct transport waits for actual backend activity within the deadline.
+      queueMicrotask(() => {
+        if (this.readyState === 1) {
+          this.dispatchEvent(new MessageEvent("message", { data: RPC_PONG }));
+        }
+      });
+    }
     this.sendChain = this.sendChain
-      .then(() => this.bridge.send(clientId, data))
+      .then(() => {
+        if (this.readyState !== 1) return;
+        return this.bridge.send(clientId, data);
+      })
       .catch(() => this.fail());
   }
 

@@ -553,6 +553,55 @@ export function ThemeLibrary({
       <p className="px-3 text-[13px] leading-[1.45] text-muted-foreground/80 sm:px-4">
         T3 Code의 화면 스타일을 선택하세요. 기본 테마를 사용하거나 직접 만들 수 있습니다.
       </p>
+      <div
+        aria-label="시맨틱 상태 색상 분리 기준"
+        className="mx-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-card/70 px-3 py-2 text-xs sm:mx-4"
+      >
+        <span className="mr-1 font-medium text-muted-foreground">고정 상태 배지</span>
+        <span
+          className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium"
+          style={{
+            backgroundColor: "var(--status-danger-surface)",
+            borderColor: "var(--status-danger-border)",
+            color: "var(--status-danger-fg)",
+          }}
+        >
+          오류
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium"
+          style={{
+            backgroundColor: "var(--status-warning-surface)",
+            borderColor: "var(--status-warning-border)",
+            color: "var(--status-warning-fg)",
+          }}
+        >
+          경고
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium"
+          style={{
+            backgroundColor: "var(--status-success-surface)",
+            borderColor: "var(--status-success-border)",
+            color: "var(--status-success-fg)",
+          }}
+        >
+          성공
+        </span>
+        <span
+          className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium"
+          style={{
+            backgroundColor: "var(--status-info-surface)",
+            borderColor: "var(--status-info-border)",
+            color: "var(--status-info-fg)",
+          }}
+        >
+          정보
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          모든 테마에서 브랜드 색상과 분리되어 고정 대비를 유지합니다.
+        </span>
+      </div>
       <h3 className="px-3 text-sm font-medium tracking-[-0.005em] text-foreground sm:px-4">
         색상 모드
       </h3>

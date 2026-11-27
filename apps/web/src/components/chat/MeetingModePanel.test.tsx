@@ -80,11 +80,11 @@ it("renders multiple models per account and identifies exactly one selected cond
   expect(markup.match(/data-meeting-seat=/g)).toHaveLength(4);
   expect(markup.match(/aria-pressed="true"/g)).toHaveLength(1);
   expect(markup).toContain('value="claude-b" selected=""');
-  expect(markup).toContain('aria-label="codex Model a 모델"');
-  expect(markup).toContain('aria-label="codex Model b 모델"');
-  expect(markup).toContain('aria-label="claudeAgent Model a 제거"');
-  expect(markup).toContain('aria-label="claudeAgent 모델 추가"');
-  expect(markup).toContain("선택하지 않은 AI 추가 허용");
+  expect(markup).toContain('aria-label="Codex Model a 모델"');
+  expect(markup).toContain('aria-label="Codex Model b 모델"');
+  expect(markup).toContain('aria-label="Claude Model a 제거"');
+  expect(markup).toContain('aria-label="Claude 모델 추가"');
+  expect(markup.match(/사용자가 지정한 역할/g)).toHaveLength(4);
   expect(meetingModelDefaultOptions(entries[0]!, "a")).toEqual([
     { id: "reasoningEffort", value: "low" },
   ]);
@@ -92,4 +92,12 @@ it("renders multiple models per account and identifies exactly one selected cond
     { id: "reasoningEffort", value: "medium" },
   ]);
   expect(meetingModelDefaultOptions(entries[1]!, "a")).toEqual([{ id: "effort", value: "low" }]);
+});
+
+it("keeps unavailable saved participants visible and removable", () => {
+  const markup = renderToStaticMarkup(
+    <MeetingModePanel instanceEntries={[]} modelOptionsByInstance={new Map()} />,
+  );
+  expect(markup.match(/연결을 찾을 수 없음/g)).toHaveLength(4);
+  expect(markup).toContain('aria-label="codex a 제거"');
 });

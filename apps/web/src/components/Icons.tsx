@@ -211,6 +211,26 @@ export const GrokIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
+export const MuseIcon: Icon = ({ className, ...props }) => {
+  const id = useId().replaceAll(":", "");
+  const gradId = `${id}-muse-g`;
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" className={className}>
+      <defs>
+        <linearGradient id={gradId} x1="2" y1="3" x2="22" y2="21" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#0082FB" />
+          <stop offset="100%" stopColor="#7B61FF" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M3.5 18.5V6.2c0-.95 1.12-1.45 1.83-.82L12 11.35l6.67-5.97c.71-.63 1.83-.13 1.83.82v12.3a1.25 1.25 0 0 1-2.5 0V9.12l-5.17 4.62a1.25 1.25 0 0 1-1.66 0L6 9.12v9.38a1.25 1.25 0 0 1-2.5 0Z"
+        fill={`url(#${gradId})`}
+      />
+      <circle cx="12" cy="18.2" r="1.8" fill={`url(#${gradId})`} />
+    </svg>
+  );
+};
+
 export const TraeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 24 24" fill="currentColor">
     {/* Back rectangle: left strip + bottom strip drawn separately — empty bottom-left corner is the gap between them */}
@@ -644,6 +664,110 @@ const ANTIGRAVITY_ICON_DATA_URL =
 export const AntigravityIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 128 128" fill="none">
     <image href={ANTIGRAVITY_ICON_DATA_URL} width="128" height="128" />
+  </svg>
+);
+
+export const GlmIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn(className)}>
+    <path
+      d="M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5z"
+      fill="none"
+      stroke="#7C3AED"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path d="M12 7.5v9M7.5 9.75l9 4.5M16.5 9.75l-9 4.5" stroke="#7C3AED" strokeWidth="1.2" />
+  </svg>
+);
+
+export const DeepSeekIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn(className)}>
+    <path
+      d="M6.4 4.2c2.7-1.1 5.8-.9 8.2.5 2.4 1.4 3.9 3.9 3.9 6.6 0 3.9-3.1 7-7 7H9.2c-.6 0-1.1-.4-1.3-.9l-.7-1.8c-.5-1.2-.2-2.6.7-3.6.9-1 2.3-1.4 3.5-1.1l2.6.7c.5.1.9-.2 1-.7.1-.5-.2-1-.7-1.1l-2.9-.8c-1.7-.5-3.5-.1-4.8 1-1.3 1.1-1.9 2.8-1.5 4.4l.3 1.2c-2.4-.3-4.5-1.7-5.7-3.9C1.4 9.4 2.1 6.7 4 5c.7-.7 1.5-1.2 2.4-.8z"
+      fill="#4D6BFE"
+    />
+  </svg>
+);
+
+export const AntseedIcon: Icon = ({ className, ...props }) => (
+  <svg
+    {...props}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={cn("text-[#4ade80]", className)}
+  >
+    <circle cx="12" cy="5" r="2.4" />
+    <circle cx="5" cy="19" r="2.4" />
+    <circle cx="19" cy="19" r="2.4" />
+    <circle cx="12" cy="19" r="0" fill="none" stroke="none" />
+    <path d="M10.4 6.7 6.2 16.8" />
+    <path d="M13.6 6.7 17.8 16.8" />
+    <path d="M7.4 19h9.2" />
+  </svg>
+);
+
+export const ExaoneIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn(className)}>
+    <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="5.5" fill="#A50034" />
+    <path
+      d="M7.2 7.5h9.6M7.2 12h7.8M7.2 16.5h9.6M7.2 7.5v9"
+      stroke="#FFFFFF"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="17.2" cy="12" r="1.25" fill="#FF85A6" />
+  </svg>
+);
+
+export const OllamaIcon: Icon = ({ className, ...props }) => (
+  <svg
+    {...props}
+    viewBox="0 0 24 24"
+    fill="none"
+    className={cn("stroke-black dark:stroke-white", className)}
+  >
+    <path
+      d="M8.2 4.2c-.8 0-1.4.8-1.3 2.1l.4 3c-1.1 1-1.8 2.6-1.8 4.4 0 3.3 2.6 5.9 6.5 5.9s6.5-2.6 6.5-5.9c0-1.8-.7-3.4-1.8-4.4l.4-3c.1-1.3-.5-2.1-1.3-2.1-.9 0-1.7 1.1-2.1 2.7a7.8 7.8 0 0 0-3.4 0C9.9 5.3 9.1 4.2 8.2 4.2Z"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="9.6" cy="13.2" r="1" className="fill-black dark:fill-white" stroke="none" />
+    <circle cx="14.4" cy="13.2" r="1" className="fill-black dark:fill-white" stroke="none" />
+    <path d="M10.7 15.8c.5.5 1 .7 1.3.7s.8-.2 1.3-.7" strokeWidth="1.5" strokeLinecap="round" />
+  </svg>
+);
+
+export const QwenIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn(className)}>
+    <path
+      d="M12 2.4 19.8 6.9v10.2L12 21.6l-7.8-4.5V6.9L12 2.4Z"
+      fill="#615CED"
+      fillOpacity="0.16"
+      stroke="#615CED"
+      strokeWidth="1.7"
+      strokeLinejoin="round"
+    />
+    <circle cx="11.6" cy="11.6" r="3.6" stroke="#615CED" strokeWidth="1.9" />
+    <path d="m14.2 14.2 2.7 2.7" stroke="#615CED" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
+export const KimiIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn(className)}>
+    <circle cx="12" cy="12" r="9.5" fill="#0F172A" />
+    <path
+      d="M8.4 7.2v9.6M15.4 7.5 10 12l5.6 4.6"
+      stroke="#38BDF8"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
   </svg>
 );
 

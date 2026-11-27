@@ -34,6 +34,11 @@ T3 Code의 서버 측 관측성 모델은 하나입니다.
 개발 서버는 `<worktree>/.t3/userdata/logs/server.trace.ndjson`을, 연결된 워크트리 밖에서 암묵적으로
 실행한 개발 서버는 `~/.t3/dev/logs/server.trace.ndjson`을 사용합니다.
 
+로컬 파일에는 읽을 가치가 있는 스팬만 남깁니다. 성공했고 이벤트가 없으며 50ms 미만으로 끝난 서버 스팬(SQL 한 문장, 프로젝터 한 단계 등)은 기록하지 않습니다. 실패·중단된 스팬, 이벤트가 있는 스팬, 50ms 이상 걸린
+스팬, 브라우저에서 온 스팬은 그대로 기록합니다. 기준은 `apps/server/src/observability/traceRetention.ts`의
+`ROUTINE_SPAN_MAX_DURATION_MS`입니다. OTLP 내보내기와 서버 자체 감시 지표에는 모든 스팬이 그대로 전달됩니다.
+파일은 10MB씩 10개까지 회전하므로, 걸러내지 않으면 30분 남짓한 기록만 남습니다.
+
 두 레코드 유형에 공통으로 있는 주요 필드입니다.
 
 - `type`: `effect-span` 또는 `otlp-span`

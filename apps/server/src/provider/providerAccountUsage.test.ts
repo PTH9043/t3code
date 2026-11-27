@@ -173,6 +173,81 @@ describe("provider account usage", () => {
     });
   });
 
+  it("counts measured spend, including subagents, ahead of the context counter", () => {
+    const observation = (
+      sourceId: string,
+      total: number,
+      mode: "cumulative" | "execution-total",
+    ) => ({
+      sourceId,
+      mode,
+      provider: "claude",
+      model: "claude-opus-5-5",
+      counts: {
+        total,
+        input: total,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: null,
+      },
+    });
+    let state = makeEmptyProviderAccountUsageState();
+    for (const [id, payload] of [
+      [
+        "turn-1",
+        {
+          usage: { usedTokens: 900, totalProcessedTokens: 900 },
+          consumption: [
+            observation("r1:main", 900, "execution-total"),
+            observation("r1:worker", 4_000, "execution-total"),
+          ],
+        },
+      ],
+      [
+        "turn-2",
+        {
+          usage: { usedTokens: 700, totalProcessedTokens: 700 },
+          consumption: [observation("r2:main", 700, "execution-total")],
+        },
+      ],
+      ["counter-1", { consumption: [observation("native", 1_000, "cumulative")] }],
+      ["counter-2", { consumption: [observation("native", 1_250, "cumulative")] }],
+      ["counter-reset", { consumption: [observation("native", 10, "cumulative")] }],
+    ] as const) {
+      state = reduceProviderAccountUsage(
+        state,
+        runtimeEvent({
+          id,
+          type: "thread.token-usage.updated",
+          createdAt: "2026-11-15T00:00:00.000Z",
+          payload,
+        }),
+      );
+    }
+    // 900 + 4,000 + 700 executions, then 1,250 of counter growth; never the
+    // 900 max context counter, and a counter going backwards adds nothing.
+    expect(providerAccountUsageFromState(state)?.sessionTokens).toBe(6_850);
+  });
+
+  it("shows an exhausted Claude window and keeps overage out of the 5-hour slot", () => {
+    expect(
+      normalizeProviderRateLimits({
+        rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1 },
+      }),
+    ).toEqual({ primary: { label: "5시간", usedPercent: 100, resetsAt: 1 } });
+    expect(
+      normalizeProviderRateLimits({
+        rate_limit_info: { status: "allowed", rateLimitType: "five_hour" },
+      }),
+    ).toBeUndefined();
+    expect(
+      normalizeProviderRateLimits({
+        rate_limit_info: { status: "rejected", rateLimitType: "overage", utilization: 1 },
+      }),
+    ).toBeUndefined();
+  });
+
   it("preserves provider lifetime totals while adding runtime activity", () => {
     const providerUsage: ServerProviderUsage = {
       source: "provider",
@@ -200,6 +275,75 @@ describe("provider account usage", () => {
       sessionCount: 1,
       lifetimeTokens: 2_000_000,
       secondary: { label: "7일", usedPercent: 50 },
+    });
+  });
+
+  it("picks the fresher rate-limit reading per window between provider probe and runtime events", () => {
+    let runtimeState = reduceProviderAccountUsage(
+      makeEmptyProviderAccountUsageState(),
+      runtimeEvent({
+        id: "old-5h",
+        type: "account.rate-limits.updated",
+        createdAt: "2026-11-20T01:00:00.000Z",
+        payload: {
+          rateLimits: { rate_limit_info: { rateLimitType: "five_hour", utilization: 0.2 } },
+        },
+      }),
+    );
+
+    const probeUsage: ServerProviderUsage = {
+      source: "provider",
+      updatedAt: "2026-11-20T01:05:00.000Z",
+      sessionTokens: 0,
+      sessionCount: 0,
+      activeSessionCount: 0,
+      primary: { label: "5시간", usedPercent: 35, windowDurationMinutes: 300 },
+      secondary: { label: "7일", usedPercent: 60, windowDurationMinutes: 10_080 },
+    };
+
+    // Fresher SDK probe beats the older turn event.
+    expect(mergeProviderAccountUsage(probeUsage, runtimeState)).toMatchObject({
+      source: "combined",
+      updatedAt: "2026-11-20T01:05:00.000Z",
+      primary: { label: "5시간", usedPercent: 35, windowDurationMinutes: 300 },
+      secondary: { label: "7일", usedPercent: 60, windowDurationMinutes: 10_080 },
+    });
+
+    // A later token-only event updates sessionTokens/updatedAt without overriding fresher probe limits.
+    runtimeState = reduceProviderAccountUsage(
+      runtimeState,
+      runtimeEvent({
+        id: "tokens-later",
+        type: "thread.token-usage.updated",
+        createdAt: "2026-11-20T01:06:00.000Z",
+        payload: { usage: { usedTokens: 1_500 } },
+      }),
+    );
+    expect(mergeProviderAccountUsage(probeUsage, runtimeState)).toMatchObject({
+      source: "combined",
+      updatedAt: "2026-11-20T01:06:00.000Z",
+      sessionTokens: 1_500,
+      primary: { label: "5시간", usedPercent: 35, windowDurationMinutes: 300 },
+      secondary: { label: "7일", usedPercent: 60, windowDurationMinutes: 10_080 },
+    });
+
+    // A later rate-limit event updates only its matching window while keeping the probe's weekly window.
+    runtimeState = reduceProviderAccountUsage(
+      runtimeState,
+      runtimeEvent({
+        id: "newer-5h",
+        type: "account.rate-limits.updated",
+        createdAt: "2026-11-20T01:07:00.000Z",
+        payload: {
+          rateLimits: { rate_limit_info: { rateLimitType: "five_hour", utilization: 0.42 } },
+        },
+      }),
+    );
+    expect(mergeProviderAccountUsage(probeUsage, runtimeState)).toMatchObject({
+      source: "combined",
+      updatedAt: "2026-11-20T01:07:00.000Z",
+      primary: { label: "5시간", usedPercent: 42 },
+      secondary: { label: "7일", usedPercent: 60, windowDurationMinutes: 10_080 },
     });
   });
 

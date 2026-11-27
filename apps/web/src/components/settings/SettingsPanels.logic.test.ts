@@ -229,4 +229,31 @@ describe("buildProviderInstanceUpdatePatch", () => {
     expect(patch.providerInstances?.[instanceId]).toEqual(nextInstance);
     expect(patch.providers).toBeUndefined();
   });
+
+  it("keeps nested config.enabled aligned with instance.enabled when toggling a provider on", () => {
+    const instanceId = ProviderInstanceId.make("gemini");
+    const patch = buildProviderInstanceUpdatePatch({
+      settings: DEFAULT_SERVER_SETTINGS,
+      instanceId,
+      instance: {
+        driver: ProviderDriverKind.make("gemini"),
+        enabled: true,
+        config: {
+          enabled: false,
+          binaryPath: "agy",
+        },
+      },
+      driver: ProviderDriverKind.make("gemini"),
+      isDefault: true,
+    });
+
+    expect(patch.providerInstances?.[instanceId]).toEqual({
+      driver: ProviderDriverKind.make("gemini"),
+      enabled: true,
+      config: {
+        enabled: true,
+        binaryPath: "agy",
+      },
+    });
+  });
 });

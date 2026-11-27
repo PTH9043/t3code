@@ -1,3 +1,4 @@
+import { isRecoverableUserInputRequestId } from "@t3tools/contracts";
 import { isLiquidGlassSupported, LiquidGlassView } from "@callstack/liquid-glass";
 import type {
   EnvironmentId,
@@ -7,7 +8,9 @@ import type {
   ProviderInteractionMode,
   RuntimeMode,
   ServerConfig as T3ServerConfig,
+  ServerProviderSkill,
 } from "@t3tools/contracts";
+import { mergeChatProjectSkills } from "@t3tools/client-runtime/state/chat-project-skills";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -69,7 +72,12 @@ import {
   resolveProviderOptionDescriptors,
 } from "../../lib/providerOptions";
 import { useComposerPathSearch } from "../../state/use-composer-path-search";
+import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
+import { orchestrationEnvironment } from "../../state/orchestration";
+import { useEnvironmentQuery } from "../../state/query";
+
+const EMPTY_CHAT_PROJECT_SKILLS: ReadonlyArray<ServerProviderSkill> = [];
 
 /**
  * Height of the collapsed composer (pill + vertical padding, excluding safe-area inset).
@@ -102,9 +110,17 @@ export interface ThreadComposerProps {
   readonly pendingQuestionRequestId?: string | undefined;
   readonly serverConfig: T3ServerConfig | null;
   readonly queueCount: number;
+  readonly failedQueuedMessage?: QueuedThreadMessage | undefined;
+  readonly onRetryFailedMessage?: (message: QueuedThreadMessage) => Promise<void>;
+  readonly onRestoreFailedMessage?: (message: QueuedThreadMessage) => Promise<void>;
   readonly activeThreadBusy: boolean;
+  readonly orchestraActive?: boolean;
+  readonly orchestraHasQuestion?: boolean;
+  readonly orchestraConfigured?: boolean;
+  readonly onOpenOrchestraSettings?: () => void;
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
+  readonly skillCwd?: string | null;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftImages: () => Promise<void>;
@@ -308,14 +324,20 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onExpandedChange?.(false);
   }, [onExpandedChange]);
   const showStopAction =
+    props.orchestraActive === true ||
     props.selectedThread.session?.status === "running" ||
     props.selectedThread.session?.status === "starting" ||
-    props.pendingQuestionRequestId?.startsWith("async:") === true;
+    isRecoverableUserInputRequestId(props.pendingQuestionRequestId);
 
-  const sendLabel =
-    props.connectionState !== "connected" || props.activeThreadBusy || props.queueCount > 0
-      ? "Queue"
-      : "보내기";
+  const sendLabel = props.orchestraActive
+    ? props.orchestraHasQuestion
+      ? "답변"
+      : "지시 전달"
+    : props.orchestraConfigured
+      ? "통합 작업 시작"
+      : props.connectionState !== "connected" || props.activeThreadBusy || props.queueCount > 0
+        ? "Queue"
+        : "보내기";
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
   const currentInteractionMode = props.selectedThread.interactionMode ?? "default";
@@ -363,6 +385,49 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
     return detectComposerTrigger(props.draftMessage, composerSelection.end);
   }, [composerSelection, props.draftMessage]);
+  const chatSkillsQuery = useEnvironmentQuery(
+    orchestrationEnvironment.chatProjectSkills({
+      environmentId: props.environmentId,
+      input: { projectId: props.selectedThread.projectId, threadId: props.selectedThread.id },
+    }),
+  );
+  useEffect(() => {
+    if (composerTrigger?.kind === "skill" || composerTrigger?.kind === "slash-command") {
+      chatSkillsQuery.refresh();
+    }
+  }, [composerTrigger?.kind, chatSkillsQuery.refresh]);
+  const selectedDriver = selectedProviderStatus?.driver;
+  const projectSkills =
+    selectedDriver === "codex"
+      ? chatSkillsQuery.data?.codex
+      : selectedDriver === "claudeAgent"
+        ? chatSkillsQuery.data?.claudeAgent
+        : selectedDriver === "gemini"
+          ? (chatSkillsQuery.data?.gemini ?? chatSkillsQuery.data?.grok)
+          : chatSkillsQuery.data?.grok;
+  const otherProviderSkills = useMemo(
+    () =>
+      (props.serverConfig?.providers ?? []).flatMap((provider) =>
+        provider.instanceId === selectedProviderStatus?.instanceId ? [] : provider.skills,
+      ),
+    [props.serverConfig?.providers, selectedProviderStatus?.instanceId],
+  );
+  const chatSkills = useMemo(
+    () =>
+      mergeChatProjectSkills(
+        selectedProviderStatus?.skills ?? [],
+        projectSkills ?? EMPTY_CHAT_PROJECT_SKILLS,
+        props.skillCwd ?? props.projectCwd,
+        otherProviderSkills,
+      ),
+    [
+      selectedProviderStatus?.skills,
+      projectSkills,
+      props.skillCwd,
+      props.projectCwd,
+      otherProviderSkills,
+    ],
+  );
   const pathSearch = useComposerPathSearch({
     environmentId: props.environmentId,
     cwd: composerTrigger?.kind === "path" ? props.projectCwd : null,
@@ -411,11 +476,29 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         });
       }
 
-      return [...builtIn, ...providerCommands];
+      const skillMatches: ComposerCommandItem[] = chatSkills
+        .filter(
+          (skill) =>
+            skill.enabled &&
+            (!q ||
+              skill.name.toLowerCase().includes(q) ||
+              (skill.displayName ?? "").toLowerCase().includes(q) ||
+              (skill.description ?? "").toLowerCase().includes(q)),
+        )
+        .slice(0, 20)
+        .map((skill) => ({
+          id: `skill:${skill.name}`,
+          type: "skill" as const,
+          skill,
+          label: skill.displayName ?? skill.name,
+          description: skill.shortDescription ?? skill.description ?? "",
+        }));
+
+      return [...builtIn, ...providerCommands, ...skillMatches];
     }
 
     if (composerTrigger.kind === "skill") {
-      const enabledSkills = (selectedProviderStatus?.skills ?? []).filter((s) => s.enabled);
+      const enabledSkills = chatSkills.filter((s) => s.enabled);
       const normalizedQuery = normalizeSearchQuery(composerTrigger.query, {
         trimLeadingPattern: /^\$+/,
       });
@@ -512,7 +595,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     return [];
-  }, [composerTrigger, pathSearch.entries, selectedProviderStatus]);
+  }, [composerTrigger, pathSearch.entries, selectedProviderStatus, chatSkills]);
 
   // ── Handle command selection ──────────────────────────────
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;
@@ -781,7 +864,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               ref={inputRef}
               multiline
               value={props.draftMessage}
-              skills={selectedProviderStatus?.skills ?? []}
+              skills={chatSkills}
               selection={composerSelection}
               onChangeText={props.onChangeDraftMessage}
               onSelectionChange={handleSelectionChange}
@@ -863,6 +946,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   onPress={() => void props.onPickDraftImages()}
                   showChevron={false}
                 />
+                <ComposerToolbarButton
+                  accessibilityLabel="통합 작업 설정"
+                  icon="person.2"
+                  onPress={() => props.onOpenOrchestraSettings?.()}
+                  showChevron={false}
+                />
                 <ControlPillMenu
                   actions={modelMenuActions}
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}
@@ -907,12 +996,39 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           </Animated.View>
         ) : null}
 
+        {props.failedQueuedMessage?.deliveryFailure ? (
+          <View className="gap-2 pt-2" accessibilityRole="alert">
+            <Text className="text-xs text-foreground">
+              전송 결과를 확인하지 못해 메시지를 보존했습니다.{" "}
+              {props.failedQueuedMessage.deliveryFailure.message}
+            </Text>
+            <Text className="text-xs text-foreground-muted" numberOfLines={3}>
+              {props.failedQueuedMessage.text}
+            </Text>
+            <View className="flex-row gap-4">
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void props.onRetryFailedMessage?.(props.failedQueuedMessage!)}
+              >
+                <Text className="text-xs text-foreground">다시 시도</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void props.onRestoreFailedMessage?.(props.failedQueuedMessage!)}
+              >
+                <Text className="text-xs text-foreground">초안으로 옮겨 수정</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
         {/* Queue count */}
         {props.queueCount > 0 ? (
           <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(120)}>
             <Text className="pt-2 text-xs text-foreground-muted">
-              {props.queueCount} queued message{props.queueCount === 1 ? "" : "s"} will send
-              automatically.
+              {props.failedQueuedMessage
+                ? `대기 메시지 ${props.queueCount}개 · 전송 결과를 확인하세요.`
+                : `대기 메시지 ${props.queueCount}개가 순서대로 전송됩니다.`}
             </Text>
           </Animated.View>
         ) : null}

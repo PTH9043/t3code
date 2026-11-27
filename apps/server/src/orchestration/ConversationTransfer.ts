@@ -279,6 +279,122 @@ export const exportConversation = Effect.fn("ConversationTransfer.export")(
       if (raw !== null && NodeCrypto.createHash("sha256").update(raw).digest("hex") === sourceHash)
         originalSource = { format: string(metadata?.format) ?? "t3", content: raw };
     }
+    const scope = input.scope ?? "all";
+    const outputFormat = input.outputFormat ?? "json";
+    if (scope !== "all" || outputFormat === "markdown") {
+      const { analyzeUserSpeechStyle, formatUserSpeechProfileMarkdown } = yield* Effect.promise(
+        () => import("@t3tools/shared/userSpeechProfile"),
+      );
+      const userMessages = thread.messages.filter(
+        (m) => m.role === "user" && m.text.trim().length > 0,
+      );
+      const aiMessages = thread.messages.filter(
+        (m) => m.role !== "user" && m.text.trim().length > 0,
+      );
+      const speechProfile = analyzeUserSpeechStyle(
+        userMessages.map((m) => ({
+          id: m.id,
+          threadId: thread.id,
+          threadTitle: thread.title,
+          text: m.text,
+          createdAt: m.createdAt,
+        })),
+      );
+
+      if (outputFormat === "markdown") {
+        const sections: string[] = [
+          `# ${thread.title || thread.id} · 대화 분리 저장본`,
+          "",
+          `- 대화 ID: \`${thread.id}\``,
+          `- 저장 구분: ${scope === "user_only" ? "내 대화·말투 전용" : scope === "ai_only" ? "AI 작성·조사 결과 전용" : "전체 (내 대화·말투 / AI 결과 구역 분리)"}`,
+          "",
+        ];
+        if (scope === "all" || scope === "user_only") {
+          sections.push(
+            formatUserSpeechProfileMarkdown(speechProfile).trimEnd(),
+            "",
+            `## 내 대화 원문 (${userMessages.length}건)`,
+            "",
+            ...(userMessages.length > 0
+              ? userMessages.map(
+                  (m, idx) => `### [${idx + 1}] ${m.createdAt} (\`${m.id}\`)\n\n${m.text.trim()}`,
+                )
+              : ["(기록된 사용자 발화 없음)"]),
+            "",
+          );
+        }
+        if (scope === "all" || scope === "ai_only") {
+          sections.push(
+            `## AI 작성 및 조사 결과 (${aiMessages.length}건)`,
+            "",
+            ...(aiMessages.length > 0
+              ? aiMessages.map(
+                  (m, idx) =>
+                    `### [${idx + 1}] ${m.createdAt} · ${m.role} (\`${m.id}\`)\n\n${m.text.trim()}`,
+                )
+              : ["(기록된 AI 응답 없음)"]),
+            "",
+          );
+          if (thread.proposedPlans.length > 0) {
+            sections.push(
+              `## AI 작성 계획서 (${thread.proposedPlans.length}건)`,
+              "",
+              ...thread.proposedPlans.map(
+                (p, idx) =>
+                  `### [계획 ${idx + 1}] ${p.createdAt} (\`${p.id}\`)\n\n${p.planMarkdown.trim()}`,
+              ),
+              "",
+            );
+          }
+        }
+        const mdContent = `${sections.join("\n").trimEnd()}\n`;
+        const suffix =
+          scope === "user_only" ? "user-style" : scope === "ai_only" ? "ai-outputs" : "separated";
+        return {
+          fileName: `${thread.id}-${suffix}.md`,
+          content: mdContent,
+          format: "markdown",
+        };
+      }
+
+      const separatedJson = yield* encodeExport({
+        format: "t3-conversation-separated",
+        version: 1,
+        scope,
+        threadId: thread.id,
+        title: thread.title,
+        exportedAt: DateTime.formatIso(yield* DateTime.now),
+        ...(scope === "all" || scope === "user_only"
+          ? {
+              userDialogueAndStyle: {
+                speechProfile,
+                messages: userMessages,
+              },
+            }
+          : {}),
+        ...(scope === "all" || scope === "ai_only"
+          ? {
+              aiResearchAndOutputs: {
+                messages: aiMessages,
+                proposedPlans: thread.proposedPlans,
+              },
+            }
+          : {}),
+      });
+      if (separatedJson.length > 8_000_000) {
+        return yield* new ConversationTransferError({
+          message: "대화가 8 MB를 초과합니다. CLI 원본 내보내기를 사용하세요.",
+        });
+      }
+      const suffix =
+        scope === "user_only" ? "user-style" : scope === "ai_only" ? "ai-outputs" : "separated";
+      return {
+        fileName: `${thread.id}-${suffix}.json`,
+        content: separatedJson,
+        format: "json",
+      };
+    }
+
     const content = yield* encodeExport({
       format: "t3-conversation",
       version: 1,

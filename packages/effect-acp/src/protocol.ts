@@ -339,8 +339,19 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     return Queue.offer(serverQueue, message).pipe(Effect.asVoid);
   };
 
-  const handleExitEncoded = (message: RpcMessage.ResponseExitEncoded) =>
-    Ref.get(extPending).pipe(
+  const handleExitEncoded = (response: RpcMessage.ResponseExitEncoded) => {
+    // ndJsonRpc decodes an ordinary JSON-RPC error as a defect. Preserve the ACP
+    // code and data before RpcClient converts that defect into a plain Error.
+    const cause = response.exit._tag === "Failure" ? response.exit.cause : [];
+    const reason = cause.length === 1 ? cause[0] : undefined;
+    const message: RpcMessage.ResponseExitEncoded =
+      reason?._tag === "Die" && isProtocolError(reason.defect)
+        ? {
+            ...response,
+            exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: reason.defect }] },
+          }
+        : response;
+    return Ref.get(extPending).pipe(
       Effect.flatMap((pending) => {
         const pendingRequest = pending.get(String(message.requestId));
         if (!pendingRequest) {
@@ -370,6 +381,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         );
       }),
     );
+  };
 
   const routeDecodedMessage = (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,

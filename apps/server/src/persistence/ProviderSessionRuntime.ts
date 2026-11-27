@@ -1,4 +1,5 @@
 import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -235,6 +236,29 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  // Write-through in-memory cache for provider_session_runtime.
+  // Eliminates ~1,900+ redundant full-table SQLite scans per session (reaper/directory lookups)
+  // while keeping writes durable and honoring external/test DB edits via short list TTL.
+  const LIST_CACHE_TTL_MS = 10_000;
+  const cachedByThreadId = new Map<ThreadId, ProviderSessionRuntime>();
+  let listCache: {
+    readonly rows: ReadonlyArray<ProviderSessionRuntime>;
+    readonly expiresAtMs: number;
+  } | null = null;
+
+  const sortCachedRows = (): ReadonlyArray<ProviderSessionRuntime> =>
+    Array.from(cachedByThreadId.values()).sort((a, b) =>
+      a.lastSeenAt === b.lastSeenAt
+        ? a.threadId < b.threadId
+          ? -1
+          : a.threadId > b.threadId
+            ? 1
+            : 0
+        : a.lastSeenAt < b.lastSeenAt
+          ? -1
+          : 1,
+    );
+
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime) =>
     upsertRuntimeRow(runtime).pipe(
       Effect.mapError(
@@ -244,69 +268,93 @@ export const make = Effect.gen(function* () {
           { threadId: runtime.threadId },
         ),
       ),
-    );
-
-  const getByThreadId: ProviderSessionRuntimeRepository["Service"]["getByThreadId"] = (input) =>
-    getRuntimeRowByThreadId(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProviderSessionRuntimeRepository.getByThreadId:query",
-          "ProviderSessionRuntimeRepository.getByThreadId:decodeRow",
-          { threadId: input.threadId },
-        ),
-      ),
-      Effect.flatMap((runtimeRowOption) =>
-        Option.match(runtimeRowOption, {
-          onNone: () => Effect.succeed(Option.none()),
-          onSome: (row) =>
-            decodeRuntimeRow(row).pipe(
-              Effect.mapError((cause) =>
-                PersistenceDecodeError.fromSchemaError(
-                  "ProviderSessionRuntimeRepository.getByThreadId:decodeRow",
-                  cause,
-                  { threadId: input.threadId },
-                ),
-              ),
-              Effect.map((runtime) => Option.some(runtime)),
-            ),
+      Effect.tap(() =>
+        Effect.gen(function* () {
+          const nowMs = yield* Clock.currentTimeMillis;
+          cachedByThreadId.set(runtime.threadId, runtime);
+          if (listCache !== null) {
+            listCache = { rows: sortCachedRows(), expiresAtMs: nowMs + LIST_CACHE_TTL_MS };
+          }
         }),
       ),
     );
 
-  const list: ProviderSessionRuntimeRepository["Service"]["list"] = () =>
-    listRuntimeRows(undefined).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProviderSessionRuntimeRepository.list:query",
-          "ProviderSessionRuntimeRepository.list:decodeRows",
-        ),
-      ),
-      Effect.flatMap((rows) =>
-        // Skip rows that no longer decode (e.g. written by an older build)
-        // instead of failing the whole list — one stale row must not disable
-        // every consumer that enumerates sessions, such as the reaper.
-        Effect.forEach(rows, (row) =>
-          decodeRuntimeRow(row).pipe(
-            Effect.map(Option.some),
-            Effect.catch((cause) =>
-              Effect.logWarning("provider.session.runtime.row-skipped", {
-                threadId: row.threadId,
-                error: PersistenceDecodeError.fromSchemaError(
-                  "ProviderSessionRuntimeRepository.list:decodeRows",
-                  cause,
-                  { threadId: row.threadId },
-                ).message,
-              }).pipe(Effect.as(Option.none<ProviderSessionRuntime>())),
-            ),
+  const getByThreadId: ProviderSessionRuntimeRepository["Service"]["getByThreadId"] = (input) =>
+    Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+      const cached = cachedByThreadId.get(input.threadId);
+      if (cached !== undefined && listCache !== null && nowMs < listCache.expiresAtMs) {
+        return Option.some(cached);
+      }
+      const runtimeRowOption = yield* getRuntimeRowByThreadId(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProviderSessionRuntimeRepository.getByThreadId:query",
+            "ProviderSessionRuntimeRepository.getByThreadId:decodeRow",
+            { threadId: input.threadId },
           ),
         ),
-      ),
-      Effect.map((decoded) =>
-        Arr.filterMap(decoded, (row) =>
-          Option.isSome(row) ? Result.succeed(row.value) : Result.failVoid,
+      );
+      if (Option.isNone(runtimeRowOption)) {
+        cachedByThreadId.delete(input.threadId);
+        return Option.none<ProviderSessionRuntime>();
+      }
+      const runtime = yield* decodeRuntimeRow(runtimeRowOption.value).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "ProviderSessionRuntimeRepository.getByThreadId:decodeRow",
+            cause,
+            { threadId: input.threadId },
+          ),
         ),
-      ),
-    );
+      );
+      cachedByThreadId.set(runtime.threadId, runtime);
+      return Option.some(runtime);
+    });
+
+  const list: ProviderSessionRuntimeRepository["Service"]["list"] = () =>
+    Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+      if (listCache !== null && nowMs < listCache.expiresAtMs) {
+        return listCache.rows;
+      }
+      const rows = yield* listRuntimeRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProviderSessionRuntimeRepository.list:query",
+            "ProviderSessionRuntimeRepository.list:decodeRows",
+          ),
+        ),
+      );
+      // Skip rows that no longer decode (e.g. written by an older build)
+      // instead of failing the whole list — one stale row must not disable
+      // every consumer that enumerates sessions, such as the reaper.
+      const decoded = yield* Effect.forEach(rows, (row) =>
+        decodeRuntimeRow(row).pipe(
+          Effect.map(Option.some),
+          Effect.catch((cause) =>
+            Effect.logWarning("provider.session.runtime.row-skipped", {
+              threadId: row.threadId,
+              error: PersistenceDecodeError.fromSchemaError(
+                "ProviderSessionRuntimeRepository.list:decodeRows",
+                cause,
+                { threadId: row.threadId },
+              ).message,
+            }).pipe(Effect.as(Option.none<ProviderSessionRuntime>())),
+          ),
+        ),
+      );
+      const validRows = Arr.filterMap(decoded, (row) =>
+        Option.isSome(row) ? Result.succeed(row.value) : Result.failVoid,
+      );
+      cachedByThreadId.clear();
+      for (const item of validRows) {
+        cachedByThreadId.set(item.threadId, item);
+      }
+      const completedAtMs = yield* Clock.currentTimeMillis;
+      listCache = { rows: validRows, expiresAtMs: completedAtMs + LIST_CACHE_TTL_MS };
+      return validRows;
+    });
 
   const deleteByThreadId: ProviderSessionRuntimeRepository["Service"]["deleteByThreadId"] = (
     input,
@@ -319,6 +367,15 @@ export const make = Effect.gen(function* () {
             correlation: { threadId: input.threadId },
             cause,
           }),
+      ),
+      Effect.tap(() =>
+        Effect.gen(function* () {
+          const nowMs = yield* Clock.currentTimeMillis;
+          cachedByThreadId.delete(input.threadId);
+          if (listCache !== null) {
+            listCache = { rows: sortCachedRows(), expiresAtMs: nowMs + LIST_CACHE_TTL_MS };
+          }
+        }),
       ),
     );
 

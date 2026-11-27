@@ -416,3 +416,112 @@ codeSubjects.forEach((subject, i) =>
 );
 
 export const knowledgeCases: readonly KnowledgeCase[] = cases;
+
+/**
+ * 4-stage Next-Gen RAG benchmark cases covering hierarchical Parent-Child context,
+ * Markdown table header preservation, exact clause/code RRF + Cross-Interaction
+ * reranking, and RBAC/folder scope isolation.
+ */
+export const nextGenRagCases: readonly KnowledgeCase[] = [
+  {
+    id: "nextgen-contextual-clause-01",
+    category: "code",
+    split: "development",
+    request: {
+      projectId: ProjectId.make("eval-nextgen-clause-01"),
+      task: "2026년 국내 출장 시 제3조 숙박비 한도 조정 기준은 무엇인가요?",
+      contextMode: "relevant",
+      maxContextChars: 12_000,
+    },
+    items: [
+      source(
+        ProjectId.make("eval-nextgen-clause-01"),
+        "travel-policy-2026",
+        "사내 여비 규정집",
+        [
+          "# 2026년 국내 출장 규정",
+          "## 제1조 목적",
+          "본 규정은 임직원의 국내 출장 여비 지급 기준을 정한다. " + "총칙 안내 문구. ".repeat(85),
+          "## 제2조 교통비 기준",
+          "국내 출장 교통비는 철도 및 버스 실비를 기준으로 지급한다. " +
+            "교통비 세부 문구. ".repeat(75),
+          "## 제3조 숙박비 한도",
+          "본 한도는 직전 분기 대비 10% 이내로 조정한다.",
+        ].join("\n\n"),
+        { research: research("국내출장규정", 2, ["travel-policy-2025"]) },
+      ),
+      source(
+        ProjectId.make("eval-nextgen-clause-01"),
+        "travel-policy-2025",
+        "사내 여비 규정집 (구판)",
+        "2025년 국내 출장 시 제3조 숙박비 한도는 고정 금액으로 한다.",
+        { research: research("국내출장규정", 1) },
+      ),
+    ],
+    expected: ["travel-policy-2026"],
+    forbidden: ["travel-policy-2025"],
+    evidenceText: ["# 2026년 국내 출장 규정", "직전 분기 대비 10% 이내로 조정한다"],
+  },
+  {
+    id: "nextgen-code-identifier-02",
+    category: "code",
+    split: "development",
+    request: {
+      projectId: ProjectId.make("eval-nextgen-code-02"),
+      task: "에러 코드 TS-999와 제품 식별자 A-2201의 장애 복구 절차를 알려줘",
+      contextMode: "relevant",
+      maxContextChars: 12_000,
+    },
+    items: [
+      source(
+        ProjectId.make("eval-nextgen-code-02"),
+        "ts999-runbook",
+        "장애 대응 매뉴얼",
+        "에러 코드 TS-999가 제품 A-2201에서 발생하면 로컬 세션을 재시작하고 체크포인트를 검증한다.",
+      ),
+      source(
+        ProjectId.make("foreign-eval-nextgen-code-02"),
+        "foreign-ts999",
+        "타 프로젝트 매뉴얼",
+        "에러 코드 TS-999가 제품 A-2201에서 발생하면 외부 서버를 재부팅한다.",
+      ),
+    ],
+    expected: ["ts999-runbook"],
+    forbidden: ["foreign-ts999"],
+    evidenceText: ["TS-999", "A-2201", "체크포인트를 검증한다"],
+  },
+  {
+    id: "nextgen-table-continuation-03",
+    category: "code",
+    split: "holdout",
+    request: {
+      projectId: ProjectId.make("eval-nextgen-table-03"),
+      task: "직급별 숙박비 한도표에서 책임연구원의 제주 숙박비 기준을 찾아줘",
+      contextMode: "relevant",
+      maxContextChars: 12_000,
+    },
+    items: [
+      source(
+        ProjectId.make("eval-nextgen-table-03"),
+        "lodging-table",
+        "직급별 숙박비 한도표",
+        [
+          "# 직급별 숙박비 한도표",
+          "| 직급 | 서울 숙박비 | 제주 숙박비 |",
+          "| :--- | :--- | :--- |",
+          ...Array.from(
+            { length: 28 },
+            (_, idx) => `| 일반직-${idx + 1} | 110,000원 | 120,000원 |`,
+          ),
+          "| 책임연구원 | 160,000원 | 185,000원 |",
+        ].join("\n"),
+      ),
+    ],
+    expected: ["lodging-table"],
+    forbidden: [],
+    evidenceText: [
+      "| 직급 | 서울 숙박비 | 제주 숙박비 |",
+      "| 책임연구원 | 160,000원 | 185,000원 |",
+    ],
+  },
+];

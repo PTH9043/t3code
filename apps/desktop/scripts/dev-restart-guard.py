@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 import psutil
@@ -13,7 +14,7 @@ REPLACEMENT_HOLD = Path(__file__).resolve().parents[3] / '.t3' / 'unified-work-r
 
 PROVIDER_PROCESSES = {
     'codex', 'codex.exe', 'claude', 'claude.exe', 'opencode', 'opencode.exe',
-    'grok', 'grok.exe', 'gemini', 'gemini.exe', 'cursor-agent', 'cursor-agent.exe',
+    'grok', 'grok.exe', 'agy', 'agy.exe', 'gemini', 'gemini.exe', 'cursor-agent', 'cursor-agent.exe',
     # Their descendants may run outside the Windows process tree.
     'wsl', 'wsl.exe', 'ssh', 'ssh.exe',
     # A terminal may contain user work even without an active agent turn.
@@ -79,9 +80,13 @@ def has_provider_process(app_pid):
             name = child.name().lower()
             if name in PROVIDER_PROCESSES:
                 return True
+            if name in ('python', 'python.exe', 'python3', 'python3.exe'):
+                cwd = Path(child.cwd()).resolve()
+                if cwd.name.startswith('t3-assistant-voice-') and cwd.parent == Path(tempfile.gettempdir()).resolve():
+                    return True
             if name in ('node', 'node.exe', 'bun', 'bun.exe'):
                 arguments = ' '.join(child.cmdline()).lower().replace('\\', '/')
-                if any(marker in arguments for marker in ('/codex/', '/claude/', '/opencode/', '/grok/', '/gemini/')):
+                if any(marker in arguments for marker in ('/codex/', '/claude/', '/opencode/', '/grok/', '/antigravity/', '/agy/', '/gemini/')):
                     return True
         except psutil.NoSuchProcess:
             continue

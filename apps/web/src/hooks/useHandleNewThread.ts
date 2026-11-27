@@ -175,11 +175,21 @@ export function useNewThreadHandler() {
               ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
-            if (carryModelSelection) {
+            const existingStoredDraft = getComposerDraft(reusableStoredDraftThread.draftId);
+            const carrySourceProjectId =
+              carrySourceShell?.projectId ?? carrySourceDraft?.projectId ?? null;
+            const targetProjectDefaultModelSelection =
+              project && carrySourceProjectId !== project.id
+                ? (project.defaultModelSelection ?? null)
+                : null;
+            const fallbackModelSelection =
+              targetProjectDefaultModelSelection ?? carryModelSelection;
+            if (fallbackModelSelection && !existingStoredDraft?.activeProvider) {
               // The carried selection is a complete snapshot of the viewed
               // thread's model state: absent options mean "no options", not
-              // "keep the stale draft's options".
-              setModelSelection(reusableStoredDraftThread.draftId, carryModelSelection, {
+              // "keep the stale draft's options". Never overwrite a model the
+              // user already selected for this stored draft.
+              setModelSelection(reusableStoredDraftThread.draftId, fallbackModelSelection, {
                 replaceOptions: true,
               });
             }
@@ -267,13 +277,21 @@ export function useNewThreadHandler() {
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);
-        if (carryModelSelection) {
-          // After sticky state so the viewed thread's exact selection
-          // (model + options like effort and context window) wins over the
-          // globally sticky one. replaceOptions: the carried selection is a
+        const carrySourceProjectId =
+          carrySourceShell?.projectId ?? carrySourceDraft?.projectId ?? null;
+        const targetProjectDefaultModelSelection =
+          project && carrySourceProjectId !== project.id
+            ? (project.defaultModelSelection ?? null)
+            : null;
+        const initialDraftModelSelection =
+          targetProjectDefaultModelSelection ?? carryModelSelection;
+        if (initialDraftModelSelection) {
+          // After sticky state so the target project's explicit default (or,
+          // within the same project, the viewed thread's exact selection) wins
+          // over the globally sticky one. replaceOptions: the selection is a
           // complete snapshot — absent options mean "no options", not "keep
           // whatever sticky state just wrote".
-          setModelSelection(draftId, carryModelSelection, { replaceOptions: true });
+          setModelSelection(draftId, initialDraftModelSelection, { replaceOptions: true });
         }
 
         await router.navigate({

@@ -3,14 +3,17 @@ import { workflowDefaults } from "@t3tools/shared/workflow";
 import {
   ProviderInstanceId,
   WorkspaceMeetingParticipantId,
+  WorkspaceWorkflowError,
   type WorkflowVersion,
   type WorkspaceMeetingSetup,
 } from "@t3tools/contracts";
 import {
   chatWorkflowChoices,
   chatWorkflowValues,
+  exactWorkflowModelSelection,
   resolveWorkflowRoleModels,
-  selectMeetingCoordinator,
+  selectIndependentMeetingCoordinator,
+  workflowStartFailureMessage,
 } from "./chatWorkflow";
 
 const definition = workflowDefaults()[0]!;
@@ -22,7 +25,41 @@ const saved: WorkflowVersion = {
   createdAt: "2026-10-27T00:00:00.000Z",
 };
 
+describe("workflow start failures", () => {
+  it("shows the server reason while keeping the uncertain request retry guidance", () => {
+    const text = workflowStartFailureMessage(
+      new WorkspaceWorkflowError({ message: "지정한 참가자 목록만 사용할 수 있습니다." }),
+    );
+    expect(text).toContain("지정한 참가자 목록만 사용할 수 있습니다.");
+    expect(text).toContain("같은 요청으로 다시 확인");
+    expect(text).not.toContain("실행되지 않았습니다");
+  });
+
+  it("keeps transport details and handles missing details without inventing a cause", () => {
+    expect(workflowStartFailureMessage(new Error("연결이 끊겼습니다"))).toContain(
+      "연결이 끊겼습니다",
+    );
+    expect(workflowStartFailureMessage({ message: "서버 오류" })).toContain("서버 오류");
+    expect(workflowStartFailureMessage(null)).not.toContain("오류:");
+  });
+});
+
 describe("chat workflow choices", () => {
+  it("keeps the exact selected model and options or refuses an automatic replacement", () => {
+    const selected = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-terra",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    };
+    expect(exactWorkflowModelSelection(selected, { ...selected, options: [] }, true)).toEqual(
+      selected,
+    );
+    expect(
+      exactWorkflowModelSelection(selected, { ...selected, model: "gpt-6-astra" }, true),
+    ).toBeNull();
+    expect(exactWorkflowModelSelection(selected, selected, false)).toBeNull();
+    expect(exactWorkflowModelSelection(undefined, selected, true)).toBeNull();
+  });
   it("uses saved versions once and keeps basic templates available without saving them", () => {
     const choices = chatWorkflowChoices({
       definitions: [saved],
@@ -84,74 +121,37 @@ describe("chat workflow choices", () => {
   });
 });
 
-describe("selected meeting coordinator", () => {
-  const seat = (name: string) => ({
-    id: WorkspaceMeetingParticipantId.make(name),
-    displayName: name,
-    modelSelection: { instanceId: ProviderInstanceId.make(name), model: `${name}-model` },
-  });
-  const original: WorkspaceMeetingSetup = {
+describe("independent meeting coordinator", () => {
+  const coordinator = {
+    id: WorkspaceMeetingParticipantId.make("supervisor"),
+    displayName: "Supervisor",
+    modelSelection: { instanceId: ProviderInstanceId.make("provider"), model: "supervisor-model" },
+  };
+  const meeting: WorkspaceMeetingSetup = {
     mode: "fixed-rounds",
-    participants: [seat("fable"), seat("worker")],
-    chairParticipantId: WorkspaceMeetingParticipantId.make("fable"),
+    participants: [coordinator],
+    chairParticipantId: coordinator.id,
     maxRounds: 0,
     userInLoop: false,
   };
-  const chosen = {
-    instanceId: ProviderInstanceId.make("codex"),
-    model: "chosen-model",
-    options: [{ id: "effort", value: "high" }],
-  };
 
-  it("uses the chosen model as chair without automatically running the old Fable model", () => {
-    const result = selectMeetingCoordinator(original, chosen);
-    expect(result.error).toBeNull();
-    expect(result.meeting?.chairParticipantId).toBe("selected-coordinator");
-    expect(result.meeting?.participants.map((seat) => seat.modelSelection.model)).toEqual([
-      "worker-model",
-      "chosen-model",
-    ]);
-    expect(result.meeting?.participants[1]?.modelSelection).toEqual(chosen);
-    expect(original.chairParticipantId).toBe("fable");
-    expect(original.participants).toHaveLength(2);
-  });
-
-  it("reuses a matching seat and applies the selected options to that run", () => {
-    const roster = { ...original, participants: [seat("another"), seat("worker")] };
-    const selected = { ...roster.participants[1]!.modelSelection, options: chosen.options };
-    const result = selectMeetingCoordinator(roster, selected);
-    expect(result.meeting?.chairParticipantId).toBe("worker");
-    expect(result.meeting?.participants).toHaveLength(2);
-    expect(result.meeting?.participants[1]?.modelSelection).toEqual(selected);
-    expect(roster.participants[1]?.modelSelection).not.toHaveProperty("options");
-  });
-
-  it("reports too few participants instead of running an unselected Fable seat", () => {
-    const selected = original.participants[1]!.modelSelection;
-    expect(selectMeetingCoordinator(original, selected)).toMatchObject({
-      meeting: null,
-      error: expect.any(String),
+  it("preserves the explicitly selected supervisor and roster", () => {
+    const result = selectIndependentMeetingCoordinator(meeting, {
+      instanceId: ProviderInstanceId.make("chat"),
+      model: "chat-model",
     });
-    expect(original.participants).toHaveLength(2);
+    expect(result).toEqual({ meeting, error: null });
   });
 
-  it("allows Fable when explicitly selected as the chair or another role", () => {
-    const fable = original.participants[0]!.modelSelection;
-    expect(selectMeetingCoordinator(original, fable).meeting?.chairParticipantId).toBe("fable");
-    const result = selectMeetingCoordinator(original, chosen, [fable]);
-    expect(result.meeting?.participants.map((seat) => seat.modelSelection.model)).toEqual([
-      "fable-model",
-      "worker-model",
-      "chosen-model",
-    ]);
-  });
-
-  it("reports a full roster instead of dropping a participant or the selected model", () => {
-    const full = { ...original, participants: Array.from({ length: 8 }, (_, i) => seat(`s${i}`)) };
-    expect(selectMeetingCoordinator(full, chosen)).toMatchObject({
-      meeting: null,
-      error: expect.any(String),
-    });
-    expect(selectMeetingCoordinator(full, undefined).meeting).toBe(full);
+  it("requires an assigned supervisor and permits the same model as the chat", () => {
+    expect(
+      selectIndependentMeetingCoordinator({ ...meeting, chairParticipantId: null }, null),
+    ).toMatchObject({ meeting: null, error: expect.any(String) });
+    expect(
+      selectIndependentMeetingCoordinator(meeting, {
+        instanceId: ProviderInstanceId.make("other-account"),
+        model: "supervisor-model",
+      }),
+    ).toEqual({ meeting, error: null });
   });
 });

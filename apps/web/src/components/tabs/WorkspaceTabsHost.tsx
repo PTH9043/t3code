@@ -1,5 +1,5 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useLocation } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
@@ -14,9 +14,14 @@ import {
 } from "../../workspaceTabStore";
 import { WorkspaceTabBar } from "./WorkspaceTabBar";
 import { WorkspaceTabPane } from "./WorkspaceTabPanes";
+import { openUpgradeRoomWorkspaceTab } from "./openUpgradeRoomWorkspaceTab";
+import { stackedThreadToast, toastManager } from "../ui/toast";
+import { MAX_WORKSPACE_TABS } from "../../workspaceTabStore";
 
 function viewPathname(view: WorkspaceTabView): string {
   switch (view.kind) {
+    case "upgrade-room":
+      return "/upgrade-room";
     case "thread":
       return `/${view.environmentId}/${view.threadId}`;
     case "draft":
@@ -92,6 +97,28 @@ export function WorkspaceTabsHost({ children }: { children: ReactNode }) {
   const pathname = useLocation({ select: (location) => location.pathname });
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
   const paneVisible = activeTab !== null && pathnameMatchesView(pathname, activeTab.view);
+  const room = typeof window !== "undefined" && window.desktopBridge?.upgradeRoomTab;
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!room) return;
+    return room.onMenuOpen(() => {
+      if (!openUpgradeRoomWorkspaceTab(navigate)) {
+        toastManager.add(
+          stackedThreadToast({ type: "warning", title: `탭은 ${MAX_WORKSPACE_TABS}개까지입니다` }),
+        );
+      }
+    });
+  }, [navigate, room]);
+  const panes = (
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      {tabs.map((tab) => (
+        <WorkspaceTabPane key={tab.id} tab={tab} active={paneVisible && tab.id === activeTabId} />
+      ))}
+      <div className={paneVisible ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
+        {children}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex h-svh min-h-0 min-w-0 flex-1 flex-col md:h-dvh">
@@ -99,14 +126,7 @@ export function WorkspaceTabsHost({ children }: { children: ReactNode }) {
         <div className="workspace-window-titlebar drag-region" aria-hidden="true" />
       ) : null}
       <WorkspaceTabBar />
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        {tabs.map((tab) => (
-          <WorkspaceTabPane key={tab.id} tab={tab} active={paneVisible && tab.id === activeTabId} />
-        ))}
-        <div className={paneVisible ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-          {children}
-        </div>
-      </div>
+      {panes}
     </div>
   );
 }

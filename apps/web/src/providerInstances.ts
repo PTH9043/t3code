@@ -15,6 +15,8 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
+  OPENAI_API_CONNECTION,
+  LOCAL_OLLAMA_INSTANCE,
   PROVIDER_DISPLAY_NAMES,
   type ModelSelection,
   type ProviderDriverKind,
@@ -24,6 +26,7 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
+import { hasProperty } from "effect/Predicate";
 
 import { formatProviderDriverKindLabel } from "./providerModels";
 
@@ -44,9 +47,13 @@ export const NO_PROVIDER_MODEL_SELECTION: ModelSelection = {
  * `displayName` used by every picker and settings view.
  */
 export interface ProviderInstanceEntry {
+  /** The independent room exposes each registered account for explicit model selection. */
+  readonly individualAccount?: boolean;
   readonly instanceId: ProviderInstanceId;
   readonly driverKind: ProviderDriverKind;
   readonly displayName: string;
+  /** Unique visible part of the billing instance id for an official OpenAI API account. */
+  readonly openAiAccountTag?: string | undefined;
   readonly accentColor?: string | undefined;
   readonly continuationGroupKey?: string | undefined;
   readonly enabled: boolean;
@@ -71,7 +78,25 @@ export interface ProviderInstanceEntry {
  * `ready` probe status can remain in the streamed snapshot until reconciliation.
  */
 export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled && entry.isAvailable && entry.status === "ready";
+  if (entry.individualAccount) {
+    return (
+      entry.enabled &&
+      entry.installed &&
+      entry.snapshot.availability !== "unavailable" &&
+      entry.status !== "disabled" &&
+      entry.status !== "error" &&
+      entry.snapshot.auth.status !== "unauthenticated"
+    );
+  }
+  return (
+    entry.enabled &&
+    entry.isAvailable &&
+    (entry.status === "ready" ||
+      (entry.driverKind === "codex" &&
+        entry.installed &&
+        entry.status === "warning" &&
+        entry.snapshot.auth.status !== "unauthenticated"))
+  );
 }
 
 /** Picker rails contain configured, enabled instances only. */
@@ -169,7 +194,18 @@ function resolveInstanceDisplayName(
   driverKind: ProviderDriverKind,
   isDefault: boolean,
 ): string {
-  const trimmedSnapshotName = snapshot.displayName?.trim();
+  const rawSnapshotName = snapshot.displayName?.trim();
+  const trimmedSnapshotName =
+    rawSnapshotName && !rawSnapshotName.includes("\uFFFD") ? rawSnapshotName : undefined;
+  if (
+    !trimmedSnapshotName &&
+    driverKind === "muse" &&
+    (instanceId.startsWith("muse_cloud_") ||
+      snapshot.continuation?.groupKey?.startsWith("muse:cloud:") ||
+      snapshot.badgeLabel === "Cloud · Google")
+  ) {
+    return "Muse Cloud";
+  }
   const kindLabel = driverKindLabel(driverKind);
   if (trimmedSnapshotName && trimmedSnapshotName !== kindLabel) {
     return trimmedSnapshotName;
@@ -238,8 +274,37 @@ export function applyProviderInstanceSettings(
       ? (explicitInstance.enabled ?? true)
       : entry.isDefault
         ? (legacyProviders[entry.driverKind]?.enabled ?? entry.enabled)
-        : false;
-    return enabled === entry.enabled ? entry : { ...entry, enabled };
+        : entry.instanceId === LOCAL_OLLAMA_INSTANCE &&
+          entry.driverKind === "opencode" &&
+          entry.enabled;
+    const config = explicitInstance
+      ? explicitInstance.config
+      : entry.isDefault
+        ? settings.providers.opencode
+        : undefined;
+    const connection = hasProperty(config, "apiConnection") ? config.apiConnection : undefined;
+    let openAiAccountTag: string | undefined;
+    if (
+      entry.driverKind === "opencode" &&
+      hasProperty(connection, "providerId") &&
+      connection.providerId === OPENAI_API_CONNECTION.providerId
+    ) {
+      // Start with a readable suffix and extend it if another instance shares it.
+      const id = entry.instanceId;
+      let length = 6;
+      while (
+        length < id.length &&
+        entries.some(
+          (other) => other.instanceId !== id && other.instanceId.endsWith(id.slice(-length)),
+        )
+      ) {
+        length++;
+      }
+      openAiAccountTag = id.slice(-length);
+    }
+    return enabled === entry.enabled && openAiAccountTag === entry.openAiAccountTag
+      ? entry
+      : { ...entry, enabled, openAiAccountTag };
   });
 }
 
@@ -339,7 +404,7 @@ export function resolveSelectableProviderInstanceEntry(
     }
   }
   return (
-    entries.find(isProviderInstancePickerReady) ??
+    entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status === "ready") ??
     entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );
 }

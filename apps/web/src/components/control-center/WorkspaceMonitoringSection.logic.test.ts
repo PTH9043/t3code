@@ -78,6 +78,12 @@ describe("labels", () => {
     expect(describeMonitoringMetric(plan.metrics[1]!, plan.targets)).toBe(
       "T3 서버 · 메모리 · 증가 추세 분당 20MB · 30분 창",
     );
+    expect(
+      describeMonitoringMetric(
+        { targetIndex: 1, metric: "failed-spans", trend: "threshold", windowMin: 5, limit: 2 },
+        plan.targets,
+      ),
+    ).toBe("T3 서버 · 실패한 내부 처리(span) · 임계치 분당 2건 · 5분 창");
     expect(describeMonitoringPlaybook(plan.playbooks[0]!, plan)).toBe(
       "dev의 상태검사 이상 → 프로그램 재시작",
     );

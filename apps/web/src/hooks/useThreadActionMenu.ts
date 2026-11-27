@@ -21,6 +21,7 @@ import {
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { threadEnvironment } from "../state/threads";
+import { shellEnvironment } from "../state/shell";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsPinning,
@@ -29,6 +30,7 @@ import {
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
 } from "../state/entities";
+import { useRightPanelStore } from "../rightPanelStore";
 import { readLocalApi } from "../localApi";
 import { useUiStateStore } from "../uiStateStore";
 import { useCopyToClipboard } from "./useCopyToClipboard";
@@ -78,6 +80,9 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
+    reportFailure: false,
+  });
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const autoSettleAfterDays = useClientSettings((s) => s.sidebarAutoSettleAfterDays);
@@ -113,6 +118,7 @@ export function useThreadActionMenu(input: {
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
+          openInFileManager: Boolean(thread.worktreePath ?? projectCwd),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
@@ -177,6 +183,9 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "open-viewer":
+            useRightPanelStore.getState().open(threadRef, "agents");
+            return;
           case "new-thread-on-branch": {
             // Explicit branch carry-over: reuse the thread's worktree when it
             // has one, otherwise its branch on the local checkout.
@@ -225,6 +234,26 @@ export function useThreadActionMenu(input: {
           case "mark-unread":
             markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
             return;
+          case "open-in-file-manager": {
+            const workspacePath = thread.worktreePath ?? projectCwd;
+            if (!workspacePath) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "폴더를 열 수 없습니다",
+                  description: "이 대화에는 열 수 있는 작업공간 경로가 없습니다.",
+                }),
+              );
+              return;
+            }
+            await reportFailure("파일 탐색기에서 열지 못했습니다", () =>
+              openInEditor({
+                environmentId: threadRef.environmentId,
+                input: { cwd: workspacePath, editor: "file-manager" },
+              }),
+            );
+            return;
+          }
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -285,6 +314,7 @@ export function useThreadActionMenu(input: {
       handleNewThread,
       markThreadUnread,
       onStartRename,
+      openInEditor,
       pinThread,
       projectCwd,
       settleThread,

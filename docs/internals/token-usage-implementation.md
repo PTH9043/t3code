@@ -22,11 +22,12 @@
 
 ## 제공자 계약
 
-| 제공자                            | 원본과 산식                                         | 제한                                                                                                                                                        |
-| --------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex                             | `thread/tokenUsage/updated.tokenUsage.total`의 차분 | `last`는 소비량이 아님. 새 native session만 0 기준이 입증됨. 재접속은 저장된 누계를 재사용하고, 처음 보는 기존 세션은 baseline 이후만 집계                  |
-| Claude / 페이블                   | SDK result의 `usage`를 result UUID별 1회 집계       | streaming input의 result usage는 해당 턴의 주 에이전트 루프 합계. 캐시 읽기·쓰기를 입력에 포함. `modelUsage`는 호출 전체 누계이므로 턴 합계에 혼합하지 않음 |
-| Cursor / Grok / OpenCode / Gemini | 요청과 선택 모델은 기록                             | 소비량이 확인되지 않아 unreported로 표시                                                                                                                    |
+| 제공자                   | 원본과 산식                                                                 | 제한                                                                                                                                                        |
+| ------------------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex                    | `thread/tokenUsage/updated.tokenUsage.total`의 차분                         | `last`는 소비량이 아님. 새 native session만 0 기준이 입증됨. 재접속은 저장된 누계를 재사용하고, 처음 보는 기존 세션은 baseline 이후만 집계                  |
+| Claude / 페이블          | SDK result의 `usage`를 result UUID별 1회 집계                               | streaming input의 result usage는 해당 턴의 주 에이전트 루프 합계. 캐시 읽기·쓰기를 입력에 포함. `modelUsage`는 호출 전체 누계이므로 턴 합계에 혼합하지 않음 |
+| Antigravity (`gemini`)   | ACP `usage_update` 문맥 창(`usedTokens`/`maxTokens`) + `agy -p /usage` 쿼터 | 5시간·7일 버킷(`Gemini`·`Claude·GPT`) 잔여 한도와 실시간 문맥 창을 표시하며, 턴 종료 시 디바운스 갱신                                                       |
+| Cursor / Grok / OpenCode | 요청과 선택 모델은 기록                                                     | 소비량이 확인되지 않아 unreported로 표시                                                                                                                    |
 
 Claude의 streaming input 범위와 하위 에이전트 제외 의미는
 [공식 cost tracking 문서](https://code.claude.com/docs/en/agent-sdk/cost-tracking#track-costs-in-streaming-input-mode)에

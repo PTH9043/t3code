@@ -133,8 +133,9 @@ const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const GEMINI_DRIVER_KIND = ProviderDriverKind.make("gemini");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
+const MUSE_DRIVER_KIND = ProviderDriverKind.make("muse");
 
-export const DEFAULT_MODEL = "gpt-6-astra";
+export const DEFAULT_MODEL = "gpt-6.2-sol";
 
 /**
  * Codex default-model fallback ranking, most preferred first. Codex's own
@@ -143,21 +144,28 @@ export const DEFAULT_MODEL = "gpt-6-astra";
  * in the live `model/list` response when Codex flags nothing or a legacy model.
  */
 export const PREFERRED_DEFAULT_CODEX_MODELS: ReadonlyArray<string> = [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
   "gpt-6-astra",
   "gpt-6-sol",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
+  "gpt-6-luna",
 ];
 export const DEFAULT_TEXT_GENERATION_MODEL = "gpt-6-luna";
 export const DEFAULT_TEXT_GENERATION_REASONING_EFFORT = "low";
+
+// Legacy saved selections use this sentinel for the active model negotiated by agy ACP.
+const ANTIGRAVITY_SESSION_DEFAULT = "auto";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-sonnet-5-5",
   [CURSOR_DRIVER_KIND]: "auto",
   [GROK_DRIVER_KIND]: "grok-build",
-  [GEMINI_DRIVER_KIND]: "auto",
+  [GEMINI_DRIVER_KIND]: ANTIGRAVITY_SESSION_DEFAULT,
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [MUSE_DRIVER_KIND]: "muse-spark-1.3",
 };
 
 /** Per-provider text generation model defaults. */
@@ -167,8 +175,9 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [CODEX_DRIVER_KIND]: DEFAULT_TEXT_GENERATION_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
-  [GEMINI_DRIVER_KIND]: "auto",
+  [GEMINI_DRIVER_KIND]: ANTIGRAVITY_SESSION_DEFAULT,
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [MUSE_DRIVER_KIND]: "muse-spark-1.3",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
@@ -225,6 +234,7 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   },
   [GEMINI_DRIVER_KIND]: {},
   [OPENCODE_DRIVER_KIND]: {},
+  [MUSE_DRIVER_KIND]: {},
 };
 
 // ── Provider display names ────────────────────────────────────────────
@@ -234,6 +244,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CLAUDE_DRIVER_KIND]: "Claude",
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
-  [GEMINI_DRIVER_KIND]: "Gemini",
+  [GEMINI_DRIVER_KIND]: "Antigravity CLI",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
+  [MUSE_DRIVER_KIND]: "Muse",
 };

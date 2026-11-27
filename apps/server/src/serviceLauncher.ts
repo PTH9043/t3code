@@ -402,6 +402,7 @@ export class Launcher {
     const child = NodeChildProcess.spawn(process.execPath, [paths.entryPath, "serve"], {
       env: { ...process.env, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
+      windowsHide: true,
     });
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);

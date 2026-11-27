@@ -1,5 +1,7 @@
 import {
+  ApprovalRequestId,
   CommandId,
+  DEFAULT_WORKSPACE_CONTROL_SETTINGS,
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   DEFAULT_WORKSPACE_MONITORING_SETTINGS,
   DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
@@ -22,9 +24,18 @@ import { OrchestrationEventStore } from "../../persistence/Services/Orchestratio
 import { ServerConfig } from "../../config.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
+import { memoryHash } from "../memoryFiles.ts";
+import { ProjectionWorkspaceRagRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceRagRepository } from "../../persistence/Services/ProjectionWorkspaceRag.ts";
+import { ProjectionWorkspaceKnowledgeRepositoryLive } from "../../persistence/Layers/ProjectionWorkspaceKnowledge.ts";
+import { ProjectionWorkspaceKnowledgeRepository } from "../../persistence/Services/ProjectionWorkspaceKnowledge.ts";
 
 const layer = it.layer(
-  OrchestrationProjectionPipelineLive.pipe(
+  Layer.merge(
+    Layer.merge(OrchestrationProjectionPipelineLive, WorkspaceMemory.layer),
+    Layer.merge(ProjectionWorkspaceRagRepositoryLive, ProjectionWorkspaceKnowledgeRepositoryLive),
+  ).pipe(
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-conversation-rag-projection-" }),
@@ -52,6 +63,242 @@ function eventBase(id: string, aggregateKind: "project" | "thread") {
 }
 
 layer("automatic conversation RAG projection", (it) => {
+  it.effect("resumes provenance replay using the settings in force at each old event", () =>
+    Effect.gen(function* () {
+      const events = yield* OrchestrationEventStore;
+      const pipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("provenance-resume-project");
+      const threadId = ThreadId.make("provenance-resume-thread");
+      const base = (id: string, kind: "project" | "thread") => ({
+        ...eventBase(id, kind),
+        aggregateId: kind === "project" ? projectId : threadId,
+      });
+      yield* events.append({
+        ...base("resume-project", "project"),
+        type: "project.created",
+        payload: {
+          projectId,
+          title: "Replay",
+          workspaceRoot: "/tmp/replay",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      const thread = yield* events.append({
+        ...base("resume-thread", "thread"),
+        type: "thread.created",
+        payload: {
+          threadId,
+          projectId,
+          title: "Replay",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* events.append({
+        ...base("resume-message", "thread"),
+        type: "thread.message-sent",
+        payload: {
+          threadId,
+          messageId: MessageId.make("resume-message"),
+          role: "user",
+          inputOrigin: "user",
+          text: `begin-${"x".repeat(2500)}-end`,
+          attachments: [],
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* events.append({
+        ...base("resume-settings", "project"),
+        type: "project.workspace-control-updated",
+        payload: {
+          projectId,
+          workspaceControl: {
+            ...DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+            conversationRag: {
+              ...DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+              maxInputChars: 2000,
+            },
+          },
+          updatedAt: now,
+        },
+      });
+      const tail = yield* events.append({
+        ...base("resume-unrelated-tail", "project"),
+        type: "project.runtime-viewed",
+        payload: { projectId, viewedThrough: now, updatedAt: now },
+      });
+      yield* pipeline.bootstrap;
+      const before = yield* sql<{
+        item_id: string;
+      }>`SELECT item_id FROM workspace_conversation_rag_sources WHERE project_id=${projectId}`;
+      assert.equal(before.length, 1);
+      yield* sql`DELETE FROM workspace_conversation_rag_sources WHERE project_id=${projectId}`;
+      yield* sql`UPDATE projection_state SET last_applied_sequence=${thread.sequence} WHERE projector='projection.conversation-rag-sources-v1'`;
+      yield* Effect.gen(function* () {
+        const resumed = yield* OrchestrationProjectionPipeline;
+        yield* resumed.bootstrap;
+      }).pipe(Effect.provide(Layer.fresh(OrchestrationProjectionPipelineLive)));
+      const after = yield* sql<{
+        item_id: string;
+      }>`SELECT item_id FROM workspace_conversation_rag_sources WHERE project_id=${projectId}`;
+      assert.deepEqual(after, before);
+      const [cursor] = yield* sql<{ sequence: number }>`SELECT last_applied_sequence AS sequence
+        FROM projection_state WHERE projector='projection.conversation-rag-sources-v1'`;
+      assert.equal(cursor?.sequence, tail.sequence);
+    }),
+  );
+  it.effect(
+    "keeps independent duplicate sources and suppresses forgotten messages after provenance replay",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* OrchestrationEventStore;
+        const pipeline = yield* OrchestrationProjectionPipeline;
+        const memory = yield* WorkspaceMemory;
+        const rag = yield* ProjectionWorkspaceRagRepository;
+        const knowledge = yield* ProjectionWorkspaceKnowledgeRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const projectId = ProjectId.make("forgotten-rag-project");
+        const threadId = ThreadId.make("forgotten-rag-thread");
+        const base = (id: string, kind: "project" | "thread") => ({
+          ...eventBase(id, kind),
+          aggregateId: kind === "project" ? projectId : threadId,
+        });
+        yield* events.append({
+          ...base("forgotten-project", "project"),
+          type: "project.created",
+          payload: {
+            projectId,
+            title: "RAG",
+            workspaceRoot: "/tmp/conversation-rag",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* events.append({
+          ...base("forgotten-thread", "thread"),
+          type: "thread.created",
+          payload: {
+            threadId,
+            projectId,
+            title: "Test",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        for (const [id, text] of [
+          ["duplicate-a", "DUPLICATECONTENTCANARY"],
+          ["duplicate-b", "DUPLICATECONTENTCANARY"],
+          ["separate", "INDEPENDENTCONTENTCANARY"],
+          ["answer-duplicate", '{"choice":{"answers":["ANSWERPRESERVEDCANARY"]}}'],
+        ] as const) {
+          yield* events.append({
+            ...base(id, "thread"),
+            type: "thread.message-sent",
+            payload: {
+              threadId,
+              messageId: MessageId.make(id),
+              role: "user",
+              inputOrigin: "user",
+              text,
+              attachments: [],
+              turnId: null,
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+        }
+        yield* events.append({
+          ...base("answer-event", "thread"),
+          type: "thread.user-input-response-requested",
+          payload: {
+            threadId,
+            requestId: ApprovalRequestId.make("answer-request"),
+            answers: { choice: { answers: ["ANSWERPRESERVEDCANARY"] } },
+            createdAt: now,
+          },
+        });
+        yield* pipeline.bootstrap;
+        yield* memory.reconcile(projectId);
+        // Simulate an upgraded installation whose previous projectors had already
+        // consumed the events, then reconstruct provenance with its own cursor.
+        yield* sql`DELETE FROM workspace_conversation_rag_sources WHERE project_id=${projectId}`;
+        yield* sql`DELETE FROM projection_state WHERE projector = 'projection.conversation-rag-sources-v1'`;
+        yield* pipeline.bootstrap;
+        const sources = yield* sql<{
+          source_id: string;
+        }>`SELECT source_id FROM workspace_conversation_rag_sources WHERE project_id=${projectId} ORDER BY source_id`;
+        assert.deepEqual(
+          sources.map((row) => row.source_id),
+          ["answer-duplicate", "answer-request", "duplicate-a", "duplicate-b", "separate"],
+        );
+        yield* memory.invoke({
+          projectId,
+          action: "forget-message",
+          id: memoryHash("message:duplicate-a"),
+        });
+        assert.equal(
+          (yield* rag.search({ projectId, query: "DUPLICATECONTENTCANARY" })).matches.length,
+          1,
+        );
+        yield* sql`DELETE FROM projection_thread_messages WHERE message_id='duplicate-b'`;
+        assert.equal(
+          (yield* rag.search({ projectId, query: "DUPLICATECONTENTCANARY" })).matches.length,
+          0,
+        );
+        yield* sql`INSERT INTO projection_thread_messages(message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+          VALUES ('duplicate-b',${threadId},'user','DUPLICATECONTENTCANARY',0,${now},${now})`;
+        yield* memory.invoke({
+          projectId,
+          action: "forget-message",
+          id: memoryHash("message:duplicate-b"),
+        });
+        assert.equal(
+          (yield* rag.search({ projectId, query: "DUPLICATECONTENTCANARY" })).matches.length,
+          0,
+        );
+        assert.equal(
+          (yield* rag.search({ projectId, query: "INDEPENDENTCONTENTCANARY" })).matches.length,
+          1,
+        );
+        yield* memory.invoke({
+          projectId,
+          action: "forget-message",
+          id: memoryHash("message:answer-duplicate"),
+        });
+        assert.equal(
+          (yield* rag.search({ projectId, query: "ANSWERPRESERVEDCANARY" })).matches.length,
+          1,
+        );
+        const items = yield* knowledge.listByProjectId({ projectId });
+        assert.ok(!items.some((item) => item.content.includes("DUPLICATECONTENTCANARY")));
+        assert.ok(items.some((item) => item.content.includes("INDEPENDENTCONTENTCANARY")));
+        const originals = yield* sql<{
+          text: string;
+        }>`SELECT text FROM projection_thread_messages WHERE message_id IN ('duplicate-a','duplicate-b')`;
+        assert.equal(originals.length, 2);
+        assert.ok(originals.every((row) => row.text === "DUPLICATECONTENTCANARY"));
+      }),
+  );
   it.effect("stores only direct user input as compacted project-scoped RAG", () =>
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;

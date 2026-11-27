@@ -23,7 +23,6 @@ const DRIVER_LABEL: Record<string, string> = {
   claudeAgent: "Claude",
   cursor: "Cursor",
   grok: "Grok",
-  gemini: "Gemini",
 };
 
 export function CliAccountLoginDialog({
@@ -35,7 +34,7 @@ export function CliAccountLoginDialog({
 }: {
   readonly open: boolean;
   readonly environmentId: EnvironmentId;
-  readonly driver: "codex" | "claudeAgent" | "cursor" | "grok" | "gemini";
+  readonly driver: "codex" | "claudeAgent" | "cursor" | "grok";
   readonly onOpenChange: (open: boolean) => void;
   readonly onBack?: () => void;
 }) {
@@ -78,7 +77,7 @@ export function CliAccountLoginDialog({
           <DialogTitle>{DRIVER_LABEL[driver]} 계정 추가</DialogTitle>
           <DialogDescription>
             버튼을 누르면 기본 브라우저에서 {DRIVER_LABEL[driver]} 로그인 페이지가 열립니다. 거기서
-            Google 계정으로 로그인하면 인증 정보가 이 인스턴스 전용 홈에 저장됩니다.
+            로그인하면 인증 정보가 이 인스턴스 전용 홈에 저장됩니다.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 px-6 py-5">

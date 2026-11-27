@@ -26,7 +26,9 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   answerWorkspaceCollaborationRun,
+  cancelWorkspaceCollaborationRun,
   createProject,
+  interjectWorkspaceCollaborationRun,
   settleThread,
   stopThreadSession,
   unsettleThread,
@@ -76,6 +78,52 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("environment commands", () => {
+  it.effect("retains caller receipts and image answers for conversation orchestra commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const common = {
+        projectId: ProjectId.make("project-1"),
+        runId: WorkspaceCollaborationRunId.make("run-1"),
+        createdAt: "2026-11-02T00:00:00.000Z",
+      };
+      const images = [
+        {
+          type: "image" as const,
+          name: "a.png",
+          mimeType: "image/png",
+          sizeBytes: 1,
+          dataUrl: "data:image/png;base64,YQ==",
+        },
+      ];
+      yield* answerWorkspaceCollaborationRun({
+        ...common,
+        commandId: CommandId.make("answer-receipt"),
+        question: "어느 쪽인가요?",
+        questionRef: { nodeId: null, askedAt: common.createdAt },
+        answer: "첨부한 이미지를 참고하세요.",
+        images,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* interjectWorkspaceCollaborationRun({
+        ...common,
+        commandId: CommandId.make("instruction-receipt"),
+        text: "추가 지시",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* cancelWorkspaceCollaborationRun({
+        ...common,
+        commandId: CommandId.make("stop-receipt"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(dispatched).toMatchObject([
+        { type: "project.collaboration.run.answer", commandId: "answer-receipt", images },
+        {
+          type: "project.collaboration.run.interject",
+          commandId: "instruction-receipt",
+          text: "추가 지시",
+        },
+        { type: "project.collaboration.run.cancel", commandId: "stop-receipt" },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
   it.effect("preserves the question reference when sending an answer to a remote environment", () =>
     Effect.gen(function* () {
       const dispatched: ClientOrchestrationCommand[] = [];

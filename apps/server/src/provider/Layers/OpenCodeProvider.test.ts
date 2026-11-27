@@ -253,6 +253,40 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
+  it.effect("lists only configured OpenAI API models even when other accounts are discovered", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: {
+          connected: ["other"],
+          all: [
+            {
+              id: "other",
+              name: "Other",
+              models: { shadow: { id: "shadow", name: "Shadow", variants: {} } },
+            },
+          ],
+          default: {},
+        },
+        agents: [],
+      };
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({
+          apiConnection: {
+            providerId: "t3_openai",
+            baseUrl: "https://api.openai.com/v1",
+            protocol: "responses",
+            models: ["Exact-A", "ft:Exact-B"],
+          },
+        }),
+        process.cwd(),
+      );
+      NodeAssert.deepEqual(
+        snapshot.models.map((row) => row.slug),
+        ["t3_openai/Exact-A", "t3_openai/ft:Exact-B"],
+      );
+    }),
+  );
+
   it.effect("merges API connection models with the discovered inventory", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventory = {

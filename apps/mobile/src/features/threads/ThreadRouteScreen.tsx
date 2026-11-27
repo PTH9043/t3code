@@ -1,3 +1,4 @@
+import { isRecoverableUserInputRequestId } from "@t3tools/contracts";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import {
   StackActions,
@@ -27,6 +28,7 @@ import {
 } from "../../components/AndroidScreenHeader";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { SPLIT_LAYOUT_MIN_WIDTH } from "../../lib/layout";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { connectionTone } from "../connection/connectionTone";
 
@@ -49,12 +51,11 @@ import {
   stagePendingTerminalLaunch,
 } from "../terminal/terminalLaunchContext";
 import { terminalDebugLog } from "../terminal/terminalDebugLog";
+import { ThreadTeamViewer } from "./ThreadTeamViewer";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
-import {
-  ThreadGitControls,
-  useThreadGitCenterHeaderItems,
-  useThreadGitRightHeaderItems,
-} from "./ThreadGitControls";
+import { selectUpgradeRoomProgress } from "@t3tools/client-runtime/state/thread-tool-activity";
+import { useThreadHeaderRightItems } from "./ThreadGitControls";
+import { ThreadAndroidHeaderActions } from "./ThreadAndroidHeaderActions";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSelectedThreadGitActions } from "../../state/use-selected-thread-git-actions";
@@ -195,6 +196,17 @@ function ThreadRouteContent(
     useThreadSelection();
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const upgradeRoomProgress = useMemo(() => {
+    const session = selectedThreadDetail?.session;
+    return selectedThreadDetail && session?.status === "running"
+      ? selectUpgradeRoomProgress(
+          selectedThreadDetail.id,
+          session.activeTurnId,
+          session.updatedAt,
+          selectedThreadDetail.activities,
+        )
+      : null;
+  }, [selectedThreadDetail]);
   // "Load earlier turns" header state for windowed (paginated) thread loads.
   const loadEarlierTurns = useMemo(() => {
     if (selectedThread === null || !threadHasOlderTurns(selectedThreadDetailState)) {
@@ -252,6 +264,8 @@ function ThreadRouteContent(
   const threadId = firstRouteParam(params.threadId);
   const routeThreadIdentity =
     environmentIdRaw !== null && threadId !== null ? `${environmentIdRaw}:${threadId}` : null;
+  const [viewerRoom, setViewerRoom] = useState<string | null>(null);
+  const openViewer = useCallback(() => setViewerRoom(routeThreadIdentity), [routeThreadIdentity]);
   const [inspectorSelection, setInspectorSelection] = useState<ThreadInspectorSelection | null>(
     () => (props.renderInspector ? { routeThreadIdentity, mode: "route" } : null),
   );
@@ -510,12 +524,17 @@ function ThreadRouteContent(
     void navigation.navigate("Connections");
   }, [navigation]);
   const handleStopThread = useCallback(() => {
+    if (composer.activeOrchestra) {
+      void composer.onStopOrchestra();
+      return;
+    }
     const questionRequestId = requests.activePendingUserInput?.requestId;
+    const recoverableQuestion = isRecoverableUserInputRequestId(questionRequestId);
     if (
       !selectedThread ||
       (selectedThread.session?.status !== "running" &&
         selectedThread.session?.status !== "starting" &&
-        !questionRequestId?.startsWith("async:"))
+        !recoverableQuestion)
     ) {
       return;
     }
@@ -523,13 +542,19 @@ function ThreadRouteContent(
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
-        ...(questionRequestId?.startsWith("async:") ? { questionRequestId } : {}),
+        ...(recoverableQuestion && questionRequestId ? { questionRequestId } : {}),
         ...(selectedThread.session?.activeTurnId
           ? { turnId: selectedThread.session.activeTurnId }
           : {}),
       },
     });
-  }, [interruptThreadTurn, requests.activePendingUserInput, selectedThread]);
+  }, [
+    composer.activeOrchestra,
+    composer.onStopOrchestra,
+    interruptThreadTurn,
+    requests.activePendingUserInput,
+    selectedThread,
+  ]);
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
@@ -662,15 +687,19 @@ function ThreadRouteContent(
     canOpenFiles: Boolean(selectedThreadProject?.workspaceRoot),
     projectScripts: selectedThreadProject?.scripts ?? [],
     terminalSessions: terminalMenuSessions,
-    showDirectFileControl: layout.usesSplitView,
     onOpenTerminal: handleOpenTerminal,
     onOpenNewTerminal: handleOpenNewTerminal,
     onRunProjectScript: handleRunProjectScript,
     onPull: gitActions.onPullSelectedThreadBranch,
     onRunAction: gitActions.onRunSelectedThreadGitAction,
   };
-  const threadCenterHeaderItems = useThreadGitCenterHeaderItems(threadGitControlProps);
-  const compactRightHeaderItems = useThreadGitRightHeaderItems(threadGitControlProps);
+  const inspectorWidth =
+    activeInspectorRenderer && panes.auxiliaryPaneVisible ? (panes.auxiliaryPaneWidth ?? 0) : 0;
+  const rightHeaderItems = useThreadHeaderRightItems(
+    threadGitControlProps,
+    layout.usesSplitView && panes.contentPaneWidth - inspectorWidth >= SPLIT_LAYOUT_MIN_WIDTH,
+    openViewer,
+  );
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       {
@@ -791,20 +820,20 @@ function ThreadRouteContent(
     connectionState: routeConnectionState,
   });
   const serverConfig = routeEnvironmentRuntime?.serverConfig ?? null;
-  const renderThreadRouteBody = (showActionControls: boolean) => (
+  const composerThread = selectedThreadWithDraftSettings ?? selectedThread;
+  const threadRouteBody = (
     <>
-      <ThreadGitControls {...threadGitControlProps} showActionControls={showActionControls} />
-
       <GitActionProgressOverlay progress={gitActionProgress} onDismiss={dismissGitActionResult} />
 
       <View className="flex-1 bg-screen">
         <ThreadDetailScreen
-          selectedThread={selectedThreadWithDraftSettings ?? selectedThread}
+          selectedThread={composerThread}
           contentPresentation={contentPresentation}
           screenTone={connectionTone(routeConnectionState)}
           connectionError={routeConnectionError}
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
           selectedThreadFeed={composer.selectedThreadFeed}
+          upgradeRoomProgress={upgradeRoomProgress}
           activeWorkStartedAt={composer.activeWorkStartedAt}
           activePendingApproval={requests.activePendingApproval}
           respondingApprovalId={requests.respondingApprovalId}
@@ -818,10 +847,25 @@ function ThreadRouteContent(
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
           activeThreadBusy={composer.activeThreadBusy}
+          orchestraActive={composer.activeOrchestra !== undefined}
+          orchestraQuestion={composer.activeOrchestra?.meeting?.pendingQuestion ?? null}
+          orchestraError={composer.orchestraError}
+          hasOrchestraAttempt={composer.hasOrchestraAttempt}
+          hasOrchestraStartAttempt={composer.hasOrchestraStartAttempt}
+          orchestraConfig={composer.orchestraConfig}
+          onChangeOrchestraConfig={composer.onChangeOrchestraConfig}
+          onRetryOrchestraStart={composer.onRetryOrchestraStart}
+          onRestoreOrchestraStart={composer.onRestoreOrchestraStart}
+          orchestraAttemptBusy={composer.orchestraAttemptBusy}
+          onRetryOrchestraAttempt={composer.onRetryOrchestraAttempt}
+          onRestoreOrchestraAttempt={composer.onRestoreOrchestraAttempt}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
+          failedQueuedMessage={composer.selectedThreadFailedMessage}
+          onRetryFailedMessage={composer.onRetryFailedMessage}
+          onRestoreFailedMessage={composer.onRestoreFailedMessage}
           layoutVariant={layout.variant}
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}
@@ -855,6 +899,7 @@ function ThreadRouteContent(
     <>
       {activeInspectorRenderer ? <InspectorPaneRoleActivation /> : null}
       <NativeStackScreenOptions
+        optionsVersion={Platform.OS === "ios" ? [routeThreadIdentity, rightHeaderItems] : undefined}
         options={{
           // Android draws its own in-flow header (AndroidScreenHeader below);
           // the native stack header stays iOS-only.
@@ -879,31 +924,40 @@ function ThreadRouteContent(
                   ? undefined
                   : () => compactHomeHeaderItems
               : undefined,
-          // Search lives in the persistent sidebar, so the split header keeps
-          // the git controls on the RIGHT (no center items — center space is
-          // reserved for future breadcrumbs/status).
-          unstable_headerRightItems:
-            Platform.OS === "ios"
-              ? () => (layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems)
-              : undefined,
+          unstable_headerRightItems: Platform.OS === "ios" ? () => rightHeaderItems : undefined,
           unstable_headerSubtitle: usesNativeHeaderGlass ? headerSubtitle : undefined,
         }}
       />
 
+      {viewerRoom === routeThreadIdentity && routeThreadIdentity !== null && (
+        <ThreadTeamViewer
+          key={JSON.stringify([
+            environmentId,
+            selectedThread.id,
+            composerThread.modelSelection.instanceId,
+            composerThread.modelSelection.model,
+          ])}
+          environmentId={environmentId}
+          thread={composerThread}
+          detail={selectedThreadDetail?.id === selectedThread.id ? selectedThreadDetail : null}
+          serverConfig={serverConfig}
+          connected={routeConnectionState === "connected"}
+          live={routeConnectionState === "connected" && selectedThreadDetailState.status === "live"}
+          onClose={() => setViewerRoom(null)}
+        />
+      )}
       {Platform.OS === "android" ? (
         <AndroidScreenHeader
           title={selectedThread.title}
           subtitle={headerSubtitle}
           onBack={layout.usesSplitView ? undefined : () => navigation.goBack()}
-          actions={androidHeaderActions}
+          trailing={
+            <ThreadAndroidHeaderActions onOpenViewer={openViewer} actions={androidHeaderActions} />
+          }
         />
       ) : null}
 
-      {/* Android surfaces the git/files/inspector actions in its in-flow
-          header above, so the fallback action toolbar stays iOS-only. */}
-      {renderThreadRouteBody(
-        Platform.OS !== "android" && !layout.usesSplitView && !usesNativeHeaderGlass,
-      )}
+      {threadRouteBody}
     </>
   );
 }

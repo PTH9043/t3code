@@ -112,6 +112,66 @@ describe("account auto switch policy", () => {
       }),
     ).toBeUndefined();
   });
+  it("never auto-switches between Claude subscriptions and API-credit accounts", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const api = account("claude_api_one", {
+      driver: claude,
+      auth: { status: "authenticated" },
+      usage: undefined,
+    });
+    const subscription = account("subscription", { driver: claude, usage: undefined });
+    const configs = {
+      claude_api_one: { driver: claude, config: { authMode: "api-key" } },
+      subscription: { driver: claude, config: {} },
+    };
+    const enabled = { codex: true, claudeAgent: true };
+    const chooseFrom = (id: string, providers: ReadonlyArray<ServerProvider>) =>
+      chooseAutomaticAccount({
+        selection: { ...selection, instanceId: ProviderInstanceId.make(id) },
+        providers,
+        providerInstances: configs,
+        settings: enabled,
+        blockedInstanceIds: new Set([id]),
+        nowMs: 0,
+        driverHint: "claudeAgent",
+      });
+    expect(chooseFrom("subscription", [subscription, api])).toBeUndefined();
+    expect(chooseFrom("claude_api_one", [api, subscription])).toBeUndefined();
+    expect(chooseFrom("claude_api_one", [subscription])).toBeUndefined();
+  });
+
+  it("never auto-switches to another instance signed into the same email account", () => {
+    const current = account("current", {
+      auth: { status: "authenticated", email: "Primary.User@example.com" },
+    });
+    const duplicate = account("duplicate_slot", {
+      auth: { status: "authenticated", email: "primary.user@example.com" },
+      usage: { ...account("base").usage!, secondary: { usedPercent: 10 } },
+    });
+    const distinct = account("distinct_slot", {
+      auth: { status: "authenticated", email: "second-account@example.com" },
+      usage: { ...account("base").usage!, secondary: { usedPercent: 50 } },
+    });
+
+    expect(choose([current, duplicate])).toBeUndefined();
+    expect(choose([current, duplicate, distinct])?.instanceId).toBe("distinct_slot");
+  });
+
+  it("does not replace a missing Claude account with unknown credentials", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const providers = [account("other", { driver: claude, usage: undefined })];
+    const current = { ...selection, instanceId: ProviderInstanceId.make("unregistered-custom") };
+    expect(
+      chooseAutomaticAccount({
+        selection: current,
+        providers,
+        settings: { codex: true, claudeAgent: true },
+        nowMs: 0,
+        driverHint: "claudeAgent",
+        blockedInstanceIds: new Set([current.instanceId]),
+      }),
+    ).toBeUndefined();
+  });
   it("rejects unavailable accounts, other drivers, and different models", () => {
     const candidates = [
       account("disabled", { enabled: false }),
@@ -147,11 +207,23 @@ describe("account auto switch policy", () => {
       "Too Many Requests",
       "You've reached your usage limit",
       "usage limit exceeded",
+      "You've hit your 5-hour limit · resets 10:30am (Asia/Seoul)",
+      "You've hit your session limit · resets 9:30am (Asia/Seoul)",
+      "You're out of usage credits. Switch to another model, or manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+      "Prompt is too long · automatic compaction failed: You're out of usage credits. Switch to another model, or manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
       "사용량 한도에 도달했습니다",
       "5시간 사용 한도에 도달했습니다",
     ])
       expect(isActualRateLimitFailure(message)).toBe(true);
-    for (const message of ["credits 429", "weekly quota 100%", "429 tokens processed", null])
+    for (const message of [
+      "credits 429",
+      "weekly quota 100%",
+      "429 tokens processed",
+      "credits balance 62,500",
+      "Your message was flagged by Claude's safeguards. HTTP 429 Too Many Requests",
+      "Blocked by safety filter; usage limit reached",
+      null,
+    ])
       expect(isActualRateLimitFailure(message)).toBe(false);
   });
 });

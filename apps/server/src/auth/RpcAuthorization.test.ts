@@ -1,9 +1,12 @@
 import {
+  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  ORCHESTRATION_WS_METHODS,
   WS_METHODS,
+  WORKSPACE_MEMORY_WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -35,6 +38,52 @@ describe("RPC authorization scopes", () => {
       AuthRelayReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
+  });
+
+  it("reads the knowledge dashboard and dispatches management commands under their existing scopes", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.getWorkspaceKnowledgeDashboard)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.dispatchCommand)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
+  it("requires operate scope for PDF publication and read scope for published sources", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.getPdfRevisionStatus)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.startPdfRevision)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.retryPdfRevision)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.readPdfRevisionSource)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+
+  it("requires operate scope to run a local tool activity summary", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverSummarizeToolActivity)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
+  it("separates project channel status from authorizing a personal feed or CLI transfer", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.telegramChannelsStatus)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.telegramChannelsManage)).toBe(AuthAccessWriteScope);
+  });
+
+  it("requires write permission to change indexed memory", () => {
+    expect(requiredScopeForRpcMethod(WORKSPACE_MEMORY_WS_METHODS.forgetMessage)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WORKSPACE_MEMORY_WS_METHODS.remember)).toBe(
+      AuthOrchestrationOperateScope,
+    );
   });
 
   it("rejects unknown RPC method names", () => {

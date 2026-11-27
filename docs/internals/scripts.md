@@ -70,8 +70,17 @@ Node로 대체하며, 기여자 설정에서 Bun을 요구하는 부분은 없�
   호스트를 따르므로 Apple Silicon에서는 arm64 DMG가 만들어집니다. 특정 아키텍처를 강제하려면
   `dist:desktop:dmg:arm64`나 `dist:desktop:dmg:x64`를 사용하거나 `--arch <arm64|x64|universal>`을 전달하세요.
 - `vp run dist:desktop:linux`: Linux AppImage를 `./release`에 빌드합니다.
-- `vp run dist:desktop:win`: Windows NSIS 설치 프로그램을 `./release`에 빌드합니다. `:arm64`와 `:x64`
-  변형이 있습니다.
+- Windows에서는 저장소 루트에서 `node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64`를 실행합니다. ARM64는 `--arch arm64`를 사용합니다. 기본 실행은 웹·서버·데스크톱을 먼저 빌드하고 NSIS 설치 파일을 `release/`에 만듭니다. 기존 번들을 패키징할 때만 `--skip-build`를 추가합니다. WSL용 node-pty 바이너리는 기존 `--wsl-prebuild <pty.node 경로>`로 전달합니다.
+- Windows 패키징은 루트 `package.json`에 고정된 pnpm을 Node로 실행합니다. `pnpm@11.10.0`은 저장소 또는 사용자 Vite+ 캐시의 `package_manager/pnpm/11.10.0/pnpm/bin/pnpm.cjs`, 또는 Corepack 캐시의 `v1/pnpm/11.10.0/bin/pnpm.cjs`에서 찾습니다. 스테이지는 이 체크아웃의 `pnpm-lock.yaml`에서 서버·데스크톱의 해석 버전과 피어·패치 정보를 가져와 `install --prod --frozen-lockfile --ignore-scripts`로 설치합니다. Clerk와 WSL 네이티브 파일은 이어지는 스테이징 단계에서 복사합니다.
+- 리소스 모니터는 기본적으로 임시 스테이지의 `cargo-target/`에서 빌드합니다. `CARGO_TARGET_DIR`가 있으면 Cargo 출력과 바이너리 복사에 같은 경로를 사용합니다. 상대 경로의 기준은 저장소 루트입니다.
+
+### Windows Azure 서명
+
+Windows 패키징 명령에 `--signed`를 추가하면 로컬 도구와 환경 변수를 검사한 뒤 빌드를 시작합니다. `SIGNTOOL_PATH`로 Windows SDK의 `signtool.exe`, `AZURE_TRUSTED_SIGNING_DLIB`로 같은 아키텍처의 `Azure.CodeSigning.Dlib.dll` 절대 경로를 지정할 수 있습니다. 기본 경로는 Windows Kits의 x64 SignTool과 `%ProgramFiles(x86)%/Microsoft/ArtifactSigningClientTools/bin`입니다. Microsoft 클라이언트 패키지의 DLL과 runtimeconfig 파일을 함께 두고, 해당 설정이 요구하는 아키텍처와 버전의 .NET 런타임을 설치합니다.
+
+서비스 주체는 `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`으로 인증합니다. 서명 계정에는 `AZURE_TRUSTED_SIGNING_ENDPOINT`, `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME`, `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`, `AZURE_TRUSTED_SIGNING_PUBLISHER_NAME`이 필요합니다. Microsoft의 Dlib 메타데이터는 앱 디렉터리 밖에 생성되며 환경 자격 증명만 사용합니다. 기존 파일·타임스탬프 해시와 RFC 3161 서버 설정을 지원합니다. [Microsoft 서명 통합 문서](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-signing-integrations)
+
+서명 훅은 각 파일에 SignTool을 직접 실행하고 타임스탬프와 서명을 검증합니다. 최종 Windows 설치 파일은 `release/`로 복사하기 전에 다시 검증합니다. CI는 서명 설정 일부만 있는 경우 실패하며, 서명이 구성된 경우 SHA-512로 확인한 Microsoft.ArtifactSigning.Client 1.0.151을 러너 임시 폴더에 풉니다. 이 버전은 .NET 10을 사용합니다. [Microsoft NuGet 패키지](https://www.nuget.org/packages/Microsoft.ArtifactSigning.Client/1.0.151)
 
 ### 데스크톱 `.dmg` 패키징 참고 사항
 

@@ -4,10 +4,13 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   DEFAULT_MEETING_COMPOSER_CONFIG,
+  activeMeetingConversationKey,
   addMeetingComposerSeat,
+  disarmMeetingComposer,
   meetingSeatId,
   configFromExecutionProfile,
   meetingSetupFromConfig,
+  promoteMeetingComposerConfig,
   readMeetingComposerConfig,
   setMeetingComposerSeatModel,
   setMeetingComposerSeatOption,
@@ -78,9 +81,7 @@ describe("meetingComposerStore", () => {
       meeting: meetingSetupFromConfig(config),
       orchestra: { maxParallel: 2, isolateWorktrees: true },
     };
-    useMeetingComposerStore
-      .getState()
-      .updateConfig("env-1:folder-a", (current) => configFromExecutionProfile(current, profile));
+    updateMeetingComposerConfig((current) => configFromExecutionProfile(current, profile));
     expect(readMeetingComposerConfig()).toMatchObject({
       enabled: true,
       maxParallel: 2,
@@ -117,15 +118,68 @@ describe("meetingComposerStore", () => {
     expect(readMeetingComposerConfig().chairSeatId).toBe(chair!.id);
   });
 
-  it("rejects duplicate account-model pairs and clears old model options when replacing a model", () => {
+  it("replaces the previous worker limit when switching execution profiles", () => {
+    const limited = {
+      id: "limited",
+      name: "Limited",
+      revision: 1,
+      instructions: "",
+      verificationCommands: [],
+      meeting: meetingSetupFromConfig(DEFAULT_MEETING_COMPOSER_CONFIG),
+      orchestra: { maxParallel: 1, isolateWorktrees: false, maxWorkerTurns: 3 },
+    };
+    const unlimited = {
+      ...limited,
+      id: "unlimited",
+      orchestra: { maxParallel: 1, isolateWorktrees: false },
+    };
+    updateMeetingComposerConfig((config) => configFromExecutionProfile(config, limited));
+    expect(readMeetingComposerConfig().maxWorkerTurns).toBe(3);
+    updateMeetingComposerConfig((config) => configFromExecutionProfile(config, unlimited));
+    expect(readMeetingComposerConfig().maxWorkerTurns).toBeUndefined();
+    expect(Object.hasOwn(readMeetingComposerConfig(), "maxWorkerTurns")).toBe(false);
+    expect(readMeetingComposerConfig().executionProfile?.id).toBe("unlimited");
+    updateMeetingComposerConfig((config) => configFromExecutionProfile(config, limited));
+    expect(readMeetingComposerConfig().maxWorkerTurns).toBe(3);
+  });
+
+  it("keeps the execution mode and supervisor separately for conversations in the same folder", () => {
+    updateMeetingComposerConfig((config) => ({
+      ...config,
+      executionMode: "persistent",
+      chairSeatId: "supervisor-a",
+      seats: [{ ...seat("codex", "Supervisor A"), id: "supervisor-a" }],
+    }));
+    showFolder("tab-2", "env-1:folder-a");
+    expect(readMeetingComposerConfig().executionMode).toBe("once");
+    expect(readMeetingComposerConfig().chairSeatId).toBeNull();
+    updateMeetingComposerConfig((config) => ({ ...config, chairSeatId: "supervisor-b" }));
+    showFolder("tab-1", "env-1:folder-a");
+    expect(readMeetingComposerConfig()).toMatchObject({
+      executionMode: "persistent",
+      chairSeatId: "supervisor-a",
+    });
+  });
+
+  it("preserves user-assigned roles in the run roster", () => {
+    const config = {
+      ...DEFAULT_MEETING_COMPOSER_CONFIG,
+      allowAdditionalWorkers: true,
+      seats: [{ ...seat("claude", "Supervisor"), roleDescription: "개발 방향" }],
+    };
+    expect(meetingSetupFromConfig(config).participants[0]?.roleDescription).toBe("개발 방향");
+    expect(meetingSetupFromConfig(config).allowAdditionalWorkers).toBe(false);
+  });
+
+  it("keeps duplicate account-model seats independent and clears changed model options", () => {
     addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-a" });
     addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-b" });
     addMeetingComposerSeat({ ...seat("codex", "Codex"), model: "model-a" });
     const first = readMeetingComposerConfig().seats[0]!;
     setMeetingComposerSeatOption(first.id, "reasoningEffort", "high");
     setMeetingComposerSeatModel(first.id, "model-b");
-    expect(readMeetingComposerConfig().seats).toHaveLength(2);
-    expect(readMeetingComposerConfig().seats[0]!.model).toBe("model-a");
+    expect(readMeetingComposerConfig().seats).toHaveLength(3);
+    expect(readMeetingComposerConfig().seats[0]!.model).toBe("model-b");
     setMeetingComposerSeatModel(first.id, "model-c");
     expect(readMeetingComposerConfig().seats[0]).toMatchObject({
       id: first.id,
@@ -176,11 +230,11 @@ describe("meetingComposerStore", () => {
     expect(readMeetingComposerConfig().chairSeatId).toBeNull();
   });
 
-  it("refuses a ninth seat instead of failing at send", () => {
+  it("preserves more than eight independently selected seats", () => {
     for (let index = 0; index < 9; index += 1) {
       toggleMeetingComposerSeat(seat(`seat-${index}`, `Seat ${index}`));
     }
-    expect(readMeetingComposerConfig().seats).toHaveLength(8);
+    expect(readMeetingComposerConfig().seats).toHaveLength(9);
   });
 
   it("keeps each folder's meeting room to itself", () => {
@@ -198,17 +252,56 @@ describe("meetingComposerStore", () => {
     expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
   });
 
-  it("survives the tab closing and the folder reopening in a fresh tab", () => {
-    // The regression that kept biting: settings keyed to a tab id died with
-    // the tab. The folder is the identity that survives.
+  it("survives reopening the same conversation in a fresh tab", () => {
     updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
     toggleMeetingComposerSeat(seat("claude-a", "Claude"));
 
     useWorkspaceTabStore.setState({ tabs: [], activeTabId: null });
-    showFolder("tab-99", "env-1:folder-a");
+    useWorkspaceTabStore.setState({
+      tabs: [{ ...tab("tab-99", "env-1:folder-a"), view: tab("tab-1", "env-1:folder-a").view }],
+      activeTabId: "tab-99",
+    });
 
     expect(readMeetingComposerConfig().enabled).toBe(true);
     expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
+  });
+
+  it("keeps settings independent for conversations in the same folder", () => {
+    toggleMeetingComposerSeat(seat("claude-a", "Claude"));
+    updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
+    showFolder("tab-2", "env-1:folder-a");
+    expect(readMeetingComposerConfig()).toEqual(DEFAULT_MEETING_COMPOSER_CONFIG);
+    toggleMeetingComposerSeat(seat("codex-a", "Codex"));
+    showFolder("tab-1", "env-1:folder-a");
+    expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
+    expect(readMeetingComposerConfig().enabled).toBe(true);
+  });
+
+  it("disarms only the conversation that started a run and retains its roster", () => {
+    toggleMeetingComposerSeat(seat("claude-a", "Claude"));
+    updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
+    const first = activeMeetingConversationKey();
+    showFolder("tab-2", "env-1:folder-a");
+    updateMeetingComposerConfig((config) => ({ ...config, enabled: true }));
+    disarmMeetingComposer(first);
+    expect(readMeetingComposerConfig().enabled).toBe(true);
+    showFolder("tab-1", "env-1:folder-a");
+    expect(readMeetingComposerConfig().enabled).toBe(false);
+    expect(readMeetingComposerConfig().seats.map((entry) => entry.id)).toEqual(["claude-a"]);
+  });
+
+  it("preserves the draft roster when it becomes a conversation without rearming it", () => {
+    useMeetingComposerStore.getState().updateConfig("draft:sample", (config) => ({
+      ...config,
+      enabled: true,
+      seats: [seat("claude", "Supervisor")],
+    }));
+    promoteMeetingComposerConfig("draft:sample", "thread:env-1:new");
+    const promoted = useMeetingComposerStore.getState().configsByFolder["thread:env-1:new"];
+    expect(promoted?.enabled).toBe(false);
+    expect(promoted?.seats[0]?.displayName).toBe("Supervisor");
+    promoteMeetingComposerConfig("draft:sample", "thread:env-1:new");
+    expect(useMeetingComposerStore.getState().configsByFolder["thread:env-1:new"]).toBe(promoted);
   });
 
   it("keeps the meeting's rounds when switching styles back and forth", () => {
@@ -236,7 +329,7 @@ describe("meetingComposerStore", () => {
     const config = readMeetingComposerConfig();
     expect(config.style).toBe("collaboration");
     expect(config.maxRounds).toBe(DEFAULT_MEETING_COMPOSER_CONFIG.maxRounds);
-    expect(config.enabled).toBe(true);
+    expect(config.enabled).toBe(false);
   });
 
   it("screens seat ids into the server's participant-id shape", () => {

@@ -190,6 +190,7 @@ import {
 } from "./Sidebar.logic";
 import { getThreadSortTimestamp, sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { UpgradeRoomMenuItem, useUpgradeRoomFolderShortcut } from "./sidebar/UpgradeRoomMenuItem";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -874,6 +875,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 });
 
 interface SidebarProjectThreadListProps {
+  upgradeRoomLinked: boolean;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -998,7 +1000,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 
   return (
     <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden border-l-0 px-1 py-0 sm:mx-1 sm:px-1.5">
-      {shouldShowThreadPanel && showEmptyThreadState ? (
+      {projectExpanded && props.upgradeRoomLinked && <UpgradeRoomMenuItem />}
+      {shouldShowThreadPanel && showEmptyThreadState && !props.upgradeRoomLinked ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
             data-thread-selection-safe
@@ -1098,6 +1101,8 @@ interface SidebarProjectItemProps {
 }
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const shortcut = useUpgradeRoomFolderShortcut(props.project, primaryEnvironmentId);
   const {
     project,
     isThreadListExpanded,
@@ -1678,6 +1683,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
+            ...(shortcut.available ? [{ id: "upgrade-room-shortcut", label: shortcut.label }] : []),
             buildTargetedItem("rename", "Rename"),
             buildTargetedItem("grouping", "Group into..."),
             buildTargetedItem("copy-path", "Copy Path"),
@@ -1695,7 +1701,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           return;
         }
 
-        await actionHandlers.get(clicked)?.();
+        if (clicked === "upgrade-room-shortcut") shortcut.setLinked(!shortcut.linked);
+        else await actionHandlers.get(clicked)?.();
       })();
     },
     [
@@ -1704,6 +1711,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectGroupingDialog,
       openProjectRenameDialog,
       project.groupedProjectCount,
+      shortcut,
       project.memberProjects,
       suppressProjectClickForContextMenuRef,
     ],
@@ -2349,6 +2357,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       </div>
 
       <SidebarProjectThreadList
+        upgradeRoomLinked={shortcut.linked}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}

@@ -6,7 +6,13 @@ import type {
   McpToolCatalogEntry,
   ServerSettingsPatch,
 } from "@t3tools/contracts";
-import { CheckCircle2Icon, ExternalLinkIcon, PlugZapIcon, RefreshCcwIcon } from "lucide-react";
+import {
+  CheckCircle2Icon,
+  ExternalLinkIcon,
+  PlugZapIcon,
+  RefreshCcwIcon,
+  ShieldCheckIcon,
+} from "lucide-react";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useEnvironment } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
@@ -21,6 +27,51 @@ import {
   formatTimestamp,
 } from "../control-center/controlCenterShared";
 
+const mcpCatalogSwrCache = new Map<string, McpToolCatalog>();
+
+function mcpCatalogCacheKey(environmentId: EnvironmentId, workspaceRoot?: string): string {
+  return `${environmentId}::${workspaceRoot ?? "*"}`;
+}
+
+function hasUncheckedEnabledMcpEntries(catalog: McpToolCatalog): boolean {
+  return catalog.entries.some(
+    (entry) =>
+      entry.enabled &&
+      entry.installed &&
+      entry.status !== "ready" &&
+      entry.status !== "error" &&
+      entry.status !== "missing",
+  );
+}
+
+const T3_CORE_MCP_ESTIMATED_TOOLS = 26;
+const ANTIGRAVITY_SAFE_MCP_TOOL_BUDGET = 40;
+
+function estimateAntigravityMcpBudget(entries: ReadonlyArray<McpToolCatalogEntry>): {
+  readonly estimatedTools: number;
+  readonly budget: number;
+  readonly skippedNativeRedundantCount: number;
+} {
+  let externalTools = 0;
+  let skippedNativeRedundantCount = 0;
+  for (const entry of entries) {
+    if (!entry.enabled || !entry.installed || !entry.providers.includes("gemini")) continue;
+    const isRedundantDefault =
+      entry.scope === "environment" &&
+      (entry.nativeRedundantProviders?.includes("gemini") ?? false);
+    if (isRedundantDefault) {
+      skippedNativeRedundantCount += 1;
+      continue;
+    }
+    externalTools += entry.tools.length > 0 ? entry.tools.length : (entry.estimatedToolCount ?? 6);
+  }
+  return {
+    estimatedTools: T3_CORE_MCP_ESTIMATED_TOOLS + externalTools,
+    budget: ANTIGRAVITY_SAFE_MCP_TOOL_BUDGET,
+    skippedNativeRedundantCount,
+  };
+}
+
 export function McpToolsSection(props: {
   environmentId: EnvironmentId;
   readOnly?: boolean;
@@ -31,10 +82,14 @@ export function McpToolsSection(props: {
   const connected = useEnvironment(props.environmentId)?.connection.phase === "connected";
   const getTools = useAtomCommand(serverEnvironment.getMcpTools, { reportFailure: false });
   const update = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
-  const [catalog, setCatalog] = useState<McpToolCatalog | null>(null);
+  const cacheKey = mcpCatalogCacheKey(props.environmentId, props.workspaceRoot);
+  const [catalog, setCatalog] = useState<McpToolCatalog | null>(
+    () => mcpCatalogSwrCache.get(cacheKey) ?? null,
+  );
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<ManagedMcpServerConfig | null>(null);
   const requestGeneration = useRef(0);
+  const autoProbedKeys = useRef<Set<string>>(new Set());
   const refresh = useCallback(
     async (check: boolean) => {
       if (!connected) return;
@@ -49,22 +104,44 @@ export function McpToolsSection(props: {
         if (
           !notifyCommandFailure(result, "MCP 도구를 확인하지 못했습니다.") &&
           result._tag === "Success"
-        )
+        ) {
+          mcpCatalogSwrCache.set(cacheKey, result.value);
           setCatalog(result.value);
+          // BUG-08: Automatically probe enabled servers that remain in unchecked state on mount
+          if (
+            !check &&
+            !autoProbedKeys.current.has(cacheKey) &&
+            hasUncheckedEnabledMcpEntries(result.value)
+          ) {
+            autoProbedKeys.current.add(cacheKey);
+            const probeResult = await getTools({
+              environmentId: props.environmentId,
+              input: {
+                check: true,
+                ...(props.workspaceRoot ? { workspaceRoot: props.workspaceRoot } : {}),
+              },
+            });
+            if (generation !== requestGeneration.current) return;
+            if (probeResult._tag === "Success") {
+              mcpCatalogSwrCache.set(cacheKey, probeResult.value);
+              setCatalog(probeResult.value);
+            }
+          }
+        }
       } finally {
         if (generation === requestGeneration.current) setBusy(false);
       }
     },
-    [connected, getTools, props.environmentId, props.workspaceRoot],
+    [cacheKey, connected, getTools, props.environmentId, props.workspaceRoot],
   );
   useEffect(() => {
-    setCatalog(null);
+    setCatalog(mcpCatalogSwrCache.get(cacheKey) ?? null);
     setBusy(false);
     void refresh(false);
     return () => {
       requestGeneration.current++;
     };
-  }, [refresh]);
+  }, [cacheKey, refresh]);
   const save = async (patch: ServerSettingsPatch) => {
     if (!connected) return false;
     setBusy(true);
@@ -97,13 +174,15 @@ export function McpToolsSection(props: {
     } else await save({ mcpTools: { [entry.builtinId]: enabled } });
   };
 
+  const antigravityBudget = catalog ? estimateAntigravityMcpBudget(catalog.entries) : null;
+
   return (
     <SectionCard
       id={props.id ?? "mcp-tools"}
       icon={PlugZapIcon}
       title="MCP 도구"
       scopeLabel={props.workspaceRoot ? "현재 프로젝트" : "현재 환경"}
-      description="Codex·Claude·Grok의 도구와 사용자 MCP 서버를 관리하세요. 새 AI 세션부터 적용됩니다."
+      description="Codex·Claude·Antigravity·Grok의 도구와 사용자 MCP 서버를 관리하세요. 새 AI 세션부터 적용됩니다."
       action={
         <Button
           size="sm"
@@ -116,6 +195,44 @@ export function McpToolsSection(props: {
         </Button>
       }
     >
+      <div className="mb-3 rounded-xl border border-border bg-background/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <ShieldCheckIcon className="size-4 shrink-0 text-emerald-500" />
+            <span className="text-sm font-semibold">T3 Code 내장 도구 (t3-code)</span>
+            <Badge size="sm" variant="success">
+              항상 최우선 활성
+            </Badge>
+          </div>
+          {antigravityBudget ? (
+            <Badge
+              size="sm"
+              variant={
+                antigravityBudget.estimatedTools > antigravityBudget.budget ? "warning" : "outline"
+              }
+            >
+              Antigravity 예상 도구 {antigravityBudget.estimatedTools} / {antigravityBudget.budget}
+              개
+            </Badge>
+          ) : null}
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          협업 브라우저(<code>preview_open</code>·<code>preview_click</code>·
+          <code>preview_type</code>·<code>preview_evaluate</code>), 장기기억(
+          <code>workspace_memory</code>), 하위 위임(
+          <code>workspace_delegate</code>), 앱 실행(<code>workspace_launch_app</code>) 등 핵심{" "}
+          {T3_CORE_MCP_ESTIMATED_TOOLS}개 도구는 개별 비활성화 없이 모든 세션에서 1순위로 자동
+          연결됩니다. Antigravity 세션 중 도구 누락이 감지되면 T3가 <code>t3-code</code> 최우선
+          모드로 자동 재연결해 복구합니다.
+        </p>
+        {antigravityBudget && antigravityBudget.estimatedTools > antigravityBudget.budget ? (
+          <p className="mt-2 text-xs text-warning">
+            Antigravity 예상 도구 수가 안전 권장치({antigravityBudget.budget}개)를 초과했습니다.
+            세션 시작 시 <code>t3-code</code> 핵심 도구를 먼저 보장하고 초과 외부 MCP는 자동으로
+            후순위 제외됩니다.
+          </p>
+        ) : null}
+      </div>
       <div className="grid gap-3 md:grid-cols-2">
         {catalog?.entries.map((entry) => (
           <div key={entry.id} className="rounded-xl border border-border bg-background/45 p-4">
@@ -152,11 +269,26 @@ export function McpToolsSection(props: {
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               {entry.description}
             </p>
+            {entry.nativeRedundantProviders?.includes("gemini") ? (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <Badge size="sm" variant="outline">
+                  {entry.scope === "project"
+                    ? "Antigravity 프로젝트 강제 포함"
+                    : "Antigravity 기본 제외 (내장 도구 중복 · 예산 보호)"}
+                </Badge>
+              </div>
+            ) : null}
             <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
               <span>
                 {entry.providers
                   .map((provider) =>
-                    provider === "claudeAgent" ? "Claude" : provider === "grok" ? "Grok" : "Codex",
+                    provider === "claudeAgent"
+                      ? "Claude"
+                      : provider === "gemini"
+                        ? "Antigravity"
+                        : provider === "grok"
+                          ? "Grok"
+                          : "Codex",
                   )
                   .join(" · ")}
               </span>
@@ -240,6 +372,7 @@ export function McpToolsSection(props: {
         <McpServerForm
           key={editing?.name ?? "new"}
           editing={editing}
+          existingNames={Object.keys(settings.customMcpServers)}
           {...(props.workspaceRoot ? { workspaceRoot: props.workspaceRoot } : {})}
           busy={busy || !connected}
           cancel={() => setEditing(null)}

@@ -29,6 +29,7 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
+import type { TurnDelegateTeam } from "../subagentSelection.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
@@ -42,6 +43,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    restrictNativeSubagents?: boolean,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
@@ -49,6 +51,7 @@ export interface ProviderServiceShape {
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
+    delegateTeam?: TurnDelegateTeam,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /**

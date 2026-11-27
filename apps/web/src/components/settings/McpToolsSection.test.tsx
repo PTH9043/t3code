@@ -118,4 +118,131 @@ describe("MCP catalog connection lifecycle", () => {
     await flush();
     expect(state.failure).toHaveBeenCalledExactlyOnceWith("MCP 도구를 확인하지 못했습니다.");
   });
+  it("automatically triggers a background health probe when enabled MCP servers are unchecked (BUG-08)", async () => {
+    state.connected = true;
+    state.getTools
+      .mockResolvedValueOnce({
+        _tag: "Success",
+        value: {
+          entries: [
+            {
+              id: "builtin:context7",
+              builtinId: "context7",
+              name: "Context7",
+              description: "Docs lookup",
+              source: "https://example.com",
+              scope: "environment",
+              providers: ["claudeAgent"],
+              installed: true,
+              enabled: true,
+              status: "unchecked",
+              tools: [],
+              checkedAt: null,
+              error: null,
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        _tag: "Success",
+        value: {
+          entries: [
+            {
+              id: "builtin:context7",
+              builtinId: "context7",
+              name: "Context7",
+              description: "Docs lookup",
+              source: "https://example.com",
+              scope: "environment",
+              providers: ["claudeAgent"],
+              installed: true,
+              enabled: true,
+              status: "ready",
+              tools: ["resolve-library-id", "query-docs"],
+              checkedAt: "2026-11-22T05:00:00.000Z",
+              error: null,
+            },
+          ],
+        },
+      });
+    render();
+    await flush();
+    await flush();
+    expect(state.getTools).toHaveBeenCalledTimes(2);
+    expect(state.getTools).toHaveBeenNthCalledWith(2, {
+      environmentId,
+      input: { check: true, workspaceRoot: "D:/isolated" },
+    });
+  });
+
+  it("renders t3-code priority card, Antigravity tool budget badge, and native-redundant notice", async () => {
+    state.connected = true;
+    state.getTools.mockResolvedValueOnce({
+      _tag: "Success",
+      value: {
+        entries: [
+          {
+            id: "filesystem",
+            builtinId: "filesystem",
+            name: "Project Files",
+            description: "Local files",
+            source: "https://example.com/fs",
+            scope: "environment",
+            providers: ["codex", "claudeAgent", "gemini", "grok"],
+            nativeRedundantProviders: ["gemini"],
+            estimatedToolCount: 14,
+            installed: true,
+            enabled: true,
+            status: "ready",
+            tools: ["read_file"],
+            checkedAt: "2026-11-25T05:00:00.000Z",
+            error: null,
+          },
+          {
+            id: "openaiDocs",
+            builtinId: "openaiDocs",
+            name: "OpenAI Docs",
+            description: "Docs",
+            source: "https://example.com/docs",
+            scope: "environment",
+            providers: ["codex", "claudeAgent", "gemini", "grok"],
+            estimatedToolCount: 5,
+            installed: true,
+            enabled: true,
+            status: "ready",
+            tools: ["search_docs", "fetch_doc"],
+            checkedAt: "2026-11-25T05:00:00.000Z",
+            error: null,
+          },
+        ],
+      },
+    });
+    const tree = render();
+    await flush();
+    const updated = render();
+    expect(tree).toBeDefined();
+    const textChunks: string[] = [];
+    const collectText = (node: unknown) => {
+      if (typeof node === "string" || typeof node === "number") {
+        textChunks.push(String(node));
+        return;
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) collectText(item);
+        return;
+      }
+      if (node && typeof node === "object" && "props" in node) {
+        const children = (node as { props?: { children?: unknown } }).props?.children;
+        collectText(children);
+      }
+    };
+    collectText(updated);
+    const fullText = textChunks.join(" ");
+    expect(fullText).toContain("T3 Code 내장 도구 (t3-code)");
+    expect(fullText).toContain("항상 최우선 활성");
+    expect(fullText).toContain("Antigravity 예상 도구");
+    expect(fullText).toContain("28");
+    expect(fullText).toContain("40");
+    expect(fullText).toContain("Antigravity 기본 제외 (내장 도구 중복 · 예산 보호)");
+  });
 });

@@ -1,9 +1,11 @@
+import { ToolActivityRow, UnlinkedToolRecords } from "./ToolActivityRow";
 import {
   type EnvironmentId,
   type MessageId,
   type ScopedThreadRef,
   type ServerProviderSkill,
   type TurnId,
+  type UnifiedBgTask,
   type WorkspaceOrchestraBlock,
 } from "@t3tools/contracts";
 import {
@@ -22,6 +24,7 @@ import {
 
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
+import type { ResponseStyleUiProfile } from "@t3tools/client-runtime/state/response-style-presentation";
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import {
   createContext,
@@ -29,6 +32,7 @@ import {
   memo,
   use,
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -80,6 +84,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { ResponseStyleMessageBody } from "./ResponseStyleMessageBody";
 import {
   OrchestraTaskListPanel,
   DEFAULT_ORCHESTRA_LIST_STATE,
@@ -90,6 +95,7 @@ import { OrchestraRunControls } from "./OrchestraRunControls";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  MIN_TAIL_FIRST_ROW_COUNT,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -99,8 +105,10 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  sliceMessagesTimelineRowsForTailFirst,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
+  TIMELINE_HORIZONTAL_INSET_CLASS_NAME,
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestTurn,
 } from "./MessagesTimeline.logic";
@@ -120,6 +128,8 @@ import {
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
 import { cn } from "~/lib/utils";
+import { useClientSettings } from "~/hooks/useSettings";
+import { STANDARD_RESPONSE_STYLE_UI_PROFILE } from "~/responseStyleUi";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatShortTimestamp } from "../../timestampFormat";
@@ -168,7 +178,15 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
+  /** How the conversation's response style lays out assistant messages. */
+  responseStyleProfile: ResponseStyleUiProfile;
+  backgroundTasks?: readonly UnifiedBgTask[];
+  hasActiveBackgroundWork: boolean;
+  latestSettledAssistantMessageId: MessageId | null;
 }
+
+const EMPTY_ORCHESTRA_WORK_LOGS: ReadonlyArray<TimelineWorkEntry> = [];
+const EMPTY_ORCHESTRA_ATTACHMENTS: NonNullable<TimelineMessage["attachments"]> = [];
 
 interface TimelineRowActivityState {
   isWorking: boolean;
@@ -183,6 +201,13 @@ const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
 const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
+export const TIMELINE_DEFAULT_ESTIMATED_ITEM_SIZE = 96;
+export const TIMELINE_MIN_ESTIMATED_ROW_HEIGHT = 36;
+export const TIMELINE_MAX_ESTIMATED_ROW_HEIGHT = 1600;
+export const TIMELINE_DRAW_DISTANCE = 1400;
+export const TIMELINE_SCROLL_PADDING_TOP_CLASS_NAME = "scroll-pt-4";
+export const TIMELINE_FADE_SCROLL_PADDING_TOP_CLASS_NAME = "scroll-pt-10 sm:scroll-pt-12";
+const TIMELINE_ESTIMATE_MAX_SCAN_CHARS = 16_000;
 
 // Header row shown when older turns exist beyond the loaded window. Plain
 // button, no spinner animation; the label change is the loading indicator.
@@ -197,7 +222,7 @@ function TimelineLoadEarlierHeader({
 }) {
   return (
     <div className={fade ? "pt-10 sm:pt-12" : "pt-3 sm:pt-4"}>
-      <div className="mx-auto w-full max-w-3xl pb-2">
+      <div className="mx-auto w-full pb-2">
         <button
           type="button"
           onClick={onLoadEarlier}
@@ -269,6 +294,16 @@ interface MessagesTimelineProps {
   topFadeEnabled?: boolean;
   /** Non-null when older turns exist beyond the loaded window. */
   loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
+  /**
+   * Optional token identifying the current thread/foreground reveal pass.
+   * When provided, the timeline immediately paints only the latest turns at
+   * the bottom and attaches older in-memory history after layout settles.
+   */
+  tailFirstRevealKey?: string | null;
+  /** Pass an object that keeps its identity between renders; every row reads it. */
+  responseStyleProfile?: ResponseStyleUiProfile;
+  backgroundTasks?: readonly UnifiedBgTask[];
+  hasActiveBackgroundWork?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +345,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
   loadEarlier = null,
+  tailFirstRevealKey = null,
+  responseStyleProfile = STANDARD_RESPONSE_STYLE_UI_PROFILE,
+  backgroundTasks,
+  hasActiveBackgroundWork = false,
 }: MessagesTimelineProps) {
   const [orchestraListStates, setOrchestraListStates] = useState<
     Readonly<Record<string, OrchestraListState>>
@@ -446,11 +485,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     return grouped;
   }, [timelineEntries]);
 
+  const windowedOrchestraRuns = useMemo(() => {
+    if (loadEarlier === null || orchestraRuns.length === 0) {
+      return orchestraRuns;
+    }
+    let earliestLoadedAt: string | null = null;
+    for (const entry of timelineEntries) {
+      if (entry.kind !== "message" && entry.kind !== "work") continue;
+      if (earliestLoadedAt === null || entry.createdAt < earliestLoadedAt) {
+        earliestLoadedAt = entry.createdAt;
+      }
+    }
+    if (earliestLoadedAt === null) {
+      return orchestraRuns;
+    }
+    const runIdsWithLoadedBlocks = new Set<string>();
+    for (const block of orchestraBlocks.values()) {
+      runIdsWithLoadedBlocks.add(block.runId);
+    }
+    return orchestraRuns.filter((run) => {
+      const isTerminal =
+        run.status === "completed" || run.status === "failed" || run.status === "cancelled";
+      if (!isTerminal || runIdsWithLoadedBlocks.has(String(run.id))) {
+        return true;
+      }
+      return run.createdAt >= earliestLoadedAt;
+    });
+  }, [loadEarlier, orchestraBlocks, orchestraRuns, timelineEntries]);
+
   const orchestraLists = useMemo(
     () =>
       deriveOrchestraTaskLists({
         ownerThreadId: parseScopedThreadKey(routeThreadKey)?.threadId ?? null,
-        runs: orchestraRuns,
+        runs: windowedOrchestraRuns,
         blocks: orchestraBlocks,
         messages: timelineEntries.flatMap((entry) =>
           entry.kind === "message" ? [entry.message] : [],
@@ -459,7 +526,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           entry.kind === "work" ? [entry.entry] : [],
         ),
       }),
-    [routeThreadKey, orchestraRuns, orchestraBlocks, timelineEntries],
+    [routeThreadKey, windowedOrchestraRuns, orchestraBlocks, timelineEntries],
   );
 
   const rawRows = useMemo(
@@ -490,7 +557,96 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  const [settledRevealKey, setSettledRevealKey] = useState<string | null>(null);
+  const liveFollowEnabledRef = useRef(liveFollowEnabled);
+  liveFollowEnabledRef.current = liveFollowEnabled;
+  const anchorMessageIdRef = useRef(anchorMessageId);
+  anchorMessageIdRef.current = anchorMessageId;
+
+  const isTailFirstPending =
+    tailFirstRevealKey !== null &&
+    tailFirstRevealKey !== settledRevealKey &&
+    anchorMessageId === null &&
+    rows.length > MIN_TAIL_FIRST_ROW_COUNT;
+
+  const displayedRows = useMemo(
+    () => (isTailFirstPending ? sliceMessagesTimelineRowsForTailFirst(rows) : rows),
+    [isTailFirstPending, rows],
+  );
+
+  const hasRealContentRows = rows.length > 1 || (rows.length === 1 && rows[0]?.kind !== "working");
+
+  useEffect(() => {
+    if (tailFirstRevealKey === null || settledRevealKey === tailFirstRevealKey) {
+      return;
+    }
+    if (!hasRealContentRows) {
+      return;
+    }
+    if (rows.length <= MIN_TAIL_FIRST_ROW_COUNT || anchorMessageId !== null) {
+      setSettledRevealKey(tailFirstRevealKey);
+      if (liveFollowEnabledRef.current && anchorMessageIdRef.current === null) {
+        const settleFrame = requestAnimationFrame(() => {
+          void listRef.current?.scrollToEnd?.({ animated: false });
+        });
+        return () => cancelAnimationFrame(settleFrame);
+      }
+      return;
+    }
+
+    let secondFrame: number | null = null;
+    const firstFrame = requestAnimationFrame(() => {
+      if (liveFollowEnabledRef.current && anchorMessageIdRef.current === null) {
+        void listRef.current?.scrollToEnd?.({ animated: false });
+      }
+      secondFrame = requestAnimationFrame(() => {
+        setSettledRevealKey(tailFirstRevealKey);
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) {
+        cancelAnimationFrame(secondFrame);
+      }
+    };
+  }, [
+    anchorMessageId,
+    hasRealContentRows,
+    listRef,
+    rows.length,
+    settledRevealKey,
+    tailFirstRevealKey,
+  ]);
+
+  const prevTailFirstPendingRef = useRef(isTailFirstPending);
+  const prevLoadingEarlierRef = useRef(Boolean(loadEarlier?.loading));
+  useEffect(() => {
+    const justAttachedLocalHistory = prevTailFirstPendingRef.current && !isTailFirstPending;
+    const justAttachedServerHistory =
+      prevLoadingEarlierRef.current && !Boolean(loadEarlier?.loading);
+    prevTailFirstPendingRef.current = isTailFirstPending;
+    prevLoadingEarlierRef.current = Boolean(loadEarlier?.loading);
+
+    if (
+      (justAttachedLocalHistory || justAttachedServerHistory) &&
+      liveFollowEnabledRef.current &&
+      anchorMessageIdRef.current === null
+    ) {
+      const frame = requestAnimationFrame(() => {
+        if (liveFollowEnabledRef.current && anchorMessageIdRef.current === null) {
+          void listRef.current?.scrollToEnd?.({ animated: false });
+        }
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [isTailFirstPending, loadEarlier?.loading, listRef]);
+
+  const minimapItems = useMemo(() => deriveTimelineMinimapItems(displayedRows), [displayedRows]);
+  const minimapEnabled = useClientSettings((settings) => settings.timelineMinimapEnabled);
+  const chatHorizontalInsetPx = useClientSettings(
+    (settings) => settings.chatHorizontalInsetPx ?? null,
+  );
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
@@ -505,11 +661,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [anchorMessageId, onAnchorReady],
   );
   const anchoredEndSpace = useMemo(() => {
-    const config = resolveChatListAnchoredEndSpace(rows, anchorMessageId, (row) =>
+    const config = resolveChatListAnchoredEndSpace(displayedRows, anchorMessageId, (row) =>
       row.kind === "message" ? row.message.id : null,
     );
     return config ? { ...config, onReady: handleAnchorReady } : undefined;
-  }, [anchorMessageId, handleAnchorReady, rows]);
+  }, [anchorMessageId, displayedRows, handleAnchorReady]);
 
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
@@ -517,7 +673,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     if (isAtEnd !== undefined) {
       onIsAtEndChange(isAtEnd);
     }
-    if (!state || minimapItems.length === 0) {
+    if (!state || !minimapEnabled || minimapItems.length === 0) {
       return;
     }
 
@@ -537,14 +693,24 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         rowTop < scrollBottom &&
         rowTop + Math.max(1, rowHeight ?? 1) > scrollTop;
 
-      strip.dataset.inView = inView ? "true" : "false";
+      const nextInView = inView ? "true" : "false";
+      if (strip.dataset.inView !== nextInView) {
+        strip.dataset.inView = nextInView;
+      }
     }
-  }, [contentInsetEndAdjustment, listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+  }, [
+    contentInsetEndAdjustment,
+    listRef,
+    minimapEnabled,
+    minimapItems,
+    minimapStripMap,
+    onIsAtEndChange,
+  ]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
     return () => cancelAnimationFrame(frame);
-  }, [handleScroll, rows.length]);
+  }, [handleScroll, displayedRows.length]);
 
   useEffect(() => {
     if (!timelineViewportElement) {
@@ -553,11 +719,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
     const measure = () => {
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
-      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
+      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(
+        viewportWidth,
+        chatHorizontalInsetPx,
+      );
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
-      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+      setMinimapHitStripWidth(
+        resolveTimelineMinimapHitStripWidth(viewportWidth, chatHorizontalInsetPx),
+      );
     };
 
     const frame = requestAnimationFrame(measure);
@@ -569,7 +740,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [timelineViewportElement, rows.length]);
+  }, [timelineViewportElement, rows.length, chatHorizontalInsetPx]);
 
   const resultAttachments = useMemo(
     () =>
@@ -591,6 +762,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         if (attachment.result) owners.set(attachment.id, messageId);
     return owners;
   }, [resultAttachments]);
+  const latestSettledAssistantMessageId = useMemo<MessageId | null>(() => {
+    if (isWorking || activeTurnInProgress) {
+      return null;
+    }
+    for (let index = timelineEntries.length - 1; index >= 0; index -= 1) {
+      const entry = timelineEntries[index];
+      if (entry?.kind !== "message") {
+        continue;
+      }
+      if (entry.message.role !== "assistant") {
+        return null;
+      }
+      return entry.message.streaming ? null : entry.message.id;
+    }
+    return null;
+  }, [activeTurnInProgress, isWorking, timelineEntries]);
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       orchestraBlocks,
@@ -615,6 +802,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       agentPanelModel,
       onOpenAgents,
+      responseStyleProfile,
+      ...(backgroundTasks ? { backgroundTasks } : {}),
+      hasActiveBackgroundWork,
+      latestSettledAssistantMessageId,
     }),
     [
       orchestraBlocks,
@@ -638,6 +829,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       agentPanelModel,
       onOpenAgents,
+      responseStyleProfile,
+      backgroundTasks,
+      hasActiveBackgroundWork,
+      latestSettledAssistantMessageId,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -655,14 +850,50 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div className="mx-auto w-full min-w-0 overflow-x-clip" data-timeline-root="true">
         <TimelineRowContent row={item} />
       </div>
     ),
     [],
   );
 
-  if (rows.length === 0 && !isWorking) {
+  const estimatedItemSize = useMemo(
+    () => estimateTimelineAverageRowHeight(displayedRows, orchestraBlocks),
+    [displayedRows, orchestraBlocks],
+  );
+  const visibleLoadEarlier = isTailFirstPending ? null : loadEarlier;
+  const estimatedHeaderSize =
+    visibleLoadEarlier !== null ? (topFadeEnabled ? 84 : 52) : topFadeEnabled ? 48 : 16;
+  const handleStartReached = useCallback(() => {
+    if (
+      isTailFirstPending ||
+      liveFollowEnabledRef.current ||
+      visibleLoadEarlier === null ||
+      visibleLoadEarlier.loading
+    ) {
+      return;
+    }
+    visibleLoadEarlier.onLoadEarlier();
+  }, [isTailFirstPending, visibleLoadEarlier]);
+  const resolveItemType = useCallback(
+    (item: MessagesTimelineRow) =>
+      getTimelineRowItemType(item, {
+        hasOrchestraBlock:
+          item.kind === "message" &&
+          item.message.role === "assistant" &&
+          orchestraBlocks.has(item.message.id),
+      }),
+    [orchestraBlocks],
+  );
+  const maintainScrollAtEnd =
+    anchoredEndSpace ||
+    !liveFollowEnabled ||
+    disclosureToggleSettling ||
+    Boolean(loadEarlier?.loading)
+      ? false
+      : TIMELINE_MAINTAIN_SCROLL_AT_END;
+
+  if (displayedRows.length === 0 && !isWorking) {
     if (hideEmptyPlaceholder) {
       return null;
     }
@@ -679,30 +910,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
           <LegendList<MessagesTimelineRow>
             ref={listRef}
-            data={rows}
+            data={displayedRows}
             keyExtractor={keyExtractor}
-            getItemType={getItemType}
+            getItemType={resolveItemType}
             renderItem={renderItem}
-            estimatedItemSize={90}
+            estimatedItemSize={estimatedItemSize}
+            estimatedHeaderSize={estimatedHeaderSize}
+            drawDistance={TIMELINE_DRAW_DISTANCE}
             initialScrollAtEnd
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
-            maintainScrollAtEnd={
-              anchoredEndSpace || !liveFollowEnabled || disclosureToggleSettling
-                ? false
-                : TIMELINE_MAINTAIN_SCROLL_AT_END
-            }
+            maintainScrollAtEnd={maintainScrollAtEnd}
+            maintainScrollAtEndThreshold={1.5}
             maintainVisibleContentPosition={maintainVisibleContentPosition}
+            onStartReached={handleStartReached}
+            onStartReachedThreshold={0.25}
             onScroll={handleScroll}
             className={cn(
-              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
-              topFadeEnabled && "chat-timeline-scroll-fade",
+              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
+              "chat-timeline-horizontal-inset",
+              TIMELINE_HORIZONTAL_INSET_CLASS_NAME,
+              topFadeEnabled
+                ? cn("chat-timeline-scroll-fade", TIMELINE_FADE_SCROLL_PADDING_TOP_CLASS_NAME)
+                : TIMELINE_SCROLL_PADDING_TOP_CLASS_NAME,
             )}
             ListHeaderComponent={
-              loadEarlier !== null ? (
+              visibleLoadEarlier !== null ? (
                 <TimelineLoadEarlierHeader
-                  loading={loadEarlier.loading}
-                  onLoadEarlier={loadEarlier.onLoadEarlier}
+                  loading={visibleLoadEarlier.loading}
+                  onLoadEarlier={visibleLoadEarlier.onLoadEarlier}
                   fade={topFadeEnabled}
                 />
               ) : topFadeEnabled ? (
@@ -713,21 +949,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             }
             ListFooterComponent={TIMELINE_LIST_FOOTER}
           />
-          <TimelineMinimap
-            items={minimapItems}
-            bottomInset={contentInsetEndAdjustment}
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              onManualNavigation();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
-            }}
-          />
+          {minimapEnabled ? (
+            <TimelineMinimap
+              items={minimapItems}
+              bottomInset={contentInsetEndAdjustment}
+              hasPersistentGutter={minimapHasPersistentGutter}
+              hitStripWidth={minimapHitStripWidth}
+              stripMap={minimapStripMap}
+              onSelect={(item) => {
+                onManualNavigation();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: topFadeEnabled ? 48 : 24,
+                });
+              }}
+            />
+          ) : null}
         </div>
       </TimelineRowActivityCtx>
     </TimelineRowCtx>
@@ -738,8 +976,241 @@ function keyExtractor(item: MessagesTimelineRow) {
   return item.id;
 }
 
-function getItemType(item: MessagesTimelineRow) {
-  return item.kind === "message" ? `message:${item.message.role}` : item.kind;
+function clampEstimatedHeight(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.round(Math.min(max, Math.max(min, value)));
+}
+
+function estimateMarkdownContentHeight(
+  text: string | null | undefined,
+  charsPerLine: number,
+  lineHeight = 24,
+): number {
+  if (!text) {
+    return lineHeight;
+  }
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return lineHeight;
+  }
+
+  const safeCharsPerLine = Math.max(24, charsPerLine);
+  const sample =
+    trimmed.length > TIMELINE_ESTIMATE_MAX_SCAN_CHARS
+      ? trimmed.slice(0, TIMELINE_ESTIMATE_MAX_SCAN_CHARS)
+      : trimmed;
+  const lines = sample.split("\n");
+  let height = 0;
+  let inCodeFence = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("```") || line.startsWith("~~~")) {
+      if (!inCodeFence) {
+        // Code block header + top/bottom container padding.
+        height += 36;
+      }
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+
+    if (inCodeFence) {
+      const codeWrappedLines = Math.max(1, Math.ceil(rawLine.length / (safeCharsPerLine + 12)));
+      height += codeWrappedLines * 20;
+      continue;
+    }
+
+    if (line.length === 0) {
+      height += 10;
+      continue;
+    }
+
+    if (/^#{1,6}\s/.test(line)) {
+      const headingWrappedLines = Math.max(1, Math.ceil(line.length / (safeCharsPerLine - 8)));
+      height += headingWrappedLines * lineHeight + 10;
+      continue;
+    }
+
+    if (line.startsWith("|") && line.endsWith("|")) {
+      height += 28;
+      continue;
+    }
+
+    const wrappedLines = Math.max(1, Math.ceil(line.length / safeCharsPerLine));
+    height += wrappedLines * lineHeight;
+  }
+
+  if (trimmed.length > TIMELINE_ESTIMATE_MAX_SCAN_CHARS) {
+    const extraChars = trimmed.length - TIMELINE_ESTIMATE_MAX_SCAN_CHARS;
+    height += Math.ceil(extraChars / safeCharsPerLine) * lineHeight;
+  }
+
+  return Math.max(lineHeight, height);
+}
+
+/**
+ * Deterministic height estimator for every timeline row variant.
+ * Feeds LegendList's dataset `estimatedItemSize` and height-bucketed `getItemType`
+ * so 500+ turn conversations maintain accurate per-bucket averages during reverse
+ * scrolling without disabling real DOM measurement.
+ */
+export function estimateTimelineRowHeight(
+  row: MessagesTimelineRow,
+  options?: { readonly hasOrchestraBlock?: boolean },
+): number {
+  switch (row.kind) {
+    case "working":
+      return 36;
+
+    case "turn-fold":
+      return 44;
+
+    case "work-toggle":
+      return 36;
+
+    case "turn-plan": {
+      const stepCount = row.turnPlan.plan.steps.length;
+      return clampEstimatedHeight(
+        40 + Math.min(24, Math.floor(Math.max(0, stepCount - 1) / 8) * 4),
+        36,
+        72,
+      );
+    }
+
+    case "work": {
+      const visibleEntries = row.groupedEntries.filter(
+        (entry) => !workEntryIndicatesToolNeutralStatus(entry),
+      );
+      const entries = visibleEntries.length > 0 ? visibleEntries : row.groupedEntries;
+      const onlyToolEntries =
+        entries.length > 0 && entries.every((entry) => workLogEntryIsToolLike(entry));
+      let height = 14 + (onlyToolEntries ? 0 : 22);
+      for (const entry of entries) {
+        if (entry.unlinkedToolSignals && entry.unlinkedToolSignals.length > 0) {
+          height += 34 + Math.min(6, entry.unlinkedToolSignals.length) * 22;
+        } else if (entry.agentSpawn) {
+          height += 44;
+        } else if (entry.toolActivity) {
+          height += 34;
+        } else {
+          const previewLen = (entry.detail?.length ?? 0) + (entry.command?.length ?? 0);
+          height += 28 + (previewLen > 160 ? 12 : 0);
+        }
+      }
+      return clampEstimatedHeight(height, TIMELINE_MIN_ESTIMATED_ROW_HEIGHT, 480);
+    }
+
+    case "proposed-plan": {
+      const contentHeight = estimateMarkdownContentHeight(row.proposedPlan.planMarkdown, 68);
+      return clampEstimatedHeight(96 + contentHeight, 120, 960);
+    }
+
+    case "orchestra": {
+      let height = 88;
+      for (let index = 0; index < row.list.tasks.length; index += 1) {
+        const task = row.list.tasks[index];
+        if (!task) continue;
+        height += 56;
+        const latestAttempt = task.attempts.at(-1);
+        if (latestAttempt?.text) {
+          const previewCap = index === 0 || task.status === "running" ? 220 : 64;
+          height += Math.min(previewCap, estimateMarkdownContentHeight(latestAttempt.text, 70));
+        }
+      }
+      return clampEstimatedHeight(height, 120, 960);
+    }
+
+    case "message": {
+      const attachments = row.message.attachments ?? [];
+      const imageCount = attachments.filter((attachment) => attachment.type === "image").length;
+      const fileCount = attachments.length - imageCount;
+      const text = row.message.text ?? "";
+
+      if (row.message.role === "user") {
+        let height = 56;
+        height += Math.ceil(imageCount / 2) * 160 + fileCount * 54;
+        if (text.includes("<review_comment")) {
+          height += 140;
+        }
+        if (text.includes("<element_context>") || text.includes("<terminal_context>")) {
+          height += 28;
+        }
+        const collapsed = shouldCollapseUserMessage(text);
+        if (collapsed) {
+          // Matches `max-h-44` (176px) + collapse footer toggle (~30px).
+          height += 176 + 30;
+        } else {
+          // 75 chars/line * 8 lines = 600 chars -> 176px max before collapse threshold,
+          // preserving monotonicity across the collapse boundary.
+          height += Math.min(176, estimateMarkdownContentHeight(text, 75, 22));
+        }
+        return clampEstimatedHeight(height, 64, 960);
+      }
+
+      let height = 24 + (row.showAssistantMeta ? 28 : 0);
+      if (options?.hasOrchestraBlock) {
+        height += 84;
+      }
+      height += estimateMarkdownContentHeight(text, 74, 24);
+      height += imageCount * 180 + fileCount * 72;
+      const changedFilesCount = row.assistantTurnDiffSummary?.files.length ?? 0;
+      if (changedFilesCount > 0) {
+        height += 56 + Math.min(changedFilesCount, 8) * 28;
+      }
+      return clampEstimatedHeight(height, 52, TIMELINE_MAX_ESTIMATED_ROW_HEIGHT);
+    }
+  }
+}
+
+function resolveEstimatedHeightBucket(estimatedHeight: number): string {
+  if (estimatedHeight <= 72) return "xs";
+  if (estimatedHeight <= 128) return "sm";
+  if (estimatedHeight <= 224) return "md";
+  if (estimatedHeight <= 384) return "lg";
+  if (estimatedHeight <= 640) return "xl";
+  return "xxl";
+}
+
+export function getTimelineRowItemType(
+  item: MessagesTimelineRow,
+  options?: { readonly hasOrchestraBlock?: boolean },
+): string {
+  if (item.kind === "working" || item.kind === "turn-fold" || item.kind === "work-toggle") {
+    return item.kind;
+  }
+  const baseType =
+    item.kind === "message"
+      ? item.message.role === "assistant" && options?.hasOrchestraBlock
+        ? "message:assistant:orchestra-block"
+        : `message:${item.message.role}`
+      : item.kind;
+  const bucket = resolveEstimatedHeightBucket(estimateTimelineRowHeight(item, options));
+  return `${baseType}:${bucket}`;
+}
+
+export function estimateTimelineAverageRowHeight(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  orchestraBlocks?: ReadonlyMap<MessageId, WorkspaceOrchestraBlock>,
+): number {
+  if (rows.length === 0) {
+    return TIMELINE_DEFAULT_ESTIMATED_ITEM_SIZE;
+  }
+  let total = 0;
+  for (const row of rows) {
+    const hasOrchestraBlock =
+      row.kind === "message" &&
+      row.message.role === "assistant" &&
+      Boolean(orchestraBlocks?.has(row.message.id));
+    total += estimateTimelineRowHeight(row, { hasOrchestraBlock });
+  }
+  const average = total / rows.length;
+  if (!Number.isFinite(average)) {
+    return TIMELINE_DEFAULT_ESTIMATED_ITEM_SIZE;
+  }
+  const quantized = Math.round(average / 8) * 8;
+  return Math.min(480, Math.max(48, quantized));
 }
 
 interface TimelineMinimapItem {
@@ -900,7 +1371,7 @@ function TimelineMinimap({
   return (
     <div
       className={cn(
-        "group/minimap pointer-events-none absolute top-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        "group/minimap pointer-events-none absolute top-0 right-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
@@ -913,7 +1384,7 @@ function TimelineMinimap({
         <button
           aria-label={`메시지로 이동: ${activeItem?.userText ?? "사용자 메시지"}`}
           className={cn(
-            "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
+            "absolute top-1/2 right-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
             hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
@@ -965,7 +1436,7 @@ function TimelineMinimap({
           }}
           type="button"
         >
-          <div className="absolute top-0 left-3 h-full w-px bg-border/15" />
+          <div className="absolute top-0 right-3 h-full w-px bg-border/15" />
           {items.map((item, index) => {
             const top = `${resolveTimelineMinimapTopPercent(index, items.length)}%`;
             const activeDistance =
@@ -974,7 +1445,7 @@ function TimelineMinimap({
               <span
                 aria-hidden="true"
                 className={cn(
-                  "pointer-events-none absolute left-0 h-0.5 -translate-y-1/2 rounded-full bg-muted-foreground/35 transition-[background-color,width] duration-150 data-[in-view=true]:bg-foreground/90",
+                  "pointer-events-none absolute right-0 h-0.5 -translate-y-1/2 rounded-full bg-muted-foreground/35 transition-[background-color,width] duration-150 data-[in-view=true]:bg-foreground/90",
                   activeDistance === 0
                     ? "w-6 bg-muted-foreground/75"
                     : activeDistance === 1
@@ -999,7 +1470,7 @@ function TimelineMinimap({
           })}
           {activeItem ? (
             <span
-              className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
+              className="pointer-events-auto absolute right-8 w-80 cursor-text select-text"
               data-minimap-preview
               onMouseMove={(event) => event.stopPropagation()}
               style={{
@@ -1248,10 +1719,16 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function OrchestraAttemptBody({ attempt }: { attempt: OrchestraTaskAttemptView }) {
   const ctx = use(TimelineRowCtx);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const deferredText = useDeferredValue(attempt.text);
   const logs =
-    attempt.messageId === null ? [] : (ctx.orchestraWorkLogs.get(attempt.messageId) ?? []);
+    attempt.messageId === null
+      ? EMPTY_ORCHESTRA_WORK_LOGS
+      : (ctx.orchestraWorkLogs.get(attempt.messageId) ?? EMPTY_ORCHESTRA_WORK_LOGS);
   const attachments =
-    attempt.messageId === null ? [] : (ctx.resultAttachments.get(attempt.messageId) ?? []);
+    attempt.messageId === null
+      ? EMPTY_ORCHESTRA_ATTACHMENTS
+      : (ctx.resultAttachments.get(attempt.messageId) ?? EMPTY_ORCHESTRA_ATTACHMENTS);
   return (
     <div className="min-w-0" data-message-id={attempt.messageId ?? undefined}>
       {attempt.isSummary && (
@@ -1262,7 +1739,7 @@ function OrchestraAttemptBody({ attempt }: { attempt: OrchestraTaskAttemptView }
       )}
       <ChatMarkdown
         text={
-          attempt.text ||
+          (attempt.streaming ? deferredText : attempt.text) ||
           (attachments.length
             ? ""
             : attempt.streaming
@@ -1273,6 +1750,7 @@ function OrchestraAttemptBody({ attempt }: { attempt: OrchestraTaskAttemptView }
         }
         cwd={ctx.markdownCwd}
         threadRef={ctx.threadRef ?? undefined}
+        detailsScopeKey={attempt.messageId ?? undefined}
         isStreaming={attempt.streaming}
         skills={ctx.skills}
         resultAttachments={attachments}
@@ -1289,15 +1767,18 @@ function OrchestraAttemptBody({ attempt }: { attempt: OrchestraTaskAttemptView }
         />
       ) : null}
       {logs.length > 0 && (
-        <details className="mt-3 rounded-md border border-border p-2">
+        <details
+          className="mt-3 rounded-md border border-border p-2"
+          onToggle={(event) => setLogsOpen(event.currentTarget.open)}
+        >
           <summary className="cursor-pointer text-xs text-muted-foreground">
             도구 실행 기록 {logs.length}개
           </summary>
-          <div className="mt-2 space-y-2">
-            {logs.map((entry) => (
-              <WorkGroupSection key={entry.id} groupedEntries={[entry]} />
-            ))}
-          </div>
+          {logsOpen && (
+            <div className="mt-2 space-y-2">
+              <WorkGroupSection groupedEntries={logs} />
+            </div>
+          )}
         </details>
       )}
       <AssistantChangedFilesSection
@@ -1387,7 +1868,8 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
                 {orchestraKindLabels[block.kind]} · {block.title}
               </span>
               <span className="mt-1 block break-all text-xs text-muted-foreground">
-                {block.displayName} · {block.modelSelection.model}
+                {block.displayName} · 배정 모델 · {block.modelSelection.instanceId} ·{" "}
+                {block.modelSelection.model}
                 {block.attempt > 1 ? ` · 재시도 ${block.attempt - 1}` : ""}
               </span>
             </span>
@@ -1412,11 +1894,18 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
               <p className="mt-2 whitespace-pre-wrap">{block.instruction}</p>
             </details>
           ) : null}
-          <ChatMarkdown
+          <ResponseStyleMessageBody
+            variant={ctx.responseStyleProfile.variant}
             text={messageText}
             cwd={ctx.markdownCwd}
             threadRef={ctx.threadRef ?? undefined}
+            detailsScopeKey={row.message.id}
             isStreaming={Boolean(row.message.streaming)}
+            isTurnAnswer={row.showAssistantMeta}
+            isLatestAssistantAnswer={ctx.latestSettledAssistantMessageId === row.message.id}
+            hasActiveBackgroundWork={ctx.hasActiveBackgroundWork}
+            turnId={row.message.turnId ?? null}
+            {...(ctx.backgroundTasks ? { backgroundTasks: ctx.backgroundTasks } : {})}
             skills={ctx.skills}
             resultAttachments={row.message.attachments}
             onImageExpand={ctx.onImageExpand}
@@ -1658,7 +2147,7 @@ function WorkingTimer({ createdAt }: { createdAt: string }) {
 const WorkGroupSection = memo(function WorkGroupSection({
   groupedEntries,
 }: {
-  groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
+  groupedEntries: readonly TimelineWorkEntry[];
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
   const nonEmptyEntries = useMemo(
@@ -1672,21 +2161,58 @@ const WorkGroupSection = memo(function WorkGroupSection({
       : `도구 호출 ${nonEmptyEntries.length}회`
     : "작업 기록";
 
+  const toolActivities = nonEmptyEntries
+    .map((entry) => entry.toolActivity)
+    .filter((item): item is NonNullable<typeof item> => item !== undefined);
+  const sharedExecutorLabel =
+    toolActivities.length >= 2 &&
+    toolActivities.every((item) => item.executorLabel === toolActivities[0]!.executorLabel)
+      ? toolActivities[0]!.executorLabel
+      : null;
+  const activeTool = [...toolActivities]
+    .reverse()
+    .find((item) => item.phase === "started" || item.phase === "running");
+
   if (nonEmptyEntries.length === 0) return null;
 
   return (
     <section className="-mx-1 space-y-0.5 px-1 py-0.5" aria-label={groupLabel}>
-      {!onlyToolEntries && (
-        <p className="px-0.5 pb-0.5 font-medium text-secondary-label text-[11px]">{groupLabel}</p>
+      {(!onlyToolEntries || sharedExecutorLabel || activeTool) && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 pb-0.5 text-[11px] text-secondary-label">
+          {!onlyToolEntries && <span className="font-medium">{groupLabel}</span>}
+          {sharedExecutorLabel && (
+            <span className="truncate text-muted-foreground" title={sharedExecutorLabel}>
+              {sharedExecutorLabel}
+            </span>
+          )}
+          {activeTool && (
+            <span className="truncate font-medium text-primary/90" title={activeTool.summary}>
+              수행 중 · {activeTool.summary}
+            </span>
+          )}
+        </div>
       )}
       <div className="space-y-px">
-        {nonEmptyEntries.map((workEntry) => (
-          <SimpleWorkEntryRow
-            key={workEntry.id}
-            workEntry={workEntry}
-            workspaceRoot={workspaceRoot}
-          />
-        ))}
+        {nonEmptyEntries.map((workEntry) =>
+          workEntry.unlinkedToolSignals ? (
+            <UnlinkedToolRecords key={workEntry.id} groups={workEntry.unlinkedToolSignals} />
+          ) : workEntry.toolActivity ? (
+            <ToolActivityRow
+              key={workEntry.id}
+              group={workEntry.toolActivity}
+              hideExecutor={
+                sharedExecutorLabel !== null &&
+                workEntry.toolActivity.executorLabel === sharedExecutorLabel
+              }
+            />
+          ) : (
+            <SimpleWorkEntryRow
+              key={workEntry.id}
+              workEntry={workEntry}
+              workspaceRoot={workspaceRoot}
+            />
+          ),
+        )}
       </div>
     </section>
   );

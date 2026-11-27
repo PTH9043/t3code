@@ -5,8 +5,9 @@ const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
 const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
-const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}$/;
+const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\/?(?::\d+){0,2}$/;
 const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
+const TRAILING_DIRECTORY_SLASH_PATTERN = /[\\/]$/;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
 
@@ -63,6 +64,7 @@ export interface MarkdownFileLinkMeta {
   displayPath: string;
   workspaceRelativePath: string | null;
   basename: string;
+  isDirectory: boolean;
   line?: number;
   column?: number;
 }
@@ -352,11 +354,17 @@ export function resolveInlineCodeFileLinkMeta(
     candidate.startsWith("/") ||
     WINDOWS_DRIVE_PATH_PATTERN.test(candidate) ||
     WINDOWS_UNC_PATH_PATTERN.test(candidate);
+  const hasTrailingDirectorySlash =
+    !hasPosition && TRAILING_DIRECTORY_SLASH_PATTERN.test(candidate);
   if (!hasExplicitPathShape) {
     const withoutPosition = candidate.replace(POSITION_SUFFIX_PATTERN, "");
     const firstSegment = withoutPosition.split("/")[0] ?? withoutPosition;
     if (looksLikeHostname(firstSegment, hasPosition)) return null;
-    if (!hasPosition && !FILE_EXTENSION_PATTERN.test(basenameOfPath(withoutPosition))) {
+    if (
+      !hasPosition &&
+      !hasTrailingDirectorySlash &&
+      !FILE_EXTENSION_PATTERN.test(basenameOfPath(withoutPosition))
+    ) {
       return null;
     }
   }
@@ -377,20 +385,77 @@ export function resolveInlineCodeFileLinkMeta(
   return null;
 }
 
+function stripTrailingPathSeparators(path: string): string {
+  if (/^[A-Za-z]:[\\/]+$/.test(path)) {
+    return `${path.slice(0, 2)}${path.includes("\\") ? "\\" : "/"}`;
+  }
+  if (/^[/\\]+$/.test(path)) {
+    return path.slice(0, 1);
+  }
+  return path.replace(/[\\/]+$/, "");
+}
+
 function basenameOfPath(path: string): string {
-  const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
+  const cleaned = stripTrailingPathSeparators(path);
+  if (/^[A-Za-z]:[\\/]$/.test(cleaned) || cleaned === "/" || cleaned === "\\") {
+    return cleaned;
+  }
+  const separatorIndex = Math.max(cleaned.lastIndexOf("/"), cleaned.lastIndexOf("\\"));
+  return separatorIndex >= 0 ? cleaned.slice(separatorIndex + 1) : cleaned;
+}
+
+const KNOWN_HIDDEN_DIRECTORY_NAMES = new Set([
+  ".t3",
+  ".git",
+  ".github",
+  ".agents",
+  ".vscode",
+  ".idea",
+  ".claude",
+  ".codex",
+  ".gemini",
+  ".logs",
+  ".venv",
+  ".cache",
+  ".next",
+  ".nuxt",
+]);
+
+function isLikelyDirectoryPath(path: string, hasLine: boolean): boolean {
+  if (hasLine) return false;
+  if (TRAILING_DIRECTORY_SLASH_PATTERN.test(path)) return true;
+  if (/^[A-Za-z]:[\\/]?$/.test(path)) return true;
+  const basename = basenameOfPath(path);
+  if (!basename || basename === "." || basename === "..") return true;
+  if (EXTENSIONLESS_FILE_NAMES.has(basename)) return false;
+  if (KNOWN_HIDDEN_DIRECTORY_NAMES.has(basename.toLowerCase())) return true;
+  const isWindowsAbsolute =
+    WINDOWS_DRIVE_PATH_PATTERN.test(path) || WINDOWS_UNC_PATH_PATTERN.test(path);
+  // Real file extensions contain at least one letter (e.g. .html, .pdf, .mp4, .7z);
+  // purely numeric dot-suffixes on Windows paths (e.g. `지원자료_2026.10.10`, `v2.0`) are folders.
+  if (FILE_EXTENSION_PATTERN.test(basename)) {
+    if (isWindowsAbsolute && /\.[0-9]+$/.test(basename)) {
+      return true;
+    }
+    return false;
+  }
+  // Windows drive/UNC folders without an extension (e.g. D:\__NewAutoUsage, D:\__NewAutoUsage\apps\web)
+  // are directories unless named like a known extensionless file.
+  return isWindowsAbsolute;
 }
 
 function workspaceRelativePath(path: string, workspaceRoot: string | undefined): string | null {
   if (!workspaceRoot) return null;
-  const normalizedPath = normalizeWindowsDrivePath(path.replaceAll("\\", "/"));
+  const normalizedPath = stripTrailingPathSeparators(
+    normalizeWindowsDrivePath(path.replaceAll("\\", "/")),
+  );
   const normalizedRoot = normalizeWindowsDrivePath(workspaceRoot.replaceAll("\\", "/")).replace(
     /\/+$/,
     "",
   );
   const pathForCompare = normalizedPath.toLowerCase();
   const rootForCompare = normalizedRoot.toLowerCase();
+  if (pathForCompare === rootForCompare) return "";
   if (!pathForCompare.startsWith(`${rootForCompare}/`)) return null;
   return normalizedPath.slice(normalizedRoot.length + 1);
 }
@@ -410,13 +475,17 @@ function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string): Markdown
   const parsedColumn = column ? Number.parseInt(column, 10) : Number.NaN;
   const lineNumber = Number.isFinite(parsedLine) ? parsedLine : undefined;
   const columnNumber = Number.isFinite(parsedColumn) ? parsedColumn : undefined;
+  const isDirectory = isLikelyDirectoryPath(path, lineNumber !== undefined);
+  const normalizedFilePath = stripTrailingPathSeparators(path);
+  const normalizedTargetPath = lineNumber !== undefined ? targetPath : normalizedFilePath;
 
   return {
-    filePath: path,
-    targetPath,
-    displayPath: formatWorkspaceRelativePath(targetPath, cwd),
-    workspaceRelativePath: workspaceRelativePath(path, cwd),
-    basename: basenameOfPath(path),
+    filePath: normalizedFilePath,
+    targetPath: normalizedTargetPath,
+    displayPath: formatWorkspaceRelativePath(normalizedTargetPath, cwd),
+    workspaceRelativePath: workspaceRelativePath(normalizedFilePath, cwd),
+    basename: basenameOfPath(normalizedFilePath),
+    isDirectory,
     ...(lineNumber !== undefined ? { line: lineNumber } : {}),
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
   };

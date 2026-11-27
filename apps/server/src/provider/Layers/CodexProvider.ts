@@ -39,6 +39,32 @@ import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_STATUS_PROBE_TIMEOUT_MS = AUTH_PROBE_TIMEOUT_MS * 2;
+const CODEX_TRANSIENT_NETWORK_ERROR_PATTERN =
+  /workspace routing discovery timed out|timed out|timeout|etimedout|econnrefused|econnreset|enotfound|enetunreach|ehostunreach|eai_again|socket hang up|fetch failed|network/iu;
+
+export const CODEX_UNVERIFIED_NETWORK_MESSAGE =
+  "Codex 상태를 확인할 수 없습니다(네트워크 지연 또는 연결 단절). 진행 중인 대화는 영향을 받지 않을 수 있습니다.";
+
+export function isCodexTransientNetworkError(error: unknown): boolean {
+  if (isCodexAppServerSpawnError(error)) {
+    return false;
+  }
+  const messages: string[] = [];
+  if (typeof error === "string") {
+    messages.push(error);
+  } else if (typeof error === "object" && error !== null) {
+    if ("message" in error && typeof error.message === "string") {
+      messages.push(error.message);
+    }
+    if ("cause" in error && typeof error.cause === "object" && error.cause !== null) {
+      if ("message" in error.cause && typeof error.cause.message === "string") {
+        messages.push(error.cause.message);
+      }
+    }
+  }
+  return messages.some((message) => CODEX_TRANSIENT_NETWORK_ERROR_PATTERN.test(message));
+}
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -52,7 +78,17 @@ export interface CodexAppServerProviderSnapshot {
   readonly skills: ReadonlyArray<ServerProviderSkill>;
   readonly rateLimits?: CodexSchema.V2GetAccountRateLimitsResponse;
   readonly tokenUsage?: CodexSchema.V2GetAccountTokenUsageResponse;
+  readonly metadataIncomplete?: boolean;
+  readonly unverifiedReason?: string;
 }
+
+// Account authentication is independent from optional catalog and usage data.
+// A stuck optional request must not discard an already successful account/read.
+export const optionalCodexProbe = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.timeoutOption(Duration.seconds(4)),
+    Effect.catch(() => Effect.succeed(Option.none<A>())),
+  );
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
@@ -67,7 +103,7 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
 
 const DEFAULT_SERVICE_TIER_ID = "default";
 /** How many of the newest `gpt-<major>.<minor>` lines count as current. */
-const CURRENT_CODEX_MODEL_LINES = 2;
+const CURRENT_CODEX_MODEL_LINES = 1;
 
 type CodexCatalogModel = Pick<CodexSchema.V2ModelListResponse__Model, "model" | "upgrade">;
 
@@ -423,23 +459,60 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     Effect.provide(clientContext),
   );
 
-  const initialize = yield* client.request("initialize", {
-    clientInfo: {
-      name: "t3code_desktop",
-      title: "T3 Code Desktop",
-      version: "0.1.0",
-    },
-    capabilities: {
-      experimentalApi: true,
-    },
-  });
+  const initializeResult = yield* client
+    .request("initialize", {
+      clientInfo: {
+        name: "t3code_desktop",
+        title: "T3 Code Desktop",
+        version: "0.1.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+      },
+    })
+    .pipe(
+      Effect.map((value) => ({ _tag: "ok" as const, value })),
+      Effect.catchIf(isCodexTransientNetworkError, (error) =>
+        Effect.logWarning(
+          "Codex status probe could not verify provider due to network/timeout during initialize.",
+          { detail: error.message },
+        ).pipe(Effect.as({ _tag: "unverified" as const, reason: error.message })),
+      ),
+    );
+  if (initializeResult._tag === "unverified") {
+    return {
+      account: { account: null, requiresOpenaiAuth: false },
+      version: undefined,
+      models: appendCustomCodexModels([], input.customModels ?? []),
+      skills: [],
+      unverifiedReason: initializeResult.reason,
+    } satisfies CodexAppServerProviderSnapshot;
+  }
+  const initialize = initializeResult.value;
   yield* client.notify("initialized", undefined);
 
   // Extract the version string after the first '/' in userAgent, up to the next space or the end
   const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
   const version = versionMatch ? versionMatch[1] : undefined;
 
-  const accountResponse = yield* client.request("account/read", {});
+  const accountResult = yield* client.request("account/read", {}).pipe(
+    Effect.map((value) => ({ _tag: "ok" as const, value })),
+    Effect.catchIf(isCodexTransientNetworkError, (error) =>
+      Effect.logWarning("Codex status probe could not verify account due to network/timeout.", {
+        detail: error.message,
+      }).pipe(Effect.as({ _tag: "unverified" as const, reason: error.message })),
+    ),
+  );
+  if (accountResult._tag === "unverified") {
+    return {
+      account: { account: null, requiresOpenaiAuth: false },
+      version,
+      models: appendCustomCodexModels([], input.customModels ?? []),
+      skills: [],
+      unverifiedReason: accountResult.reason,
+    } satisfies CodexAppServerProviderSnapshot;
+  }
+  const accountResponse = accountResult.value;
   if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
     return {
       account: accountResponse,
@@ -451,12 +524,14 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   const [skillsResponse, models, rateLimitsResult, tokenUsageResult] = yield* Effect.all(
     [
-      client.request("skills/list", {
-        cwds: [input.cwd],
-      }),
-      requestAllCodexModels(client),
-      client.request("account/rateLimits/read", undefined).pipe(Effect.result),
-      client.request("account/usage/read", undefined).pipe(Effect.result),
+      optionalCodexProbe(
+        client.request("skills/list", {
+          cwds: [input.cwd],
+        }),
+      ),
+      optionalCodexProbe(requestAllCodexModels(client)),
+      optionalCodexProbe(client.request("account/rateLimits/read", undefined)),
+      optionalCodexProbe(client.request("account/usage/read", undefined)),
     ],
     { concurrency: "unbounded" },
   );
@@ -465,11 +540,17 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     account: accountResponse,
     version,
     models: applyPreferredCodexDefaultModel(
-      appendCustomCodexModels(models, input.customModels ?? []),
+      appendCustomCodexModels(
+        Option.getOrElse(models, () => []),
+        input.customModels ?? [],
+      ),
     ),
-    skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
-    ...(Result.isSuccess(rateLimitsResult) ? { rateLimits: rateLimitsResult.success } : {}),
-    ...(Result.isSuccess(tokenUsageResult) ? { tokenUsage: tokenUsageResult.success } : {}),
+    skills: Option.isSome(skillsResponse)
+      ? parseCodexSkillsListResponse(skillsResponse.value, input.cwd)
+      : [],
+    ...(Option.isNone(skillsResponse) || Option.isNone(models) ? { metadataIncomplete: true } : {}),
+    ...(Option.isSome(rateLimitsResult) ? { rateLimits: rateLimitsResult.value } : {}),
+    ...(Option.isSome(tokenUsageResult) ? { tokenUsage: tokenUsageResult.value } : {}),
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -644,7 +725,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     environment: resolvedEnvironment,
   }).pipe(
     Effect.scoped,
-    Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
+    Effect.timeoutOption(Duration.millis(CODEX_STATUS_PROBE_TIMEOUT_MS)),
     Effect.result,
   );
 
@@ -658,6 +739,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
+    const transientNetwork = installed && isCodexTransientNetworkError(error);
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -669,9 +751,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: installed ? "warning" : "error",
         auth: { status: "unknown" },
-        message: installed
-          ? `Codex 상태 확인에 실패했습니다: ${error.message} 진행 중인 대화는 영향을 받지 않을 수 있습니다.`
-          : "Codex CLI(`codex`)를 찾을 수 없습니다. 설치되어 있고 PATH에 등록되어 있는지 확인하세요.",
+        message: transientNetwork
+          ? CODEX_UNVERIFIED_NETWORK_MESSAGE
+          : installed
+            ? `Codex 상태 확인에 실패했습니다: ${error.message} 진행 중인 대화는 영향을 받지 않을 수 있습니다.`
+            : "Codex CLI(`codex`)를 찾을 수 없습니다. 설치되어 있고 PATH에 등록되어 있는지 확인하세요.",
       },
     });
   }
@@ -688,12 +772,28 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: "warning",
         auth: { status: "unknown" },
-        message: `Codex 상태 확인이 ${Math.round(AUTH_PROBE_TIMEOUT_MS / 1000)}초 안에 끝나지 않았습니다. CLI는 설치되어 있으며 진행 중인 대화는 영향을 받지 않을 수 있습니다.`,
+        message: `Codex 상태 확인이 ${Math.round(CODEX_STATUS_PROBE_TIMEOUT_MS / 1000)}초 안에 끝나지 않았습니다. 인증 여부는 아직 확인되지 않았으며 기존 선택으로 다시 시도할 수 있습니다.`,
       },
     });
   }
 
   const snapshot = probeResult.success.value;
+  if (snapshot.unverifiedReason) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models: snapshot.models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: snapshot.version ?? null,
+        status: "warning",
+        auth: { status: "unknown" },
+        message: CODEX_UNVERIFIED_NETWORK_MESSAGE,
+      },
+    });
+  }
   const accountStatus = accountProbeStatus(snapshot.account);
   const usage = codexAccountUsage(snapshot, checkedAt);
 
@@ -707,9 +807,19 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     probe: {
       installed: true,
       version: snapshot.version ?? null,
-      status: accountStatus.status,
+      status:
+        snapshot.metadataIncomplete && accountStatus.status === "ready"
+          ? "warning"
+          : accountStatus.status,
       auth: accountStatus.auth,
-      ...(accountStatus.message ? { message: accountStatus.message } : {}),
+      ...(accountStatus.message
+        ? { message: accountStatus.message }
+        : snapshot.metadataIncomplete
+          ? {
+              message:
+                "Codex 인증은 확인됐지만 모델 또는 스킬 목록을 아직 확인하지 못했습니다. 기존 목록으로 계속 사용할 수 있습니다.",
+            }
+          : {}),
     },
   });
 });

@@ -1,5 +1,8 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  findThreadModelTeam,
+  ThreadId,
+  type ThreadModelTeamUpdate,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -18,6 +21,98 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
+  it("updates only the requested background watch, including repeated enables and disables", () => {
+    const a = ThreadId.make("room-a");
+    const b = ThreadId.make("room-b");
+    const set = (settings: typeof DEFAULT_SERVER_SETTINGS, threadId: ThreadId, enabled: boolean) =>
+      applyServerSettingsPatch(settings, { backgroundWatchThreadUpdate: { threadId, enabled } });
+
+    const before = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      selfMonitoring: { enabled: true },
+      workspaceProgramPermissions: { monitoringAutoActions: true },
+    });
+    expect(before.backgroundWatchThreadIds).toEqual([]);
+    const first = set(before, a, true);
+    const both = set(first, b, true);
+    expect(first.backgroundWatchThreadIds).toEqual([a]);
+    expect(both.backgroundWatchThreadIds).toEqual([a, b]);
+    expect(set(both, a, true)).toEqual(both);
+    const disabled = set(both, a, false);
+    expect(disabled).toEqual({ ...before, backgroundWatchThreadIds: [b] });
+    expect(set(disabled, a, false)).toEqual(disabled);
+    expect(set(disabled, b, false)).toEqual(before);
+  });
+
+  it("changes banner duration independently of watch membership", () => {
+    const room = ThreadId.make("room");
+    const silent = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      backgroundWatchThreadUpdate: { threadId: room, enabled: true },
+      backgroundWatchNoticeSeconds: 0,
+    });
+    expect(silent.backgroundWatchThreadIds).toEqual([room]);
+    expect(silent.backgroundWatchNoticeSeconds).toBe(0);
+    expect(silent).not.toHaveProperty("backgroundWatchThreadUpdate");
+    const visible = applyServerSettingsPatch(silent, { backgroundWatchNoticeSeconds: 120 });
+    expect(visible).toEqual({ ...silent, backgroundWatchNoticeSeconds: 120 });
+  });
+
+  it("isolates delegated teams across rooms, answering models and accounts, including an empty override", () => {
+    const room = ThreadId.make("room-a");
+    const second = ThreadId.make("room-b");
+    const parent = ProviderInstanceId.make("opencode");
+    const otherAccount = ProviderInstanceId.make("opencode_work");
+    const scope = { threadId: room, answeringInstanceId: parent, forModel: "kimi-k3" };
+    const member = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "terra",
+      role: "scout" as const,
+      instructions: "Review the source evidence.",
+    };
+    const set = (settings: typeof DEFAULT_SERVER_SETTINGS, update: ThreadModelTeamUpdate) =>
+      applyServerSettingsPatch(settings, { threadModelTeamUpdate: update });
+    const one = set(DEFAULT_SERVER_SETTINGS, { ...scope, members: [member] });
+    const two = set(one, { ...scope, forModel: "other-model", members: [] });
+    const three = set(two, { ...scope, threadId: second, members: [member] });
+    const four = set(three, { ...scope, answeringInstanceId: otherAccount, members: [] });
+    const removed = set(four, { ...scope, forModel: "KIMI-K3", members: null });
+    expect(DEFAULT_SERVER_SETTINGS.threadModelTeams).toEqual([]);
+    expect(findThreadModelTeam(one.threadModelTeams, scope)?.members).toEqual([member]);
+    expect(removed.threadModelTeams).toHaveLength(3);
+    expect(findThreadModelTeam(removed.threadModelTeams, scope)).toBeUndefined();
+    expect(
+      findThreadModelTeam(removed.threadModelTeams, { ...scope, forModel: "other-model" })?.members,
+    ).toEqual([]);
+    expect(
+      findThreadModelTeam(removed.threadModelTeams, { ...scope, threadId: second })?.members,
+    ).toEqual([member]);
+    expect(
+      findThreadModelTeam(removed.threadModelTeams, { ...scope, answeringInstanceId: otherAccount })
+        ?.members,
+    ).toEqual([]);
+    expect(removed).not.toHaveProperty("threadModelTeamUpdate");
+  });
+
+  it("round-trips the search model order independently of the answering model and removes stale rows", () => {
+    const baidu = {
+      provider: "baidu",
+      model: "selected-model",
+      apiInstanceId: "qianfan-test",
+    } as const;
+    const openai = { provider: "openai", model: "another-model" } as const;
+    expect(DEFAULT_SERVER_SETTINGS.searchModels).toEqual([]);
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      searchModels: [baidu, openai],
+    });
+    const reordered = applyServerSettingsPatch(first, { searchModels: [openai, baidu] });
+    expect(reordered.searchModels).toEqual([openai, baidu]);
+    expect(reordered.textGenerationModelSelection).toEqual(
+      DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+    );
+    expect(applyServerSettingsPatch(reordered, { searchModels: [baidu] }).searchModels).toEqual([
+      baidu,
+    ]);
+    expect(applyServerSettingsPatch(reordered, { searchModels: [] }).searchModels).toEqual([]);
+  });
   it("preserves AI search choices when only the research budget changes", () => {
     const current = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       aiSearch: { semanticEnabled: false, embeddingModel: "local-custom-model", ocrEnabled: false },
@@ -28,6 +123,31 @@ describe("serverSettings helpers", () => {
       applyServerSettingsPatch(next, { aiSearch: { researchDailyUsd: null } }).aiSearch
         .researchDailyUsd,
     ).toBeNull();
+  });
+  it("replaces the subordinate model list as a whole", () => {
+    const claude = ProviderInstanceId.make("claudeAgent");
+    const codex = ProviderInstanceId.make("codex");
+    expect(DEFAULT_SERVER_SETTINGS.subordinateModels).toEqual([]);
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      subordinateModels: [
+        { answeringInstanceId: claude, instanceId: codex, model: "gpt-6-sol", role: "worker" },
+        { answeringInstanceId: claude, instanceId: codex, model: "gpt-6-astra", role: "advisor" },
+      ],
+    });
+    expect(first.subordinateModels).toHaveLength(2);
+    // An unrelated patch keeps the list.
+    expect(
+      applyServerSettingsPatch(first, { aiSearch: { researchDailyUsd: 1 } }).subordinateModels,
+    ).toEqual(first.subordinateModels);
+    const next = applyServerSettingsPatch(first, {
+      subordinateModels: [
+        { answeringInstanceId: codex, instanceId: codex, model: "gpt-6.1-terra", role: "scout" },
+      ],
+    });
+    expect(next.subordinateModels).toEqual([
+      { answeringInstanceId: codex, instanceId: codex, model: "gpt-6.1-terra", role: "scout" },
+    ]);
+    expect(applyServerSettingsPatch(next, { subordinateModels: [] }).subordinateModels).toEqual([]);
   });
   it("replaces MCP transport definitions atomically and removes only selected registrations", () => {
     const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {

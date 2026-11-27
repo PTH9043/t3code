@@ -35,7 +35,7 @@ export function MobileMcpServerEditor(props: {
     ),
   );
   const [providers, setProviders] = useState<readonly ManagedMcpProvider[]>(
-    props.initial?.providers ?? ["grok", "codex", "claudeAgent"],
+    props.initial?.providers ?? ["grok", "codex", "claudeAgent", "gemini"],
   );
   const [scoped, setScoped] = useState(
     Boolean(props.initial ? props.initial.workspaceRoot : props.workspaceRoot),
@@ -139,10 +139,14 @@ export function MobileMcpServerEditor(props: {
       <Text className="text-xs text-foreground-muted">
         ${"{ENV_NAME}"}는 서버 환경 변수에서 읽습니다. 미설정 값은 연결 검사에 표시됩니다.
       </Text>
-      {(["grok", "codex", "claudeAgent"] as const).map((provider) => (
+      {(["grok", "codex", "claudeAgent", "gemini"] as const).map((provider) => (
         <View key={provider} className="flex-row justify-between">
           <Text className="text-xs text-foreground">
-            {provider === "claudeAgent" ? "Claude" : provider}
+            {provider === "claudeAgent"
+              ? "Claude"
+              : provider === "gemini"
+                ? "Antigravity"
+                : provider}
           </Text>
           <Switch
             value={providers.includes(provider)}

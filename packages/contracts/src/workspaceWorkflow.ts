@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   NonNegativeInt,
@@ -10,11 +11,13 @@ import { WorkflowDefinition, WorkflowValues, WorkflowVersion } from "./workflowG
 import {
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadTurnStartBootstrap,
   WorkspaceCollaborationRun,
   WorkspaceExecutionProfile,
   WorkflowRoleModels,
 } from "./orchestration.ts";
 import { SkillMetadata } from "./agentSkills.ts";
+import { ServerProviderSkill } from "./server.ts";
 
 export const WORKSPACE_WORKFLOW_WS_METHODS = {
   overview: "workspaceWorkflow.overview",
@@ -23,9 +26,21 @@ export const WORKSPACE_WORKFLOW_WS_METHODS = {
   start: "workspaceWorkflow.start",
   control: "workspaceWorkflow.control",
   skills: "workspaceWorkflow.skills",
+  chatSkills: "workspaceWorkflow.chatSkills",
   getRun: "workspaceWorkflow.getRun",
 } as const;
 export const WorkflowLookup = Schema.Struct({ projectId: ProjectId });
+export const WorkflowChatSkillLookup = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+});
+export const WorkflowChatSkillCatalog = Schema.Struct({
+  codex: Schema.Array(ServerProviderSkill),
+  claudeAgent: Schema.Array(ServerProviderSkill),
+  gemini: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  grok: Schema.Array(ServerProviderSkill),
+  truncated: Schema.Boolean,
+});
 export const WorkflowRunLookup = Schema.Struct({
   projectId: ProjectId,
   runId: WorkspaceCollaborationRunId,
@@ -112,9 +127,11 @@ export const WorkflowStart = Schema.Struct({
   revision: Schema.optionalKey(NonNegativeInt),
   values: Schema.optionalKey(WorkflowValues),
   task: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(20_000))),
+  userMessage: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(20_000))),
   requestId: TrimmedNonEmptyString,
   roleModels: Schema.optionalKey(WorkflowRoleModels),
   threadId: Schema.optionalKey(ThreadId),
+  bootstrap: Schema.optionalKey(ThreadTurnStartBootstrap),
   executionProfile: Schema.optionalKey(WorkspaceExecutionProfile),
   meeting: Schema.optionalKey(WorkspaceExecutionProfile.fields.meeting),
   orchestra: Schema.optionalKey(WorkspaceExecutionProfile.fields.orchestra),

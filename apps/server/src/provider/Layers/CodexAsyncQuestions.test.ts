@@ -45,6 +45,69 @@ it.effect("delivers question images with the async answer", () =>
   }),
 );
 
+it.effect("does not treat a changed image as an identical accepted answer", () =>
+  Effect.gen(function* () {
+    let deliveries = 0;
+    let resolutions = 0;
+    const bridge = yield* makeCodexAsyncQuestions({
+      requested: () => Effect.void,
+      resolved: () =>
+        Effect.sync(() => {
+          resolutions++;
+        }),
+      closed: () => Effect.void,
+      sendAnswer: () =>
+        Effect.sync(() => {
+          deliveries++;
+          return nextTurn;
+        }),
+      rejectedBeforeDelivery: () => false,
+    });
+    yield* bridge.register(item, originalTurn);
+    const requestId = ApprovalRequestId.make("async:native-question-item");
+    const first = [{ type: "image" as const, url: "data:image/png;base64,YQ==" }];
+    const changed = [{ type: "image" as const, url: "data:image/png;base64,Yg==" }];
+    expect(yield* bridge.answer(requestId, answers, first)).toBe(true);
+    expect(Exit.isFailure(yield* Effect.exit(bridge.answer(requestId, answers, changed)))).toBe(
+      true,
+    );
+    expect(Exit.isFailure(yield* Effect.exit(bridge.answer(requestId, answers)))).toBe(true);
+    expect(deliveries).toBe(1);
+    expect(resolutions).toBe(1);
+    expect(yield* bridge.answer(requestId, answers, first)).toBe(true);
+    expect(deliveries).toBe(1);
+    expect(resolutions).toBe(2);
+  }),
+);
+
+it.effect(
+  "does not treat differently structured answers with the same rendered text as identical",
+  () =>
+    Effect.gen(function* () {
+      let deliveries = 0;
+      const bridge = yield* makeCodexAsyncQuestions({
+        requested: () => Effect.void,
+        resolved: () => Effect.void,
+        closed: () => Effect.void,
+        sendAnswer: () =>
+          Effect.sync(() => {
+            deliveries++;
+            return nextTurn;
+          }),
+        rejectedBeforeDelivery: () => false,
+      });
+      yield* bridge.register(item, originalTurn);
+      const requestId = ApprovalRequestId.make("async:native-question-item");
+      expect(yield* bridge.answer(requestId, { question_1: { answers: ["A", "B"] } })).toBe(true);
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(bridge.answer(requestId, { question_1: { answers: ["A\nB"] } })),
+        ),
+      ).toBe(true);
+      expect(deliveries).toBe(1);
+    }),
+);
+
 it.effect("renders native free-text metadata and sends an identical answer once", () =>
   Effect.gen(function* () {
     const opened: CodexAsyncQuestion[] = [];
@@ -96,7 +159,46 @@ it.effect("renders native free-text metadata and sends an identical answer once"
   }),
 );
 
-it.effect("does not resend an answer after unknown delivery and closes the pending card", () =>
+it.effect("keeps an unanswered card open when its session closes", () =>
+  Effect.gen(function* () {
+    let closed = 0;
+    const bridge = yield* makeCodexAsyncQuestions({
+      requested: () => Effect.void,
+      resolved: () => Effect.void,
+      closed: () =>
+        Effect.sync(() => {
+          closed++;
+        }),
+      sendAnswer: () => Effect.succeed(nextTurn),
+      rejectedBeforeDelivery: () => false,
+    });
+    yield* bridge.register(item, originalTurn);
+    yield* bridge.close;
+    expect(closed).toBe(0);
+  }),
+);
+
+it.effect("ignores late question notifications after the session closes", () =>
+  Effect.gen(function* () {
+    let requested = 0;
+    const bridge = yield* makeCodexAsyncQuestions({
+      requested: () =>
+        Effect.sync(() => {
+          requested++;
+        }),
+      resolved: () => Effect.void,
+      closed: () => Effect.void,
+      sendAnswer: () => Effect.succeed(nextTurn),
+      rejectedBeforeDelivery: () => false,
+    });
+    yield* bridge.close;
+    yield* bridge.register(item, originalTurn);
+    expect(requested).toBe(0);
+    expect(yield* bridge.has(ApprovalRequestId.make("async:native-question-item"))).toBe(false);
+  }),
+);
+
+it.effect("does not resend or falsely close an answer with unknown delivery", () =>
   Effect.gen(function* () {
     const opened: CodexAsyncQuestion[] = [];
     let sent = 0;
@@ -124,7 +226,72 @@ it.effect("does not resend an answer after unknown delivery and closes the pendi
     expect(retry._tag).toBe("CodexAsyncAnswerDeliveryError");
     expect(sent).toBe(1);
     yield* bridge.close;
-    expect(closed).toBe(1);
+    expect(closed).toBe(0);
+  }),
+);
+
+it.effect("does not restore a closed session when an in-flight answer succeeds late", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let closed = 0;
+    let resolved = 0;
+    const bridge = yield* makeCodexAsyncQuestions({
+      requested: () => Effect.void,
+      resolved: () =>
+        Effect.sync(() => {
+          resolved++;
+        }),
+      closed: () =>
+        Effect.sync(() => {
+          closed++;
+        }),
+      sendAnswer: () =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return nextTurn;
+        }),
+      rejectedBeforeDelivery: () => false,
+    });
+    yield* bridge.register(item, originalTurn);
+    const requestId = ApprovalRequestId.make("async:native-question-item");
+    const delivery = yield* bridge.answer(requestId, answers).pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* bridge.close;
+    expect(closed).toBe(0);
+    yield* Deferred.succeed(release, undefined);
+    expect(yield* Fiber.join(delivery)).toBe(true);
+    expect(resolved).toBe(1);
+    expect(yield* bridge.has(requestId)).toBe(false);
+    expect(yield* bridge.answer(requestId, answers)).toBe(false);
+  }),
+);
+
+it.effect("does not restore a closed session after a late pre-delivery rejection", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const bridge = yield* makeCodexAsyncQuestions({
+      requested: () => Effect.void,
+      resolved: () => Effect.void,
+      closed: () => Effect.void,
+      sendAnswer: () =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return yield* new AnswerFailure({ known: true });
+        }),
+      rejectedBeforeDelivery: (error) => error.known,
+    });
+    yield* bridge.register(item, originalTurn);
+    const requestId = ApprovalRequestId.make("async:native-question-item");
+    const delivery = yield* bridge.answer(requestId, answers).pipe(Effect.result, Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* bridge.close;
+    yield* Deferred.succeed(release, undefined);
+    expect((yield* Fiber.join(delivery))._tag).toBe("Failure");
+    expect(yield* bridge.has(requestId)).toBe(false);
   }),
 );
 

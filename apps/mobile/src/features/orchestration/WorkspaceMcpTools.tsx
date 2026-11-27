@@ -91,7 +91,8 @@ export function WorkspaceMcpTools({
       {expanded ? (
         <>
           <Text className="text-xs text-muted-foreground">
-            새 AI 세션부터 적용됩니다. 파일 도구는 해당 작업 폴더를 사용합니다.
+            T3 Code 내장 도구(t3-code · 협업 브라우저/기억/위임 26개)는 항상 1순위로 자동 연결되며,
+            아래 설정은 새 AI 세션부터 적용됩니다.
           </Text>
           <Pressable
             accessibilityRole="button"
@@ -153,11 +154,24 @@ export function WorkspaceMcpTools({
               <Text className="text-xs text-muted-foreground">
                 {entry.providers
                   .map((provider) =>
-                    provider === "claudeAgent" ? "Claude" : provider === "grok" ? "Grok" : "Codex",
+                    provider === "claudeAgent"
+                      ? "Claude"
+                      : provider === "gemini"
+                        ? "Antigravity"
+                        : provider === "grok"
+                          ? "Grok"
+                          : "Codex",
                   )
                   .join(" · ")}{" "}
                 · {entry.scope === "project" ? "프로젝트 설정" : "환경 설정"}
               </Text>
+              {entry.nativeRedundantProviders?.includes("gemini") ? (
+                <Text className="text-xs text-muted-foreground">
+                  {entry.scope === "project"
+                    ? "Antigravity 프로젝트 강제 포함"
+                    : "Antigravity 기본 제외 (내장 도구 중복 · 도구 예산 보호)"}
+                </Text>
+              ) : null}
               <Text className="text-xs text-muted-foreground">
                 {entry.status === "ready"
                   ? `연결 확인 · 도구 ${entry.tools.length}개`

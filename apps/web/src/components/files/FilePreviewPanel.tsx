@@ -724,22 +724,32 @@ function RenderedMarkdownSurface({
     onPendingChange,
   });
 
+  const contentsRef = useRef(contents);
+  contentsRef.current = contents;
+  const saveCoordinatorRef = useRef(saveCoordinator);
+  saveCoordinatorRef.current = saveCoordinator;
+  const handleTaskListChange = useCallback(
+    ({ markerOffset, checked }: { markerOffset: number; checked: boolean }) => {
+      const currentContents =
+        getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
+        contentsRef.current;
+      const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
+      if (nextContents === currentContents) return;
+      setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+      saveCoordinatorRef.current.change(nextContents);
+    },
+    [cwd, environmentId, relativePath],
+  );
+
   return (
     <ScrollArea className="min-h-0 flex-1">
       <ChatMarkdown
         text={contents}
         cwd={cwd}
         threadRef={threadRef}
+        detailsScopeKey={`file:${environmentId}:${cwd}:${relativePath}`}
         className="mx-auto max-w-4xl px-6 py-5"
-        onTaskListChange={({ markerOffset, checked }) => {
-          const currentContents =
-            getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
-            contents;
-          const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
-          if (nextContents === currentContents) return;
-          setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
-          saveCoordinator.change(nextContents);
-        }}
+        onTaskListChange={handleTaskListChange}
       />
     </ScrollArea>
   );

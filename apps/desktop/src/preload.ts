@@ -12,6 +12,7 @@ import * as IpcChannels from "./ipc/channels.ts";
 
 exposeClerkBridge({ passkeys: true });
 
+let upgradeRoomMenuClick = false;
 let internalDragHandoffInstalled = false;
 function installInternalDragHandoff() {
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Electron sandbox preload has no Effect/Node host services.
@@ -117,6 +118,56 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
+  patchClientSettings: (patch) =>
+    ipcRenderer.invoke(IpcChannels.PATCH_CLIENT_SETTINGS_CHANNEL, patch),
+  onClientSettingsChanged: (listener) => {
+    const wrapped = (
+      _event: Electron.IpcRendererEvent,
+      settings: import("@t3tools/contracts/settings").ClientSettings,
+    ) => listener(settings);
+    ipcRenderer.on(IpcChannels.CLIENT_SETTINGS_CHANGED_CHANNEL, wrapped);
+    return () => ipcRenderer.removeListener(IpcChannels.CLIENT_SETTINGS_CHANGED_CHANNEL, wrapped);
+  },
+  getAssistantSettings: () => ipcRenderer.invoke(IpcChannels.GET_ASSISTANT_SETTINGS_CHANNEL),
+  getAssistantVoiceStatus: () => ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_STATUS_CHANNEL),
+  beginAssistantVoiceRecording: () =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_RECORDING_BEGIN_CHANNEL),
+  endAssistantVoiceRecording: (token) =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_RECORDING_END_CHANNEL, token),
+  runAssistantVoice: (request) =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_RUN_CHANNEL, request),
+  cancelAssistantVoice: () => ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_CANCEL_CHANNEL),
+  beginAssistantVoiceSample: () =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_SAMPLE_BEGIN_CHANNEL),
+  saveAssistantVoiceSample: (request) =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_SAMPLE_SAVE_CHANNEL, request),
+  deleteAssistantVoiceSample: () =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_VOICE_SAMPLE_DELETE_CHANNEL),
+  setAssistantSettings: (patch) =>
+    ipcRenderer.invoke(IpcChannels.SET_ASSISTANT_SETTINGS_CHANNEL, patch),
+  openAssistant: () => ipcRenderer.invoke(IpcChannels.OPEN_ASSISTANT_CHANNEL),
+  closeAssistant: () => ipcRenderer.invoke(IpcChannels.CLOSE_ASSISTANT_CHANNEL),
+  onAssistantSettingsChanged: (listener) => {
+    const wrapped = (
+      _event: Electron.IpcRendererEvent,
+      value: import("@t3tools/contracts").DesktopAssistantSettings,
+    ) => listener(value);
+    ipcRenderer.on(IpcChannels.ASSISTANT_SETTINGS_CHANGED_CHANNEL, wrapped);
+    return () =>
+      ipcRenderer.removeListener(IpcChannels.ASSISTANT_SETTINGS_CHANGED_CHANNEL, wrapped);
+  },
+  publishAssistantModelUpdate: (update) =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_MODEL_UPDATE_CHANNEL, update),
+  getAssistantModelSelection: (ref) =>
+    ipcRenderer.invoke(IpcChannels.ASSISTANT_MODEL_GET_CHANNEL, ref),
+  onAssistantModelUpdate: (listener) => {
+    const wrapped = (
+      _event: Electron.IpcRendererEvent,
+      value: import("@t3tools/contracts").DesktopAssistantModelUpdate,
+    ) => listener(value);
+    ipcRenderer.on(IpcChannels.ASSISTANT_MODEL_CHANGED_CHANNEL, wrapped);
+    return () => ipcRenderer.removeListener(IpcChannels.ASSISTANT_MODEL_CHANGED_CHANNEL, wrapped);
+  },
   getConnectionCatalog: () => ipcRenderer.invoke(IpcChannels.GET_CONNECTION_CATALOG_CHANNEL),
   setConnectionCatalog: (catalog) =>
     ipcRenderer.invoke(IpcChannels.SET_CONNECTION_CATALOG_CHANNEL, catalog),
@@ -176,6 +227,33 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ...(position === undefined ? {} : { position }),
     }),
   openExternal: (url: string) => ipcRenderer.invoke(IpcChannels.OPEN_EXTERNAL_CHANNEL, url),
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- The sandbox preload exposes host-specific desktop capabilities.
+  ...(process.platform === "win32" && {
+    upgradeRoomTab: {
+      resume: (owner) => ipcRenderer.invoke(IpcChannels.RESUME_UPGRADE_ROOM_CHANNEL, owner),
+      open: (owner) => {
+        if (!upgradeRoomMenuClick && !navigator.userActivation.isActive) {
+          return Promise.resolve(false);
+        }
+        upgradeRoomMenuClick = false;
+        return ipcRenderer.invoke(IpcChannels.OPEN_UPGRADE_ROOM_CHANNEL, owner);
+      },
+      onMenuOpen: (listener) => {
+        const click = () => {
+          upgradeRoomMenuClick = true;
+          try {
+            listener();
+          } finally {
+            upgradeRoomMenuClick = false;
+          }
+        };
+        ipcRenderer.on(IpcChannels.UPGRADE_ROOM_TAB_MENU_CHANNEL, click);
+        return () => ipcRenderer.removeListener(IpcChannels.UPGRADE_ROOM_TAB_MENU_CHANNEL, click);
+      },
+      layout: (owner, bounds) =>
+        ipcRenderer.send(IpcChannels.UPGRADE_ROOM_TAB_LAYOUT_CHANNEL, owner, bounds),
+    },
+  }),
   onMenuAction: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
       if (typeof action !== "string") return;

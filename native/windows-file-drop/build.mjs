@@ -1,3 +1,4 @@
+import { readMsvcEnvironment } from "../msvc-environment.mjs";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
@@ -70,22 +71,7 @@ if (NodeOS.platform() !== "win32") {
     ).trim();
     if (!installation)
       throw new Error("Visual Studio C++ build tools are required for Windows file drops.");
-    const vcvars = NodePath.join(installation, "VC/Auxiliary/Build/vcvarsall.bat");
-    const target = architecture === "arm64" ? "amd64_arm64" : "amd64";
-    const environment = run(
-      process.env.ComSpec ?? "cmd.exe",
-      ["/u", "/d", "/s", "/c", `"call "${vcvars}" ${target} >nul && set"`],
-      { windowsVerbatimArguments: true },
-    );
-    const compilerEnv = { ...process.env };
-    for (const line of environment.toString("utf16le").split(/\r?\n/)) {
-      const separator = line.indexOf("=");
-      if (separator <= 0) continue;
-      const key = line.slice(0, separator);
-      for (const existing of Object.keys(compilerEnv))
-        if (existing.toLowerCase() === key.toLowerCase()) delete compilerEnv[existing];
-      compilerEnv[key] = line.slice(separator + 1);
-    }
+    const compilerEnv = readMsvcEnvironment(installation, architecture, run);
     NodeFS.mkdirSync(output, { recursive: true });
     run(
       "cl.exe",

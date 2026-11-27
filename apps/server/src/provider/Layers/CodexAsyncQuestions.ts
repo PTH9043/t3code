@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import { ApprovalRequestId, ProviderItemId, type TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -16,6 +18,7 @@ const NativeQuestion = Schema.Struct({
   ),
 });
 const decodeNativeQuestion = Schema.decodeUnknownOption(NativeQuestion);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 export type CodexAsyncAnswers = Readonly<
   Record<string, { readonly answers: ReadonlyArray<string> }>
 >;
@@ -61,9 +64,12 @@ export const makeCodexAsyncQuestions = <E, E2>(callbacks: {
       readonly question: CodexAsyncQuestion;
       readonly state: "pending" | "submitting" | "accepted" | "cancelling";
       readonly text?: string;
+      readonly imagesFingerprint?: string;
+      readonly answersFingerprint?: string;
       readonly acceptedTurnId?: TurnId;
     };
     const pending = yield* Ref.make(new Map<ApprovalRequestId, Pending>());
+    let sessionClosed = false;
     const register = Effect.fn("CodexAsyncQuestions.register")(function* (
       item: unknown,
       turnId: TurnId,
@@ -85,10 +91,10 @@ export const makeCodexAsyncQuestions = <E, E2>(callbacks: {
         })),
       };
       const added = yield* Ref.modify(pending, (current) => {
-        if (current.has(question.requestId)) return [false, current];
+        if (sessionClosed || current.has(question.requestId)) return [false, current];
         return [true, new Map(current).set(question.requestId, { question, state: "pending" })];
       });
-      if (added) yield* callbacks.requested(question);
+      if (added && !sessionClosed) yield* callbacks.requested(question);
     });
     const answer = Effect.fn("CodexAsyncQuestions.answer")(function* (
       requestId: ApprovalRequestId,
@@ -105,36 +111,67 @@ export const makeCodexAsyncQuestions = <E, E2>(callbacks: {
               `${question.question}\n${(answers[question.id]?.answers ?? []).join("\n")}`,
           )
           .join("\n\n");
-      if (current.state === "accepted" && current.text === text && current.acceptedTurnId) {
+      const imagesFingerprint = NodeCrypto.createHash("sha256")
+        .update(encodeJson(images ?? []))
+        .digest("hex");
+      const answersFingerprint = NodeCrypto.createHash("sha256")
+        .update(encodeJson(Object.entries(answers).toSorted(([a], [b]) => a.localeCompare(b))))
+        .digest("hex");
+      if (
+        current.state === "accepted" &&
+        current.text === text &&
+        current.imagesFingerprint === imagesFingerprint &&
+        current.answersFingerprint === answersFingerprint &&
+        current.acceptedTurnId
+      ) {
         yield* callbacks.resolved(current.question, answers, current.acceptedTurnId);
         return true;
       }
       const claimed = yield* Ref.modify(pending, (entries) => {
         const entry = entries.get(requestId);
         if (entry?.state !== "pending") return [false, entries];
-        return [true, new Map(entries).set(requestId, { ...entry, state: "submitting", text })];
+        return [
+          true,
+          new Map(entries).set(requestId, {
+            ...entry,
+            state: "submitting",
+            text,
+            imagesFingerprint,
+            answersFingerprint,
+          }),
+        ];
       });
       if (!claimed) return yield* new CodexAsyncAnswerDeliveryError({ requestId });
       const turnId = yield* callbacks.sendAnswer(text, images).pipe(
         Effect.catch((error) =>
           Effect.gen(function* () {
             if (callbacks.rejectedBeforeDelivery(error)) {
-              yield* Ref.update(pending, (entries) =>
-                new Map(entries).set(requestId, { question: current.question, state: "pending" }),
-              );
+              yield* Ref.update(pending, (entries) => {
+                const active = entries.get(requestId);
+                if (active?.state !== "submitting" || active.question !== current.question)
+                  return entries;
+                return new Map(entries).set(requestId, {
+                  question: current.question,
+                  state: "pending",
+                });
+              });
             }
             return yield* Effect.fail(error);
           }),
         ),
       );
-      yield* Ref.update(pending, (entries) =>
-        new Map(entries).set(requestId, {
+      yield* Ref.update(pending, (entries) => {
+        const active = entries.get(requestId);
+        if (active?.state !== "submitting" || active.question !== current.question) return entries;
+        return new Map(entries).set(requestId, {
           question: current.question,
           state: "accepted",
           text,
+          imagesFingerprint,
+          answersFingerprint,
           acceptedTurnId: turnId,
-        }),
-      );
+        });
+      });
       yield* callbacks.resolved(current.question, answers, turnId);
       return true;
     });
@@ -163,14 +200,11 @@ export const makeCodexAsyncQuestions = <E, E2>(callbacks: {
       });
       return true;
     });
-    const close = Effect.gen(function* () {
-      const entries = yield* Ref.getAndSet(pending, new Map());
-      yield* Effect.forEach(
-        [...entries.values()].filter((entry) => entry.state !== "accepted"),
-        (entry) => callbacks.closed(entry.question),
-        { discard: true },
-      );
-    });
+    // Questions and delivery receipts are durable outside this session. Closing
+    // the callback registry must not claim an uncertain answer was resolved.
+    const close = Effect.sync(() => {
+      sessionClosed = true;
+    }).pipe(Effect.andThen(Ref.set(pending, new Map())), Effect.uninterruptible);
     const has = (requestId: ApprovalRequestId) =>
       Ref.get(pending).pipe(Effect.map((entries) => entries.has(requestId)));
     return { register, answer, cancel, has, close };

@@ -1,4 +1,6 @@
 import { ConversationHandoffMode } from "./conversationHandoff.ts";
+import { UnifiedBgTask } from "./backgroundTasks.ts";
+import { WorkspaceWikiLinksInput, WorkspaceWikiLinksResult } from "./workspaceWikiLinks.ts";
 import { WorkflowExecutionContext, WorkflowVersion } from "./workflowGraph.ts";
 import { WorkspaceDesignReference } from "./designReference.ts";
 import { WorkspaceCompletionAutomation } from "./completionAutomation.ts";
@@ -41,15 +43,29 @@ import {
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { ApprovedTaskConditions } from "./taskConditions.ts";
+import { ThreadCharacter } from "./threadCharacter.ts";
+import { ThreadModelTeam, ThreadTeamMember } from "./threadModelTeam.ts";
+import { ThreadResponseStyle } from "./threadResponseStyle.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   getThreadTokenUsage: "orchestration.getThreadTokenUsage",
   dispatchCommand: "orchestration.dispatchCommand",
+  checkTurnReceipt: "orchestration.checkTurnReceipt",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
+  getWorkspaceKnowledgeDashboard: "orchestration.getWorkspaceKnowledgeDashboard",
   listWorkspaceKnowledge: "orchestration.listWorkspaceKnowledge",
+  getPdfRevisionStatus: "orchestration.getPdfRevisionStatus",
+  startPdfRevision: "orchestration.startPdfRevision",
+  retryPdfRevision: "orchestration.retryPdfRevision",
+  readPdfRevisionSource: "orchestration.readPdfRevisionSource",
+  editWorkspaceKnowledge: "orchestration.editWorkspaceKnowledge",
+  restoreWorkspaceKnowledge: "orchestration.restoreWorkspaceKnowledge",
+  listWorkspaceKnowledgeRevisions: "orchestration.listWorkspaceKnowledgeRevisions",
+  getWorkspaceKnowledgeRevision: "orchestration.getWorkspaceKnowledgeRevision",
+  getWorkspaceWikiLinks: "orchestration.getWorkspaceWikiLinks",
   searchWorkspaceRag: "orchestration.searchWorkspaceRag",
   composeWorkspacePrompt: "orchestration.composeWorkspacePrompt",
   listWorkspaceAgentRoles: "orchestration.listWorkspaceAgentRoles",
@@ -279,6 +295,15 @@ export const ProjectScript = Schema.Struct({
   icon: ProjectScriptIcon,
   runOnWorktreeCreate: Schema.Boolean,
   /**
+   * When true, runs as a declarative validation gate inside an isolated
+   * worktree before merge/sign-off (Orca-style lifecycle hook).
+   */
+  runOnWorktreeValidate: Schema.optional(Schema.Boolean),
+  /**
+   * When true, runs best-effort inside a worktree immediately before removal.
+   */
+  runOnWorktreeCleanup: Schema.optional(Schema.Boolean),
+  /**
    * URL to open in the in-app browser preview when this script runs (or
    * when the user explicitly requests a preview). Optional; only honored on
    * the desktop build.
@@ -386,6 +411,7 @@ export const WorkspaceMonitoringMetricKind = Schema.Literals([
   "memory",
   "latency",
   "slow-spans",
+  "failed-spans",
   "health",
   "regression",
   /** Lines of a `log` target matching its patterns within the window. */
@@ -408,7 +434,7 @@ export const WorkspaceMonitoringMetric = Schema.Struct({
   windowMin: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
   /**
    * Unit depends on `metric`+`trend`: percent for cpu threshold, bytes/min for
-   * memory slope, ms for latency, count/min for slow-spans, consecutive
+   * memory slope, ms for latency, count/min for slow-spans and failed-spans, consecutive
    * failures for health, non-zero exit count for regression, matching lines
    * in the window for log-matches, and a ratio (e.g. 1.5 = 50% worse) for
    * p95-vs-baseline.
@@ -468,11 +494,24 @@ export const WorkspaceMonitoringUserSettings = Schema.Struct({
 });
 export type WorkspaceMonitoringUserSettings = typeof WorkspaceMonitoringUserSettings.Type;
 
+/** The approved monitoring state a queued automatic action was based on. */
+export const WorkspaceMonitoringGuard = Schema.Struct({
+  proposalGeneration: NonNegativeInt,
+  planRevision: NonNegativeInt,
+  planApprovedAt: IsoDateTime,
+});
+export type WorkspaceMonitoringGuard = typeof WorkspaceMonitoringGuard.Type;
+
 export const WorkspaceMonitoringSettings = Schema.Struct({
   ...WorkspaceMonitoringUserSettings.fields,
   threadId: Schema.NullOr(ThreadId),
   plan: Schema.NullOr(WorkspaceMonitoringPlan),
   planStatus: WorkspaceMonitoringPlanStatus,
+  /** Last plan approved by the person, independent of a pending proposal. */
+  activePlan: Schema.optionalKey(Schema.NullOr(WorkspaceMonitoringPlan)),
+  activePlanStale: Schema.optionalKey(Schema.Boolean),
+  /** Invalidates delayed proposals after another request or manual edit. */
+  proposalGeneration: Schema.optionalKey(NonNegativeInt),
   /** Start times of automatic AI turns, newest last, trimmed to the last 24h. */
   turnLog: Schema.Array(IsoDateTime).check(Schema.isMaxLength(60)),
   lastCheckedAt: Schema.NullOr(IsoDateTime),
@@ -514,7 +553,7 @@ export const DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS: WorkspaceOrchestraDefaults = 
 export const WorkspaceControlSettings = Schema.Struct({
   completionAutomation: Schema.optionalKey(WorkspaceCompletionAutomation),
   isolationMode: Schema.Literal("strict"),
-  /** Explicit rollout switches; missing settings retain existing request behavior. */
+  /** Missing settings enable automatic chat memory; an explicit opt-out is preserved. */
   contextOptimization: Schema.optionalKey(
     Schema.Struct({
       memoryMode: Schema.Literals(["standard", "relevant"]),
@@ -642,7 +681,49 @@ export const WorkspaceResearchRecord = Schema.Struct({
 });
 export type WorkspaceResearchRecord = typeof WorkspaceResearchRecord.Type;
 
+/** Logical worker classes used by the Workspace task-graph orchestrator. */
+export const WorkspaceOrchestrationAgent = Schema.Literals(["fable", "codex", "grok"]);
+export type WorkspaceOrchestrationAgent = typeof WorkspaceOrchestrationAgent.Type;
+
+export const WorkspaceKnowledgeActor = Schema.Literals([
+  "fable",
+  "codex",
+  "grok",
+  "user",
+  "claude",
+  "gemini",
+  "opencode",
+  "cursor",
+]);
+export type WorkspaceKnowledgeActor = typeof WorkspaceKnowledgeActor.Type;
+
+export const WorkspaceValidationConfidence = Schema.Literals(["high", "medium", "low"]);
+export type WorkspaceValidationConfidence = typeof WorkspaceValidationConfidence.Type;
+
+export const WorkspaceKnowledgeSourceModel = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+});
+
+export const WorkspaceKnowledgeProvenance = Schema.Struct({
+  /** Logical orchestra slot or capture source recorded on the knowledge item. */
+  actor: Schema.optionalKey(WorkspaceKnowledgeActor),
+  confidence: Schema.optionalKey(WorkspaceValidationConfidence),
+  /** Explicit model and provider account on the attempt that produced the captured output. */
+  modelSelection: Schema.optionalKey(WorkspaceKnowledgeSourceModel),
+  runId: Schema.optionalKey(WorkspaceCollaborationRunId),
+  nodeIds: Schema.optionalKey(Schema.Array(WorkspaceTaskNodeId)),
+  nodeId: Schema.optionalKey(WorkspaceTaskNodeId),
+  threadId: Schema.optionalKey(ThreadId),
+});
+const WorkspaceKnowledgeSourceFields = {
+  provenance: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeProvenance)),
+  sourceItemId: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeItemId)),
+};
+
 export const WorkspaceKnowledgeItem = Schema.Struct({
+  ...WorkspaceKnowledgeSourceFields,
+  supersededBy: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeItemId)),
   id: WorkspaceKnowledgeItemId,
   projectId: ProjectId,
   kind: WorkspaceKnowledgeKind,
@@ -677,16 +758,160 @@ export const WorkspaceKnowledgeItem = Schema.Struct({
 });
 export type WorkspaceKnowledgeItem = typeof WorkspaceKnowledgeItem.Type;
 
+export const WorkspaceKnowledgeDashboardFilters = Schema.Struct({
+  query: Schema.optionalKey(Schema.String),
+  kind: Schema.optionalKey(WorkspaceKnowledgeKind),
+  origin: Schema.optionalKey(WorkspaceKnowledgeOrigin),
+  status: Schema.optionalKey(WorkspaceKnowledgeStatus),
+  usage: Schema.optionalKey(Schema.Literals(["used", "unused"])),
+  contentHash: Schema.optionalKey(Schema.String),
+});
+export type WorkspaceKnowledgeDashboardFilters = typeof WorkspaceKnowledgeDashboardFilters.Type;
+export const WorkspaceKnowledgeDashboardInput = Schema.Struct({
+  projectId: ProjectId,
+  ...WorkspaceKnowledgeDashboardFilters.fields,
+  offset: Schema.optionalKey(NonNegativeInt),
+  limit: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(200))),
+});
+export type WorkspaceKnowledgeDashboardInput = typeof WorkspaceKnowledgeDashboardInput.Type;
+
+const dashboardRow = Schema.Struct({
+  revisionSequence: NonNegativeInt,
+  id: WorkspaceKnowledgeItemId,
+  title: Schema.String,
+  kind: WorkspaceKnowledgeKind,
+  status: WorkspaceKnowledgeStatus,
+  promptUses: NonNegativeInt,
+  lastUsedAt: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  contentHash: Schema.String,
+  supersededBy: Schema.NullOr(WorkspaceKnowledgeItemId),
+});
+const dashboardPage = Schema.Struct({ total: NonNegativeInt, items: Schema.Array(dashboardRow) });
+const savedSearchFields = {
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  filters: WorkspaceKnowledgeDashboardFilters,
+};
+export const WorkspaceKnowledgeDashboard = Schema.Struct({
+  projectId: ProjectId,
+  measuredAt: IsoDateTime,
+  total: NonNegativeInt,
+  byKind: Schema.Array(Schema.Struct({ kind: WorkspaceKnowledgeKind, count: NonNegativeInt })),
+  byStatus: Schema.Array(
+    Schema.Struct({ status: WorkspaceKnowledgeStatus, count: NonNegativeInt }),
+  ),
+  growth: Schema.Array(Schema.Struct({ day: Schema.String, count: NonNegativeInt })),
+  compaction: Schema.Struct({
+    measuredItems: NonNegativeInt,
+    originalChars: NonNegativeInt,
+    storedChars: NonNegativeInt,
+    reductionRatio: Schema.NullOr(Schema.Number),
+  }),
+  matching: dashboardPage,
+  candidates: dashboardPage,
+  mostUsed: dashboardPage,
+  unused: dashboardPage,
+  duplicates: Schema.Struct({
+    total: NonNegativeInt,
+    items: Schema.Array(
+      Schema.Struct({
+        contentHash: Schema.String,
+        count: NonNegativeInt,
+      }),
+    ),
+  }),
+  savedSearches: Schema.Array(Schema.Struct({ ...savedSearchFields, updatedAt: IsoDateTime })),
+});
+export type WorkspaceKnowledgeDashboard = typeof WorkspaceKnowledgeDashboard.Type;
+
+export function isProtectedWorkspaceKnowledgeItem(item: WorkspaceKnowledgeItem): boolean {
+  return (
+    !item.sourceItemId &&
+    (item.origin === "agent" ||
+      item.tags.includes("auto-agent-output") ||
+      item.tags.includes("auto-conversation") ||
+      item.research?.attachment != null)
+  );
+}
+
+const PublishedPdfRevision = Schema.Struct({
+  version: PositiveInt,
+  contentHash: TrimmedNonEmptyString,
+  totalPages: NonNegativeInt,
+});
+export const PdfRevisionStatus = Schema.Struct({
+  published: PublishedPdfRevision,
+  pending: Schema.NullOr(
+    Schema.Struct({
+      ...PublishedPdfRevision.fields,
+      status: Schema.Literals(["indexing", "failed"]),
+      lastPage: NonNegativeInt,
+      error: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
+export type PdfRevisionStatus = typeof PdfRevisionStatus.Type;
+
+const KnowledgeDocumentKey = { projectId: ProjectId, itemId: WorkspaceKnowledgeItemId };
+export const WorkspaceKnowledgeEditInput = Schema.Struct({
+  ...KnowledgeDocumentKey,
+  ...WorkspaceKnowledgeLocationFields,
+  commandId: CommandId,
+  expectedSequence: NonNegativeInt,
+  title: TrimmedNonEmptyString,
+  content: Schema.String,
+  /** The editor opened resolved occurrences as explicit ID links. Bare titles are new or unresolved. */
+  wikiLinksCanonicalized: Schema.optionalKey(Schema.Boolean),
+  kind: Schema.optionalKey(WorkspaceKnowledgeKind),
+  tags: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  relativeFolder: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeRelativeFolder)),
+  research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
+});
+export type WorkspaceKnowledgeEditInput = typeof WorkspaceKnowledgeEditInput.Type;
+const KnowledgeRevisionKey = {
+  sequence: PositiveInt,
+  occurredAt: IsoDateTime,
+  eventType: Schema.Literals([
+    "project.knowledge-item-upserted",
+    "project.knowledge-item-archived",
+  ]),
+};
+const KnowledgeDocumentWriteResult = Schema.Struct({
+  itemId: WorkspaceKnowledgeItemId,
+  sequence: PositiveInt,
+});
+
 export const WorkspaceKnowledgeListInput = Schema.Struct({
+  /** Return item metadata with an empty content field. Fetch an individual item for its body. */
+  summariesOnly: Schema.optionalKey(Schema.Boolean),
+  itemId: Schema.optionalKey(WorkspaceKnowledgeItemId),
+  sourceRunId: Schema.optionalKey(WorkspaceCollaborationRunId),
+  sourceItemId: Schema.optionalKey(WorkspaceKnowledgeItemId),
   projectId: ProjectId,
   includeShared: Schema.optionalKey(Schema.Boolean),
+  /** Include a consistent snapshot of this project’s separate memory and conversation records. */
+  includeArchiveSnapshot: Schema.optionalKey(Schema.Boolean),
   kinds: Schema.optional(Schema.Array(WorkspaceKnowledgeKind)),
   statuses: Schema.optional(Schema.Array(WorkspaceKnowledgeStatus)),
 });
 export type WorkspaceKnowledgeListInput = typeof WorkspaceKnowledgeListInput.Type;
 
+export const WorkspaceKnowledgeArchiveSnapshot = Schema.Struct({
+  memories: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  sourceArchives: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  importedSources: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  threads: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  messages: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  activities: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  plans: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  turns: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+});
+export type WorkspaceKnowledgeArchiveSnapshot = typeof WorkspaceKnowledgeArchiveSnapshot.Type;
 export const WorkspaceKnowledgeListResult = Schema.Struct({
   items: Schema.Array(WorkspaceKnowledgeItem),
+  archiveSnapshot: Schema.optionalKey(WorkspaceKnowledgeArchiveSnapshot),
 });
 export type WorkspaceKnowledgeListResult = typeof WorkspaceKnowledgeListResult.Type;
 
@@ -706,6 +931,18 @@ export const WorkspaceRagSearchInput = Schema.Struct({
 export type WorkspaceRagSearchInput = typeof WorkspaceRagSearchInput.Type;
 
 export const WorkspaceRagMatch = Schema.Struct({
+  /** Edition of the returned passage and any replacement still awaiting publication. */
+  pdfRevision: Schema.optionalKey(
+    Schema.Struct({
+      publishedVersion: PositiveInt,
+      pending: Schema.NullOr(
+        Schema.Struct({
+          version: PositiveInt,
+          status: Schema.Literals(["indexing", "failed"]),
+        }),
+      ),
+    }),
+  ),
   projectId: ProjectId,
   ...WorkspaceKnowledgeLocationFields,
   itemId: WorkspaceKnowledgeItemId,
@@ -727,6 +964,14 @@ export const WorkspaceRagMatch = Schema.Struct({
   research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
 });
 export type WorkspaceRagMatch = typeof WorkspaceRagMatch.Type;
+
+export function formatPdfSearchEditionLabel(revision: WorkspaceRagMatch["pdfRevision"]): string {
+  if (!revision) return "";
+  const published = `${revision.publishedVersion}판 공개`;
+  const pending = revision.pending;
+  if (!pending) return published;
+  return `${published} · ${pending.version}판 ${pending.status === "indexing" ? "색인 중" : "색인 실패"}`;
+}
 
 export const WorkspaceRagSearchResult = Schema.Struct({
   matches: Schema.Array(WorkspaceRagMatch),
@@ -869,6 +1114,16 @@ export const WorkspacePromptComposeResult = Schema.Struct({
       }),
     ),
   ),
+  sourcePassages: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        projectId: ProjectId,
+        itemId: WorkspaceKnowledgeItemId,
+        start: NonNegativeInt,
+        end: NonNegativeInt,
+      }),
+    ),
+  ),
   ragMatches: Schema.Array(WorkspaceRagMatch),
   /** Shared library references the prompt actually carries. */
   libraryMatches: Schema.optionalKey(Schema.Array(SharedLibraryMatch)),
@@ -912,10 +1167,6 @@ export const WorkspaceAgentRoleListResult = Schema.Struct({
 });
 export type WorkspaceAgentRoleListResult = typeof WorkspaceAgentRoleListResult.Type;
 
-/** Logical worker classes used by the Workspace task-graph orchestrator. */
-export const WorkspaceOrchestrationAgent = Schema.Literals(["fable", "codex", "grok"]);
-export type WorkspaceOrchestrationAgent = typeof WorkspaceOrchestrationAgent.Type;
-
 export const WorkspaceTaskNodeKind = Schema.Literals([
   "orchestration",
   "research",
@@ -950,9 +1201,6 @@ export const WorkspaceTaskAttemptStatus = Schema.Literals([
   "cancelled",
 ]);
 export type WorkspaceTaskAttemptStatus = typeof WorkspaceTaskAttemptStatus.Type;
-
-export const WorkspaceValidationConfidence = Schema.Literals(["high", "medium", "low"]);
-export type WorkspaceValidationConfidence = typeof WorkspaceValidationConfidence.Type;
 
 export const WorkspaceValidationVerdict = Schema.Literals(["pass", "fail", "inconclusive"]);
 export type WorkspaceValidationVerdict = typeof WorkspaceValidationVerdict.Type;
@@ -1145,7 +1393,8 @@ export const WorkspaceTaskNode = Schema.Struct({
 export type WorkspaceTaskNode = typeof WorkspaceTaskNode.Type;
 
 export const WorkspaceTaskGraphChange = Schema.Struct({
-  revision: PositiveInt,
+  // Format retries can be recorded before the first plan is accepted.
+  revision: NonNegativeInt,
   reason: WorkspaceTaskGraphChangeReason,
   summary: Schema.String.check(Schema.isMaxLength(8_000)),
   addedNodeIds: Schema.Array(WorkspaceTaskNodeId),
@@ -1197,6 +1446,15 @@ export const WorkspaceOrchestraDelivery = Schema.Struct({
 export type WorkspaceOrchestraDelivery = typeof WorkspaceOrchestraDelivery.Type;
 
 export const WorkspaceTaskGraph = Schema.Struct({
+  /** An unresolved saved-workflow assignment; pending nodes must not run. */
+  workflowAssignment: Schema.optionalKey(
+    Schema.Struct({
+      gateNodeId: WorkspaceTaskNodeId,
+      pendingNodeIds: Schema.Array(WorkspaceTaskNodeId),
+    }),
+  ),
+  /** Saved-workflow steps left unperformed after the user skips assignment. */
+  workflowSkippedNodeIds: Schema.optionalKey(Schema.Array(WorkspaceTaskNodeId)),
   workspaceBaseline: Schema.optionalKey(Schema.String),
   planReview: Schema.optionalKey(
     Schema.Struct({
@@ -1308,6 +1566,7 @@ export const WorkspaceMeetingParticipant = Schema.Struct({
   id: WorkspaceMeetingParticipantId,
   displayName: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   modelSelection: ModelSelection,
+  roleDescription: Schema.optionalKey(Schema.String),
 });
 export type WorkspaceMeetingParticipant = typeof WorkspaceMeetingParticipant.Type;
 
@@ -1378,6 +1637,27 @@ const WorkspaceQuestionImageReference = Schema.Struct({
 
 export const WorkspaceMeeting = Schema.Struct({
   workspaceBaseline: Schema.optionalKey(Schema.String),
+  /** Last completed cycle of an explicitly requested persistent run. */
+  continuation: Schema.optionalKey(
+    Schema.Struct({
+      cycle: PositiveInt,
+      workerTurns: NonNegativeInt,
+      summary: Schema.String.check(Schema.isMaxLength(20_000)),
+      nextTask: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+    }),
+  ),
+  /** Number of user instructions included in the supervisor's latest planning or review turn. */
+  supervisorReviewedInterjections: Schema.optionalKey(NonNegativeInt),
+  /** The supervisor must review instructions received after its latest planning or review turn. */
+  pendingSupervisorReview: Schema.optionalKey(Schema.Boolean),
+  /** Stable recovery identity for a supervisor review while a refusal question remains open. */
+  refusalInstructionReview: Schema.optionalKey(
+    Schema.Struct({
+      answerCount: PositiveInt,
+      status: Schema.Literals(["pending", "completed", "failed"]),
+      error: Schema.optionalKey(Schema.String),
+    }),
+  ),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
   mode: WorkspaceMeetingMode,
@@ -1394,10 +1674,7 @@ export const WorkspaceMeeting = Schema.Struct({
   ),
   /** False confines planning and recovery to the user-selected roster. */
   allowAdditionalWorkers: Schema.optionalKey(Schema.Boolean),
-  participants: Schema.Array(WorkspaceMeetingParticipant).check(
-    Schema.isMinLength(2),
-    Schema.isMaxLength(8),
-  ),
+  participants: Schema.Array(WorkspaceMeetingParticipant).check(Schema.isMinLength(1)),
   /**
    * The one conversation window the whole meeting lives in. Every turn —
    * statements, chair duties, the seats' share of execution — runs in this
@@ -1455,10 +1732,7 @@ export const WorkspaceMeetingSetup = Schema.Struct({
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
   mode: WorkspaceMeetingMode,
   allowAdditionalWorkers: Schema.optionalKey(Schema.Boolean),
-  participants: Schema.Array(WorkspaceMeetingParticipant).check(
-    Schema.isMinLength(2),
-    Schema.isMaxLength(8),
-  ),
+  participants: Schema.Array(WorkspaceMeetingParticipant).check(Schema.isMinLength(1)),
   chairParticipantId: Schema.NullOr(WorkspaceMeetingParticipantId),
   /** 0 rounds is direct collaboration: no discussion, straight to the plan. */
   maxRounds: NonNegativeInt.check(Schema.isLessThanOrEqualTo(10)),
@@ -1480,6 +1754,8 @@ export type WorkspaceMeetingSetup = typeof WorkspaceMeetingSetup.Type;
  * checkout isolation, independently of conversation ownership.
  */
 export const WorkspaceOrchestraSettings = Schema.Struct({
+  /** Only an explicit selection enables continuation after a completed cycle. */
+  executionMode: Schema.optionalKey(Schema.Literals(["once", "persistent"])),
   /** Nodes executed at once. */
   maxParallel: PositiveInt.check(Schema.isLessThanOrEqualTo(6)),
   /** Pauses once the executable plan is ready; off preserves direct execution. */
@@ -1491,6 +1767,10 @@ export const WorkspaceOrchestraSettings = Schema.Struct({
   /** Absent keeps historical runs readable. */
   completionCheck: Schema.optionalKey(Schema.Boolean),
   maxWorkerTurns: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(500))),
+  /** An explicitly selected period for a separate supervisor-model watchdog session. */
+  watchdogIntervalSeconds: Schema.optionalKey(
+    PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  ),
   /** Wait for a known provider reset and resume at most three times; absent is off. */
   resumeAfterLimit: Schema.optionalKey(Schema.Boolean),
   /**
@@ -1522,12 +1802,34 @@ export const WorkflowRoleModels = Schema.Struct({
 });
 export type WorkflowRoleModels = typeof WorkflowRoleModels.Type;
 
-export const WorkspaceWorkflowContext = Schema.Struct({
+export const WorkspaceProviderPreflightWarning = Schema.Struct({
+  role: Schema.Literals(["implementer", "researcher"]),
+  modelSelection: ModelSelection,
+  message: Schema.String.check(Schema.isMaxLength(4_000)),
+});
+export type WorkspaceProviderPreflightWarning = typeof WorkspaceProviderPreflightWarning.Type;
+
+/** A bootstrap style and the prior room value observed before its first request was accepted. */
+export const ThreadResponseStyleSeed = Schema.Struct({
+  value: ThreadResponseStyle,
+  previous: Schema.NullOr(ThreadResponseStyle),
+});
+export type ThreadResponseStyleSeed = typeof ThreadResponseStyleSeed.Type;
+
+const ClientWorkspaceWorkflowContext = Schema.Struct({
+  responseStyle: Schema.optionalKey(Schema.NullOr(ThreadResponseStyle)),
   ...WorkflowExecutionContext.fields,
+  providerWarnings: Schema.optionalKey(Schema.Array(WorkspaceProviderPreflightWarning)),
   definition: WorkflowVersion,
   roleBindings: Schema.Array(WorkspaceAgentRoleBinding),
   roleModels: Schema.optionalKey(WorkflowRoleModels),
   threadId: Schema.optionalKey(ThreadId),
+});
+export const WorkspaceWorkflowContext = Schema.Struct({
+  ...ClientWorkspaceWorkflowContext.fields,
+  customSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  initialModelTeams: Schema.optionalKey(Schema.Array(ThreadModelTeam)),
+  initialResponseStyle: Schema.optionalKey(ThreadResponseStyleSeed),
 });
 export type WorkspaceWorkflowContext = typeof WorkspaceWorkflowContext.Type;
 
@@ -1539,11 +1841,19 @@ export const WorkspaceRunControl = Schema.Struct({
 });
 export type WorkspaceRunControl = typeof WorkspaceRunControl.Type;
 
-export const WorkspaceRunContext = Schema.Struct({
+const ClientWorkspaceRunContext = Schema.Struct({
+  responseStyle: Schema.optionalKey(Schema.NullOr(ThreadResponseStyle)),
+  providerWarnings: Schema.optionalKey(Schema.Array(WorkspaceProviderPreflightWarning)),
   requestDigest: Schema.String,
   threadId: Schema.optionalKey(ThreadId),
   roleBindings: Schema.optionalKey(Schema.Array(WorkspaceAgentRoleBinding)),
   requestMode: Schema.optionalKey(Schema.Literals(["direct", "ask-first", "conditions"])),
+});
+export const WorkspaceRunContext = Schema.Struct({
+  ...ClientWorkspaceRunContext.fields,
+  customSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  initialModelTeams: Schema.optionalKey(Schema.Array(ThreadModelTeam)),
+  initialResponseStyle: Schema.optionalKey(ThreadResponseStyleSeed),
 });
 export type WorkspaceRunContext = typeof WorkspaceRunContext.Type;
 
@@ -2126,6 +2436,13 @@ const SourceProposedPlanReference = Schema.Struct({
   planId: OrchestrationProposedPlanId,
 });
 
+/** Text and asynchronous questions can be closed even when no turn is active. */
+export function isRecoverableUserInputRequestId(requestId: string | null | undefined): boolean {
+  return (
+    requestId?.startsWith("async:") === true || requestId?.startsWith("text-question:") === true
+  );
+}
+
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
   "starting",
@@ -2190,6 +2507,86 @@ export const OrchestrationThreadActivity = Schema.Struct({
   createdAt: IsoDateTime,
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
+
+export const EXAONE_DEFERRED_CONFIRM_PREFIX = "exaone-deferred:";
+export const EXAONE_DEFERRED_CONFIRM_QUESTION = "confirm";
+export const EXAONE_DEFERRED_CONFIRM_ANSWER = "이전 답변을 확인했고 이 질문을 따로 열겠습니다";
+
+export function includeDeferredExaoneQuestions(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  pending: ReadonlyArray<{
+    requestId: ApprovalRequestId;
+    createdAt: string;
+    questions: ReadonlyArray<import("./providerRuntime.ts").UserInputQuestion>;
+  }>,
+) {
+  const deferred = new Map<string, OrchestrationThreadActivity>();
+  const hidden = new Set<string>();
+  const observedNative = new Set<string>();
+  const resolvedNative = new Set<string>();
+  for (const activity of activities) {
+    const payload = activity.payload as {
+      requestId?: unknown;
+      requestIds?: unknown;
+      nativeRequestId?: unknown;
+      questions?: unknown;
+    } | null;
+    if (!payload || typeof payload !== "object") continue;
+    if (
+      (activity.kind === "user-input.requested" || activity.kind === "user-input.resolved") &&
+      typeof payload.requestId === "string"
+    )
+      observedNative.add(payload.requestId);
+    if (activity.kind === "user-input.resolved" && typeof payload.requestId === "string")
+      resolvedNative.add(payload.requestId);
+    if (
+      activity.kind !== "provider.user-input.duplicate.deferred" ||
+      typeof payload.nativeRequestId !== "string" ||
+      !Array.isArray(payload.questions) ||
+      payload.questions.length === 0
+    )
+      continue;
+    if (typeof payload.requestId === "string") hidden.add(payload.requestId);
+    if (Array.isArray(payload.requestIds)) {
+      for (const requestId of payload.requestIds)
+        if (typeof requestId === "string") hidden.add(requestId);
+    }
+    deferred.set(payload.nativeRequestId, activity);
+  }
+  const confirmations = [...deferred.entries()].flatMap(([nativeId, activity]) =>
+    observedNative.has(nativeId)
+      ? []
+      : [
+          {
+            requestId: ApprovalRequestId.make(EXAONE_DEFERRED_CONFIRM_PREFIX + nativeId),
+            createdAt: activity.createdAt,
+            questions: [
+              {
+                id: EXAONE_DEFERRED_CONFIRM_QUESTION,
+                header: "중복 질문 확인",
+                question:
+                  "같은 내용의 질문이 나중에 도착했습니다. 별도로 답하면 AI가 같은 작업을 다시 실행할 수 있습니다. 이전 답변의 결과를 확인한 뒤 질문을 열겠습니까?",
+                options: [
+                  {
+                    label: EXAONE_DEFERRED_CONFIRM_ANSWER,
+                    description:
+                      "이전 답변은 다시 보내지 않습니다. 질문을 연 뒤 직접 새 답변을 제출할 수 있습니다.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+  );
+  return [
+    ...confirmations,
+    ...pending.filter(
+      (item) =>
+        !hidden.has(item.requestId) &&
+        !(deferred.has(item.requestId) && resolvedNative.has(item.requestId)),
+    ),
+  ];
+}
 
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
@@ -2333,6 +2730,11 @@ export const OrchestrationThreadShell = Schema.Struct({
    * live work. Optional so old servers/clients interop; absent = none.
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
+  /**
+   * Ground-truth live background tasks for the thread (local PIDs and remote
+   * async jobs) used by the 3-tier verification UI. Optional for interop.
+   */
+  backgroundTasks: Schema.optional(Schema.Array(UnifiedBgTask)),
   /**
    * Current plan step while a turn runs, for the Working indicators
    * (sidebar row, in-chat working line). Cleared when the turn settles —
@@ -2562,6 +2964,14 @@ const ProjectRuntimeViewCommand = Schema.Struct({
 });
 
 const ProjectKnowledgeItemUpsertCommand = Schema.Struct({
+  ...WorkspaceKnowledgeSourceFields,
+  documentWrite: Schema.optionalKey(
+    Schema.Union([
+      Schema.Struct({ mode: Schema.Literal("legacy") }),
+      Schema.Struct({ mode: Schema.Literal("restore") }),
+      Schema.Struct({ mode: Schema.Literal("edit"), edit: WorkspaceKnowledgeEditInput }),
+    ]),
+  ),
   type: Schema.Literal("project.knowledge.item.upsert"),
   ...WorkspaceKnowledgeLocationFields,
   research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
@@ -2579,6 +2989,41 @@ const ProjectKnowledgeItemUpsertCommand = Schema.Struct({
   originalChars: Schema.optionalKey(NonNegativeInt),
   storedChars: Schema.optionalKey(NonNegativeInt),
   createdAt: IsoDateTime,
+});
+
+const knowledgeCommandFields = {
+  commandId: CommandId,
+  projectId: ProjectId,
+  createdAt: IsoDateTime.check(Schema.makeFilter((value) => Number.isFinite(Date.parse(value)))),
+};
+const ProjectKnowledgeBulkCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.bulk"),
+  ...knowledgeCommandFields,
+  items: Schema.Array(
+    Schema.Struct({
+      id: WorkspaceKnowledgeItemId,
+      updatedAt: IsoDateTime,
+      revisionSequence: NonNegativeInt,
+    }),
+  ).check(Schema.isMinLength(1)),
+  operation: Schema.Union([
+    Schema.Struct({ type: Schema.Literal("promote") }),
+    Schema.Struct({ type: Schema.Literal("archive") }),
+    Schema.Struct({ type: Schema.Literal("reclassify"), kind: WorkspaceKnowledgeKind }),
+    Schema.Struct({ type: Schema.Literal("merge"), targetId: WorkspaceKnowledgeItemId }),
+  ]),
+});
+const ProjectKnowledgeSearchSaveCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.search.save"),
+  ...knowledgeCommandFields,
+  ...savedSearchFields,
+  expectedUpdatedAt: Schema.NullOr(IsoDateTime),
+});
+const ProjectKnowledgeSearchRemoveCommand = Schema.Struct({
+  type: Schema.Literal("project.knowledge.search.remove"),
+  ...knowledgeCommandFields,
+  id: TrimmedNonEmptyString,
+  expectedUpdatedAt: IsoDateTime,
 });
 
 const ProjectKnowledgeItemArchiveCommand = Schema.Struct({
@@ -2649,6 +3094,13 @@ const ProjectCollaborationRunRequestCommand = Schema.Struct({
   workflow: Schema.optionalKey(WorkspaceWorkflowContext),
   runContext: Schema.optionalKey(WorkspaceRunContext),
   createdAt: IsoDateTime,
+});
+
+// Only the workflow service can attach a validated draft team to a run request.
+const ClientProjectCollaborationRunRequestCommand = Schema.Struct({
+  ...ProjectCollaborationRunRequestCommand.fields,
+  workflow: Schema.optionalKey(ClientWorkspaceWorkflowContext),
+  runContext: Schema.optionalKey(ClientWorkspaceRunContext),
 });
 
 const ProjectWorkflowRunCommand = Schema.Struct({
@@ -2832,6 +3284,7 @@ const ProjectProgramStartCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   programId: WorkspaceProgramId,
+  monitoringGuard: Schema.optionalKey(WorkspaceMonitoringGuard),
   createdAt: IsoDateTime,
 });
 
@@ -2840,6 +3293,7 @@ const ProjectProgramStopCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   programId: WorkspaceProgramId,
+  monitoringGuard: Schema.optionalKey(WorkspaceMonitoringGuard),
   createdAt: IsoDateTime,
 });
 
@@ -2848,6 +3302,7 @@ const ProjectProgramRestartCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   programId: WorkspaceProgramId,
+  monitoringGuard: Schema.optionalKey(WorkspaceMonitoringGuard),
   createdAt: IsoDateTime,
 });
 
@@ -2872,6 +3327,7 @@ const ProjectIncidentRepairRequestCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   incidentId: WorkspaceIncidentId,
+  monitoringGuard: Schema.optionalKey(WorkspaceMonitoringGuard),
   instruction: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
   createdAt: IsoDateTime,
 });
@@ -2909,10 +3365,14 @@ const ThreadCreateCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
-const ThreadDeleteCommand = Schema.Struct({
+const ClientThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+const ThreadDeleteCommand = Schema.Struct({
+  ...ClientThreadDeleteCommand.fields,
+  expectedCreationCommandId: Schema.optionalKey(CommandId),
 });
 
 const ThreadArchiveCommand = Schema.Struct({
@@ -2991,7 +3451,7 @@ const ThreadPinReorderCommand = Schema.Struct({
   orderKey: TrimmedNonEmptyString,
 });
 
-const ThreadMetaUpdateCommand = Schema.Struct({
+const ThreadMetaUpdateFields = {
   handoffMode: Schema.optional(ConversationHandoffMode),
   type: Schema.Literal("thread.meta.update"),
   commandId: CommandId,
@@ -3002,6 +3462,19 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+};
+const ClientThreadMetaUpdateCommand = Schema.Struct(ThreadMetaUpdateFields).check(
+  Schema.makeFilter(
+    (input) =>
+      !(input.title !== undefined && input.regenerateTitle === true) ||
+      "title and regenerateTitle cannot be specified together",
+  ),
+);
+const ThreadMetaUpdateCommand = Schema.Struct({
+  ...ThreadMetaUpdateFields,
+  bootstrapCreateClaim: Schema.optionalKey(CommandId),
+  bootstrapExpectedBranch: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  bootstrapExpectedWorktreePath: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -3027,6 +3500,9 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
+  responseStyle: Schema.optionalKey(ThreadResponseStyle),
+  customSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  modelTeams: Schema.optionalKey(Schema.Array(ThreadModelTeam)),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -3044,7 +3520,7 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
   startFromOrigin: Schema.optional(Schema.Boolean),
 });
 
-const ThreadTurnStartBootstrap = Schema.Struct({
+export const ThreadTurnStartBootstrap = Schema.Struct({
   createThread: Schema.optional(ThreadTurnStartBootstrapCreateThread),
   prepareWorktree: Schema.optional(ThreadTurnStartBootstrapPrepareWorktree),
   runSetupScript: Schema.optional(Schema.Boolean),
@@ -3053,6 +3529,17 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  /** The server binds these draft teams to the initial accepted turn. */
+  customSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  initialModelTeams: Schema.optionalKey(Schema.Array(ThreadModelTeam)),
+  initialResponseStyle: Schema.optionalKey(ThreadResponseStyleSeed),
+  /** Present only for a turn sent from the desktop assistant window. */
+  desktopAssistantCharacter: Schema.optionalKey(ThreadCharacter),
+  /** Server-computed identity for safe retry after temporary contention. */
+  requestFingerprint: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
+  bootstrapCreateClaim: Schema.optionalKey(CommandId),
+  bootstrapExpectedBranch: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  bootstrapExpectedWorktreePath: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   requireTaskConditions: Schema.optional(Schema.Boolean),
   taskConditions: Schema.optional(ApprovedTaskConditions),
   usageContext: Schema.optional(TokenUsageContext),
@@ -3070,16 +3557,17 @@ export const ThreadTurnStartCommand = Schema.Struct({
   inputOrigin: Schema.optionalKey(OrchestrationInputOrigin),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
-  runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
-  interactionMode: ProviderInteractionMode.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
-  ),
+  // Legacy internal commands may omit these fields. Keeping absence distinct
+  // prevents a decoder default from overriding the thread's selected policy.
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   createdAt: IsoDateTime,
 });
 
 const ClientThreadTurnStartCommand = Schema.Struct({
+  desktopAssistantCharacter: Schema.optionalKey(ThreadCharacter),
   requireTaskConditions: Schema.optional(Schema.Boolean),
   taskConditions: Schema.optional(ApprovedTaskConditions),
   type: Schema.Literal("thread.turn.start"),
@@ -3185,6 +3673,9 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectMonitoringPlanApproveCommand,
   ProjectMonitoringReanalyzeCommand,
   ProjectKnowledgeItemUpsertCommand,
+  ProjectKnowledgeBulkCommand,
+  ProjectKnowledgeSearchSaveCommand,
+  ProjectKnowledgeSearchRemoveCommand,
   ProjectKnowledgeItemArchiveCommand,
   ProjectKnowledgeUsageRecordCommand,
   ProjectAgentRoleUpsertCommand,
@@ -3240,11 +3731,14 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectMonitoringPlanApproveCommand,
   ProjectMonitoringReanalyzeCommand,
   ProjectKnowledgeItemUpsertCommand,
+  ProjectKnowledgeBulkCommand,
+  ProjectKnowledgeSearchSaveCommand,
+  ProjectKnowledgeSearchRemoveCommand,
   ProjectKnowledgeItemArchiveCommand,
   ProjectKnowledgeUsageRecordCommand,
   ProjectAgentRoleUpsertCommand,
   ProjectAgentRoleRemoveCommand,
-  ProjectCollaborationRunRequestCommand,
+  ClientProjectCollaborationRunRequestCommand,
   ProjectCollaborationRunControlCommand,
   ProjectCollaborationRunCancelCommand,
   ClientProjectCollaborationRunAnswerCommand,
@@ -3264,7 +3758,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectIncidentResolveCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
-  ThreadDeleteCommand,
+  ClientThreadDeleteCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadSettleCommand,
@@ -3274,7 +3768,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadPinCommand,
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
-  ThreadMetaUpdateCommand,
+  ClientThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
@@ -3286,11 +3780,40 @@ export const ClientOrchestrationCommand = Schema.Union([
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
+/** Background-capable foreground turns can start after newer messages have been queued. */
+const SessionTurnRequest = Schema.Struct({
+  messageId: MessageId,
+  requestedAt: IsoDateTime,
+});
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  turnRequest: Schema.optional(SessionTurnRequest),
+  preservePendingTurnStart: Schema.optional(Schema.Boolean),
+  expectedCurrent: Schema.optionalKey(
+    Schema.Struct({
+      threadUpdatedAt: IsoDateTime,
+      sessionUpdatedAt: IsoDateTime,
+      status: OrchestrationSessionStatus,
+      activeTurnId: Schema.NullOr(TurnId),
+    }),
+  ),
+  createdAt: IsoDateTime,
+});
+
+/** Internal startup recovery; not accepted by client command schemas. */
+const ThreadBackgroundRecoveryCommand = Schema.Struct({
+  type: Schema.Literal("thread.background-recovery.start"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expectedSessionStatus: OrchestrationSessionStatus,
+  expectedSessionUpdatedAt: IsoDateTime,
+  expectedThreadUpdatedAt: IsoDateTime,
+  activities: Schema.Array(OrchestrationThreadActivity),
+  turn: ThreadTurnStartCommand,
   createdAt: IsoDateTime,
 });
 
@@ -3434,6 +3957,7 @@ const ProjectMonitoringPlanProposeCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   plan: WorkspaceMonitoringPlan,
+  expectedGeneration: Schema.optionalKey(NonNegativeInt),
 });
 
 /** Server-only: bookkeeping the reactor writes back (thread, budget log, last check). */
@@ -3449,6 +3973,18 @@ const ProjectMonitoringRuntimeUpdateCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("project.pdf-revision.publish"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    attachmentId: TrimmedNonEmptyString,
+    version: NonNegativeInt,
+    contentHash: TrimmedNonEmptyString,
+    createdAt: IsoDateTime,
+  }),
+  ThreadBackgroundRecoveryCommand,
   ThreadMessageUserAppendCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -3485,6 +4021,8 @@ export const OrchestrationEventType = Schema.Literals([
   "project.workspace-control-updated",
   "project.runtime-viewed",
   "project.knowledge-item-upserted",
+  "project.knowledge-search-saved",
+  "project.knowledge-search-removed",
   "project.knowledge-item-archived",
   "project.knowledge-usage-recorded",
   "project.agent-role-upserted",
@@ -3584,6 +4122,17 @@ export const ProjectRuntimeViewedPayload = Schema.Struct({
 });
 
 export const ProjectKnowledgeItemUpsertedPayload = Schema.Struct({
+  wikiLinkBindings: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        start: NonNegativeInt,
+        targetItemId: Schema.NullOr(WorkspaceKnowledgeItemId),
+        needsChoice: Schema.Boolean,
+      }),
+    ),
+  ),
+  ...WorkspaceKnowledgeSourceFields,
+  supersededBy: Schema.optionalKey(Schema.NullOr(WorkspaceKnowledgeItemId)),
   ...WorkspaceKnowledgeLocationFields,
   research: Schema.optionalKey(Schema.NullOr(WorkspaceResearchRecord)),
   projectId: ProjectId,
@@ -3874,6 +4423,10 @@ export const ThreadMessageSentPayload = Schema.Struct({
 });
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  customSubordinateTeam: Schema.optionalKey(Schema.Array(ThreadTeamMember)),
+  initialModelTeams: Schema.optionalKey(Schema.Array(ThreadModelTeam)),
+  initialResponseStyle: Schema.optionalKey(ThreadResponseStyleSeed),
+  desktopAssistantCharacter: Schema.optionalKey(ThreadCharacter),
   usageContext: Schema.optional(TokenUsageContext),
   threadId: ThreadId,
   messageId: MessageId,
@@ -3934,6 +4487,8 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  turnRequest: Schema.optional(SessionTurnRequest),
+  preservePendingTurnStart: Schema.optional(Schema.Boolean),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -4025,6 +4580,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.knowledge-item-upserted"),
     payload: ProjectKnowledgeItemUpsertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.knowledge-search-saved"),
+    payload: Schema.Struct({ projectId: ProjectId, ...savedSearchFields, updatedAt: IsoDateTime }),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.knowledge-search-removed"),
+    payload: Schema.Struct({ projectId: ProjectId, id: TrimmedNonEmptyString }),
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -4563,6 +5128,19 @@ export class OrchestrationSharedLibraryError extends Schema.TaggedErrorClass<Orc
 ) {}
 
 export const OrchestrationRpcSchemas = {
+  checkTurnReceipt: {
+    input: Schema.Struct({
+      commandId: CommandId,
+      threadId: ThreadId,
+      requestFingerprint: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+    }),
+    output: Schema.Struct({
+      status: Schema.Literals(["accepted", "unconfirmed", "mismatch", "rejected"]),
+      safeBootstrapReplay: Schema.optional(Schema.Boolean),
+      safeBootstrapResume: Schema.optional(Schema.Boolean),
+      safeWorktreeBootstrapResume: Schema.optional(Schema.Boolean),
+    }),
+  },
   getThreadTokenUsage: {
     input: GetThreadTokenUsageInput,
     output: ThreadTokenUsageReport,
@@ -4587,9 +5165,66 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationSearchThreadsInput,
     output: OrchestrationSearchThreadsResult,
   },
+  getWorkspaceKnowledgeDashboard: {
+    input: WorkspaceKnowledgeDashboardInput,
+    output: WorkspaceKnowledgeDashboard,
+  },
+  getPdfRevisionStatus: { input: Schema.Struct(KnowledgeDocumentKey), output: PdfRevisionStatus },
+  startPdfRevision: {
+    input: Schema.Struct({
+      ...KnowledgeDocumentKey,
+      expectedVersion: PositiveInt,
+      requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+      file: Schema.Struct({
+        ...UploadChatFileAttachment.fields,
+        mimeType: Schema.Literal("application/pdf"),
+      }),
+    }),
+    output: PdfRevisionStatus,
+  },
+  retryPdfRevision: { input: Schema.Struct(KnowledgeDocumentKey), output: PdfRevisionStatus },
+  readPdfRevisionSource: {
+    input: Schema.Struct({ ...KnowledgeDocumentKey, version: PositiveInt }),
+    output: Schema.Struct({ dataUrl: Schema.String }),
+  },
+  editWorkspaceKnowledge: {
+    input: WorkspaceKnowledgeEditInput,
+    output: KnowledgeDocumentWriteResult,
+  },
+  restoreWorkspaceKnowledge: {
+    input: Schema.Struct({ ...KnowledgeDocumentKey, commandId: CommandId }),
+    output: KnowledgeDocumentWriteResult,
+  },
+  listWorkspaceKnowledgeRevisions: {
+    input: Schema.Struct({
+      ...KnowledgeDocumentKey,
+      beforeSequence: Schema.optionalKey(PositiveInt),
+      limit: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(100))),
+    }),
+    output: Schema.Struct({
+      revisions: Schema.Array(Schema.Struct(KnowledgeRevisionKey)),
+      nextBeforeSequence: Schema.NullOr(PositiveInt),
+    }),
+  },
+  getWorkspaceKnowledgeRevision: {
+    input: Schema.Struct({ ...KnowledgeDocumentKey, sequence: PositiveInt }),
+    output: Schema.Struct({
+      revision: Schema.NullOr(
+        Schema.Struct({
+          ...KnowledgeRevisionKey,
+          title: Schema.NullOr(Schema.String),
+          content: Schema.NullOr(Schema.String),
+        }),
+      ),
+    }),
+  },
   listWorkspaceKnowledge: {
     input: WorkspaceKnowledgeListInput,
     output: WorkspaceKnowledgeListResult,
+  },
+  getWorkspaceWikiLinks: {
+    input: WorkspaceWikiLinksInput,
+    output: WorkspaceWikiLinksResult,
   },
   searchWorkspaceRag: {
     input: WorkspaceRagSearchInput,
@@ -4721,6 +5356,14 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedErrorClass<O
   "OrchestrationDispatchCommandError",
   {
     message: TrimmedNonEmptyString,
+    reason: Schema.optionalKey(
+      Schema.Literals([
+        "active-turn-settings",
+        "turn-request-id-conflict",
+        "bootstrap-precommit-rejected",
+        "bootstrap-state-unknown",
+      ]),
+    ),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

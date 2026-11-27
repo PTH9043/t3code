@@ -793,6 +793,22 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
       },
     }),
+    connectOpenCodeGo: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:opencode-connect",
+      tag: WS_METHODS.openCodeConnect,
+    }),
+    listOpenAiApiModels: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:openai-api-list-models",
+      tag: WS_METHODS.openAiApiListModels,
+    }),
+    listOllamaEmbeddingModels: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:ai-search-list-embedding-models",
+      tag: WS_METHODS.aiSearchListEmbeddingModels,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.endpoint ?? "default"}`,
+      },
+    }),
     completeGeminiAuth: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:gemini-auth-complete",
       tag: WS_METHODS.geminiAuthComplete,
@@ -806,8 +822,49 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.providerAccountLogin,
       concurrency: {
         mode: "singleFlight",
-        key: ({ environmentId, input }) => `${environmentId}:${input.driver}`,
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.driver}:${input.instanceId ?? "new"}`,
       },
+    }),
+    beginGrokDeviceAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:grok-device-auth-begin",
+      tag: WS_METHODS.grokDeviceAuthBegin,
+    }),
+    waitGrokDeviceAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:grok-device-auth-wait",
+      tag: WS_METHODS.grokDeviceAuthWait,
+    }),
+    cancelGrokDeviceAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:grok-device-auth-cancel",
+      tag: WS_METHODS.grokDeviceAuthCancel,
+    }),
+    beginMuseAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-auth-begin",
+      tag: WS_METHODS.museAuthBegin,
+    }),
+    waitMuseAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-auth-wait",
+      tag: WS_METHODS.museAuthWait,
+    }),
+    cancelMuseAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-auth-cancel",
+      tag: WS_METHODS.museAuthCancel,
+    }),
+    beginMuseCloudAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-cloud-auth-begin",
+      tag: WS_METHODS.museCloudAuthBegin,
+    }),
+    waitMuseCloudAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-cloud-auth-wait",
+      tag: WS_METHODS.museCloudAuthWait,
+    }),
+    cancelMuseCloudAuth: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-cloud-auth-cancel",
+      tag: WS_METHODS.museCloudAuthCancel,
+    }),
+    importMuseCloudCookies: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:muse-cloud-auth-import-cookies",
+      tag: WS_METHODS.museCloudAuthImportCookies,
     }),
     updateServer,
     upsertKeybinding: createEnvironmentRpcCommand(runtime, {
@@ -827,6 +884,10 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverUpdateSettings,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    assistantComputerControl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:assistant:computer-control",
+      tag: WS_METHODS.assistantComputerControl,
     }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",

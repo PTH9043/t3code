@@ -82,6 +82,9 @@ export const isProviderDriverKind = (value: unknown): value is ProviderDriverKin
 export const ProviderInstanceId = slugSchema.pipe(Schema.brand("ProviderInstanceId"));
 export type ProviderInstanceId = typeof ProviderInstanceId.Type;
 
+/** Runtime-discovered OpenCode instance for the environment's own Ollama daemon. */
+export const LOCAL_OLLAMA_INSTANCE = ProviderInstanceId.make("ollama-local");
+
 /**
  * Lightweight reference identifying which driver implements an instance.
  * Carried alongside `ProviderInstanceId` on wire shapes so consumers can

@@ -1,4 +1,5 @@
 import {
+  CanonicalWorkflowGraphFromPersistence,
   WorkflowVersion,
   WorkflowRunSummary,
   AiTaskRunSummary,
@@ -6,6 +7,7 @@ import {
   WorkspaceWorkflowError,
   type OrchestrationEvent,
   type ProjectId,
+  type WorkflowGraphV2,
 } from "@t3tools/contracts";
 import { summarizeWorkflowRun } from "@t3tools/shared/workflow";
 import * as Context from "effect/Context";
@@ -16,6 +18,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowVersion));
 const encode = Schema.encodeSync(Schema.fromJsonString(WorkflowVersion));
+const decodeCanonicalGraphJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(CanonicalWorkflowGraphFromPersistence),
+);
+const encodeCanonicalGraphJson = Schema.encodeEffect(
+  Schema.fromJsonString(CanonicalWorkflowGraphFromPersistence),
+);
 const encodeRunSummary = Schema.encodeEffect(Schema.fromJsonString(WorkflowRunSummary));
 const decodeRunSummary = Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowRunSummary));
 const decodeAiTaskRunSummary = Schema.decodeUnknownEffect(AiTaskRunSummary);
@@ -27,6 +35,21 @@ const failure = (cause: unknown) =>
   isWorkflowError(cause)
     ? cause
     : new WorkspaceWorkflowError({ message: "워크플로 기록을 처리하지 못했습니다.", cause });
+
+/**
+ * SQLite나 파일에 저장된 v1 `WorkflowVersion`, 경량 `WorkflowGraphV1`, 또는 `WorkflowGraphV2`
+ * JSON 문자열을 무손실 결정론적 업캐스터를 거쳐 검증된 `WorkflowGraphV2`로 디코드한다.
+ */
+export const decodeCanonicalWorkflowGraph = (
+  rawJson: string,
+): Effect.Effect<WorkflowGraphV2, WorkspaceWorkflowError> =>
+  decodeCanonicalGraphJson(rawJson).pipe(Effect.mapError(failure));
+
+/** 검증된 `WorkflowGraphV2`를 정규화된 v2 JSON 문자열로 인코드한다. */
+export const encodeCanonicalWorkflowGraph = (
+  graph: WorkflowGraphV2,
+): Effect.Effect<string, WorkspaceWorkflowError> =>
+  encodeCanonicalGraphJson(graph).pipe(Effect.mapError(failure));
 
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -107,6 +130,29 @@ export const make = Effect.gen(function* () {
     }>`SELECT v.definition_json FROM projection_workspace_workflow_versions v WHERE v.project_id=${projectId} AND v.revision=(SELECT MAX(n.revision) FROM projection_workspace_workflow_versions n WHERE n.project_id=v.project_id AND n.definition_id=v.definition_id) ORDER BY v.definition_id`;
     return yield* Effect.forEach(rows, (row) => decode(row.definition_json));
   }, Effect.mapError(failure));
+  const getCanonicalGraph = Effect.fn("WorkflowStore.getCanonicalGraph")(function* (
+    projectId: ProjectId,
+    id: string,
+    revision?: number,
+  ) {
+    const rows =
+      revision === undefined
+        ? yield* sql<{
+            definition_json: string;
+          }>`SELECT definition_json FROM projection_workspace_workflow_versions WHERE project_id=${projectId} AND definition_id=${id} ORDER BY revision DESC LIMIT 1`
+        : yield* sql<{
+            definition_json: string;
+          }>`SELECT definition_json FROM projection_workspace_workflow_versions WHERE project_id=${projectId} AND definition_id=${id} AND revision=${revision}`;
+    return rows[0] ? yield* decodeCanonicalGraphJson(rows[0].definition_json) : null;
+  }, Effect.mapError(failure));
+  const listCanonicalGraphs = Effect.fn("WorkflowStore.listCanonicalGraphs")(function* (
+    projectId: ProjectId,
+  ) {
+    const rows = yield* sql<{
+      definition_json: string;
+    }>`SELECT v.definition_json FROM projection_workspace_workflow_versions v WHERE v.project_id=${projectId} AND v.revision=(SELECT MAX(n.revision) FROM projection_workspace_workflow_versions n WHERE n.project_id=v.project_id AND n.definition_id=v.definition_id) ORDER BY v.definition_id`;
+    return yield* Effect.forEach(rows, (row) => decodeCanonicalGraphJson(row.definition_json));
+  }, Effect.mapError(failure));
   const retainedBinding = Effect.fn("WorkflowStore.retainedBinding")(function* (
     projectId: ProjectId,
     definitionId: string,
@@ -180,6 +226,8 @@ export const make = Effect.gen(function* () {
   return {
     get,
     list,
+    getCanonicalGraph,
+    listCanonicalGraphs,
     retainedBinding,
     projectSaved,
     delivery,

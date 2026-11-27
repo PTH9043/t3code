@@ -1,0 +1,8 @@
+# AI 검색·ripgrep 색인 노이즈 차단 (대용량 카탈로그·아카이브·임시 로그)
+docs/internals/aigithubnews-catalog-2026-10-23.json
+docs/internals/aigithubnews-repositories-2026-10-23.md
+docs/internals/T3-작업기록-백그라운드관제-초상세설계서-20261121.pdf
+docs/archive/
+Gemini_개발_오류_보고서.pdf
+*.log
+

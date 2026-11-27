@@ -1,0 +1,1 @@
+export const LOCAL_CONNECTION_ESTABLISHMENT_TIMEOUT = "1 minute";

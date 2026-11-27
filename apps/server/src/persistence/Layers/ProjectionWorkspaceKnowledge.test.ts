@@ -241,4 +241,50 @@ layer("ProjectionWorkspaceKnowledgeRepository", (it) => {
       });
     }),
   );
+
+  it.effect("deduplicates repeated itemIds within a single recordUsage call", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectionWorkspaceKnowledgeRepository;
+      const projectId = ProjectId.make("workspace-usage-dedupe");
+      const itemId = WorkspaceKnowledgeItemId.make("dedupe-item");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, workspace_control_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${projectId}, 'Dedupe', 'D:/dedupe', NULL, '[]',
+          '{"isolationMode":"strict","longTermMemoryRoot":null}',
+          '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z', NULL
+        )
+      `;
+      yield* repository.upsert({
+        id: itemId,
+        projectId,
+        kind: "rag-source",
+        title: "Dedupe Note",
+        content: "Body",
+        status: "active",
+        origin: "user",
+        relativeFolder: null,
+        tags: [],
+        originalChars: null,
+        storedChars: null,
+        promptUses: 0,
+        lastUsedAt: null,
+        createdAt: "2026-08-08T01:00:00.000Z",
+        updatedAt: "2026-08-08T01:00:00.000Z",
+      });
+
+      yield* repository.recordUsage({
+        projectId,
+        itemIds: [itemId, itemId, itemId],
+        usedAt: "2026-08-09T00:00:00.000Z",
+      });
+
+      const items = yield* repository.listByProjectId({ projectId });
+      assert.strictEqual(items[0]?.promptUses, 1);
+      assert.strictEqual(items[0]?.lastUsedAt, "2026-08-09T00:00:00.000Z");
+    }),
+  );
 });

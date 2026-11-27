@@ -54,6 +54,25 @@ describe("desktop development process ownership", () => {
     await import("./dev-desktop-bundles.mjs");
     expect(children[0].args).toContain("--no-clean");
     expect(children[1].args).toContain("--no-clean");
+    const build = mocks.spawnSync.mock.calls.find(
+      ([command, args]) => command === process.execPath && args.includes("pack"),
+    );
+    expect(build?.[1]).toContain("--no-clean");
+    expect(build?.[2]).toMatchObject({ windowsHide: true, timeout: 120_000 });
+    expect(mocks.spawnSync.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.spawn.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not start an old desktop when the initial bundle build fails", async () => {
+    mocks.spawnSync.mockImplementation((command, args) => {
+      if (command === process.execPath && args.includes("pack")) return { status: 1 };
+      return { status: 0 };
+    });
+    await expect(import("./dev-desktop-bundles.mjs")).rejects.toThrow(
+      "Initial desktop bundle build failed.",
+    );
+    expect(children).toHaveLength(0);
   });
 
   it.each([0, 7])(

@@ -4,13 +4,25 @@
 
 연결 검사는 실제 MCP 서버에 연결해 제공 도구를 조회합니다. AI 응답을 생성하거나 프로젝트 파일을 변경하지 않습니다. 켜기·끄기는 새 AI 세션부터 적용되며 진행 중인 작업은 현재 연결을 유지합니다. 설정은 연결한 서버 환경에 저장되어 같은 환경의 다른 기기에도 반영됩니다.
 
-| 도구                | 기능                                   | 제공자       |
-| ------------------- | -------------------------------------- | ------------ |
-| OpenAI Docs         | OpenAI·Codex 공식 문서 검색·읽기       | Codex·Claude |
-| Context7            | 라이브러리별 문서·예제 검색            | Codex·Claude |
-| Project Files       | 작업 폴더의 파일 읽기·검색·편집        | Codex·Claude |
-| Sequential Thinking | 단계별 분석·계획 검토                  | Codex·Claude |
-| Claude Code Tools   | 설치된 Claude Code의 파일·검색·셸 도구 | Codex        |
+HTTP MCP의 헤더 값은 별도 비밀 저장소에 보관하고 설정 화면에는 빈 값으로 표시합니다. 기존 빈 값을 그대로 두면 저장된 값이 유지되고, 새 값을 입력하면 교체됩니다. 헤더를 지우려면 JSON에서 해당 항목을 삭제하세요. 이전에 설정 파일에 평문으로 저장한 헤더는 다음 설정 저장 때 이동합니다. 서버 주소와 로컬 명령의 인자·환경 변수는 이 보호 대상이 아니므로 비밀값을 직접 넣지 마세요.
+
+## Composio 세션을 나중에 연결하기
+
+Composio 계정이 없어도 로컬 비서와 다른 MCP 서버는 사용할 수 있습니다. 나중에 Composio 계정과 MCP 세션을 만든 경우 **MCP 서버 등록 → Composio 세션 입력**을 선택하고 같은 세션에서 함께 받은 MCP 주소와 헤더를 입력하세요. 키를 서버 주소에 넣지 마세요. 필요한 서비스 계정 인증은 Composio에서 별도로 진행합니다. 이 입력 기능은 계정이나 세션을 자동으로 만들지 않습니다. 자세한 내용은 [Composio의 세션 MCP 안내](https://docs.composio.dev/docs/sessions-via-mcp)를 참고하세요.
+
+현재 설정에 같은 이름의 MCP 서버가 있으면 등록 화면에서 덮어쓰지 않도록 막습니다. 기존 서버의 **수정**을 선택하거나 다른 이름으로 등록하세요. 사용자 등록 MCP의 제공자 범위는 Codex·Claude·Antigravity·Grok입니다.
+
+T3의 내장 도구(`t3-code`: 협업 브라우저, 장기기억, 하위 모델 위임, 앱 실행)는 별도로 끌 수 없으며 모든 세션에서 항상 최우선으로 연결됩니다. Antigravity는 세션당 도구 선언 수 한도를 고려해 내장 기능과 중복되는 Project Files와 Sequential Thinking을 기본 환경 설정에서 자동 제외하며, 프로젝트별 도구 프로필로 켜면 해당 프로젝트에 한해 포함할 수 있습니다.
+
+| 도구                | 기능                                   | 제공자                          |
+| ------------------- | -------------------------------------- | ------------------------------- |
+| OpenAI Docs         | OpenAI·Codex 공식 문서 검색·읽기       | Codex·Claude·Antigravity·Grok   |
+| Context7            | 라이브러리별 문서·예제 검색            | Codex·Claude·Antigravity·Grok   |
+| Project Files       | 작업 폴더의 파일 읽기·검색·편집        | Codex·Claude·Antigravity\*·Grok |
+| Sequential Thinking | 단계별 분석·계획 검토                  | Codex·Claude·Antigravity\*·Grok |
+| Claude Code Tools   | 설치된 Claude Code의 파일·검색·셸 도구 | Codex                           |
+
+\*Antigravity에서는 내장 파일·사고 도구와 중복되어 기본 환경 설정에서 자동 제외됩니다.
 
 Claude에서는 자체 기본 도구를 사용하므로 Claude Code Tools 연결을 중복으로 추가하지 않습니다. 다른 제공자의 도구 연결은 이 화면에서 지원하지 않습니다. 파일 MCP는 AI 세션의 실제 작업 폴더를 사용하며 다른 프로젝트 폴더를 함께 등록하지 않습니다. 원격 기기에서 사용해도 도구 실행 위치는 서버 환경입니다.
 

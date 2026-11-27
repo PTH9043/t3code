@@ -1,5 +1,6 @@
 import {
   EventId,
+  OPENAI_API_CONNECTION,
   type OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -53,7 +54,14 @@ import {
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
 import * as Option from "effect/Option";
+import { LOCAL_OLLAMA_PROVIDER, localOllamaSelectionError } from "../localOllama.ts";
 import { openCodeTokenConsumption } from "../tokenConsumption.ts";
+import {
+  formatBillingErrorMessage,
+  isNonRetryableBillingError,
+  isNonRetryableWorkerError,
+  recordUnavailableModelFromError,
+} from "../workerFailurePolicy.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 
@@ -218,6 +226,8 @@ interface OpenCodeSessionContext {
   readonly openCodeSessionId: string;
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
+  /** Other sessions already checked: true when they descend from this thread's session. */
+  readonly subAgentSessions: Map<string, boolean>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
   readonly turnIdByUserMessageId: Map<string, TurnId>;
   readonly partById: Map<string, Part>;
@@ -290,9 +300,14 @@ const toProcessError = (threadId: ThreadId, cause: unknown): ProviderAdapterProc
  * eventually, just not right now.
  */
 function isRecoverableOpenCodeError(cause: unknown): boolean {
-  const detail = openCodeRuntimeErrorDetail(cause).toLowerCase();
+  const rawDetail = openCodeRuntimeErrorDetail(cause);
+  if (isNonRetryableWorkerError(rawDetail)) {
+    return false;
+  }
+  const detail = rawDetail.toLowerCase();
   if (
     detail.includes("401") ||
+    detail.includes("402") ||
     detail.includes("403") ||
     detail.includes("unauthorized") ||
     detail.includes("forbidden") ||
@@ -321,6 +336,10 @@ type EventBaseInput = {
 
 function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
   const normalized = toolName.toLowerCase();
+  // "todowrite" edits the agent's own plan, not a file.
+  if (normalized.includes("todo")) {
+    return "dynamic_tool_call";
+  }
   if (normalized.includes("bash") || normalized.includes("command")) {
     return "command_execution";
   }
@@ -354,16 +373,37 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
 function mapPermissionToRequestType(
   permission: string,
 ): "command_execution_approval" | "file_read_approval" | "file_change_approval" | "unknown" {
-  switch (permission) {
+  switch (permission.trim().toLowerCase()) {
     case "bash":
+    case "command":
+    case "webfetch":
+    case "websearch":
+    case "task":
+    case "todowrite":
       return "command_execution_approval";
     case "read":
+    case "glob":
+    case "grep":
+    case "list":
+    case "ls":
+    case "external_directory":
       return "file_read_approval";
     case "edit":
+    case "write":
+    case "patch":
+    case "multiedit":
       return "file_change_approval";
     default:
-      return "unknown";
+      return "command_execution_approval";
   }
+}
+
+export function describeOpenCodePermission(
+  permission: string,
+  patterns: ReadonlyArray<string>,
+): string {
+  if (patterns.length === 0 || (patterns.length === 1 && patterns[0] === "*")) return permission;
+  return `${permission}\n${patterns.join("\n")}`;
 }
 
 function mapPermissionDecision(reply: "once" | "always" | "reject"): string {
@@ -497,6 +537,26 @@ function detailFromToolPart(part: Extract<Part, { type: "tool" }>): string | und
     default:
       return undefined;
   }
+}
+
+/** OpenCode todowrite input: `{ todos: [{ content, status, priority }] }`. */
+function planFromTodoInput(todos: ReadonlyArray<unknown>) {
+  return todos.flatMap((todo) => {
+    const { content, status } = (todo ?? {}) as { content?: unknown; status?: unknown };
+    const step = typeof content === "string" ? content.trim() : "";
+    if (!step) return [];
+    return [
+      {
+        step,
+        status:
+          status === "completed"
+            ? ("completed" as const)
+            : status === "in_progress"
+              ? ("inProgress" as const)
+              : ("pending" as const),
+      },
+    ];
+  });
 }
 
 function toolStateCreatedAt(part: Extract<Part, { type: "tool" }>): string | undefined {
@@ -793,13 +853,51 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    /** Whether the session descends from this thread's session, as a sub-agent's does. */
+    const isSubAgentSession = Effect.fn("isSubAgentSession")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+    ) {
+      const known = context.subAgentSessions.get(sessionId);
+      if (known !== undefined) return known;
+      let current = sessionId;
+      for (let depth = 0; depth < 8; depth++) {
+        const found = yield* Effect.exit(
+          runOpenCodeSdk("session.get", () => context.client.session.get({ sessionID: current })),
+        );
+        // A failed lookup decides nothing; the next event asks again.
+        if (found._tag !== "Success") return false;
+        const parent = found.value.data?.parentID;
+        if (!parent || parent === context.openCodeSessionId) {
+          context.subAgentSessions.set(sessionId, Boolean(parent));
+          return Boolean(parent);
+        }
+        current = parent;
+      }
+      return false;
+    });
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
     ) {
       const payloadSessionId = openCodeEventSessionId(event);
       if (payloadSessionId !== context.openCodeSessionId) {
-        return;
+        // A sub-agent runs in a child session with its own permission rules. Its prompt must
+        // reach this thread, or the turn waits forever on a question nobody was shown.
+        // Its tool calls are shown too: a sub-agent can work for minutes while the thread's own
+        // session reports nothing.
+        const ours =
+          event.type === "permission.asked" || event.type === "question.asked"
+            ? yield* isSubAgentSession(context, event.properties.sessionID)
+            : event.type === "message.part.updated"
+              ? event.properties.part.type === "tool" &&
+                (yield* isSubAgentSession(context, event.properties.part.sessionID))
+              : event.type === "permission.replied"
+                ? context.pendingPermissions.has(event.properties.requestID)
+                : (event.type === "question.replied" || event.type === "question.rejected") &&
+                  context.pendingQuestions.has(event.properties.requestID);
+        if (!ours) return;
       }
 
       const turnId = context.activeTurnId;
@@ -923,6 +1021,7 @@ export function makeOpenCodeAdapter(
           }
 
           if (part.type === "tool") {
+            const subAgent = part.sessionID !== context.openCodeSessionId;
             const itemType = toToolLifecycleItemType(part.tool);
             const title =
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
@@ -940,6 +1039,7 @@ export function makeOpenCodeAdapter(
                 tool: part.tool,
                 state: part.state,
               },
+              ...(subAgent ? { agentId: part.sessionID } : {}),
             };
             const runtimeEvent: ProviderRuntimeEvent = {
               ...(yield* buildEventBase({
@@ -958,11 +1058,44 @@ export function makeOpenCodeAdapter(
               payload,
             };
             yield* emit(runtimeEvent);
+            // The finished todo list is the only statement of which step the agent is on. An
+            // emptied list withdraws the plan. OpenCode rewrites old parts when it compacts their
+            // output; that is not a new list.
+            if (
+              !subAgent &&
+              part.tool === "todowrite" &&
+              part.state.status === "completed" &&
+              part.state.time.compacted === undefined &&
+              Array.isArray(part.state.input.todos)
+            ) {
+              const plan = planFromTodoInput(part.state.input.todos);
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: toolStateCreatedAt(part),
+                })),
+                type: "turn.plan.updated",
+                payload: { plan },
+              });
+            }
           }
           break;
         }
 
         case "permission.asked": {
+          // Full access leaves nothing to ask the user. Only a sub-agent's session still asks.
+          if (context.session.runtimeMode === "full-access") {
+            const replied = yield* Effect.exit(
+              runOpenCodeSdk("permission.reply", () =>
+                context.client.permission.reply({
+                  requestID: event.properties.id,
+                  reply: "always",
+                }),
+              ),
+            );
+            if (replied._tag === "Success") break;
+          }
           context.pendingPermissions.set(event.properties.id, event.properties);
           yield* emit({
             ...(yield* buildEventBase({
@@ -974,10 +1107,10 @@ export function makeOpenCodeAdapter(
             type: "request.opened",
             payload: {
               requestType: mapPermissionToRequestType(event.properties.permission),
-              detail:
-                event.properties.patterns.length > 0
-                  ? event.properties.patterns.join("\n")
-                  : event.properties.permission,
+              detail: describeOpenCodePermission(
+                event.properties.permission,
+                event.properties.patterns,
+              ),
               args: event.properties.metadata,
             },
           });
@@ -1065,6 +1198,59 @@ export function makeOpenCodeAdapter(
           }
 
           if (event.properties.status.type === "retry") {
+            const retryMsg = event.properties.status.message;
+            if (isNonRetryableWorkerError(retryMsg)) {
+              const isBilling = isNonRetryableBillingError(retryMsg);
+              const formatted = isBilling ? formatBillingErrorMessage(retryMsg) : retryMsg;
+              recordUnavailableModelFromError({
+                providerInstanceId: boundInstanceId,
+                model: context.session.model,
+                errorMessage: retryMsg,
+              });
+              const activeTurnId = context.activeTurnId;
+              context.activeTurnId = undefined;
+              yield* runOpenCodeSdk("session.abort", () =>
+                context.client.session.abort({ sessionID: context.openCodeSessionId }),
+              ).pipe(Effect.ignore);
+              yield* updateProviderSession(
+                context,
+                { status: "error", lastError: formatted },
+                { clearActiveTurnId: true },
+              );
+              if (activeTurnId) {
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId: activeTurnId,
+                    raw: event,
+                  })),
+                  type: "turn.completed",
+                  payload: {
+                    state: "failed",
+                    errorMessage: formatted,
+                  },
+                });
+              }
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  raw: event,
+                })),
+                type: "runtime.error",
+                payload: {
+                  message: formatted,
+                  class: "provider_error",
+                  detail: {
+                    retryable: false,
+                    errorCategory: isBilling
+                      ? "billing_insufficient_balance"
+                      : "antseed_no_policy_peer",
+                    raw: event.properties.status,
+                  },
+                },
+              });
+              break;
+            }
             yield* emit({
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
@@ -1073,7 +1259,7 @@ export function makeOpenCodeAdapter(
               })),
               type: "runtime.warning",
               payload: {
-                message: event.properties.status.message,
+                message: retryMsg,
                 detail: event.properties.status,
               },
             });
@@ -1099,7 +1285,14 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
-          const message = sessionErrorMessage(event.properties.error);
+          const rawMessage = sessionErrorMessage(event.properties.error);
+          const isBilling = isNonRetryableBillingError(rawMessage);
+          const message = isBilling ? formatBillingErrorMessage(rawMessage) : rawMessage;
+          recordUnavailableModelFromError({
+            providerInstanceId: boundInstanceId,
+            model: context.session.model,
+            errorMessage: rawMessage,
+          });
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
           yield* updateProviderSession(
@@ -1133,7 +1326,13 @@ export function makeOpenCodeAdapter(
             payload: {
               message,
               class: "provider_error",
-              detail: event.properties.error,
+              detail: isBilling
+                ? {
+                    retryable: false,
+                    errorCategory: "billing_insufficient_balance",
+                    raw: event.properties.error,
+                  }
+                : event.properties.error,
             },
           });
           break;
@@ -1170,14 +1369,20 @@ export function makeOpenCodeAdapter(
                 detail: openCodeRuntimeErrorDetail(cause),
                 cause,
               }),
-          ).pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event))),
+          ).pipe(
+            Stream.runForEach((event) =>
+              Ref.set(context.consecutiveEventStreamFailures, 0).pipe(
+                Effect.andThen(handleSubscribedEvent(context, event)),
+              ),
+            ),
+          ),
       );
 
       // Reconnect loop: on a recoverable failure, back off and resubscribe
       // instead of giving up. AntSeed gateways restart, peers churn, and
       // SSE streams get reset — the subscription must survive those.
       const pumpWithRetry = Effect.gen(function* () {
-        for (let attempt = 0; ; attempt++) {
+        for (;;) {
           if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
             return;
           }
@@ -1190,6 +1395,7 @@ export function makeOpenCodeAdapter(
           if (Exit.isSuccess(exit)) {
             // Stream ended cleanly (e.g. server closed the connection).
             // Resubscribe after a short delay — the session is still alive.
+            yield* Ref.set(context.consecutiveEventStreamFailures, 0);
             yield* Effect.sleep("500 millis");
             continue;
           }
@@ -1200,6 +1406,7 @@ export function makeOpenCodeAdapter(
             return;
           }
 
+          const attempt = yield* Ref.get(context.consecutiveEventStreamFailures);
           if (attempt >= EVENT_PUMP_MAX_RETRIES) {
             yield* emitUnexpectedExit(
               context,
@@ -1208,6 +1415,7 @@ export function makeOpenCodeAdapter(
             return;
           }
 
+          yield* Ref.set(context.consecutiveEventStreamFailures, attempt + 1);
           const delay = Math.min(EVENT_PUMP_MAX_DELAY_MS, EVENT_PUMP_BASE_DELAY_MS * 2 ** attempt);
           yield* Effect.sleep(`${delay} millis`);
         }
@@ -1264,7 +1472,7 @@ export function makeOpenCodeAdapter(
               });
               const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
               if (mcpSession && !server.external) {
-                yield* runOpenCodeSdk("mcp.add", () =>
+                const attachment = yield* runOpenCodeSdk("mcp.add", () =>
                   client.mcp.add({
                     name: "t3-code",
                     config: {
@@ -1277,6 +1485,13 @@ export function makeOpenCodeAdapter(
                     },
                   }),
                 );
+                const status = attachment.data?.["t3-code"]?.status;
+                if (status !== "connected") {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "mcp.add",
+                    detail: `OpenCode 비서 도구 연결에 실패했습니다 (${status ?? "상태 미확인"}).`,
+                  });
+                }
               }
               // Resume: re-adopt the session named by the durable cursor —
               // OpenCode scopes history by session id. The probe recovers only
@@ -1434,6 +1649,7 @@ export function makeOpenCodeAdapter(
           openCodeSessionId: started.openCodeSession.id,
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
+          subAgentSessions: new Map(),
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
@@ -1488,6 +1704,29 @@ export function makeOpenCodeAdapter(
         });
       }
       const parsedModel = parseOpenCodeModelSlug(modelSelection?.model);
+      const connection = openCodeSettings.apiConnection;
+      if (connection?.providerId === LOCAL_OLLAMA_PROVIDER) {
+        const issue = yield* Effect.promise(() =>
+          localOllamaSelectionError(connection, parsedModel),
+        );
+        if (issue)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue,
+          });
+      }
+      if (
+        connection?.providerId === OPENAI_API_CONNECTION.providerId &&
+        (parsedModel?.providerID !== connection.providerId ||
+          !connection.models.includes(parsedModel.modelID))
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "Select an exact model configured on this OpenAI API account.",
+        });
+      }
       if (!parsedModel) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
@@ -1651,7 +1890,16 @@ export function makeOpenCodeAdapter(
       "respondToUserInput",
     )(function* (threadId, requestId, answers) {
       const context = yield* ensureSessionContext(sessions, threadId);
-      const request = context.pendingQuestions.get(requestId);
+      let request = context.pendingQuestions.get(requestId);
+      if (!request) {
+        const pending = yield* runOpenCodeSdk("question.list", () =>
+          context.client.question.list(),
+        ).pipe(Effect.mapError(toRequestError));
+        request = pending.data?.find(
+          (entry) => entry.id === requestId && entry.sessionID === context.openCodeSessionId,
+        );
+        if (request) context.pendingQuestions.set(requestId, request);
+      }
       if (!request) {
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
@@ -1770,6 +2018,8 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        workspaceDelegate: () => !openCodeSettings.serverUrl.trim(),
+        stopSessionDrainsEvents: true,
       },
       startSession,
       sendTurn,

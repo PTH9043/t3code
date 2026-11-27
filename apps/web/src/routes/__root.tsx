@@ -13,6 +13,9 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { DesktopAssistantView } from "../components/DesktopAssistantView";
+import { UpgradeRoomView } from "../components/UpgradeRoomView";
+import { isDesktopAssistantWindow } from "../desktopAssistantWindow";
 import { WorkspaceTabsHost } from "../components/tabs/WorkspaceTabsHost";
 import { CommandPalette } from "../components/CommandPalette";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
@@ -86,10 +89,14 @@ export const Route = createRootRoute({
   }),
 });
 
+// Keep this stable even if a child navigates the router inside the assistant window.
+const IS_DESKTOP_ASSISTANT = isDesktopAssistantWindow();
+
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
+  const config = useAtomValue(primaryServerConfigAtom);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -118,7 +125,27 @@ function RootRouteView() {
     );
   }
 
-  const appShell = (
+  if (primaryEnvironmentAuthenticated && !config && pathname.endsWith("/autousage-upgrade-room")) {
+    return null;
+  }
+  if (primaryEnvironmentAuthenticated && config?.upgradeRoom) {
+    return (
+      <ToastProvider>
+        <AnchoredToastProvider>
+          <CommandPalette>
+            <EventRouter />
+            <UpgradeRoomView config={config} room={config.upgradeRoom} />
+          </CommandPalette>
+        </AnchoredToastProvider>
+      </ToastProvider>
+    );
+  }
+
+  const appShell = IS_DESKTOP_ASSISTANT ? (
+    <CommandPalette>
+      <DesktopAssistantView />
+    </CommandPalette>
+  ) : (
     <CommandPalette>
       <AppSidebarLayout>
         <WorkspaceTabsHost>
@@ -133,6 +160,7 @@ function RootRouteView() {
       <AnchoredToastProvider>
         <DocumentTitleSync />
         <GlassAppearanceSync />
+        <ChatLayoutAppearanceSync />
         <FontAppearanceSync />
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         <RelayClientInstallDialog />
@@ -157,6 +185,30 @@ function GlassAppearanceSync() {
   useEffect(() => {
     document.documentElement.style.setProperty("--glass-opacity", `${glassOpacity}%`);
   }, [glassOpacity]);
+
+  return null;
+}
+
+function ChatLayoutAppearanceSync() {
+  const chatHorizontalInsetPx = useClientSettings(
+    (settings) => settings.chatHorizontalInsetPx ?? null,
+  );
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (chatHorizontalInsetPx == null || !Number.isFinite(chatHorizontalInsetPx)) {
+      delete root.dataset.chatCustomInset;
+      root.style.removeProperty("--chat-horizontal-inset");
+      root.style.removeProperty("--chat-horizontal-inset-mobile");
+      return;
+    }
+    root.dataset.chatCustomInset = "true";
+    root.style.setProperty("--chat-horizontal-inset", `${chatHorizontalInsetPx}px`);
+    root.style.setProperty(
+      "--chat-horizontal-inset-mobile",
+      `${Math.min(chatHorizontalInsetPx, 24)}px`,
+    );
+  }, [chatHorizontalInsetPx]);
 
   return null;
 }

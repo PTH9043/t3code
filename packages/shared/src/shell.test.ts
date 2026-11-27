@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
+import * as NodeModule from "node:module";
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
@@ -17,6 +18,7 @@ import {
   mergePathValues,
   npmNodeScriptFromShim,
   readEnvironmentFromLoginShell,
+  readEnvironmentFromWindowsProcess,
   readEnvironmentFromWindowsShell,
   readPathFromLaunchctl,
   readPathFromLoginShell,
@@ -212,6 +214,60 @@ describe("mergePathEntries", () => {
       "C:\\Tools;C:\\Windows;C:\\Git",
     );
   });
+});
+
+describe("readEnvironmentFromWindowsProcess", () => {
+  it("reads only requested variables without starting CMD", () => {
+    expect(
+      readEnvironmentFromWindowsProcess(["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"], {
+        Path: "C:\\사용자\\도구",
+        fnm_dir: "C:\\fnm=1",
+        FNM_MULTISHELL_PATH: "",
+        OTHER: "ignored",
+      }),
+    ).toEqual({ PATH: "C:\\사용자\\도구", FNM_DIR: "C:\\fnm=1" });
+    expect(() => readEnvironmentFromWindowsProcess(["PATH&bad"], {})).toThrow(
+      "Unsupported environment variable name",
+    );
+  });
+
+  it("uses the process environment as the default Windows reader", () => {
+    const childProcess = NodeModule.createRequire(import.meta.url)(
+      "node:child_process",
+    ) as typeof import("node:child_process");
+    const exec = vi.spyOn(childProcess, "execFileSync");
+    NodeModule.syncBuiltinESMExports();
+    try {
+      expect(Effect.runSync(WindowsShellEnvironment)(["PATH"], { loadProfile: true })).toEqual(
+        readEnvironmentFromWindowsProcess(["PATH"]),
+      );
+      expect(exec).not.toHaveBeenCalled();
+    } finally {
+      exec.mockRestore();
+      NodeModule.syncBuiltinESMExports();
+    }
+  });
+
+  it("preserves long and multiline values without shell output parsing", () => {
+    const longPath = Array.from({ length: 1500 }, (_, i) => `C:\\도구\\${i}`).join(";");
+    expect(longPath.length).toBeGreaterThan(8191);
+    expect(
+      readEnvironmentFromWindowsProcess(["PATH", "FNM_DIR"], {
+        Path: longPath,
+        FNM_DIR: "C:\\한글=1\n두 번째 줄",
+      }),
+    ).toEqual({ PATH: longPath, FNM_DIR: "C:\\한글=1\n두 번째 줄" });
+  });
+
+  it.skipIf(NodeOS.platform() !== "win32")(
+    "matches CMD for the current PATH and FNM values",
+    () => {
+      const names = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"];
+      expect(readEnvironmentFromWindowsProcess(names)).toEqual(
+        readEnvironmentFromWindowsShell(names),
+      );
+    },
+  );
 });
 
 describe("readEnvironmentFromWindowsShell", () => {
@@ -411,12 +467,14 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
       expect(command.shell).toBe(true);
       expect(command.command).not.toContain(" & ");
       expect(command.command).toContain("^&");
-      expect(command.args).toEqual([
-        '^"run^"',
-        '^"value^ ^&^ calc^"',
-        '^"^%PATH^%^"',
-        '^"quote\\^"value^"',
-      ]);
+      // The escaped arguments ride on the command line itself: a shell-mode
+      // spawn with a separate argument list triggers Node's DEP0190.
+      expect(command.args).toEqual([]);
+      expect(
+        command.command.endsWith(
+          ['^"run^"', '^"value^ ^&^ calc^"', '^"^%PATH^%^"', '^"quote\\^"value^"'].join(" "),
+        ),
+      ).toBe(true);
     }),
   );
 

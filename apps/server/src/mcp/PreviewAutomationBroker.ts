@@ -33,6 +33,7 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { validatePreviewNavigationUrl } from "./HostSecurityGuard.ts";
 
 export interface PreviewAutomationInvokeInput {
   readonly scope: McpInvocationContext.McpInvocationScope;
@@ -277,11 +278,24 @@ const classifyResponseError = (
         ...context,
         ...remoteDiagnostics,
       });
-    default:
+    default: {
+      // Only the cause's class name crosses over, and only when it is a plain
+      // identifier: the remote message stays out of the agent-visible error.
+      const detail =
+        typeof error.detail === "object" && error.detail !== null ? error.detail : undefined;
+      const remoteCauseTag =
+        detail &&
+        "causeTag" in detail &&
+        typeof detail.causeTag === "string" &&
+        /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(detail.causeTag)
+          ? detail.causeTag
+          : undefined;
       return new PreviewAutomationExecutionError({
         ...context,
         ...remoteDiagnostics,
+        ...(remoteCauseTag === undefined ? {} : { remoteCauseTag }),
       });
+    }
   }
 };
 
@@ -440,6 +454,30 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   const invoke = Effect.fn("PreviewAutomationBroker.invoke")(function* <A = unknown>(
     input: Parameters<PreviewAutomationBroker["Service"]["invoke"]>[0],
   ): Effect.fn.Return<A, PreviewAutomationError> {
+    if (
+      typeof input.input === "object" &&
+      input.input !== null &&
+      "url" in input.input &&
+      typeof (input.input as { url?: unknown }).url === "string"
+    ) {
+      const targetUrl = (input.input as { url: string }).url;
+      const ssrfCheck = validatePreviewNavigationUrl(targetUrl, { allowLocalhost: true });
+      if (!ssrfCheck.allowed) {
+        return yield* new PreviewAutomationExecutionError({
+          operation: input.operation,
+          environmentId: input.scope.environmentId,
+          threadId: input.scope.threadId,
+          providerSessionId: input.scope.providerSessionId,
+          providerInstanceId: input.scope.providerInstanceId,
+          clientId: "host-security-guard",
+          connectionId: "host-security-guard",
+          requestId: "ssrf-blocked",
+          timeoutMs: input.timeoutMs ?? 15_000,
+          message: `SSRF policy blocked preview URL: ${ssrfCheck.reason ?? "disallowed host"}`,
+          ...(input.tabId !== undefined ? { tabId: input.tabId } : {}),
+        });
+      }
+    }
     const timeoutMs = input.timeoutMs ?? 15_000;
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
     const route = yield* SynchronizedRef.modify(state, (current) => {

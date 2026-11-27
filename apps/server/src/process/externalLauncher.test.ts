@@ -59,6 +59,21 @@ const testLayer = (input: {
   return Layer.mergeAll(
     ExternalLauncher.layer.pipe(Layer.provide(Layer.merge(NodeServices.layer, spawnerLayer))),
     Layer.succeed(HostProcessPlatform, input.platform),
+    Layer.succeed(ExternalLauncher.WindowsFileManagerSpawner, ({ command, args, shell }) =>
+      Effect.sync(() => {
+        const standard = ChildProcess.make(command, args, {
+          detached: true,
+          shell,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        if (ChildProcess.isStandardCommand(standard)) {
+          input.onSpawn?.(standard);
+        }
+        input.onUnref?.();
+      }),
+    ),
     Layer.succeed(
       SpawnExecutableResolution,
       (command) => input.resolveExecutable?.(command) ?? command,
@@ -95,6 +110,34 @@ it.effect("launches the default browser through the platform command", () => {
   );
 });
 
+for (const [platform, env, expected] of [
+  ["win32", { SYSTEMROOT: "C:\\Windows" }, "C:\\Windows\\explorer.exe"],
+  ["linux", { WSL_DISTRO_NAME: "Ubuntu" }, "/mnt/c/Windows/explorer.exe"],
+] as const) {
+  it.effect(`opens browser links without PowerShell on ${platform}`, () => {
+    let spawned: ChildProcess.StandardCommand | undefined;
+    const url = "https://example.com/path?a=1&b=two%20words";
+    return Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      yield* launcher.launchBrowser(url);
+      assert.ok(spawned);
+      assert.equal(spawned.command, expected);
+      assert.deepEqual(spawned.args, [url]);
+      assert.equal(spawned.options.shell, false);
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform,
+          env,
+          onSpawn: (command) => {
+            spawned = command;
+          },
+        }),
+      ),
+    );
+  });
+}
+
 it.effect("launches an installed editor with platform-safe arguments", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -124,11 +167,15 @@ it.effect("launches an installed editor with platform-safe arguments", () =>
     );
 
     assert.ok(spawned);
-    assert.equal(spawned.command, '^"C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD^"');
-    assert.deepEqual(spawned.args, [
-      '^"--goto^"',
-      '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
-    ]);
+    assert.equal(
+      spawned.command,
+      [
+        '^"C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD^"',
+        '^"--goto^"',
+        '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
+      ].join(" "),
+    );
+    assert.deepEqual(spawned.args, []);
     assert.equal(spawned.options.shell, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
@@ -156,6 +203,95 @@ it.effect("discovers editors through the service API", () =>
     assert.equal(editors.includes("vscode"), true);
     assert.equal(editors.includes("file-manager"), true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("normalizes Windows folder paths and selects files when launching file-manager", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-explorer-bin-" });
+    const workDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-explorer-work-" });
+    const sampleFile = path.join(workDir, "sample.ts");
+    yield* fileSystem.writeFileString(path.join(binDir, "explorer.CMD"), "@echo off\r\n");
+    yield* fileSystem.writeFileString(sampleFile, "export const ok = true;\n");
+
+    const spawns: ChildProcess.StandardCommand[] = [];
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      // Forward-slashed folder with trailing slash
+      yield* launcher.launchEditor({
+        editor: "file-manager",
+        cwd: `${workDir.replaceAll("\\", "/")}/`,
+      });
+      // Forward-slashed file with :line:col suffix
+      yield* launcher.launchEditor({
+        editor: "file-manager",
+        cwd: `${sampleFile.replaceAll("\\", "/")}:10:2`,
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "win32",
+          env: { PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+          resolveExecutable: (command) =>
+            command === "explorer" ? "C:\\Windows\\explorer.exe" : command,
+          onSpawn: (command) => {
+            spawns.push(command);
+          },
+        }),
+      ),
+    );
+
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[0]?.command, "C:\\Windows\\explorer.exe");
+    assert.deepEqual(spawns[0]?.args, [workDir.replaceAll("/", "\\").replace(/\\+$/, "")]);
+    assert.equal(spawns[1]?.command, "C:\\Windows\\explorer.exe");
+    assert.deepEqual(spawns[1]?.args, [`/select,${sampleFile.replaceAll("/", "\\")}`]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "discovers and launches Windows explorer.exe via SYSTEMROOT even when PATH omits Windows",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fakeWinDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-fake-win-" });
+      const workDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-airdrop-" });
+      const explorerExe = path.join(fakeWinDir, "explorer.exe");
+      yield* fileSystem.writeFileString(explorerExe, "MZ");
+
+      const spawns: ChildProcess.StandardCommand[] = [];
+      const editors = yield* Effect.gen(function* () {
+        const launcher = yield* ExternalLauncher.ExternalLauncher;
+        const available = yield* launcher.resolveAvailableEditors();
+        yield* launcher.launchEditor({
+          editor: "file-manager",
+          cwd: `${workDir.replaceAll("\\", "/")}/`,
+        });
+        return available;
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            platform: "win32",
+            env: {
+              PATH: "",
+              PATHEXT: ".COM;.EXE;.BAT;.CMD",
+              SYSTEMROOT: fakeWinDir,
+            },
+            onSpawn: (command) => {
+              spawns.push(command);
+            },
+          }),
+        ),
+      );
+
+      assert.equal(editors.includes("file-manager"), true);
+      assert.equal(spawns.length, 1);
+      assert.equal(spawns[0]?.command, explorerExe);
+      assert.deepEqual(spawns[0]?.args, [workDir.replaceAll("/", "\\").replace(/\\+$/, "")]);
+      assert.equal(spawns[0]?.options.shell, false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect(
@@ -247,8 +383,8 @@ it.effect("memoizes editor discovery and refreshes after the cache window", () =
     assert.deepEqual([...second], [...first]);
     assert.equal(statCalls, statCallsAfterFirstScan);
 
-    // Past the discovery cache window the next call rescans.
-    yield* TestClock.adjust("30 seconds");
+    // Past the 5-minute discovery cache window the next call rescans.
+    yield* TestClock.adjust("270 seconds");
     yield* launcher.resolveAvailableEditors();
     assert.isAbove(statCalls, statCallsAfterFirstScan);
   }).pipe(

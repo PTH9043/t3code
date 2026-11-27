@@ -113,3 +113,56 @@ export function useOpenInPreferredEditor(
     [availableEditors, environmentId, openInEditor],
   );
 }
+
+export function useOpenInFileManager(
+  environmentId: EnvironmentId | null,
+  availableEditors: readonly EditorId[],
+) {
+  const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
+    reportFailure: false,
+  });
+  type OpenInEditorError = AtomCommandFailure<Awaited<ReturnType<typeof openInEditor>>>;
+
+  return useCallback(
+    async (
+      targetPath: string,
+    ): Promise<
+      AtomCommandResult<
+        "file-manager",
+        | OpenInEditorError
+        | PreferredEditorEnvironmentRequiredError
+        | PreferredEditorUnavailableError
+      >
+    > => {
+      if (environmentId === null) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new PreferredEditorEnvironmentRequiredError({
+              targetPath,
+            }),
+          ),
+        );
+      }
+      if (availableEditors.length > 0 && !availableEditors.includes("file-manager")) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new PreferredEditorUnavailableError({
+              environmentId,
+              targetPath,
+              availableEditorIds: availableEditors,
+            }),
+          ),
+        );
+      }
+      const result = await openInEditor({
+        environmentId,
+        input: {
+          cwd: targetPath,
+          editor: "file-manager",
+        },
+      });
+      return mapAtomCommandResult(result, () => "file-manager" as const);
+    },
+    [availableEditors, environmentId, openInEditor],
+  );
+}

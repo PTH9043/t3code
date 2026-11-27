@@ -1,6 +1,12 @@
+import { RunKnowledgeDocuments } from "../knowledge/RunKnowledgeDocuments";
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
 import {
+  CanonicalWorkflowGraphFromPersistence,
+  extractForwardEdges,
+  resolveCanonicalWorkflowGraphV2,
   WorkflowDefinition,
+  WorkflowGraphV2,
+  type WorkflowGraphV2Draft,
   type WorkflowNode,
   type WorkflowVersion,
   type SkillMetadata,
@@ -9,7 +15,11 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import * as Schema from "effect/Schema";
 import { GitBranchIcon, RefreshCcwIcon } from "lucide-react";
-import { previewWorkflow } from "@t3tools/shared/workflow";
+import {
+  buildBuiltinWorkflowV2Presets,
+  previewWorkflow,
+  validateWorkflowGraphV2Topology,
+} from "@t3tools/shared/workflow";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -34,6 +44,101 @@ const selectClass = "w-full rounded-md border border-input bg-background p-2 tex
 const decodeDefinition = Schema.decodeUnknownSync(WorkflowDefinition);
 const serialize = Schema.encodeSync(Schema.fromJsonString(WorkflowDefinition));
 const decodeWorkflowJson = Schema.decodeUnknownSync(Schema.fromJsonString(WorkflowDefinition));
+const decodeCanonicalGraphJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(CanonicalWorkflowGraphFromPersistence),
+);
+const serializeV2GraphJson = Schema.encodeSync(Schema.fromJsonString(WorkflowGraphV2));
+
+export function workflowDefinitionFromV2Graph(
+  graph: WorkflowGraphV2Draft,
+  fallback?: WorkflowDefinition | null,
+): WorkflowDefinition {
+  const topology = validateWorkflowGraphV2Topology(graph);
+  if (!topology.valid) {
+    throw new Error(topology.issues.map((issue) => issue.message).join("\n"));
+  }
+  const forwardDeps = new Map<string, string[]>();
+  for (const edge of extractForwardEdges(graph)) {
+    const deps = forwardDeps.get(edge.to) ?? [];
+    if (!deps.includes(edge.from)) deps.push(edge.from);
+    forwardDeps.set(edge.to, deps);
+  }
+  const slugify = (raw: string, index: number): string => {
+    const cleaned = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+    return /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `n_${index}_${cleaned}`.slice(0, 64);
+  };
+  const idMap = new Map<string, string>(
+    graph.nodes.map((entry, idx) => [entry.id, slugify(entry.id, idx)]),
+  );
+  const v1Nodes: WorkflowNode[] = graph.nodes.map((entry, idx) => {
+    const mappedId = idMap.get(entry.id) ?? slugify(entry.id, idx);
+    const deps = (forwardDeps.get(entry.id) ?? [])
+      .map((depId) => idMap.get(depId))
+      .filter((depId): depId is string => depId !== undefined && depId !== mappedId);
+    if (entry.kind === "agent") {
+      const agent =
+        entry.routing?.legacyAgentHint ??
+        (entry.capability === "deep-architect" || entry.capability === "adversarial-reviewer"
+          ? "fable"
+          : entry.capability === "fast-scout" || entry.capability === "local-zero-cost"
+            ? "grok"
+            : "codex");
+      const kind =
+        entry.legacyKind ??
+        (agent === "grok" ? "research" : agent === "codex" ? "implementation" : "orchestration");
+      return {
+        id: mappedId,
+        title: entry.title.slice(0, 200),
+        kind,
+        agent,
+        participantId: entry.participantId ?? null,
+        task: entry.promptTemplate.slice(0, 4000),
+        dependsOn: deps,
+        successCriteria: entry.advisoryCriteria.filter((c) => c.trim().length > 0).slice(0, 16),
+        skills: [...(entry.skills ?? [])],
+      };
+    }
+    const kind: WorkflowNode["kind"] =
+      entry.kind === "verifier"
+        ? "debug"
+        : entry.kind === "map_fanout" || entry.kind === "reconcile_worktrees"
+          ? "implementation"
+          : "orchestration";
+    const agent: WorkflowNode["agent"] =
+      kind === "implementation" || kind === "debug" ? "codex" : "fable";
+    return {
+      id: mappedId,
+      title: entry.title.slice(0, 200),
+      kind,
+      agent,
+      participantId: null,
+      task: `[v2:${entry.kind}] ${entry.description || entry.title}`.slice(0, 4000),
+      dependsOn: deps,
+      successCriteria: [],
+      skills: [],
+    };
+  });
+  return decodeDefinition({
+    schemaVersion: 1,
+    id: graph.id ?? fallback?.id ?? "workflow-v2",
+    title: graph.title ?? fallback?.title ?? "워크플로 v2",
+    description: graph.description ?? fallback?.description ?? "",
+    inputs: graph.inputs.map((param) => ({
+      name: param.key,
+      label: param.label,
+      type:
+        param.valueType === "file_path"
+          ? "path"
+          : param.valueType === "number" || param.valueType === "boolean"
+            ? param.valueType
+            : "string",
+      required: param.required,
+      defaultValue: typeof param.defaultValue === "string" ? param.defaultValue : "",
+    })),
+    nodes: v1Nodes,
+    graphV2: graph,
+  });
+}
 
 function WorkflowRunDetails({
   project,
@@ -79,6 +184,7 @@ function WorkflowRunDetails({
       ) : (
         <p className="text-sm">실행 계획·질문을 준비하는 중입니다.</p>
       )}
+      <RunKnowledgeDocuments project={project} runId={run.id} />
     </div>
   );
 }
@@ -307,6 +413,57 @@ export function WorkspaceWorkflowSection({ project }: { project: EnvironmentProj
               {definition.title}
             </Button>
           ))}
+        </div>
+        <div
+          data-workflow-v2-presets=""
+          className="grid gap-2 rounded-lg border border-border/60 bg-muted/20 p-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
+            <span className="font-medium">그래프 v2 전문 프리셋 (이중 검증 · 병렬 루프)</span>
+            <span className="text-[11px] text-muted-foreground">
+              선택 시 v2 그래프 정의를 폼과 연결 캔버스로 즉시 불러옵니다.
+            </span>
+          </div>
+          <div className="grid gap-2 md:grid-cols-3">
+            {buildBuiltinWorkflowV2Presets().map((preset) => (
+              <div
+                key={preset.id}
+                className="flex flex-col justify-between gap-2 rounded-md border border-border/60 bg-background/80 p-2.5 text-xs"
+              >
+                <div className="space-y-1">
+                  <span className="inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    {preset.badge}
+                  </span>
+                  <p className="font-medium text-foreground">{preset.title}</p>
+                  <p className="text-[11px] text-muted-foreground">{preset.summary}</p>
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    onClick={() => {
+                      try {
+                        const existing = overview.data?.definitions.find(
+                          (entry) => entry.id === preset.id,
+                        );
+                        if (existing) {
+                          load(existing);
+                        } else {
+                          load(workflowDefinitionFromV2Graph(preset.build()));
+                        }
+                        notifySuccess(`'${preset.title}' v2 프리셋을 불러왔습니다.`);
+                      } catch (cause) {
+                        setError(cause instanceof Error ? cause.message : String(cause));
+                      }
+                    }}
+                  >
+                    프리셋 불러오기
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
         <label className="grid gap-1 text-xs">
           저장한 워크플로
@@ -847,7 +1004,7 @@ export function WorkspaceWorkflowSection({ project }: { project: EnvironmentProj
                 value={json}
                 onChange={(event) => setJson(event.target.value)}
               />
-              <div className="mt-2 flex gap-2">
+              <div className="mt-2 flex flex-wrap gap-2">
                 <Button
                   size="xs"
                   variant="outline"
@@ -867,7 +1024,29 @@ export function WorkspaceWorkflowSection({ project }: { project: EnvironmentProj
                   variant="outline"
                   onClick={() => {
                     try {
-                      load(decodeWorkflowJson(json));
+                      const canonical = Schema.decodeUnknownSync(WorkflowGraphV2)(
+                        resolveCanonicalWorkflowGraphV2(draft),
+                      );
+                      setJson(serializeV2GraphJson(canonical));
+                      setError(null);
+                    } catch (cause) {
+                      setError(cause instanceof Error ? cause.message : String(cause));
+                    }
+                  }}
+                >
+                  v2 그래프 내보내기
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => {
+                    try {
+                      try {
+                        load(decodeWorkflowJson(json));
+                      } catch {
+                        const canonicalV2 = decodeCanonicalGraphJson(json);
+                        load(workflowDefinitionFromV2Graph(canonicalV2, draft));
+                      }
                     } catch (cause) {
                       setError(cause instanceof Error ? cause.message : "정의 형식을 확인하세요.");
                     }

@@ -88,12 +88,42 @@ export function toAgentKnowledgeCaptures(input: {
       maxChars: input.settings.maxOutputChars,
     });
     if (compacted === null) continue;
+    // Starting a retry clears node.output. Only its terminal receipt identifies the
+    // producing route, including synthesis results whose stored output was reformatted.
+    const attempt = node.attempts.at(-1);
+    const producer =
+      attempt?.status === "completed" &&
+      attempt.completedAt &&
+      attempt.output &&
+      (!node.threadId || attempt.threadId === node.threadId) &&
+      (attempt.completedAt === node.completedAt || output.slice(0, 8_000) === attempt.output)
+        ? attempt
+        : undefined;
+    const threadId =
+      producer?.threadId ??
+      node.threadId ??
+      (!input.run.orchestra ? input.run.meeting?.threadId : null);
     captures.push({
       nodeId: node.id,
       originalChars: compacted.originalChars,
       storedChars: compacted.compactedChars,
       item: {
         id: agentKnowledgeItemId({ runId: input.run.id, nodeId: node.id }),
+        provenance: {
+          runId: input.run.id,
+          nodeId: node.id,
+          actor: node.agent,
+          ...(node.confidence ? { confidence: node.confidence } : {}),
+          ...(threadId ? { threadId } : {}),
+          ...(producer
+            ? {
+                modelSelection: {
+                  instanceId: producer.modelSelection.instanceId,
+                  model: producer.modelSelection.model,
+                },
+              }
+            : {}),
+        },
         projectId: input.run.projectId as ProjectId,
         kind: AGENT_OUTPUT_KIND,
         title: `에이전트 결과 · ${nodeTitle(node)}`,

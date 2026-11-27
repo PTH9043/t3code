@@ -20,8 +20,22 @@ export function OrchestraRunControls({
   environmentId: EnvironmentId;
   run: WorkspaceCollaborationRun;
 }) {
+  const providerWarnings = run.workflow?.providerWarnings ?? run.runContext?.providerWarnings ?? [];
   return (
     <View className="gap-2">
+      {providerWarnings.length > 0 && (
+        <View className="gap-1 rounded-xl bg-fill p-3">
+          <Text className="font-t3-bold text-foreground">시작 전 확인한 연결 경고</Text>
+          <Text className="text-xs text-foreground-muted">
+            시작 시점의 상태이며, 각 단계 실행 전에 다시 확인합니다.
+          </Text>
+          {providerWarnings.map((warning) => (
+            <Text key={warning.role} selectable className="text-xs text-foreground-muted">
+              {warning.message}
+            </Text>
+          ))}
+        </View>
+      )}
       {run.status === "running" && run.graph?.planReview?.status === "pending" && (
         <PlanEditor
           key={run.id + ":" + run.graph.planReview.revision}
@@ -92,7 +106,9 @@ function PlanEditor({
       nodeId: node.id,
       title: node.title,
       task: node.handoff.task,
-      participantId: node.participantId,
+      participantId: graph.workflowAssignment?.pendingNodeIds.includes(node.id)
+        ? null
+        : node.participantId,
       dependsOn: node.dependsOn.flatMap((id) => {
         const producer = gates.get(id) ?? id;
         return nodes.some((candidate) => candidate.id === producer) ? [producer] : [];
@@ -166,6 +182,18 @@ function PlanEditor({
             onChangeText={(task) => update(edit.nodeId, { task })}
           />
           <Text className="text-xs text-foreground-muted">담당 AI</Text>
+          {graph.workflowAssignment?.pendingNodeIds.includes(edit.nodeId) && (
+            <Pressable
+              disabled={busy}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: edit.participantId === null }}
+              onPress={() => update(edit.nodeId, { participantId: null })}
+            >
+              <Text className="py-1 text-xs text-foreground">
+                {edit.participantId === null ? "●" : "○"} 감독자 배정 대기
+              </Text>
+            </Pressable>
+          )}
           {run.meeting?.participants.map((seat) => (
             <Pressable
               key={seat.id}

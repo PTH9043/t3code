@@ -34,6 +34,7 @@ import * as ElectronUpdater from "./electron/ElectronUpdater.ts";
 import * as ElectronWindow from "./electron/ElectronWindow.ts";
 import * as DesktopApp from "./app/DesktopApp.ts";
 import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
+import * as DesktopIntegrity from "./app/DesktopIntegrity.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
@@ -64,6 +65,12 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
+
+if (process.platform === "win32") {
+  void DesktopIntegrity.readDesktopIntegrityRid().then((rid) => {
+    process.stdout.write(`[desktop-integrity] pid=${process.pid} rid=${rid ?? "unknown"}\n`);
+  });
+}
 
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {

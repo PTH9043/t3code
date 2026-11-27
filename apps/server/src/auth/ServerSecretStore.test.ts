@@ -6,11 +6,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as PlatformError from "effect/PlatformError";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import { isWindowsProtectedCredential } from "./WindowsCredentialProtection.ts";
 
 const makeServerConfigLayer = () =>
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-secret-store-test-" });
@@ -197,6 +199,7 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
           return {
             ...fileSystem,
             makeDirectory: () => Effect.void,
+            readDirectory: () => Effect.succeed([]),
             writeFile: () => Effect.void,
             rename: () => Effect.void,
             chmod: (path, mode) =>
@@ -219,7 +222,9 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
       yield* secretStore.set("session-signing-key", Uint8Array.from([1, 2, 3]));
 
       assert.isTrue(
-        chmodCalls.some((call) => call.mode === 0o700 && call.path.endsWith("/secrets")),
+        chmodCalls.some(
+          (call) => call.mode === 0o700 && call.path.replaceAll("\\", "/").endsWith("/secrets"),
+        ),
       );
       assert.isAtLeast(chmodCalls.filter((call) => call.mode === 0o600).length, 2);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -264,5 +269,189 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
       assert.instanceOf(error.cause, PlatformError.PlatformError);
       assert.equal((error.cause as PlatformError.PlatformError).reason._tag, "PermissionDenied");
     }).pipe(Effect.provide(makeRemoveFailureSecretStoreLayer())),
+  );
+
+  it.effect("encrypts provider keys and migrates an existing plaintext key on Windows", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-credential-protection-" });
+      const secretsDir = path.join(baseDir, "userdata", "secrets");
+      yield* fs.makeDirectory(secretsDir, { recursive: true });
+      const name = "provider-env-test-key";
+      const original = new TextEncoder().encode("synthetic-api-key-한글");
+      const secretPath = path.join(secretsDir, `${name}.bin`);
+      yield* fs.writeFile(secretPath, original);
+
+      const secrets = yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          ),
+        ),
+      );
+      const encrypted = yield* fs.readFile(secretPath);
+      assert.isTrue(isWindowsProtectedCredential(encrypted));
+      assert.notInclude(new TextDecoder().decode(encrypted), "synthetic-api-key");
+      assert.deepEqual(
+        Array.from(Option.getOrThrow(yield* secrets.get(name))),
+        Array.from(original),
+      );
+
+      const updated = new TextEncoder().encode("synthetic-updated-key");
+      yield* secrets.set(name, updated);
+      assert.isTrue(isWindowsProtectedCredential(yield* fs.readFile(secretPath)));
+      assert.deepEqual(
+        Array.from(Option.getOrThrow(yield* secrets.get(name))),
+        Array.from(updated),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("rejects an encrypted credential copied under a different name", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-credential-name-" });
+      const secrets = yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          ),
+        ),
+      );
+      yield* secrets.set("provider-env-original", new TextEncoder().encode("synthetic-key"));
+      const dir = path.join(baseDir, "userdata", "secrets");
+      yield* fs.copyFile(
+        path.join(dir, "provider-env-original.bin"),
+        path.join(dir, "provider-env-other.bin"),
+      );
+      const error = yield* Effect.flip(secrets.get("provider-env-other"));
+      assert.instanceOf(error, ServerSecretStore.SecretStoreDecodeError);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("rejects a modified encrypted credential", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-credential-modified-" });
+      const secrets = yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          ),
+        ),
+      );
+      const name = "provider-env-tampered";
+      yield* secrets.set(name, new TextEncoder().encode("synthetic-key"));
+      const secretPath = path.join(baseDir, "userdata", "secrets", `${name}.bin`);
+      const encrypted = yield* fs.readFile(secretPath);
+      encrypted[encrypted.length - 1] = (encrypted[encrypted.length - 1] ?? 0) ^ 1;
+      yield* fs.writeFile(secretPath, encrypted);
+      const error = yield* Effect.flip(secrets.get(name));
+      assert.instanceOf(error, ServerSecretStore.SecretStoreDecodeError);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not replace ciphertext when its envelope is damaged", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-credential-header-" });
+      const secrets = yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          ),
+        ),
+      );
+      const name = "provider-env-damaged-header";
+      yield* secrets.set(name, new TextEncoder().encode("synthetic-key"));
+      const secretPath = path.join(baseDir, "userdata", "secrets", `${name}.bin`);
+      const damaged = yield* fs.readFile(secretPath);
+      damaged[0] = (damaged[0] ?? 0) ^ 1;
+      yield* fs.writeFile(secretPath, damaged);
+      const error = yield* Effect.flip(secrets.get(name));
+      assert.instanceOf(error, ServerSecretStore.SecretStoreDecodeError);
+      assert.deepEqual(Array.from(yield* fs.readFile(secretPath)), Array.from(damaged));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps the original key if migration cannot replace its file", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-credential-failed-migration-",
+      });
+      const dir = path.join(baseDir, "userdata", "secrets");
+      yield* fs.makeDirectory(dir, { recursive: true });
+      const name = "provider-env-migration-failure";
+      const original = new TextEncoder().encode("synthetic-keep-original");
+      const secretPath = path.join(dir, `${name}.bin`);
+      yield* fs.writeFile(secretPath, original);
+      const secrets = yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+            Layer.provideMerge(RenameFailureFileSystemLayer),
+          ),
+        ),
+      );
+      const failure = yield* Effect.flip(secrets.get(name));
+      assert.instanceOf(failure, ServerSecretStore.SecretStorePersistError);
+      assert.deepEqual(Array.from(yield* fs.readFile(secretPath)), Array.from(original));
+      assert.deepEqual(yield* fs.readDirectory(dir), [`${name}.bin`]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not overwrite a credential changed during migration", () =>
+    Effect.gen(function* () {
+      if (process.platform !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-credential-race-" });
+      const dir = path.join(baseDir, "userdata", "secrets");
+      yield* fs.makeDirectory(dir, { recursive: true });
+      const name = "provider-env-migration-race";
+      const secretPath = path.join(dir, `${name}.bin`);
+      const replacement = new TextEncoder().encode("synthetic-replacement-key");
+      yield* fs.writeFile(secretPath, new TextEncoder().encode("synthetic-old-key"));
+      const competingWrite = Layer.effect(
+        FileSystem.FileSystem,
+        Effect.gen(function* () {
+          const underlying = yield* FileSystem.FileSystem;
+          return {
+            ...underlying,
+            writeFile: (target, data, options) =>
+              underlying
+                .writeFile(target, data, options)
+                .pipe(
+                  Effect.flatMap(() =>
+                    String(target).endsWith(".tmp")
+                      ? underlying.writeFile(secretPath, replacement)
+                      : Effect.void,
+                  ),
+                ),
+          } satisfies FileSystem.FileSystem;
+        }),
+      ).pipe(Layer.provide(NodeServices.layer));
+      yield* Effect.service(ServerSecretStore.ServerSecretStore).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+            Layer.provideMerge(competingWrite),
+          ),
+        ),
+      );
+      assert.deepEqual(Array.from(yield* fs.readFile(secretPath)), Array.from(replacement));
+      assert.deepEqual(yield* fs.readDirectory(dir), [`${name}.bin`]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

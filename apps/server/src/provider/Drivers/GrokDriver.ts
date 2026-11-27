@@ -18,6 +18,12 @@ import {
   checkGrokProviderStatus,
   enrichGrokSnapshot,
 } from "../Layers/GrokProvider.ts";
+import {
+  GROK_HOME_ENV,
+  hasGrokApiKeyInEnv,
+  makeGrokContinuationGroupKey,
+  makeGrokEnvironment,
+} from "./GrokHome.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -85,22 +91,47 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const httpClient = yield* HttpClient.HttpClient;
+      const serverConfig = yield* ServerConfig;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
-        driverKind: DRIVER_KIND,
-        instanceId,
-      });
+      const baseProcessEnv = mergeProviderInstanceEnvironment(environment);
+      const isCustomApiKeyInstance =
+        String(instanceId) !== String(DRIVER_KIND) &&
+        hasGrokApiKeyInEnv(baseProcessEnv) &&
+        config.homePath.trim().length === 0 &&
+        !baseProcessEnv[GROK_HOME_ENV]?.trim();
+      const autoIsolatedApiHome = isCustomApiKeyInstance
+        ? path.join(serverConfig.stateDir, "provider-instances", String(instanceId), "grok-home")
+        : "";
+      const effectiveConfig = {
+        ...config,
+        enabled,
+        ...(autoIsolatedApiHome ? { homePath: autoIsolatedApiHome } : {}),
+      } satisfies GrokSettings;
+      const processEnv = yield* makeGrokEnvironment(effectiveConfig, baseProcessEnv);
+      if (effectiveConfig.homePath.trim().length > 0 && processEnv[GROK_HOME_ENV]) {
+        yield* fileSystem
+          .makeDirectory(processEnv[GROK_HOME_ENV], { recursive: true })
+          .pipe(Effect.ignore);
+      }
+      const continuationKey = yield* makeGrokContinuationGroupKey(effectiveConfig, processEnv);
+      const continuationIdentity = {
+        ...defaultProviderContinuationIdentity({
+          driverKind: DRIVER_KIND,
+          instanceId,
+        }),
+        continuationKey,
+      };
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies GrokSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
@@ -116,6 +147,8 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
       const checkProvider = checkGrokProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
 

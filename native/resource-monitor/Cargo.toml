@@ -10,6 +10,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sysinfo = "0.39.3"
 
+[target.'cfg(windows)'.dependencies]
+ntapi = "0.4.3"
+winapi = { version = "0.3.9", features = ["ntstatus", "winnt"] }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

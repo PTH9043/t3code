@@ -39,6 +39,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   TextSearchIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -1491,6 +1492,41 @@ function OpenCommandPaletteDialog(props: {
         themeHalves,
         initialAppearance: resolvedTheme,
       });
+    },
+  });
+
+  const activeWorkerThreadRef = activeThread
+    ? scopeThreadRef(activeThread.environmentId, activeThread.id)
+    : null;
+
+  actionItems.push({
+    kind: "action",
+    value: "action:worker-engine",
+    searchTerms: [
+      "worker",
+      "workers",
+      "worker engine",
+      "orca",
+      "mailbox",
+      "decision gate",
+      "worktree",
+      "dispatch",
+      "작업자",
+      "작업자 엔진",
+      "메일박스",
+      "승인 게이트",
+      "병합",
+      "오케스트레이션",
+    ],
+    title: activeWorkerThreadRef ? "작업자 엔진 패널 전환" : "작업자 엔진 열기 (시스템 진단)",
+    description: "실행 중 작업자 상태 · 메일박스 · 승인 게이트 · Worktree Diff 검토",
+    icon: <WorkflowIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      if (activeWorkerThreadRef) {
+        useRightPanelStore.getState().toggle(activeWorkerThreadRef, "workers");
+        return;
+      }
+      await navigate({ to: "/settings/diagnostics" });
     },
   });
 

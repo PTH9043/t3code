@@ -3,11 +3,15 @@ import {
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
   DesktopTelemetryControlMessage,
 } from "@t3tools/contracts";
+import * as NodeNet from "node:net";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -197,6 +201,69 @@ function makeTestInstance(input: MakeInstanceInput) {
 }
 
 describe("DesktopBackendManager", () => {
+  it.live(
+    "restarts a real isolated T3 server process after unexpected exit",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const base = yield* fs.makeTempDirectoryScoped({ prefix: "t3-backend-restart-" });
+          const port = yield* Effect.promise(
+            () =>
+              new Promise<number>((resolve, reject) => {
+                const server = NodeNet.createServer();
+                server.once("error", reject);
+                server.listen(0, "127.0.0.1", () => {
+                  const address = server.address();
+                  if (!address || typeof address === "string")
+                    return reject(new Error("no local port"));
+                  server.close((error) => (error ? reject(error) : resolve(address.port)));
+                });
+              }),
+          );
+          const ready = yield* Queue.unbounded<void>();
+          const projectRoot = path.resolve(import.meta.dirname, "../../../..");
+          const entry = path.join(projectRoot, "apps/server/src/bin.ts");
+          const instance = yield* makeTestInstance({
+            spawnerLayer: NodeServices.layer,
+            httpClientLayer: NodeHttpClient.layerFetch,
+            onReady: Queue.offer(ready, undefined).pipe(Effect.asVoid),
+            config: {
+              ...baseConfig,
+              executablePath: process.execPath,
+              args: [entry, "--bootstrap-fd", "0"],
+              entryPath: entry,
+              cwd: projectRoot,
+              env: {},
+              bootstrapDelivery: "stdin",
+              httpBaseUrl: new URL(`http://127.0.0.1:${port}`),
+              bootstrap: {
+                mode: "desktop",
+                noBrowser: true,
+                port,
+                t3Home: base,
+                host: "127.0.0.1",
+                desktopBootstrapToken: "isolated-restart-test-token",
+                tailscaleServeEnabled: false,
+                tailscaleServePort: 443,
+              },
+            },
+          });
+          yield* instance.start;
+          yield* Queue.take(ready).pipe(Effect.timeout("60 seconds"));
+          const first = Option.getOrThrow((yield* instance.snapshot).activePid);
+          yield* Effect.sync(() => process.kill(first));
+          yield* Queue.take(ready).pipe(Effect.timeout("60 seconds"));
+          const second = Option.getOrThrow((yield* instance.snapshot).activePid);
+          assert.notEqual(second, first);
+          yield* instance.stop();
+          assert.equal((yield* instance.snapshot).desiredRunning, false);
+        }).pipe(Effect.provide(NodeServices.layer)),
+      ),
+    150_000,
+  );
+
   it.effect("spawns the backend with fd3 bootstrap and fd4 telemetry", () =>
     Effect.scoped(
       Effect.gen(function* () {

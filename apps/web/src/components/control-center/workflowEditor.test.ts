@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
-import { workflowDefaults } from "@t3tools/shared/workflow";
+import {
+  buildBuiltinWorkflowV2Presets,
+  lintWorkflowGraphV2,
+  previewWorkflow,
+  workflowDefaults,
+} from "@t3tools/shared/workflow";
 import { type WorkflowVersion } from "@t3tools/contracts";
 import { isWorkflowDraftDirty, workflowEditorRevision } from "./workflowEditor";
+import { workflowDefinitionFromV2Graph } from "./WorkspaceWorkflowSection";
 
 const definition = workflowDefaults()[0]!;
 const saved: WorkflowVersion = {
@@ -45,5 +51,28 @@ describe("workflow editor drafts", () => {
     expect(isWorkflowDraftDirty({ ...definition, description: "Changed" }, saved)).toBe(true);
     expect(isWorkflowDraftDirty(definition, undefined)).toBe(true);
     expect(isWorkflowDraftDirty(null, saved)).toBe(false);
+  });
+
+  it("exposes 3 valid zero-warning WorkflowGraphV2 presets that convert cleanly to WorkflowDefinition for the UI", () => {
+    const presets = buildBuiltinWorkflowV2Presets();
+    expect(presets.map((p) => p.id)).toEqual([
+      "graph-pr-review",
+      "graph-simplify-3way",
+      "graph-job-application-drafter-reviewer",
+    ]);
+
+    for (const preset of presets) {
+      const graph = preset.build();
+      const lint = lintWorkflowGraphV2(graph);
+      expect(lint.valid).toBe(true);
+      expect(lint.errorCount).toBe(0);
+      expect(lint.warningCount).toBe(0);
+
+      const converted = workflowDefinitionFromV2Graph(graph);
+      expect(converted.id).toBe(preset.id);
+      expect(converted.graphV2).toBeDefined();
+      const preview = previewWorkflow(converted, {}, { allowMissingRequired: true });
+      expect(preview.valid).toBe(true);
+    }
   });
 });

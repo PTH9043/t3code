@@ -6,10 +6,12 @@ import {
   DEFAULT_WORKSPACE_ORCHESTRA_DEFAULTS,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   WorkspaceCollaborationRunId,
   WorkspaceMeetingParticipantId,
   WorkspaceCollaborationRun,
   type OrchestrationEvent,
+  type OrchestrationReadModel,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -30,6 +32,33 @@ function asSingleEvent(
   if (!event) throw new Error("Expected one orchestration event");
   return event;
 }
+
+const seedMeetingThread = Effect.fn("seedMeetingThread")(function* (
+  readModel: OrchestrationReadModel,
+  projectId: ProjectId,
+  threadId: ThreadId,
+  runtimeMode: "approval-required" | "full-access",
+) {
+  const created = asSingleEvent(
+    yield* decideOrchestrationCommand({
+      command: {
+        type: "thread.create",
+        commandId: CommandId.make("create-meeting-thread"),
+        threadId,
+        projectId,
+        title: "Test conversation",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+        runtimeMode,
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      },
+      readModel,
+    }),
+  );
+  return yield* projectEvent(readModel, { ...created, sequence: 2 } as OrchestrationEvent);
+});
 
 it.layer(NodeServices.layer)("Workspace control decider", (it) => {
   it.effect("persists the folder-owned long-term-memory root on project creation", () =>
@@ -294,10 +323,12 @@ for (const askFirst of [undefined, false, true]) {
           readModel: createEmptyReadModel(now),
         }),
       );
-      const readModel = yield* projectEvent(createEmptyReadModel(now), {
+      const projectModel = yield* projectEvent(createEmptyReadModel(now), {
         ...created,
         sequence: 1,
       } as OrchestrationEvent);
+      const threadId = ThreadId.make("ask-first-thread");
+      const readModel = yield* seedMeetingThread(projectModel, projectId, threadId, "full-access");
       const result = asSingleEvent(
         yield* decideOrchestrationCommand({
           readModel,
@@ -309,6 +340,7 @@ for (const askFirst of [undefined, false, true]) {
             task: "질문을 먼저 받으세요",
             createdAt: now,
             meeting: {
+              threadId,
               ...(askFirst === undefined ? {} : { askFirst }),
               mode: "fixed-rounds",
               maxRounds: 0,
@@ -328,6 +360,7 @@ for (const askFirst of [undefined, false, true]) {
       const persisted = decodeRun(encodeRun(result.payload.run));
       expect(persisted.meeting?.phase).toBe(askFirst ? "clarifying" : "discussing");
       expect(persisted.meeting?.chairParticipantId).toBe("second");
+      expect(persisted.meeting?.threadId).toBe(threadId);
       expect(persisted.graph).toBeNull();
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -350,11 +383,14 @@ for (const runtimeMode of ["approval-required", "full-access"] as const) {
           readModel: createEmptyReadModel(now),
         }),
       );
-      const readModel = yield* projectEvent(createEmptyReadModel(now), {
+      const projectModel = yield* projectEvent(createEmptyReadModel(now), {
         ...created,
         sequence: 1,
       } as OrchestrationEvent);
+      const threadId = ThreadId.make("app-policy-thread");
+      const readModel = yield* seedMeetingThread(projectModel, projectId, threadId, runtimeMode);
       const meeting = {
+        threadId,
         mode: "fixed-rounds" as const,
         maxRounds: 0,
         userInLoop: false,
@@ -397,6 +433,7 @@ for (const runtimeMode of ["approval-required", "full-access"] as const) {
       if (result.type !== "project.collaboration-run-requested") return;
       const saved = decodeRun(encodeRun(result.payload.run));
       expect(saved.meeting).toMatchObject({
+        threadId,
         runtimeMode,
         interactionMode: "default",
         maxRounds: 1,

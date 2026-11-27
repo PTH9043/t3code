@@ -154,15 +154,19 @@ const buildCmd = Command.make(
       const serverDir = path.join(repoRoot, "apps/server");
 
       yield* Effect.log("[cli] Running tsdown...");
-      // node --run uses cmd.exe on Windows, which can drop an inherited PATH
-      // longer than 8191 characters. Invoke the local CLI without that shell.
-      const vpEntrypoint = path.join(repoRoot, "node_modules/vite-plus/bin/vp");
+      // Packaging must also bypass the Windows vp bootstrap in nested builds.
+      const windows = (yield* HostProcessPlatform) === "win32";
+      const pack = windows
+        ? [path.join(repoRoot, "node_modules/vite-plus/dist/pack-bin.js")]
+        : [path.join(repoRoot, "node_modules/vite-plus/bin/vp"), "pack"];
       for (const args of [
-        ["pack"],
-        ["pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean"],
+        [],
+        ["src/service-launcher.ts", "--out-dir", "dist", "--no-clean"],
+        ["src/orchestration/watchdog-worker.ts", "--out-dir", "dist", "--no-clean"],
+        ["src/mcp/codex-watch-stdio.ts", "--out-dir", "dist", "--no-clean"],
       ]) {
         yield* runCommand(
-          ChildProcess.make(process.execPath, [vpEntrypoint, ...args], {
+          ChildProcess.make(process.execPath, [...pack, ...args], {
             cwd: serverDir,
             stdout: config.verbose ? "inherit" : "ignore",
             stderr: "inherit",
@@ -172,7 +176,7 @@ const buildCmd = Command.make(
       }
 
       const webDist = path.join(repoRoot, "apps/web/dist");
-      if ((yield* HostProcessPlatform) === "win32") {
+      if (windows) {
         const architecture = yield* HostProcessArchitecture;
         yield* runCommand(
           ChildProcess.make(
@@ -251,6 +255,9 @@ const publishCmd = Command.make(
       for (const relPath of [
         "dist/bin.mjs",
         "dist/service-launcher.mjs",
+        "dist/watchdog-worker.mjs",
+        "dist/watchdog-wmi-launch.vbs",
+        "dist/codex-watch-stdio.mjs",
         "dist/client/index.html",
       ]) {
         const abs = path.join(serverDir, relPath);

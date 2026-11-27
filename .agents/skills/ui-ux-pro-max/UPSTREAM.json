@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+  "path": ".claude/skills/ui-ux-pro-max",
+  "commit": "d643997c82e94742dd3bee43210b0198e8bbba3d",
+  "commitDate": "2026-11-14",
+  "license": "MIT",
+  "fetched": "2026-11-15",
+  "modifications": [
+    "frontmatter: added disable-model-invocation: true (runs only when the user picks it)",
+    "omitted scripts/tests/ (upstream test suite and fixtures, not used at run time)"
+  ]
+}

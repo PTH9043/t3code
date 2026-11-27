@@ -95,6 +95,39 @@ import Migration0079 from "./Migrations/079_WorkspaceMemoryChunks.ts";
 import Migration0080 from "./Migrations/080_WorkspaceMemoryChunkRows.ts";
 import Migration0081 from "./Migrations/081_WorkspaceRunControl.ts";
 import Migration0082 from "./Migrations/082_WorkspaceMemoryFolderScope.ts";
+import Migration0083 from "./Migrations/083_WorkspaceConversationConcurrency.ts";
+import Migration0084 from "./Migrations/084_WorkspaceMemoryFolderLookup.ts";
+import Migration0085 from "./Migrations/085_WorkspaceForgottenMessageLookup.ts";
+import Migration0086 from "./Migrations/086_WorkspaceConversationRagSources.ts";
+import Migration0087 from "./Migrations/087_CommandReceiptFingerprint.ts";
+import Migration0088 from "./Migrations/088_BootstrapWorktreeJournal.ts";
+import Migration0089 from "./Migrations/089_RecoveryDeliveryJournal.ts";
+import Migration0090 from "./Migrations/090_WorkspaceMonitoringJournal.ts";
+import Migration0094 from "./Migrations/094_WorkspaceKnowledgeContentHash.ts";
+import Migration0095 from "./Migrations/095_WorkspaceKnowledgeSavedSearch.ts";
+import Migration0096 from "./Migrations/096_RepairWorkspaceWikiLinks.ts";
+import Migration0097 from "./Migrations/097_PendingThreadModelTeamSeeds.ts";
+import Migration0098 from "./Migrations/098_ThreadSettingsLibraryModelSaves.ts";
+import Migration0099 from "./Migrations/099_PdfRevisionPublication.ts";
+import Migration0100 from "./Migrations/100_PdfRevisionFailedAttempts.ts";
+import Migration0101 from "./Migrations/101_WorkspaceMemoryV2TieringBitemporal.ts";
+import Migration0102 from "./Migrations/102_ReopenSupersededWorkspaceMemory.ts";
+import Migration0103 from "./Migrations/103_LivingPersonaMemoryAndAffect.ts";
+import Migration0104 from "./Migrations/104_HostAuditAndSpecPin.ts";
+import Migration0105 from "./Migrations/105_WorkspaceDelegations.ts";
+import Migration0106 from "./Migrations/106_CcrToolOutputs.ts";
+import Migration0107 from "./Migrations/107_CouncilEvidenceLedger.ts";
+import Migration0108 from "./Migrations/108_UnifiedExecutionLedger.ts";
+import Migration0109 from "./Migrations/109_WorkerEngineMailbox.ts";
+import Migration0110 from "./Migrations/110_CouncilModeAndSeatStatus.ts";
+import Migration0111 from "./Migrations/111_WorkspaceMemoryContextPreservingV3.ts";
+import Migration0112 from "./Migrations/112_MissionControlAutonomousOps.ts";
+import Migration0113 from "./Migrations/113_WorkspaceRoutingGraphAndAdaptiveHandoff.ts";
+import Migration0114 from "./Migrations/114_UnifiedOpsAndRoundtable.ts";
+import Migration0115 from "./Migrations/115_WorkspaceDelegationsAllowLimitExceeded.ts";
+import Migration0091 from "./Migrations/091_WorkspaceMonitoringActionJournal.ts";
+import Migration0092 from "./Migrations/092_WorkspaceWikiLinks.ts";
+import Migration0093 from "./Migrations/093_WorkspaceKnowledgeProvenance.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -189,6 +222,39 @@ export const migrationEntries = [
   [80, "WorkspaceMemoryChunkRows", Migration0080],
   [81, "WorkspaceRunControl", Migration0081],
   [82, "WorkspaceMemoryFolderScope", Migration0082],
+  [83, "WorkspaceConversationConcurrency", Migration0083],
+  [84, "WorkspaceMemoryFolderLookup", Migration0084],
+  [85, "WorkspaceForgottenMessageLookup", Migration0085],
+  [86, "WorkspaceConversationRagSources", Migration0086],
+  [87, "CommandReceiptFingerprint", Migration0087],
+  [88, "BootstrapWorktreeJournal", Migration0088],
+  [89, "RecoveryDeliveryJournal", Migration0089],
+  [90, "WorkspaceMonitoringJournal", Migration0090],
+  [91, "WorkspaceMonitoringActionJournal", Migration0091],
+  [92, "WorkspaceWikiLinks", Migration0092],
+  [93, "WorkspaceKnowledgeProvenance", Migration0093],
+  [94, "WorkspaceKnowledgeContentHash", Migration0094],
+  [95, "WorkspaceKnowledgeSavedSearch", Migration0095],
+  [96, "RepairWorkspaceWikiLinks", Migration0096],
+  [97, "PendingThreadModelTeamSeeds", Migration0097],
+  [98, "ThreadSettingsLibraryModelSaves", Migration0098],
+  [99, "PdfRevisionPublication", Migration0099],
+  [100, "PdfRevisionFailedAttempts", Migration0100],
+  [101, "WorkspaceMemoryV2TieringBitemporal", Migration0101],
+  [102, "ReopenSupersededWorkspaceMemory", Migration0102],
+  [103, "LivingPersonaMemoryAndAffect", Migration0103],
+  [104, "HostAuditAndSpecPin", Migration0104],
+  [105, "WorkspaceDelegations", Migration0105],
+  [106, "CcrToolOutputs", Migration0106],
+  [107, "CouncilEvidenceLedger", Migration0107],
+  [108, "UnifiedExecutionLedger", Migration0108],
+  [109, "WorkerEngineMailbox", Migration0109],
+  [110, "CouncilModeAndSeatStatus", Migration0110],
+  [111, "WorkspaceMemoryContextPreservingV3", Migration0111],
+  [112, "MissionControlAutonomousOps", Migration0112],
+  [113, "WorkspaceRoutingGraphAndAdaptiveHandoff", Migration0113],
+  [114, "UnifiedOpsAndRoundtable", Migration0114],
+  [115, "WorkspaceDelegationsAllowLimitExceeded", Migration0115],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

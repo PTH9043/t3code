@@ -17,6 +17,20 @@ export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
 export const TIMELINE_CONTENT_MAX_WIDTH = 768;
 export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
+/**
+ * Narrowest timeline pane that keeps TIMELINE_MINIMAP_PERSISTENT_GUTTER on each side of the
+ * message column. Below it the column runs to the pane's ordinary padding.
+ */
+export const TIMELINE_MINIMAP_GUTTER_MIN_VIEWPORT_WIDTH = 864;
+/**
+ * Side inset of the timeline's scroll area. The message column fills the pane, and from
+ * TIMELINE_MINIMAP_GUTTER_MIN_VIEWPORT_WIDTH (54rem) up the inset steps to the 3rem minimap
+ * gutter: padding percentages resolve against the pane, so the product is far below 1.25rem
+ * under that width and far above 3rem from it on. The composer's inset
+ * (`.chat-composer-horizontal-inset` in index.css) takes the same step to stay aligned.
+ */
+export const TIMELINE_HORIZONTAL_INSET_CLASS_NAME =
+  "px-3 sm:px-[max(1.25rem,min(3rem,(100%-54rem+1px)*9999))]";
 
 export interface TimelineEndState {
   readonly isAtEnd?: boolean;
@@ -82,14 +96,17 @@ export function resolveTimelineMinimapIndexFromPointer(input: {
   return Math.max(0, Math.min(input.itemCount - 1, Math.round(progress * (input.itemCount - 1))));
 }
 
-export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number): boolean {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
+export function resolveTimelineMinimapHasPersistentGutter(
+  viewportWidth: number,
+  customHorizontalInsetPx: number | null | undefined = null,
+): boolean {
+  if (!Number.isFinite(viewportWidth)) {
     return false;
   }
-
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
-  return sideGutter >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+  if (customHorizontalInsetPx != null && Number.isFinite(customHorizontalInsetPx)) {
+    return viewportWidth >= 640 && customHorizontalInsetPx >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+  }
+  return viewportWidth >= TIMELINE_MINIMAP_GUTTER_MIN_VIEWPORT_WIDTH;
 }
 
 export const TIMELINE_MINIMAP_HIT_STRIP_LEFT = 12;
@@ -97,25 +114,27 @@ export const TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH = 40;
 export const TIMELINE_MINIMAP_EXPANDED_HIT_STRIP_WIDTH = "22rem";
 
 /**
- * The minimap overlays the viewport's left edge while the content column is
- * centered, so the side gutter between them shrinks under browser zoom or a
- * narrow pane. A fixed-width hover strip would then sit on top of the message
- * text and swallow its pointer events. Cap the strip's width so it never
- * extends past the gutter into the content column; 0 disables the strip.
+ * The minimap overlays the viewport's edge, and the message column leaves it a
+ * gutter only in a pane wide enough for one. A hover strip without that gutter
+ * would sit on top of the message text and swallow its pointer events. Cap the
+ * strip's width so it never extends past the gutter into the content column;
+ * 0 disables the strip.
  */
-export function resolveTimelineMinimapHitStripWidth(viewportWidth: number): number {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
+export function resolveTimelineMinimapHitStripWidth(
+  viewportWidth: number,
+  customHorizontalInsetPx: number | null | undefined = null,
+): number {
+  if (!resolveTimelineMinimapHasPersistentGutter(viewportWidth, customHorizontalInsetPx)) {
     return 0;
   }
 
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
-  return Math.max(
-    0,
-    Math.min(
-      TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH,
-      Math.floor(sideGutter) - TIMELINE_MINIMAP_HIT_STRIP_LEFT,
-    ),
+  const effectiveGutter =
+    customHorizontalInsetPx != null && Number.isFinite(customHorizontalInsetPx)
+      ? customHorizontalInsetPx
+      : TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+  return Math.min(
+    TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH,
+    Math.max(0, effectiveGutter - TIMELINE_MINIMAP_HIT_STRIP_LEFT),
   );
 }
 
@@ -348,7 +367,9 @@ function deriveTurnFolds(input: {
         ? (entry.message.turnId ?? null)
         : entry.kind === "work"
           ? (entry.entry.turnId ?? null)
-          : null;
+          : entry.kind === "turn-plan"
+            ? (entry.turnPlan.turnId ?? null)
+            : null;
     if (!turnId) {
       continue;
     }
@@ -743,4 +764,36 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       );
     }
   }
+}
+
+export const DEFAULT_TAIL_FIRST_USER_TURN_COUNT = 2;
+export const MIN_TAIL_FIRST_ROW_COUNT = 6;
+
+/**
+ * Slices timeline rows down to the latest N user-anchored turns (or at least
+ * MIN_TAIL_FIRST_ROW_COUNT trailing rows) so opening or returning to a room
+ * paints the latest settled result at the bottom immediately before attaching
+ * older history above it.
+ */
+export function sliceMessagesTimelineRowsForTailFirst(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  maxTailUserTurns = DEFAULT_TAIL_FIRST_USER_TURN_COUNT,
+): MessagesTimelineRow[] {
+  if (rows.length <= MIN_TAIL_FIRST_ROW_COUNT || maxTailUserTurns <= 0) {
+    return rows as MessagesTimelineRow[];
+  }
+
+  let seenUserTurns = 0;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind === "message" && row.message.role === "user") {
+      seenUserTurns += 1;
+      if (seenUserTurns >= maxTailUserTurns) {
+        return index === 0 ? (rows as MessagesTimelineRow[]) : rows.slice(index);
+      }
+    }
+  }
+
+  const fallbackStart = Math.max(0, rows.length - MIN_TAIL_FIRST_ROW_COUNT);
+  return fallbackStart === 0 ? (rows as MessagesTimelineRow[]) : rows.slice(fallbackStart);
 }

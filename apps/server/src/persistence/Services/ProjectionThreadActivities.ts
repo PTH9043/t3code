@@ -42,6 +42,12 @@ export const ListProjectionThreadActivitiesByKindInput = Schema.Struct({
   threadId: ThreadId,
   kinds: Schema.Array(Schema.String),
   completedToolNames: Schema.optional(Schema.Array(Schema.String)),
+  recentMcp: Schema.optional(
+    Schema.Struct({
+      since: IsoDateTime,
+      summaries: Schema.Array(Schema.String),
+    }),
+  ),
 });
 export type ListProjectionThreadActivitiesByKindInput =
   typeof ListProjectionThreadActivitiesByKindInput.Type;

@@ -12,6 +12,7 @@ import {
   WorkspaceCollaborationRunId,
   WorkspaceMemoryError,
   WorkspaceMeetingParticipantId,
+  WorkspaceMeetingSetup,
   WorkspaceTaskNodeId,
   type OrchestrationEvent,
   type OrchestrationCommand,
@@ -22,6 +23,7 @@ import {
   WorkspaceCollaborationRun as WorkspaceCollaborationRunSchema,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
@@ -44,6 +46,7 @@ import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstan
 import {
   meetingWrapUpQuestion,
   nodeInterventionQuestion,
+  nodeRefusalQuestion,
   roundCheckInQuestion,
 } from "../workspaceMeeting.ts";
 import {
@@ -70,6 +73,9 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { WorkspaceAgentControl, makeWorkspaceAgentControl } from "../WorkspaceAgentControl.ts";
 import { WorkspaceAgentExecutorLive } from "./WorkspaceAgentExecutor.ts";
 import { WorkspaceMemory } from "../WorkspaceMemory.ts";
+import { WorkspaceDevelopment } from "../WorkspaceDevelopment.ts";
+
+const encodeJsonFixture = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 /**
  * Deterministic provisioning fakes: non-isolating runs never touch them, and
@@ -217,14 +223,17 @@ function respondForMeetingPrompt(prompt: string): string {
 }
 
 function makeHarness(input: {
+  readonly persistentContext?: string;
   readonly memoryDirective?: string;
   readonly memoryContext?: string;
   readonly memoryFailure?: boolean;
+  readonly memorySaveReceipt?: string;
   readonly memoryPaths?: ReadonlyArray<string>;
   readonly memoryPathsFailure?: boolean;
   readonly compactHandoffs?: boolean;
   readonly liveExecutor?: boolean;
   readonly run: WorkspaceCollaborationRun;
+  readonly additionalRun?: WorkspaceCollaborationRun;
   readonly existingThreads?: ReadonlyArray<OrchestrationThread>;
   readonly respond: (prompt: string) => string;
   readonly onTurnStart?: (input: {
@@ -249,6 +258,7 @@ function makeHarness(input: {
         ? run
         : { ...run, meeting: { ...run.meeting, interjections: [...liveInterjections] } };
     const runRef = yield* Ref.make(input.run);
+    const additionalRunRef = yield* Ref.make(input.additionalRun ?? null);
     const threadsRef = yield* Ref.make(
       new Map<string, OrchestrationThread>(
         (input.existingThreads ?? []).map((thread) => [thread.id, thread]),
@@ -258,6 +268,7 @@ function makeHarness(input: {
     const promptsRef = yield* Ref.make<ReadonlyArray<string>>([]);
     const compositionsRef = yield* Ref.make<ReadonlyArray<WorkspacePromptComposeInput>>([]);
     const executionsRef = yield* Ref.make<ReadonlyArray<WorkspaceAgentExecutionInput>>([]);
+    const memoryCallsRef = yield* Ref.make<ReadonlyArray<{ input: unknown; context: unknown }>>([]);
     const sessionStopsRef = yield* Ref.make(0);
     const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
     let sequence = 0;
@@ -298,7 +309,8 @@ function makeHarness(input: {
             });
             break;
           case "project.collaboration.run.update":
-            yield* Ref.set(runRef, command.run);
+            if (command.run.id === input.run.id) yield* Ref.set(runRef, command.run);
+            else yield* Ref.set(additionalRunRef, command.run);
             if (input.onRunUpdated !== undefined) yield* input.onRunUpdated(command.run);
             break;
           case "thread.session.stop":
@@ -433,24 +445,29 @@ function makeHarness(input: {
       recordReview: () => Effect.void,
       requestVerification: () => Effect.void,
       getById: ({ projectId: requestedProjectId, runId: requestedRunId }) =>
-        Ref.get(runRef).pipe(
-          Effect.map((run) =>
-            run.projectId === requestedProjectId && run.id === requestedRunId
-              ? Option.some(withLiveInterjections(run))
-              : Option.none(),
-          ),
+        Effect.all([Ref.get(runRef), Ref.get(additionalRunRef)]).pipe(
+          Effect.map(([first, second]) => {
+            const run = [first, second].find(
+              (candidate) =>
+                candidate?.projectId === requestedProjectId && candidate.id === requestedRunId,
+            );
+            return run ? Option.some(withLiveInterjections(run)) : Option.none();
+          }),
         ),
       list: (listInput) =>
-        Ref.get(runRef).pipe(
-          Effect.map((run) =>
-            [run].filter(
+        Effect.all([Ref.get(runRef), Ref.get(additionalRunRef)]).pipe(
+          Effect.map(([first, second]) =>
+            [first, ...(second ? [second] : [])].filter(
               (candidate) =>
                 candidate.projectId === listInput.projectId &&
                 (listInput.statuses === undefined || listInput.statuses.includes(candidate.status)),
             ),
           ),
         ),
-      listResumable: () => Ref.get(runRef).pipe(Effect.map((run) => [run])),
+      listResumable: () =>
+        Effect.all([Ref.get(runRef), Ref.get(additionalRunRef)]).pipe(
+          Effect.map(([first, second]) => [first, ...(second ? [second] : [])]),
+        ),
     } satisfies ProjectionWorkspaceCollaborationRunRepository["Service"];
     // No role bindings at all: a meeting must run on its roster alone.
     const query = {
@@ -500,6 +517,7 @@ function makeHarness(input: {
       getInstance: (instanceId: ProviderInstanceId) =>
         Effect.succeed(providerInstances.find((instance) => instance.instanceId === instanceId)),
       listInstances: Effect.succeed(providerInstances),
+      listUnavailable: Effect.succeed([]),
     } as unknown as ProviderInstanceRegistry["Service"];
     const liveExecutorLayer = WorkspaceAgentExecutorLive.pipe(
       Layer.provideMerge(
@@ -592,11 +610,22 @@ function makeHarness(input: {
     );
     const layer = WorkspaceCollaborationReactorLive.pipe(
       Layer.provideMerge(
+        input.persistentContext === undefined
+          ? Layer.empty
+          : Layer.mock(WorkspaceDevelopment)({
+              workflowContext: () => Effect.succeed(input.persistentContext!),
+            }),
+      ),
+      Layer.provideMerge(
         input.memoryDirective === undefined &&
           !input.memoryFailure &&
           input.memoryPaths === undefined
           ? Layer.empty
           : Layer.mock(WorkspaceMemory)({
+              invoke: (action, context) =>
+                Ref.update(memoryCallsRef, (calls) => [...calls, { input: action, context }]).pipe(
+                  Effect.as(input.memorySaveReceipt ?? '{"id":"saved","saved":true}'),
+                ),
               context: (_projectId, _task, directivesOnly) =>
                 input.memoryFailure
                   ? Effect.fail(new WorkspaceMemoryError({ message: "memory unavailable" }))
@@ -623,7 +652,10 @@ function makeHarness(input: {
                   if (input.onTurnStart !== undefined)
                     yield* input.onTurnStart({
                       prompt: execution.prompt,
-                      run: yield* Ref.get(runRef),
+                      run:
+                        execution.execution.runId === input.run.id
+                          ? yield* Ref.get(runRef)
+                          : (yield* Ref.get(additionalRunRef))!,
                     });
                   yield* Ref.update(promptsRef, (current) => [...current, execution.prompt]);
                   return input.respond(execution.prompt);
@@ -646,9 +678,11 @@ function makeHarness(input: {
     );
     return {
       runRef,
+      additionalRunRef,
       promptsRef,
       compositionsRef,
       executionsRef,
+      memoryCallsRef,
       threadsRef,
       commandsRef,
       sessionStopsRef,
@@ -691,6 +725,28 @@ const decodeContextSourcePath = Schema.decodeSync(Schema.fromJsonString(Schema.S
 const runJsonSchema = Schema.fromJsonString(WorkspaceCollaborationRunSchema);
 const decodeRunJson = Schema.decodeEffect(runJsonSchema);
 const encodeRunJson = Schema.encodeEffect(runJsonSchema);
+const decodeMeetingSetup = Schema.decodeUnknownEffect(WorkspaceMeetingSetup);
+
+it.effect("does not add persistent workspace instructions to an independent meeting", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness({
+      run: orchestraRun(),
+      persistentContext: "OLD_PERSISTENT_WORKSPACE_CONTEXT",
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+      expect(
+        (yield* Ref.get(harness.compositionsRef)).every(
+          (request) => !request.task.includes("OLD_PERSISTENT_WORKSPACE_CONTEXT"),
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
 
 it.effect("passes required user directives to every meeting and orchestra execution", () =>
   Effect.gen(function* () {
@@ -709,6 +765,11 @@ it.effect("passes required user directives to every meeting and orchestra execut
       expect(executions.some((execution) => execution.orchestraPhase === "meeting")).toBe(true);
       expect(executions.some((execution) => execution.orchestraPhase === "task")).toBe(true);
       expect(executions.every((execution) => execution.prompt.includes(directive))).toBe(true);
+      if ((yield* HostProcessPlatform) === "win32") {
+        expect(
+          executions.every((execution) => execution.prompt.includes("<t3_windows_shell_policy>")),
+        ).toBe(true);
+      }
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   }),
 );
@@ -854,6 +915,61 @@ it.effect("persists meeting failures and stops an exhausted step after reconstru
     }).pipe(Effect.provide(resumed.layer), Effect.scoped);
   }),
 );
+
+for (const phase of ["statement", "chair close", "plan"] as const) {
+  for (const asError of [false, true]) {
+    it.effect(`preserves a ${phase} safety refusal without another call (error=${asError})`, () =>
+      Effect.gen(function* () {
+        const refusal = "Your message was flagged by Claude's safeguards.";
+        const prefix =
+          phase === "statement"
+            ? "# Workspace Meeting Statement"
+            : phase === "chair close"
+              ? "# Workspace Meeting Round Close"
+              : "# Workspace Meeting Plan";
+        const harness = yield* makeHarness({
+          run:
+            phase === "plan"
+              ? meetingRun({ maxRounds: 0, phase: "planning" })
+              : meetingRun({ answers: [executeWrapUp(1)] }),
+          respond: (prompt) =>
+            prompt.startsWith(prefix) && !asError ? refusal : respondForMeetingPrompt(prompt),
+          executionFailure: (execution) =>
+            asError && execution.prompt.startsWith(prefix)
+              ? new WorkspaceAgentExecutionError({ message: refusal })
+              : undefined,
+        });
+        const failed = yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const run = yield* Ref.get(harness.runRef);
+          const attempts = (yield* Ref.get(harness.executionsRef)).filter((entry) =>
+            entry.prompt.startsWith(prefix),
+          );
+          expect(attempts).toHaveLength(1);
+          expect(run.status).toBe("failed");
+          expect(run.error).toContain(refusal);
+          expect(run.meeting?.turnFailures?.at(-1)).toMatchObject({ count: 1 });
+          expect(run.meeting?.turnFailures?.at(-1)?.message).toContain(refusal);
+          return run;
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+        const decoded = yield* decodeRunJson(yield* encodeRunJson(failed));
+        const resumed = yield* makeHarness({
+          run: { ...decoded, status: "running", error: null },
+          respond: respondForMeetingPrompt,
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          expect(yield* Ref.get(resumed.executionsRef)).toHaveLength(0);
+          expect((yield* Ref.get(resumed.runRef)).error).toContain(refusal);
+        }).pipe(Effect.provide(resumed.layer), Effect.scoped);
+      }),
+    );
+  }
+}
 
 it.effect("a reconstructed meeting spends only its remaining failure budget", () =>
   Effect.gen(function* () {
@@ -1172,6 +1288,9 @@ it.effect.each([
         const executions = yield* Ref.get(harness.executionsRef);
         if (!liveExecutor) {
           expect(executions.length).toBeGreaterThan(0);
+          expect(executions.every((entry) => entry.allowAdditionalSkillWorkers === true)).toBe(
+            true,
+          );
           expect(executions.every((entry) => entry.execution.ownerThreadId === threadId)).toBe(
             true,
           );
@@ -1267,6 +1386,16 @@ for (const folderFailure of [false, true]) {
                 turnId: null,
               },
               {
+                id: MessageId.make(`workflow-request:${runId}`),
+                role: "user",
+                text: "RESEARCHER_ROLE_CANARY: 연구자에게 출처 검증 역할을 맡겨라",
+                streaming: false,
+                createdAt: at,
+                updatedAt: at,
+                attachments: [],
+                turnId: null,
+              },
+              {
                 id: MessageId.make("prior-work"),
                 role: "assistant",
                 text: "OTHER_FOLDER_PRIVATE_CANARY",
@@ -1311,6 +1440,9 @@ for (const folderFailure of [false, true]) {
             ),
           ).toBe(true);
           const prompts = yield* Ref.get(harness.promptsRef);
+          expect(prompts.find((prompt) => prompt.startsWith("# Workspace Meeting Plan"))).toContain(
+            "RESEARCHER_ROLE_CANARY",
+          );
           if (folderFailure)
             expect(
               prompts.every((prompt) => prompt.includes("<t3_folder_memory_unavailable>")),
@@ -1674,6 +1806,367 @@ it.effect("parks a node whose seat asks the person and re-runs it with the answe
   }),
 );
 
+it.effect("keeps a refused node on its selected model even if reassignment is requested", () =>
+  Effect.gen(function* () {
+    const refusal = "Your message was flagged by Claude's safeguards.";
+    const base = meetingRun({ answers: [executeWrapUp(1)] });
+    const harness = yield* makeHarness({
+      run: {
+        ...base,
+        meeting: {
+          ...base.meeting!,
+          participants: base.meeting!.participants.map((participant, index) =>
+            index === 0 ? { ...participant, roleDescription: "개발 방향 감독" } : participant,
+          ),
+        },
+      },
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"추가 지시 확인"}</t3_persistent_verdict>'
+          : prompt.includes("Return one strict receipt between <t3_validation>")
+            ? refusal
+            : respondForMeetingPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const parked = yield* Ref.get(harness.runRef);
+      const node = parked.graph?.nodes.find((entry) => entry.kind === "validation");
+      expect(node?.status).toBe("awaiting-user");
+      expect(node?.attempts).toHaveLength(1);
+      const question = nodeRefusalQuestion(node!.title);
+      expect(parked.meeting?.pendingQuestion?.question).toBe(question);
+      expect(parked.meeting?.pendingQuestion?.options).not.toContain("다른 좌석에게 맡기기");
+      expect(parked.meeting?.pendingQuestion?.context).toContain(refusal);
+      const executionsBefore = (yield* Ref.get(harness.executionsRef)).length;
+      let reviewed = 0;
+      for (const answer of [
+        "다른 모델에게 맡기기",
+        "재시도하지 말고 가능한 다른 작업은 계속해",
+        "건너뛰지 마",
+        "남은 작업은 담당자에게 맡겨",
+        "계속해",
+      ]) {
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [
+              ...run.meeting!.answers,
+              { question, answer, answeredAt: at, nodeId: node!.id },
+            ],
+          },
+        }));
+        yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+        yield* reactor.drain;
+        const again = yield* Ref.get(harness.runRef);
+        const same = again.graph?.nodes.find((entry) => entry.id === node!.id);
+        expect(same?.status).toBe("awaiting-user");
+        expect(same?.participantId).toBe(node?.participantId);
+        expect(same?.attempts).toHaveLength(1);
+        expect(again.meeting?.pendingQuestion?.context).toContain("우회할 수 없습니다");
+        expect(again.meeting?.answers.at(-1)?.answer).toBe(answer);
+        if (answer !== "다른 모델에게 맡기기") reviewed += 1;
+        const executions = yield* Ref.get(harness.executionsRef);
+        expect(executions).toHaveLength(executionsBefore + reviewed);
+        if (answer !== "다른 모델에게 맡기기") {
+          expect(again.meeting?.refusalInstructionReview?.status).toBe("completed");
+          expect(executions.at(-1)?.prompt).toContain(answer);
+          expect(executions.at(-1)?.prompt).toContain("다른 모델이나 계정으로");
+          expect(executions.at(-1)?.prompt).toContain(
+            "사용자가 지정한 감독자 역할: 개발 방향 감독",
+          );
+          expect(executions.at(-1)?.modelSelection).toEqual(
+            parked.meeting?.participants[0]?.modelSelection,
+          );
+        }
+      }
+      const answer = "이 단계 건너뛰고 계속";
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [
+            ...run.meeting!.answers,
+            { question, answer, answeredAt: at, nodeId: node!.id },
+          ],
+        },
+      }));
+      yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+      const resumed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(resumed.graph?.nodes.find((entry) => entry.id === node!.id)?.output).toContain(
+        "건너뛰",
+      );
+      const review = (yield* Ref.get(harness.promptsRef)).find((prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다"),
+      );
+      expect(review).toContain("재시도하지 말고 가능한 다른 작업은 계속해");
+      expect(review).toContain("건너뛰지 마");
+      expect(resumed.meeting?.pendingSupervisorReview).toBe(false);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("keeps the supervisor review obligation after a pending refusal is restored", () =>
+  Effect.gen(function* () {
+    const refusal = "Your message was flagged by Claude's safeguards.";
+    const respond = (prompt: string) =>
+      prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+        ? '<t3_persistent_verdict>{"decision":"complete","summary":"추가 지시 확인"}</t3_persistent_verdict>'
+        : prompt.includes("Return one strict receipt between <t3_validation>")
+          ? refusal
+          : respondForMeetingPrompt(prompt);
+    const first = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond,
+    });
+    const saved = yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const parked = yield* Ref.get(first.runRef);
+      const node = parked.graph!.nodes.find((entry) => entry.kind === "validation")!;
+      const question = parked.meeting!.pendingQuestion!.question;
+      const answer = "이 결과도 감독자가 확인해";
+      yield* Ref.update(first.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId: node.id }],
+        },
+      }));
+      yield* PubSub.publish(first.pubsub, answeredEvent(question, answer));
+      yield* reactor.drain;
+      return yield* decodeRunJson(yield* encodeRunJson(yield* Ref.get(first.runRef)));
+    }).pipe(Effect.provide(first.layer), Effect.scoped);
+    expect(saved.meeting?.pendingSupervisorReview).toBe(true);
+    const second = yield* makeHarness({ run: saved, respond });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(second.executionsRef)).toHaveLength(0);
+      const question = saved.meeting!.pendingQuestion!.question;
+      const nodeId = saved.meeting!.pendingQuestion!.nodeId!;
+      const answer = "이 단계 건너뛰고 계속";
+      yield* Ref.update(second.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+        },
+      }));
+      yield* PubSub.publish(second.pubsub, answeredEvent(question, answer));
+      const completed = yield* awaitRunStatus(second.runRef, "completed");
+      const review = (yield* Ref.get(second.promptsRef)).find((prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다"),
+      );
+      expect(review).toContain("이 결과도 감독자가 확인해");
+      expect(completed.meeting?.pendingSupervisorReview).toBe(false);
+    }).pipe(Effect.provide(second.layer), Effect.scoped);
+  }),
+);
+
+for (const priorStatus of ["completed", "running"] as const) {
+  it.effect(`recovers a ${priorStatus} supervisor review without calling the provider again`, () =>
+    Effect.gen(function* () {
+      const prefix = "사용자가 통합 작업에 추가 지시를 보냈습니다";
+      const respond = (prompt: string) =>
+        prompt.includes("Return one strict receipt between <t3_validation>")
+          ? "Your message was flagged by Claude's safeguards."
+          : respondForMeetingPrompt(prompt);
+      const first = yield* makeHarness({
+        run: meetingRun({ answers: [executeWrapUp(1)] }),
+        liveExecutor: true,
+        respond,
+      });
+      const snapshot = yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const parked = yield* Ref.get(first.runRef);
+        const question = parked.meeting!.pendingQuestion!.question;
+        const nodeId = parked.meeting!.pendingQuestion!.nodeId!;
+        const answer = "남은 작업을 확인해";
+        yield* Ref.update(first.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+          },
+        }));
+        yield* PubSub.publish(first.pubsub, answeredEvent(question, answer));
+        yield* reactor.drain;
+        const run = yield* Ref.get(first.runRef);
+        expect(run.meeting?.refusalInstructionReview?.status).toBe("completed");
+        expect(
+          (yield* Ref.get(first.promptsRef)).filter((prompt) => prompt.startsWith(prefix)),
+        ).toHaveLength(1);
+        const executionId = `orchestra-refusal-review:${run.id}:${run.meeting!.refusalInstructionReview!.answerCount}`;
+        const messageId = `orchestra-message:${executionId}:1`;
+        const activityId = `orchestra-block:${executionId}:1`;
+        const activityCommands = yield* Ref.get(first.commandsRef);
+        const threads = [...(yield* Ref.get(first.threadsRef)).values()].map((thread) => {
+          const activities = new Map(thread.activities.map((activity) => [activity.id, activity]));
+          for (const command of activityCommands) {
+            if (command.type === "thread.activity.append" && command.threadId === thread.id)
+              activities.set(command.activity.id, command.activity);
+          }
+          return {
+            ...thread,
+            messages: thread.messages.map((message) =>
+              priorStatus === "running" && message.id === messageId
+                ? { ...message, streaming: true }
+                : message,
+            ),
+            activities: [...activities.values()].map((activity) =>
+              priorStatus === "running" && activity.id === activityId
+                ? { ...activity, payload: { ...(activity.payload as object), status: "running" } }
+                : activity,
+            ),
+          };
+        });
+        return {
+          run: yield* decodeRunJson(
+            yield* encodeRunJson({
+              ...run,
+              meeting: {
+                ...run.meeting!,
+                refusalInstructionReview: {
+                  ...run.meeting!.refusalInstructionReview!,
+                  status: "pending",
+                },
+              },
+            }),
+          ),
+          threads,
+        };
+      }).pipe(Effect.provide(first.layer), Effect.scoped);
+      const restored = yield* makeHarness({
+        run: snapshot.run,
+        existingThreads: snapshot.threads,
+        liveExecutor: true,
+        respond,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        expect(yield* Ref.get(restored.promptsRef)).toEqual([]);
+        const review = (yield* Ref.get(restored.runRef)).meeting?.refusalInstructionReview;
+        expect(review?.status).toBe(priorStatus === "completed" ? "completed" : "failed");
+        if (priorStatus === "running") expect(review?.error).toContain("중단된 실행");
+      }).pipe(Effect.provide(restored.layer), Effect.scoped);
+    }),
+  );
+}
+
+it.effect("keeps a failed pending-instruction review recorded without retrying it on restart", () =>
+  Effect.gen(function* () {
+    const prefix = "사용자가 통합 작업에 추가 지시를 보냈습니다";
+    const harness = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: (prompt) =>
+        prompt.includes("Return one strict receipt between <t3_validation>")
+          ? "Your message was flagged by Claude's safeguards."
+          : respondForMeetingPrompt(prompt),
+      executionFailure: (execution) =>
+        execution.prompt.startsWith(prefix)
+          ? new WorkspaceAgentExecutionError({ message: `감독자 연결 실패 ${"E".repeat(25_000)}` })
+          : undefined,
+    });
+    const saved = yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const parked = yield* Ref.get(harness.runRef);
+      const question = parked.meeting!.pendingQuestion!.question;
+      const nodeId = parked.meeting!.pendingQuestion!.nodeId!;
+      const answer = "남은 작업을 확인해";
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+        },
+      }));
+      yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+      yield* reactor.drain;
+      const failed = yield* Ref.get(harness.runRef);
+      expect(failed.status).toBe("running");
+      expect(failed.meeting?.refusalInstructionReview).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("감독자 연결 실패"),
+      });
+      expect(failed.meeting?.pendingQuestion?.context).toContain("감독자 연결 실패");
+      expect(failed.meeting!.pendingQuestion!.context.length).toBeLessThanOrEqual(20_000);
+      expect(
+        (yield* Ref.get(harness.commandsRef)).some(
+          (command) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === "orchestra.instruction-review.failed" &&
+            command.activity.summary.includes("감독자 연결 실패"),
+        ),
+      ).toBe(true);
+      return yield* decodeRunJson(yield* encodeRunJson(failed));
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    const restored = yield* makeHarness({ run: saved, respond: respondForMeetingPrompt });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(yield* Ref.get(restored.executionsRef)).toHaveLength(0);
+      expect((yield* Ref.get(restored.runRef)).meeting?.refusalInstructionReview?.status).toBe(
+        "failed",
+      );
+    }).pipe(Effect.provide(restored.layer), Effect.scoped);
+  }),
+);
+
+it.effect("honors cancellation while a supervisor reviews an instruction on a refused node", () =>
+  Effect.gen(function* () {
+    let cancel: Effect.Effect<void> = Effect.void;
+    const harness = yield* makeHarness({
+      run: meetingRun({ answers: [executeWrapUp(1)] }),
+      respond: (prompt) =>
+        prompt.includes("Return one strict receipt between <t3_validation>")
+          ? "Your message was flagged by Claude's safeguards."
+          : respondForMeetingPrompt(prompt),
+      onTurnStart: ({ prompt }) =>
+        prompt.startsWith("사용자가 통합 작업에 추가 지시를 보냈습니다") ? cancel : Effect.void,
+    });
+    cancel = Ref.update(harness.runRef, (run) => ({ ...run, status: "cancel-requested" as const }));
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const parked = yield* Ref.get(harness.runRef);
+      const question = parked.meeting!.pendingQuestion!.question;
+      const nodeId = parked.meeting!.pendingQuestion!.nodeId!;
+      const answer = "남은 작업을 확인해";
+      yield* Ref.update(harness.runRef, (run) => ({
+        ...run,
+        meeting: {
+          ...run.meeting!,
+          pendingQuestion: null,
+          answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+        },
+      }));
+      yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+      const cancelled = yield* awaitRunStatus(harness.runRef, "cancelled");
+      expect(cancelled.meeting?.answers.at(-1)?.answer).toBe(answer);
+      expect(cancelled.graph?.nodes.find((node) => node.id === nodeId)?.attempts).toHaveLength(1);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
 it.effect("parks on the node instead of failing the run when its retries run out", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness({
@@ -1868,7 +2361,1554 @@ const orchestraRun = (meeting: Partial<WorkspaceMeeting> = {}): WorkspaceCollabo
   orchestra: { maxParallel: 2, isolateWorktrees: false },
 });
 
-import { reviewWorkspaceOrchestraPlan } from "../workspaceOrchestraReview.ts";
+it.effect.each([false, true])(
+  "executes ten selected seats with independent roles (same model=%s)",
+  (sameModel) =>
+    Effect.gen(function* () {
+      const base = workflowDefaults()[0]!;
+      const definition = {
+        ...base,
+        nodes: Array.from({ length: 9 }, (_, index) => ({
+          ...base.nodes[1]!,
+          id: `worker-${index}`,
+          title: `Worker ${index}`,
+          dependsOn: [],
+        })),
+        revision: 1,
+        archived: false,
+        digest: "ten-model-fixture",
+        createdAt: at,
+      };
+      const existingThreadId = ThreadId.make("thread-roster-current-request");
+      const initial = orchestraRun({
+        maxRounds: 0,
+        chairParticipantId: pid("p1"),
+        threadId: existingThreadId,
+      });
+      const prototype = initial.meeting!.participants[0]!;
+      const participants = Array.from({ length: 10 }, (_, index) => ({
+        ...prototype,
+        id: pid(`p${index + 1}`),
+        displayName: `Selected ${index}`,
+        modelSelection: {
+          ...prototype.modelSelection,
+          model: sameModel ? "shared-model" : `selected-${index}`,
+        },
+        roleDescription: `role-${index}`,
+      }));
+      const harness = yield* makeHarness({
+        memoryPaths: ["apps/web"],
+        existingThreads: [
+          {
+            id: existingThreadId,
+            projectId,
+            title: "기존 대화",
+            modelSelection: prototype.modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            latestTurn: null,
+            createdAt: at,
+            updatedAt: at,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            deletedAt: null,
+            messages: [
+              {
+                id: MessageId.make(`workflow-request:${runId}`),
+                role: "user",
+                text: "WORKFLOW_ROLE_CANARY: 10번 참가자에게 출처 검증을 맡겨라",
+                streaming: false,
+                createdAt: at,
+                updatedAt: at,
+                attachments: [],
+                turnId: null,
+              },
+            ],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          } as unknown as OrchestrationThread,
+        ],
+        run: {
+          ...initial,
+          meeting: { ...initial.meeting!, participants },
+          workflow: {
+            definitionId: definition.id,
+            definitionRevision: 1,
+            definitionDigest: definition.digest,
+            definition,
+            title: definition.title,
+            values: { goal: "fixture" },
+            nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+            roleBindings: [],
+            control: "active",
+            controlRevision: 0,
+            updatedAt: at,
+            requestDigest: "fixture",
+          },
+        },
+        respond: (prompt) =>
+          prompt.startsWith("# Saved Workflow Assignment")
+            ? `<t3_workflow_assignments>${JSON.stringify({
+                assignments: definition.nodes.map((node, index) => ({
+                  nodeId: node.id,
+                  participantId: participants[index + 1]!.id,
+                })),
+              })}</t3_workflow_assignments>`
+            : respondForMeetingPrompt(prompt),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(harness.runRef);
+        expect(run.status, run.error ?? undefined).toBe("completed");
+        const executions = yield* Ref.get(harness.executionsRef);
+        const assignmentPrompt = executions.find((entry) =>
+          entry.prompt.startsWith("# Saved Workflow Assignment"),
+        )?.prompt;
+        expect(assignmentPrompt).toContain("WORKFLOW_ROLE_CANARY");
+        for (let index = 0; index < definition.nodes.length; index++) {
+          const execution = executions.find(
+            (entry) => entry.execution.nodeId === definition.nodes[index]!.id,
+          );
+          expect(execution?.modelSelection).toEqual(participants[index + 1]!.modelSelection);
+          expect(execution?.prompt).toContain(`role-${index + 1}`);
+        }
+        expect(
+          executions.every((entry) =>
+            participants.some((p) => p.modelSelection.model === entry.modelSelection.model),
+          ),
+        ).toBe(true);
+      }).pipe(
+        Effect.provide(
+          harness.layer.pipe(
+            Layer.provideMerge(
+              Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      );
+    }),
+);
+
+for (const outcome of ["valid", "invalid-participant", "refusal", "question"] as const) {
+  it.effect(`lets the selected supervisor assign saved workflow steps (${outcome})`, () =>
+    Effect.gen(function* () {
+      const definition = {
+        ...workflowDefaults()[0]!,
+        revision: 1,
+        archived: false,
+        digest: "fixture-digest",
+        createdAt: at,
+      };
+      const initial = orchestraRun({ maxRounds: 0, chairParticipantId: pid("p1") });
+      const participants = initial.meeting!.participants.map((participant, index) => ({
+        ...participant,
+        roleDescription: index === 0 ? "감독" : "구현 담당",
+      }));
+      let assignmentCount = 0;
+      const completed = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        run: {
+          ...initial,
+          meeting: { ...initial.meeting!, participants },
+          workflow: {
+            definitionId: definition.id,
+            definitionRevision: 1,
+            definitionDigest: definition.digest,
+            definition,
+            title: definition.title,
+            values: { goal: "workflow target" },
+            nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+            roleBindings: [],
+            control: "active",
+            controlRevision: 0,
+            updatedAt: at,
+            requestDigest: "fixture",
+          },
+        },
+        respond: (prompt) => {
+          if (!prompt.startsWith("# Saved Workflow Assignment"))
+            return respondForMeetingPrompt(prompt);
+          assignmentCount++;
+          if (outcome === "refusal") return "Your message was flagged by Claude's safeguards.";
+          if (outcome === "question" && assignmentCount === 1)
+            return `<t3_question>${JSON.stringify({ question: "어느 범위인가요?", options: ["전체"], context: "범위 확인" })}</t3_question>`;
+          return `<t3_workflow_assignments>${JSON.stringify({
+            assignments: definition.nodes
+              .filter((node) => node.participantId === null)
+              .map((node) => ({
+                nodeId: node.id,
+                participantId: outcome === "invalid-participant" ? "outside" : "p2",
+              })),
+          })}</t3_workflow_assignments>`;
+        },
+        onRunUpdated: (run) =>
+          run.status === "completed"
+            ? Deferred.succeed(completed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        let run = yield* Ref.get(harness.runRef);
+        if (outcome === "question") {
+          const question = run.meeting?.pendingQuestion?.question;
+          expect(question).toBe("어느 범위인가요?");
+          expect(run.graph).toBeNull();
+          yield* Ref.update(harness.runRef, (current) => ({
+            ...current,
+            meeting: {
+              ...current.meeting!,
+              pendingQuestion: null,
+              answers: [
+                ...current.meeting!.answers,
+                { question: question!, answer: "전체", answeredAt: at, nodeId: null },
+              ],
+            },
+          }));
+          yield* PubSub.publish(harness.pubsub, answeredEvent(question!, "전체"));
+          yield* Deferred.await(completed);
+          yield* reactor.drain;
+          run = yield* Ref.get(harness.runRef);
+        }
+        const executions = yield* Ref.get(harness.executionsRef);
+        const assigned = executions.filter((execution) =>
+          execution.prompt.startsWith("# Saved Workflow Assignment"),
+        );
+        expect(assigned.length).toBeGreaterThan(0);
+        expect(assigned[0]!.modelSelection).toEqual(participants[0]!.modelSelection);
+        expect(assigned[0]!.prompt).toContain("구현 담당");
+        if (outcome === "refusal") {
+          expect(run.status).toBe("running");
+          expect(run.meeting?.pendingQuestion?.context).toContain("flagged by Claude");
+          expect(run.graph?.nodes.find((node) => node.id === "plan")?.status).toBe("awaiting-user");
+          expect(assigned).toHaveLength(1);
+          expect(
+            executions.every((execution) => execution.execution.nodeId === "workflow-assignment"),
+          ).toBe(true);
+        } else if (outcome === "invalid-participant") {
+          expect(run.status).toBe("failed");
+          expect(run.error).toContain("명단 밖 참가자");
+          expect(
+            executions.every((execution) => execution.execution.nodeId === "workflow-assignment"),
+          ).toBe(true);
+        } else {
+          expect(run.status, run.error ?? undefined).toBe("completed");
+          if (outcome === "question") {
+            expect(assigned).toHaveLength(2);
+            expect(assigned[1]!.prompt).toContain("전체");
+            expect(assigned[0]!.execution.executionId).not.toBe(assigned[1]!.execution.executionId);
+          }
+          for (const node of definition.nodes) {
+            const actual = run.graph?.nodes.find((entry) => entry.id === node.id);
+            expect(actual?.participantId).toBe("p2");
+            expect(actual?.handoff.task).toContain("workflow target");
+          }
+          expect(
+            executions.find((execution) => execution.kind === "implementation")?.modelSelection,
+          ).toEqual(participants[1]!.modelSelection);
+        }
+      }).pipe(
+        Effect.provide(
+          harness.layer.pipe(
+            Layer.provideMerge(
+              Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
+}
+
+for (const decision of [
+  "다시 시도",
+  "재시도 후 질문",
+  "이 단계 건너뛰고 계속",
+  "여기서 종료",
+] as const) {
+  it.effect(
+    `continues explicitly assigned independent work after assignment refusal (${decision})`,
+    () =>
+      Effect.gen(function* () {
+        const base = workflowDefaults()[0]!;
+        const definition = {
+          ...base,
+          nodes: [
+            ...base.nodes.map((node, index) =>
+              index === 0 ? { ...node, participantId: "p2" } : node,
+            ),
+            {
+              ...base.nodes[1]!,
+              id: "dependent",
+              participantId: "p2",
+              dependsOn: [base.nodes[1]!.id],
+            },
+          ],
+          revision: 1,
+          archived: false,
+          digest: "fixture-digest",
+          createdAt: at,
+        };
+        let assignmentCalls = 0;
+        const settled = yield* Deferred.make<void>();
+        const retryQuestion = yield* Deferred.make<void>();
+        const initial = orchestraRun({ maxRounds: 0, chairParticipantId: pid("p1") });
+        const harness = yield* makeHarness({
+          run: {
+            ...initial,
+            workflow: {
+              definitionId: definition.id,
+              definitionRevision: 1,
+              definitionDigest: definition.digest,
+              definition,
+              title: definition.title,
+              values: { goal: "workflow target" },
+              nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+              roleBindings: [],
+              control: "active",
+              controlRevision: 0,
+              updatedAt: at,
+              requestDigest: "fixture",
+            },
+          },
+          respond: (prompt) => {
+            if (!prompt.startsWith("# Saved Workflow Assignment"))
+              return respondForMeetingPrompt(prompt);
+            assignmentCalls++;
+            if (assignmentCalls === 1) return "Your message was flagged by Claude's safeguards.";
+            if (decision === "재시도 후 질문" && assignmentCalls === 2)
+              return `<t3_question>${JSON.stringify({ question: "재배정 범위는?", options: ["전체"], context: "범위 확인" })}</t3_question>`;
+            return `<t3_workflow_assignments>${JSON.stringify({
+              assignments: [{ nodeId: definition.nodes[1]!.id, participantId: "p2" }],
+            })}</t3_workflow_assignments>`;
+          },
+          onRunUpdated: (run) =>
+            Effect.gen(function* () {
+              if (["completed", "cancelled"].includes(run.status))
+                yield* Deferred.succeed(settled, undefined);
+              if (run.meeting?.pendingQuestion?.question === "재배정 범위는?")
+                yield* Deferred.succeed(retryQuestion, undefined);
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const parked = yield* Ref.get(harness.runRef);
+          const question = parked.meeting?.pendingQuestion;
+          expect(parked.status).toBe("running");
+          expect(question?.context).toContain("flagged by Claude");
+          expect(
+            parked.graph?.nodes.find((node) => node.id === definition.nodes[0]!.id)?.status,
+          ).toBe("completed");
+          expect(
+            parked.graph?.nodes.find((node) => node.id === definition.nodes[1]!.id)?.status,
+          ).toBe("blocked");
+          expect(
+            parked.graph?.nodes.find((node) => node.id === definition.nodes[1]!.id)?.participantId,
+          ).toBeNull();
+          expect(parked.steps.some((step) => step.displayName === "담당 미정")).toBe(true);
+          expect(
+            (yield* Ref.get(harness.executionsRef)).some(
+              (execution) => execution.execution.nodeId === definition.nodes[1]!.id,
+            ),
+          ).toBe(false);
+          const restored = yield* decodeRunJson(yield* encodeRunJson(parked));
+          expect(restored.graph?.workflowAssignment?.pendingNodeIds).toEqual([
+            definition.nodes[1]!.id,
+          ]);
+          yield* Ref.set(harness.runRef, restored);
+          const firstAnswer = decision === "재시도 후 질문" ? "다시 시도" : decision;
+          yield* Ref.update(harness.runRef, (run) => ({
+            ...run,
+            meeting: {
+              ...run.meeting!,
+              pendingQuestion: null,
+              answers: [
+                ...run.meeting!.answers,
+                {
+                  question: question!.question,
+                  answer: firstAnswer,
+                  answeredAt: at,
+                  nodeId: question!.nodeId,
+                },
+              ],
+            },
+          }));
+          yield* PubSub.publish(harness.pubsub, answeredEvent(question!.question, firstAnswer));
+          if (decision === "재시도 후 질문") {
+            yield* Deferred.await(retryQuestion);
+            const pending = yield* Ref.get(harness.runRef);
+            expect(
+              pending.graph?.nodes.find((node) => node.id === definition.nodes[1]!.id)?.status,
+            ).toBe("blocked");
+            const next = pending.meeting!.pendingQuestion!;
+            yield* Ref.update(harness.runRef, (run) => ({
+              ...run,
+              meeting: {
+                ...run.meeting!,
+                pendingQuestion: null,
+                answers: [
+                  ...run.meeting!.answers,
+                  { question: next.question, answer: "전체", answeredAt: at, nodeId: next.nodeId },
+                ],
+              },
+            }));
+            yield* PubSub.publish(harness.pubsub, answeredEvent(next.question, "전체"));
+          }
+          yield* Deferred.await(settled);
+          yield* reactor.drain;
+          const run = yield* Ref.get(harness.runRef);
+          const missing = run.graph?.nodes.find((node) => node.id === definition.nodes[1]!.id);
+          const dependent = run.graph?.nodes.find((node) => node.id === "dependent");
+          if (decision === "다시 시도" || decision === "재시도 후 질문") {
+            expect(run.status, run.error ?? undefined).toBe("completed");
+            expect(missing?.status).toBe("completed");
+            expect(missing?.participantId).toBe("p2");
+            expect(dependent?.status).toBe("completed");
+            expect(assignmentCalls).toBe(decision === "재시도 후 질문" ? 3 : 2);
+          } else {
+            expect(run.status).toBe(decision === "여기서 종료" ? "cancelled" : "completed");
+            expect(missing?.status).toBe(decision === "여기서 종료" ? "cancelled" : "skipped");
+            expect(dependent?.status).toBe(decision === "여기서 종료" ? "cancelled" : "skipped");
+            if (decision !== "여기서 종료") {
+              expect(run.finalOutput).toContain("미수행 단계");
+              expect(run.finalOutput).toContain(definition.nodes[1]!.title);
+              expect(run.finalOutput).toContain("dependent");
+              const saved = yield* decodeRunJson(yield* encodeRunJson(run));
+              expect(saved.graph?.workflowSkippedNodeIds).toEqual([
+                definition.nodes[1]!.id,
+                "dependent",
+              ]);
+            }
+            expect(assignmentCalls).toBe(1);
+          }
+        }).pipe(
+          Effect.provide(
+            harness.layer.pipe(
+              Layer.provideMerge(
+                Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+              ),
+            ),
+          ),
+          Effect.scoped,
+        );
+      }),
+  );
+}
+
+it.effect("reuses a completed saved-workflow assignment after a restart", () =>
+  Effect.gen(function* () {
+    const definition = {
+      ...workflowDefaults()[0]!,
+      revision: 1,
+      archived: false,
+      digest: "fixture-digest",
+      createdAt: at,
+    };
+    const initial = orchestraRun({ maxRounds: 0, chairParticipantId: pid("p1") });
+    const respond = (prompt: string) =>
+      prompt.startsWith("# Saved Workflow Assignment")
+        ? `<t3_workflow_assignments>${JSON.stringify({
+            assignments: definition.nodes
+              .filter((node) => node.participantId === null)
+              .map((node) => ({ nodeId: node.id, participantId: "p2" })),
+          })}</t3_workflow_assignments>`
+        : respondForMeetingPrompt(prompt);
+    const first = yield* makeHarness({
+      liveExecutor: true,
+      run: {
+        ...initial,
+        workflow: {
+          definitionId: definition.id,
+          definitionRevision: 1,
+          definitionDigest: definition.digest,
+          definition,
+          title: definition.title,
+          values: { goal: "workflow target" },
+          nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+          roleBindings: [],
+          control: "active",
+          controlRevision: 0,
+          updatedAt: at,
+          requestDigest: "fixture",
+        },
+      },
+      respond,
+    });
+    const snapshot = yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(first.runRef);
+      expect(
+        run.status,
+        yield* encodeJsonFixture({
+          error: run.error,
+          phase: run.meeting?.phase,
+          graph: run.graph?.status,
+          pending: run.meeting?.pendingQuestion,
+        }),
+      ).toBe("completed");
+      expect(
+        (yield* Ref.get(first.promptsRef)).filter((p) =>
+          p.startsWith("# Saved Workflow Assignment"),
+        ),
+      ).toHaveLength(1);
+      const commands = yield* Ref.get(first.commandsRef);
+      const threads = [...(yield* Ref.get(first.threadsRef)).values()].map((thread) => {
+        const activities = new Map(thread.activities.map((activity) => [activity.id, activity]));
+        for (const command of commands)
+          if (command.type === "thread.activity.append" && command.threadId === thread.id)
+            activities.set(command.activity.id, command.activity);
+        return { ...thread, activities: [...activities.values()] };
+      });
+      return {
+        run: yield* decodeRunJson(
+          yield* encodeRunJson({
+            ...run,
+            status: "running",
+            graph: null,
+            steps: [],
+            finalOutput: null,
+            meeting: { ...run.meeting!, phase: "planning" },
+          }),
+        ),
+        threads,
+      };
+    }).pipe(
+      Effect.provide(
+        first.layer.pipe(
+          Layer.provideMerge(
+            Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+          ),
+        ),
+      ),
+      Effect.scoped,
+    );
+    const restored = yield* makeHarness({
+      run: snapshot.run,
+      existingThreads: snapshot.threads,
+      liveExecutor: true,
+      respond,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(
+        (yield* Ref.get(restored.promptsRef)).filter((p) =>
+          p.startsWith("# Saved Workflow Assignment"),
+        ),
+      ).toHaveLength(0);
+      const run = yield* Ref.get(restored.runRef);
+      expect(
+        run.status,
+        yield* encodeJsonFixture({
+          error: run.error,
+          phase: run.meeting?.phase,
+          graph: run.graph?.status,
+          pending: run.meeting?.pendingQuestion,
+        }),
+      ).toBe("completed");
+      expect(
+        run.graph?.nodes.find((node) => node.id === definition.nodes[0]!.id)?.participantId,
+      ).toBe("p2");
+    }).pipe(
+      Effect.provide(
+        restored.layer.pipe(
+          Layer.provideMerge(
+            Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+          ),
+        ),
+      ),
+      Effect.scoped,
+    );
+  }),
+);
+
+it.effect(
+  "continues independent work while an unavailable selected provider waits for user action",
+  () =>
+    Effect.gen(function* () {
+      const base = orchestraRun();
+      const unavailable =
+        "선택한 AI 연결을 사용할 수 없습니다. 역할: researcher, 연결: missing, 모델: test. 해당 연결이 등록되어 있지 않습니다.";
+      const harness = yield* makeHarness({
+        run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+        respond: respondForOrchestraPrompt,
+        executionFailure: (execution) =>
+          execution.prompt.includes("Node: research-p1\n")
+            ? new WorkspaceAgentExecutionError({ message: unavailable })
+            : undefined,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(harness.runRef);
+        const blocked = run.graph?.nodes.find((node) => node.id === "research-p1");
+        const independent = run.graph?.nodes.find((node) => node.id === "research-p2");
+        expect(blocked?.status).toBe("awaiting-user");
+        expect(blocked?.attempts).toHaveLength(1);
+        expect(blocked?.error).toContain(unavailable);
+        expect(independent?.attempts).toHaveLength(1);
+        expect(independent?.status).not.toBe("queued");
+        expect(run.meeting?.pendingQuestion?.question).toContain(
+          "선택된 AI 연결을 사용할 수 없습니다",
+        );
+        expect(run.meeting?.pendingQuestion?.context).toContain("연결: missing");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect(
+  "does not retry a deterministic function name request error and continues unrelated work",
+  () =>
+    Effect.gen(function* () {
+      const base = orchestraRun();
+      const message = "Expected 'function.name' to be a string.";
+      const harness = yield* makeHarness({
+        run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+        respond: respondForOrchestraPrompt,
+        executionFailure: (execution) =>
+          execution.prompt.includes("Node: research-p1\n")
+            ? new WorkspaceAgentExecutionError({ message })
+            : undefined,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(harness.runRef);
+        const failed = run.graph?.nodes.find((node) => node.id === "research-p1");
+        const independent = run.graph?.nodes.find((node) => node.id === "research-p2");
+        expect(failed?.status).toBe("awaiting-user");
+        expect(failed?.attempts).toHaveLength(1);
+        expect(failed?.error).toContain(message);
+        expect(independent?.attempts).toHaveLength(1);
+        expect(run.meeting?.pendingQuestion?.question).toContain("함수 이름 형식 오류");
+        expect(run.meeting?.pendingQuestion?.context).toContain(message);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+for (const error of ["handoff input file ENOENT: missing.txt", "인계 파일 해시 불일치"]) {
+  it.effect(
+    `parks a deterministic input error without retrying or substituting another file: ${error}`,
+    () =>
+      Effect.gen(function* () {
+        const base = orchestraRun();
+        const harness = yield* makeHarness({
+          run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+          respond: respondForOrchestraPrompt,
+          executionFailure: (execution) =>
+            execution.prompt.includes("Node: research-p1\n")
+              ? new WorkspaceAgentExecutionError({ message: error })
+              : undefined,
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          const run = yield* Ref.get(harness.runRef);
+          const failed = run.graph?.nodes.find((node) => node.id === "research-p1");
+          expect(failed?.status).toBe("awaiting-user");
+          expect(failed?.attempts).toHaveLength(1);
+          expect(failed?.error).toContain(error);
+          expect(run.graph?.nodes.find((node) => node.id === "research-p2")?.attempts).toHaveLength(
+            1,
+          );
+          expect(run.meeting?.pendingQuestion?.question).toContain("지정된 입력 자료");
+          expect(run.meeting?.pendingQuestion?.context).toContain(error);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
+
+it.effect("does not automatically resend an input with unconfirmed prior delivery", () =>
+  Effect.gen(function* () {
+    const base = orchestraRun();
+    const error = "이전 입력의 전달·종료가 미확인입니다. 자동 재전송을 중단했습니다.";
+    const harness = yield* makeHarness({
+      run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+      respond: respondForOrchestraPrompt,
+      executionFailure: (execution) =>
+        execution.prompt.includes("Node: research-p1\n")
+          ? new WorkspaceAgentExecutionError({ message: error })
+          : undefined,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      const blocked = run.graph?.nodes.find((node) => node.id === "research-p1");
+      expect(blocked?.status).toBe("awaiting-user");
+      expect(blocked?.attempts).toHaveLength(1);
+      expect(run.meeting?.pendingQuestion?.question).toContain(
+        "전달 또는 종료 상태가 확인되지 않아",
+      );
+      expect(run.graph?.nodes.find((node) => node.id === "research-p2")?.attempts).toHaveLength(1);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("redacts credential-like values from persisted failure and intervention context", () =>
+  Effect.gen(function* () {
+    const base = orchestraRun();
+    const syntheticSecret = "sk-proj-FAKE0123456789abcdef";
+    const message = `선택한 AI 연결을 사용할 수 없습니다. api_key=${syntheticSecret}`;
+    const harness = yield* makeHarness({
+      run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+      respond: respondForOrchestraPrompt,
+      executionFailure: (execution) =>
+        execution.prompt.includes("Node: research-p1\n")
+          ? new WorkspaceAgentExecutionError({ message })
+          : undefined,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      const node = run.graph?.nodes.find((entry) => entry.id === "research-p1");
+      expect(node?.error).toContain("민감정보 제거");
+      expect(node?.error).not.toContain(syntheticSecret);
+      expect(node?.attempts[0]?.error).not.toContain(syntheticSecret);
+      expect(run.meeting?.pendingQuestion?.context).not.toContain(syntheticSecret);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "passes exact rejected evidence to the repair worker and independently revalidates the correction",
+  () =>
+    Effect.gen(function* () {
+      const evidence = [
+        "stop_loss_engine.py:26 entryNotional exists",
+        "account_risk_limits.py:178 stopFraction requires separate evidence",
+      ];
+      const harness = yield* makeHarness({
+        run: orchestraRun({ maxRounds: 0, phase: "planning" }),
+        respond: (prompt) => {
+          if (prompt.includes("Node: validate-build\n")) {
+            return `<t3_validation>${JSON.stringify({
+              verdict: "fail",
+              confidence: "high",
+              summary: "entryNotional missing claim is incorrect",
+              evidence,
+              failureClassification: "implementation",
+              nextAction: "correct the claims and revalidate",
+              followUpNodes: [
+                {
+                  id: "fix-claims",
+                  kind: "debug",
+                  participantId: "p2",
+                  title: "근거 정정",
+                  task: "잘못된 필드 주장을 정정",
+                  goal: "정확한 근거",
+                  context: "검증 반려",
+                  input: "검증 영수증",
+                  constraints: [],
+                  expectedOutput: "정정 결과",
+                  successCriteria: ["근거 확인"],
+                  dependsOn: [],
+                  priority: 1,
+                },
+              ],
+            })}</t3_validation>`;
+          }
+          if (prompt.includes("Node: fix-claims\n"))
+            return "확인된 근거에 따라 필드 주장을 정정했습니다.";
+          return respondForMeetingPrompt(prompt);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const run = yield* Ref.get(harness.runRef);
+        const prompts = yield* Ref.get(harness.promptsRef);
+        const repair = prompts.find((prompt) => prompt.includes("Node: fix-claims\n"));
+        expect(repair).toBeDefined();
+        expect(repair).toContain("DIRECT VALIDATION REJECTION RECEIPTS");
+        for (const line of evidence) expect(repair).toContain(line);
+        expect(run.graph?.nodes.find((node) => node.id === "fix-claims")?.status).toBe("completed");
+        expect(
+          run.graph?.nodes.find((node) => node.validationTargetId === "fix-claims")?.validation
+            ?.verdict,
+        ).toBe("pass");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect(
+  "keeps independent role-based work when a selected researcher connection is missing",
+  () =>
+    Effect.gen(function* () {
+      const selected = { instanceId: ProviderInstanceId.make("codex-a"), model: "selected-model" };
+      const missing = {
+        instanceId: ProviderInstanceId.make("missing-researcher"),
+        model: "research-model",
+      };
+      const roleBindings = (["coordinator", "implementer", "researcher"] as const).map((role) => ({
+        projectId,
+        role,
+        displayName: role,
+        modelSelection: role === "researcher" ? missing : selected,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        instructions: "",
+        enabled: true,
+        updatedAt: at,
+      }));
+      const plan = [
+        { id: "research", kind: "research", agent: "grok", priority: 2 },
+        { id: "build", kind: "implementation", agent: "codex", priority: 1 },
+      ].map((entry) => ({
+        ...entry,
+        title: entry.id,
+        task: entry.id,
+        goal: "goal",
+        context: "context",
+        input: "input",
+        constraints: [],
+        expectedOutput: "evidence",
+        successCriteria: ["checked"],
+        dependsOn: [],
+      }));
+      const harness = yield* makeHarness({
+        run: {
+          ...meetingRun(),
+          meeting: null,
+          orchestra: { maxParallel: 1, isolateWorktrees: false },
+          runContext: { requestDigest: "missing-researcher", roleBindings, requestMode: "direct" },
+        },
+        respond: (prompt) =>
+          prompt.includes("Return one strict machine-readable proposal between <t3_task_graph>")
+            ? `<t3_task_graph>${JSON.stringify({ summary: "plan", nextAction: "execute", nodes: plan })}</t3_task_graph>`
+            : respondForMeetingPrompt(prompt),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        const result = yield* Ref.get(harness.runRef);
+        const research = result.graph?.nodes.find((entry) => entry.id === "research");
+        const build = result.graph?.nodes.find((entry) => entry.id === "build");
+        expect(research?.status).toBe("failed");
+        expect(research?.error).toContain("missing-researcher");
+        expect(research?.attempts).toHaveLength(1);
+        expect(build?.attempts).toHaveLength(1);
+        expect(build?.status).toBe("completed");
+        expect(result.status).toBe("failed");
+        expect(result.error).toContain("missing-researcher");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect("continues an independent queued node while a plain-text safety refusal is parked", () =>
+  Effect.gen(function* () {
+    const base = orchestraRun();
+    const refusal = "Your message was flagged by Claude's safeguards.";
+    const harness = yield* makeHarness({
+      run: { ...base, orchestra: { ...base.orchestra!, maxParallel: 1 } },
+      respond: (prompt) =>
+        prompt.includes("Node: research-p1\n") ? refusal : respondForOrchestraPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const run = yield* Ref.get(harness.runRef);
+      const rejected = run.graph?.nodes.find((node) => node.id === "research-p1");
+      const independent = run.graph?.nodes.find((node) => node.id === "research-p2");
+      expect(rejected?.status).toBe("awaiting-user");
+      expect(rejected?.attempts).toHaveLength(1);
+      expect(rejected?.error).toContain(refusal);
+      expect(independent?.attempts).toHaveLength(1);
+      expect(independent?.status).not.toBe("queued");
+      expect(run.meeting?.pendingQuestion?.nodeId).toBe("research-p1");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "reviews a refusal instruction while another worker is still running without losing its result",
+  () =>
+    Effect.gen(function* () {
+      const slowStarted = yield* Deferred.make<void>();
+      const releaseSlow = yield* Deferred.make<void>();
+      const refused = yield* Deferred.make<void>();
+      const reviewStarted = yield* Deferred.make<void>();
+      const releaseReview = yield* Deferred.make<void>();
+      const workerSettled = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        run: orchestraRun(),
+        respond: (prompt) =>
+          prompt.includes("Node: research-p1\n")
+            ? "Your message was flagged by Claude's safeguards."
+            : respondForOrchestraPrompt(prompt),
+        onTurnStart: ({ prompt }) =>
+          Effect.gen(function* () {
+            if (prompt.includes("Node: research-p2\n")) {
+              yield* Deferred.succeed(slowStarted, undefined);
+              yield* Deferred.await(releaseSlow);
+            }
+            if (prompt.includes("Node: research-p1\n")) yield* Deferred.await(slowStarted);
+            if (prompt.startsWith("사용자가 통합 작업에 추가 지시를 보냈습니다")) {
+              yield* Deferred.succeed(reviewStarted, undefined);
+              yield* Deferred.await(releaseReview);
+            }
+          }),
+        onRunUpdated: (run) =>
+          Effect.gen(function* () {
+            if (run.meeting?.pendingQuestion?.nodeId === "research-p1")
+              yield* Deferred.succeed(refused, undefined);
+            if (
+              run.graph?.nodes.some(
+                (node) => node.id === "research-p2" && node.status === "awaiting-validation",
+              )
+            )
+              yield* Deferred.succeed(workerSettled, undefined);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* Deferred.await(refused);
+        const parked = yield* Ref.get(harness.runRef);
+        expect(parked.graph?.nodes.find((node) => node.id === "research-p2")?.status).toBe(
+          "running",
+        );
+        const question = parked.meeting!.pendingQuestion!.question;
+        const nodeId = parked.meeting!.pendingQuestion!.nodeId!;
+        const answer = "남은 작업을 감독해";
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          meeting: {
+            ...run.meeting!,
+            pendingQuestion: null,
+            answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+          },
+        }));
+        yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+        yield* Deferred.await(reviewStarted);
+        expect(
+          (yield* Ref.get(harness.runRef)).graph?.nodes.find((node) => node.id === "research-p2")
+            ?.status,
+        ).toBe("running");
+        yield* Deferred.succeed(releaseSlow, undefined);
+        yield* Deferred.await(workerSettled);
+        yield* Deferred.succeed(releaseReview, undefined);
+        yield* reactor.drain;
+        const result = yield* Ref.get(harness.runRef);
+        expect(result.meeting?.refusalInstructionReview?.status).toBe("completed");
+        expect(result.meeting?.pendingQuestion?.nodeId).toBe("research-p1");
+        const worker = result.graph?.nodes.find((node) => node.id === "research-p2");
+        expect(worker?.attempts).toHaveLength(1);
+        expect(worker?.attempts[0]?.status).toBe("completed");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+for (const safetyRefusal of [true, false]) {
+  it.effect(
+    `stops a running worker when the user ends a failed step (safety=${safetyRefusal})`,
+    () =>
+      Effect.gen(function* () {
+        const slowStarted = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        const refused = yield* Deferred.make<void>();
+        const harness = yield* makeHarness({
+          run: orchestraRun(),
+          respond: (prompt) =>
+            safetyRefusal && prompt.includes("Node: research-p1\n")
+              ? "Your message was flagged by Claude's safeguards."
+              : respondForOrchestraPrompt(prompt),
+          executionFailure: (execution) =>
+            !safetyRefusal && execution.prompt.includes("Node: research-p1\n")
+              ? new WorkspaceAgentExecutionError({ message: "일반 작업 실패" })
+              : undefined,
+          onTurnStart: ({ prompt }) =>
+            prompt.includes("Node: research-p2\n")
+              ? Deferred.succeed(slowStarted, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                )
+              : prompt.includes("Node: research-p1\n")
+                ? Deferred.await(slowStarted)
+                : Effect.void,
+          onRunUpdated: (run) =>
+            run.meeting?.pendingQuestion?.nodeId === "research-p1"
+              ? Deferred.succeed(refused, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceCollaborationReactor;
+          yield* reactor.start();
+          yield* Deferred.await(refused);
+          yield* Deferred.await(slowStarted);
+          const parked = yield* Ref.get(harness.runRef);
+          const question = parked.meeting!.pendingQuestion!.question;
+          const nodeId = parked.meeting!.pendingQuestion!.nodeId!;
+          const answer = "여기서 종료";
+          yield* Ref.update(harness.runRef, (run) => ({
+            ...run,
+            meeting: {
+              ...run.meeting!,
+              pendingQuestion: null,
+              answers: [...run.meeting!.answers, { question, answer, answeredAt: at, nodeId }],
+            },
+          }));
+          yield* PubSub.publish(harness.pubsub, answeredEvent(question, answer));
+          yield* Deferred.await(interrupted);
+          const cancelled = yield* awaitRunStatus(harness.runRef, "cancelled");
+          expect(cancelled.meeting?.answers.at(-1)?.answer).toBe(answer);
+          expect(cancelled.graph?.nodes.find((node) => node.id === "research-p2")?.status).toBe(
+            "cancelled",
+          );
+          yield* reactor.drain;
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+}
+
+it.effect(
+  "continues an explicit persistent run in the same conversation until the supervisor completes it",
+  () =>
+    Effect.gen(function* () {
+      const initial = orchestraRun({ maxRounds: 0, phase: "planning", answers: [] });
+      let assessments = 0;
+      const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
+      const harness = yield* makeHarness({
+        run: { ...initial, orchestra: { ...initial.orchestra!, executionMode: "persistent" } },
+        memoryDirective: "<t3_user_directives>required</t3_user_directives>",
+        liveInterjections,
+        onTurnStart: ({ prompt }) =>
+          Effect.sync(() => {
+            if (prompt.includes("조사한다.") && liveInterjections.length === 0)
+              liveInterjections.push({
+                text: "추가로 재시작도 검증해라",
+                roundIndex: 0,
+                afterStatements: 0,
+                saidAt: at,
+              });
+          }),
+        respond: (prompt) => {
+          if (prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")) {
+            assessments += 1;
+            return assessments === 1
+              ? '<t3_persistent_verdict>{"decision":"continue","summary":"첫 조사 완료","nextTask":"남은 검증을 진행"}</t3_persistent_verdict>'
+              : '<t3_persistent_verdict>{"decision":"complete","summary":"두 회차를 검증해 목표 완료"}</t3_persistent_verdict>';
+          }
+          return respondForOrchestraPrompt(prompt);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        const result = yield* awaitRunStatus(harness.runRef, "completed");
+        yield* reactor.drain;
+        expect(assessments).toBe(2);
+        expect(result.meeting?.continuation?.cycle).toBe(1);
+        expect(result.finalOutput).toBe("두 회차를 검증해 목표 완료");
+        const executions = yield* Ref.get(harness.executionsRef);
+        const plans = executions.filter((entry) =>
+          entry.prompt.startsWith("# Workspace Meeting Plan"),
+        );
+        expect(plans).toHaveLength(2);
+        expect(plans[1]!.prompt).toContain("남은 검증을 진행");
+        expect(
+          executions.some(
+            (entry) =>
+              entry.prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다") &&
+              entry.prompt.includes("추가로 재시작도 검증해라"),
+          ),
+        ).toBe(true);
+        expect(new Set(executions.map((entry) => entry.execution.ownerThreadId)).size).toBe(1);
+        const taskIds = executions
+          .filter((entry) => entry.orchestraPhase === "task")
+          .map((entry) => entry.execution.executionId);
+        expect(new Set(taskIds).size).toBe(taskIds.length);
+        expect(taskIds.some((id) => id.includes("cycle-1-"))).toBe(true);
+        const memoryCalls = yield* Ref.get(harness.memoryCallsRef);
+        expect(memoryCalls).toHaveLength(2);
+        expect(memoryCalls[0]).toMatchObject({
+          input: { action: "remember", scope: "project" },
+          context: { threadId: result.meeting?.threadId, agentReported: true },
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect("reports an unconfirmed RAG save in the conversation without stopping the work", () =>
+  Effect.gen(function* () {
+    const initial = orchestraRun({ maxRounds: 0, phase: "planning", answers: [] });
+    const harness = yield* makeHarness({
+      run: { ...initial, orchestra: { ...initial.orchestra!, executionMode: "persistent" } },
+      memoryDirective: "",
+      memorySaveReceipt: '{"id":"unsaved","saved":false}',
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"작업 완료"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      const completed = yield* Ref.get(harness.runRef);
+      expect(completed.status).toBe("completed");
+      expect(
+        (yield* Ref.get(harness.commandsRef)).some(
+          (command) =>
+            command.type === "thread.activity.append" &&
+            command.threadId === completed.meeting?.threadId &&
+            command.activity.kind === "workspace.memory.save-failed",
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("resumes a saved persistent cycle after the reactor starts again", () =>
+  Effect.gen(function* () {
+    const original = orchestraRun({
+      maxRounds: 0,
+      phase: "planning",
+      answers: [],
+      continuation: { cycle: 1, workerTurns: 3, summary: "첫 회차 결과", nextTask: "남은 작업" },
+    });
+    const saved = yield* decodeRunJson(
+      yield* encodeRunJson({
+        ...original,
+        status: "running",
+        orchestra: { ...original.orchestra!, executionMode: "persistent" },
+      }),
+    );
+    const harness = yield* makeHarness({
+      run: saved,
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"남은 작업 완료"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const result = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(result.finalOutput).toBe("남은 작업 완료");
+      expect(
+        (yield* Ref.get(harness.promptsRef)).some((prompt) => prompt.includes("남은 작업")),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("does not start another persistent cycle when the user cancels during assessment", () =>
+  Effect.gen(function* () {
+    const initial = orchestraRun({ maxRounds: 0, phase: "planning", answers: [] });
+    let cancelAssessment: Effect.Effect<void> = Effect.void;
+    const harness = yield* makeHarness({
+      run: { ...initial, orchestra: { ...initial.orchestra!, executionMode: "persistent" } },
+      onTurnStart: ({ prompt }) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? cancelAssessment
+          : Effect.void,
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"continue","summary":"첫 회차","nextTask":"다음"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    cancelAssessment = Ref.update(harness.runRef, (run) => ({
+      ...run,
+      status: "cancel-requested" as const,
+    }));
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const cancelled = yield* awaitRunStatus(harness.runRef, "cancelled");
+      expect(cancelled.graph).not.toBeNull();
+      expect(cancelled.meeting?.continuation).toBeUndefined();
+      expect(
+        (yield* Ref.get(harness.executionsRef)).filter((entry) =>
+          entry.prompt.startsWith("# Workspace Meeting Plan"),
+        ),
+      ).toHaveLength(1);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("does not repeat supervisor review for an instruction included in the plan", () =>
+  Effect.gen(function* () {
+    const liveInterjections: WorkspaceMeeting["interjections"][number][] = [
+      { text: "계획에 반영할 조건", roundIndex: 0, afterStatements: 0, saidAt: at },
+    ];
+    const harness = yield* makeHarness({
+      run: orchestraRun({ maxRounds: 0, phase: "planning", answers: [] }),
+      liveInterjections,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const completed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(completed.meeting?.supervisorReviewedInterjections).toBe(1);
+      const prompts = yield* Ref.get(harness.promptsRef);
+      expect(
+        prompts.some(
+          (prompt) =>
+            prompt.startsWith("# Workspace Meeting Plan") && prompt.includes("계획에 반영할 조건"),
+        ),
+      ).toBe(true);
+      expect(
+        prompts.some((prompt) => prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")),
+      ).toBe(false);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("supervisor reviews an instruction received before the final wave of a one-off run", () =>
+  Effect.gen(function* () {
+    const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
+    const harness = yield* makeHarness({
+      run: orchestraRun({ maxRounds: 0, phase: "planning", answers: [] }),
+      liveInterjections,
+      onTurnStart: ({ prompt }) =>
+        Effect.sync(() => {
+          if (prompt.includes("Node: research-p1") && !liveInterjections.length)
+            liveInterjections.push({
+              text: "초기 작업 중 추가한 요구사항을 감독자가 확인해라",
+              roundIndex: 0,
+              afterStatements: 0,
+              saidAt: at,
+            });
+        }),
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"추가 지시 확인 완료"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const completed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(completed.finalOutput).toBe("추가 지시 확인 완료");
+      expect(
+        (yield* Ref.get(harness.promptsRef)).some(
+          (prompt) =>
+            prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다") &&
+            prompt.includes("초기 작업 중 추가한 요구사항을 감독자가 확인해라"),
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("delivers a late instruction to the supervisor before a one-off run finishes", () =>
+  Effect.gen(function* () {
+    const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
+    const harness = yield* makeHarness({
+      run: orchestraRun({ maxRounds: 0, phase: "planning", answers: [] }),
+      liveInterjections,
+      onTurnStart: ({ prompt }) =>
+        Effect.sync(() => {
+          if (
+            prompt.includes("Return one strict payload between <t3_synthesis>") &&
+            !liveInterjections.length
+          )
+            liveInterjections.push({
+              text: "완료 전에 추가 조건을 반영해라",
+              roundIndex: 0,
+              afterStatements: 0,
+              saidAt: at,
+            });
+        }),
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"추가 조건 반영 완료"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const completed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(completed.finalOutput).toBe("추가 조건 반영 완료");
+      expect(
+        (yield* Ref.get(harness.promptsRef)).some(
+          (prompt) =>
+            prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다") &&
+            prompt.includes("완료 전에 추가 조건을 반영해라"),
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("recovery does not cancel a scheduled run in another conversation", () =>
+  Effect.gen(function* () {
+    const first = orchestraRun({
+      threadId: ThreadId.make("user-chat"),
+      maxRounds: 0,
+      phase: "planning",
+    });
+    const second = {
+      ...orchestraRun({
+        threadId: ThreadId.make("scheduled-chat"),
+        maxRounds: 0,
+        phase: "planning",
+      }),
+      id: WorkspaceCollaborationRunId.make("scheduled-chat-run"),
+      source: "automation" as const,
+    };
+    const harness = yield* makeHarness({
+      run: first,
+      additionalRun: second,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(
+        (yield* Ref.get(harness.commandsRef)).filter(
+          (command) =>
+            command.type === "project.collaboration.run.cancel" && command.runId === second.id,
+        ),
+      ).toEqual([]);
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+      expect((yield* Ref.get(harness.additionalRunRef))?.status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("legacy project work does not preempt a scheduled conversation", () =>
+  Effect.gen(function* () {
+    const first = {
+      ...orchestraRun({
+        threadId: ThreadId.make("legacy-owner"),
+        maxRounds: 0,
+        phase: "planning",
+      }),
+      meeting: null,
+    };
+    const second = {
+      ...orchestraRun({
+        threadId: ThreadId.make("independent-chat"),
+        maxRounds: 0,
+        phase: "planning",
+      }),
+      id: WorkspaceCollaborationRunId.make("independent-scheduled-run"),
+      source: "automation" as const,
+    };
+    const harness = yield* makeHarness({
+      run: first,
+      additionalRun: second,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(
+        (yield* Ref.get(harness.commandsRef)).filter(
+          (command) =>
+            command.type === "project.collaboration.run.cancel" && command.runId === second.id,
+        ),
+      ).toEqual([]);
+      expect((yield* Ref.get(harness.additionalRunRef))?.status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("a conversation run does not preempt unrelated legacy scheduled work", () =>
+  Effect.gen(function* () {
+    const first = orchestraRun({
+      threadId: ThreadId.make("user-conversation"),
+      maxRounds: 0,
+      phase: "planning",
+    });
+    const second = {
+      ...orchestraRun({
+        threadId: ThreadId.make("legacy-owner"),
+        maxRounds: 0,
+        phase: "planning",
+      }),
+      id: WorkspaceCollaborationRunId.make("legacy-scheduled-run"),
+      source: "automation" as const,
+      meeting: null,
+    };
+    const harness = yield* makeHarness({
+      run: first,
+      additionalRun: second,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* reactor.drain;
+      expect(
+        (yield* Ref.get(harness.commandsRef)).filter(
+          (command) =>
+            command.type === "project.collaboration.run.cancel" && command.runId === second.id,
+        ),
+      ).toEqual([]);
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect("starts separate conversations in the same project independently", () =>
+  Effect.gen(function* () {
+    const first = orchestraRun({
+      threadId: ThreadId.make("conversation-a"),
+      maxRounds: 0,
+      phase: "planning",
+      answers: [],
+    });
+    const second = {
+      ...orchestraRun({
+        threadId: ThreadId.make("conversation-b"),
+        maxRounds: 0,
+        phase: "planning",
+        answers: [],
+      }),
+      id: WorkspaceCollaborationRunId.make("run-other"),
+    };
+    const bothStarted = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const started = new Set<string>();
+    const harness = yield* makeHarness({
+      run: first,
+      additionalRun: second,
+      onTurnStart: ({ prompt, run }) =>
+        prompt.startsWith("# Workspace Meeting Plan")
+          ? Effect.gen(function* () {
+              started.add(run.id);
+              if (started.size === 2) yield* Deferred.succeed(bothStarted, undefined);
+              yield* Deferred.await(release);
+            })
+          : Effect.void,
+      respond: respondForOrchestraPrompt,
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      yield* Deferred.await(bothStarted);
+      expect(started).toEqual(new Set([first.id, second.id]));
+      yield* Deferred.succeed(release, undefined);
+      yield* reactor.drain;
+      expect((yield* Ref.get(harness.runRef)).status).toBe("completed");
+      expect((yield* Ref.get(harness.additionalRunRef))?.status).toBe("completed");
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+it.effect(
+  "stopping one conversation does not stop a different conversation in the same project",
+  () =>
+    Effect.gen(function* () {
+      const first = orchestraRun({
+        threadId: ThreadId.make("stop-a"),
+        maxRounds: 0,
+        phase: "planning",
+      });
+      const second = {
+        ...orchestraRun({ threadId: ThreadId.make("stop-b"), maxRounds: 0, phase: "planning" }),
+        id: WorkspaceCollaborationRunId.make("stop-other"),
+      };
+      const bothStarted = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const started = new Set<string>();
+      const harness = yield* makeHarness({
+        run: first,
+        additionalRun: second,
+        onTurnStart: ({ prompt, run }) =>
+          prompt.startsWith("# Workspace Meeting Plan")
+            ? Effect.gen(function* () {
+                started.add(run.id);
+                if (started.size === 2) yield* Deferred.succeed(bothStarted, undefined);
+                yield* Deferred.await(release);
+              })
+            : Effect.void,
+        respond: respondForOrchestraPrompt,
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* Deferred.await(bothStarted);
+        yield* Ref.update(harness.runRef, (run) => ({
+          ...run,
+          status: "cancel-requested" as const,
+        }));
+        yield* Deferred.succeed(release, undefined);
+        yield* reactor.drain;
+        expect((yield* Ref.get(harness.runRef)).status).toBe("cancelled");
+        expect((yield* Ref.get(harness.additionalRunRef))?.status).toBe("completed");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+);
+
+it.effect("allows the supervisor to plan and execute alone", () =>
+  Effect.gen(function* () {
+    const supervisor = meetingRun().meeting!.participants[0]!;
+    const run = orchestraRun({
+      participants: [supervisor],
+      chairParticipantId: supervisor.id,
+      maxRounds: 0,
+      phase: "planning",
+      answers: [],
+    });
+    const decoded = yield* decodeRunJson(yield* encodeRunJson(run));
+    expect(decoded.meeting?.participants).toHaveLength(1);
+    const setup = yield* decodeMeetingSetup({
+      mode: "fixed-rounds",
+      participants: [supervisor],
+      chairParticipantId: supervisor.id,
+      maxRounds: 0,
+      userInLoop: false,
+    });
+    expect(setup.participants).toHaveLength(1);
+    const harness = yield* makeHarness({
+      run,
+      respond: (prompt) => {
+        const response = respondForOrchestraPrompt(prompt);
+        if (!prompt.startsWith("# Workspace Meeting Plan")) return response;
+        const graph = JSON.parse(
+          response.slice("<t3_task_graph>".length, -"</t3_task_graph>".length),
+        ) as { nodes: Array<{ participantId: string }> };
+        graph.nodes = graph.nodes.filter((node) => node.participantId === "p1");
+        return `<t3_task_graph>${JSON.stringify(graph)}</t3_task_graph>`;
+      },
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const completed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(completed.status).toBe("completed");
+      expect(completed.graph?.nodes.some((node) => node.participantId === supervisor.id)).toBe(
+        true,
+      );
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  }),
+);
+
+import {
+  reviewWorkspaceOrchestraPlan,
+  reviewWorkspaceOrchestraRun,
+} from "../workspaceOrchestraReview.ts";
 import { WorkspaceDevelopmentGit } from "../WorkspaceDevelopmentGit.ts";
 
 const seatQuestion = (question: string) =>
@@ -2460,6 +4500,228 @@ it.effect(
     }),
 );
 
+for (const mode of ["partial", "all", "answer-before-review", "skip-after-review"] as const) {
+  it.effect(`preserves reviewed work after a supervisor assignment refusal (${mode})`, () =>
+    Effect.gen(function* () {
+      const allManuallyAssigned = mode === "all";
+      const base = workflowDefaults()[0]!;
+      const definition = {
+        ...base,
+        nodes: [
+          { ...base.nodes[0]!, participantId: "p2" },
+          base.nodes[1]!,
+          {
+            ...base.nodes[1]!,
+            id: "dependent",
+            participantId: null,
+            dependsOn: [base.nodes[1]!.id],
+          },
+        ],
+        revision: 1,
+        archived: false,
+        digest: "fixture-digest",
+        createdAt: at,
+      };
+      const completed = yield* Deferred.make<void>();
+      const independentDone = yield* Deferred.make<void>();
+      let assignmentCalls = 0;
+      const baseRun = orchestraRun({ maxRounds: 0, chairParticipantId: pid("p1") });
+      const harness = yield* makeHarness({
+        run: {
+          ...baseRun,
+          orchestra: { ...baseRun.orchestra!, reviewPlan: true },
+          workflow: {
+            definitionId: definition.id,
+            definitionRevision: 1,
+            definitionDigest: definition.digest,
+            definition,
+            title: definition.title,
+            values: { goal: "workflow target" },
+            nodeSkills: definition.nodes.map((node) => ({ nodeId: node.id, skills: [] })),
+            roleBindings: [],
+            control: "active",
+            controlRevision: 0,
+            updatedAt: at,
+            requestDigest: "fixture",
+          },
+        },
+        respond: (prompt) => {
+          if (!prompt.startsWith("# Saved Workflow Assignment"))
+            return respondForMeetingPrompt(prompt);
+          assignmentCalls++;
+          if (assignmentCalls === 1) return "Your message was flagged by Claude's safeguards.";
+          return `<t3_workflow_assignments>${JSON.stringify({ assignments: [{ nodeId: "execute", participantId: "p2" }] })}</t3_workflow_assignments>`;
+        },
+        onRunUpdated: (run) =>
+          Effect.gen(function* () {
+            if (run.status === "completed") yield* Deferred.succeed(completed, undefined);
+            if (run.graph?.nodes.find((node) => node.id === "analyze")?.status === "completed")
+              yield* Deferred.succeed(independentDone, undefined);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const reactor = yield* WorkspaceCollaborationReactor;
+        yield* reactor.start();
+        yield* reactor.drain;
+        let parked = yield* Ref.get(harness.runRef);
+        expect(parked.status).toBe("running");
+        expect(parked.graph?.planReview?.status).toBe("pending");
+        expect(parked.graph?.workflowAssignment?.pendingNodeIds).toEqual(["execute", "dependent"]);
+        expect(
+          (yield* Ref.get(harness.executionsRef)).filter(
+            (entry) => entry.execution.nodeId === "analyze",
+          ),
+        ).toHaveLength(0);
+        if (mode === "answer-before-review") {
+          const question = parked.meeting!.pendingQuestion!;
+          yield* Ref.update(harness.runRef, (run) => ({
+            ...run,
+            meeting: {
+              ...run.meeting!,
+              pendingQuestion: null,
+              answers: [
+                ...run.meeting!.answers,
+                {
+                  question: question.question,
+                  answer: "다시 시도",
+                  answeredAt: at,
+                  nodeId: question.nodeId,
+                },
+              ],
+            },
+          }));
+          yield* PubSub.publish(harness.pubsub, answeredEvent(question.question, "다시 시도"));
+          yield* reactor.drain;
+          parked = yield* Ref.get(harness.runRef);
+          expect(parked.graph?.planReview?.status).toBe("pending");
+          expect(
+            (yield* Ref.get(harness.executionsRef)).filter(
+              (entry) => entry.execution.nodeId === "analyze",
+            ),
+          ).toHaveLength(0);
+        }
+        const request = {
+          projectId,
+          runId,
+          expectedRevision: 0,
+          approve: true,
+          reviewedAt: at,
+          edits: [
+            {
+              nodeId: WorkspaceTaskNodeId.make("analyze"),
+              title: "사용자 분석",
+              task: "수정된 분석 지시",
+              participantId: pid("p2"),
+              dependsOn: [],
+            },
+            {
+              nodeId: WorkspaceTaskNodeId.make("execute"),
+              title: "사용자 실행",
+              task: "수정된 실행 지시",
+              participantId: allManuallyAssigned ? pid("p2") : null,
+              dependsOn: [WorkspaceTaskNodeId.make("analyze")],
+            },
+            {
+              nodeId: WorkspaceTaskNodeId.make("dependent"),
+              title: "사용자 후속",
+              task: "수정된 후속 지시",
+              participantId: pid("p1"),
+              dependsOn: [WorkspaceTaskNodeId.make("execute")],
+            },
+          ],
+        };
+        const reviewed = reviewWorkspaceOrchestraRun(parked, request)!;
+        expect(() =>
+          reviewWorkspaceOrchestraRun(parked, {
+            ...request,
+            edits: [{ ...request.edits[0]!, participantId: null }],
+          }),
+        ).toThrow("선택한 참가자");
+        if (allManuallyAssigned) {
+          const otherQuestion = {
+            ...parked.meeting!.pendingQuestion!,
+            nodeId: WorkspaceTaskNodeId.make("dependent"),
+          };
+          const other = reviewWorkspaceOrchestraRun(
+            { ...parked, meeting: { ...parked.meeting!, pendingQuestion: otherQuestion } },
+            request,
+          )!;
+          expect(other.meeting?.pendingQuestion).toEqual(otherQuestion);
+        }
+        expect(reviewed.graph?.planReview?.status).toBe("approved");
+        expect(reviewed.graph?.workflowAssignment?.pendingNodeIds).toEqual(
+          allManuallyAssigned ? undefined : ["execute"],
+        );
+        expect(reviewed.meeting?.pendingQuestion === null).toBe(
+          allManuallyAssigned || mode === "answer-before-review",
+        );
+        yield* Ref.set(harness.runRef, reviewed);
+        yield* PubSub.publish(harness.pubsub, {
+          type: "project.collaboration-run-reviewed",
+          payload: request,
+        } as unknown as OrchestrationEvent);
+        if (!allManuallyAssigned && mode !== "answer-before-review") {
+          yield* Deferred.await(independentDone);
+          const progress = yield* Ref.get(harness.runRef);
+          expect(progress.graph?.nodes.find((node) => node.id === "execute")?.status).toBe(
+            "blocked",
+          );
+          const question = progress.meeting!.pendingQuestion!;
+          const answer = mode === "skip-after-review" ? "이 단계 건너뛰고 계속" : "다시 시도";
+          yield* Ref.update(harness.runRef, (run) => ({
+            ...run,
+            meeting: {
+              ...run.meeting!,
+              pendingQuestion: null,
+              answers: [
+                ...run.meeting!.answers,
+                {
+                  question: question.question,
+                  answer,
+                  answeredAt: at,
+                  nodeId: question.nodeId,
+                },
+              ],
+            },
+          }));
+          yield* PubSub.publish(harness.pubsub, answeredEvent(question.question, answer));
+        }
+        yield* Deferred.await(completed);
+        yield* reactor.drain;
+        const result = yield* Ref.get(harness.runRef);
+        expect(result.status, result.error ?? undefined).toBe("completed");
+        expect(result.graph?.nodes.find((node) => node.id === "dependent")).toMatchObject({
+          participantId: "p1",
+          handoff: { task: "수정된 후속 지시" },
+          status: mode === "skip-after-review" ? "skipped" : "completed",
+        });
+        expect(result.graph?.nodes.find((node) => node.id === "execute")?.handoff.task).toBe(
+          "수정된 실행 지시",
+        );
+        expect(assignmentCalls).toBe(allManuallyAssigned || mode === "skip-after-review" ? 1 : 2);
+        if (mode === "skip-after-review") expect(result.finalOutput).toContain("미수행 단계");
+        if (!allManuallyAssigned && mode !== "skip-after-review") {
+          const assignment = (yield* Ref.get(harness.executionsRef)).filter((entry) =>
+            entry.prompt.startsWith("# Saved Workflow Assignment"),
+          )[1]!;
+          expect(assignment.prompt).toContain("수정된 실행 지시");
+          expect(assignment.prompt).toContain("수정된 후속 지시");
+          expect(assignment.prompt).toContain('"participantId":"p1"');
+        }
+      }).pipe(
+        Effect.provide(
+          harness.layer.pipe(
+            Layer.provideMerge(
+              Layer.mock(WorkspaceWorkflowStore)({ retrySafe: () => Effect.succeed(true) }),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
+}
+
 it.effect("stops at the persisted worker-turn limit and retains finished output", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness({
@@ -2555,6 +4817,70 @@ it.effect(
         expect(checks).toBe(2);
       }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(git))), Effect.scoped);
     }),
+);
+
+it.effect("supervisor reviews an instruction received during final verification", () =>
+  Effect.gen(function* () {
+    const initial = orchestraRun({ maxRounds: 0, phase: "planning", answers: [] });
+    const liveInterjections: WorkspaceMeeting["interjections"][number][] = [];
+    const harness = yield* makeHarness({
+      run: {
+        ...initial,
+        orchestra: {
+          ...initial.orchestra!,
+          completionCheck: true,
+          verificationCommands: ["test-command"],
+        },
+      },
+      liveInterjections,
+      respond: (prompt) =>
+        prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다")
+          ? '<t3_persistent_verdict>{"decision":"complete","summary":"검증 중 추가 지시 확인"}</t3_persistent_verdict>'
+          : respondForOrchestraPrompt(prompt),
+    });
+    const git = Layer.mock(WorkspaceDevelopmentGit)({
+      inspect: () =>
+        Effect.succeed({
+          sha: "base",
+          branch: "main",
+          commonDirectory: "repo",
+          clean: true,
+          fingerprint: "current",
+        }),
+      verify: (_cwd, commands) =>
+        Effect.sync(() => {
+          liveInterjections.push({
+            text: "최종 검증 중 새 지시",
+            roundIndex: 0,
+            afterStatements: 0,
+            saidAt: at,
+          });
+          return {
+            passed: true,
+            artifacts: [],
+            commands: commands.map((command) => ({
+              ...command,
+              exitCode: 0,
+              timedOut: false,
+              logPath: "receipt.log",
+            })),
+          };
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const reactor = yield* WorkspaceCollaborationReactor;
+      yield* reactor.start();
+      const completed = yield* awaitRunStatus(harness.runRef, "completed");
+      expect(completed.finalOutput).toBe("검증 중 추가 지시 확인");
+      expect(
+        (yield* Ref.get(harness.promptsRef)).some(
+          (prompt) =>
+            prompt.startsWith("사용자가 요청한 통합 작업의 감독자입니다") &&
+            prompt.includes("최종 검증 중 새 지시"),
+        ),
+      ).toBe(true);
+    }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(git))), Effect.scoped);
+  }),
 );
 
 it.effect(
@@ -2771,7 +5097,7 @@ for (const maxRounds of [0, 1]) {
             .pipe(Effect.result);
           expect(missing).toMatchObject({
             _tag: "Failure",
-            failure: { message: "인계할 작업 단계를 찾을 수 없습니다." },
+            failure: { message: "종료되거나 취소 중인 실행에는 작업자 입력을 준비할 수 없습니다." },
           });
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }),

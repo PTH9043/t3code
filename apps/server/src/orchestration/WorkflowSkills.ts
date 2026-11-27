@@ -75,12 +75,22 @@ export function workflowSkillSupport(
   if (!["both", "manual"].includes(metadata.invocation)) return "직접 호출할 수 없는 스킬입니다.";
   if (mode === "instructions")
     return metadata.nativeOnly ? "제공자 전용 기능을 지침 전달로 대체할 수 없습니다." : null;
-  if (!["codex", "claudeAgent"].includes(driver))
+  if (!["codex", "claudeAgent", "gemini"].includes(driver))
     return `${driver}의 고정 native 스킬 호출은 지원되지 않습니다.`;
-  if (driver === "codex" && metadata.nativeOnly)
-    return "Codex가 이 스킬의 제공자 전용 확장을 지원하지 않습니다.";
+  if ((driver === "codex" || driver === "gemini") && metadata.nativeOnly)
+    return `${driver === "gemini" ? "Antigravity" : "Codex"}가 이 스킬의 제공자 전용 확장을 지원하지 않습니다.`;
   if (driver === "claudeAgent") {
-    const supported = new Set(["allowed-tools", "context", "agent", "model", "hooks"]);
+    const supported = new Set([
+      "allowed-tools",
+      "context",
+      "agent",
+      "model",
+      "hooks",
+      "arguments",
+      "background",
+      "when_to_use",
+      "paths",
+    ]);
     if (Object.keys(metadata.extensions).some((key) => !supported.has(key)))
       return "현재 Claude SDK에서 검증하지 않은 스킬 확장이 있습니다.";
     if (
@@ -88,7 +98,11 @@ export function workflowSkillSupport(
       !policy.allowAdditionalWorkers
     )
       return "이 스킬의 별도 작업자는 현재 참가자 설정에서 허용되지 않습니다.";
-    if (metadata.extensions.model && metadata.extensions.model !== policy.model)
+    if (
+      metadata.extensions.model &&
+      metadata.extensions.model !== "inherit" &&
+      metadata.extensions.model !== policy.model
+    )
       return "스킬의 모델 지정이 현재 선택한 모델과 다릅니다.";
     if (
       (metadata.allowedTools.length || metadata.extensions.hooks) &&
@@ -203,6 +217,47 @@ export const makeWorkflowSkills = Effect.gen(function* () {
       ),
       ".claude",
     );
+    add("gemini", resolveHome(process.env.GEMINI_HOME, path.join(home, ".gemini")), ".gemini");
+    roots.push({
+      directory: path.join(cwd, ".agents", "skills"),
+      provider: "gemini",
+      scope: "project",
+    });
+    roots.push({
+      directory: path.join(home, ".gemini", "config", "skills"),
+      provider: "gemini",
+      scope: "user",
+    });
+    roots.push({
+      directory: path.join(
+        config.stateDir,
+        "provider-instances",
+        "gemini",
+        "antigravity-home",
+        ".gemini",
+        "skills",
+      ),
+      provider: "gemini",
+      scope: "user",
+    });
+    roots.push({
+      directory: path.join(
+        config.stateDir,
+        "provider-instances",
+        "gemini",
+        "antigravity-home",
+        ".gemini",
+        "config",
+        "skills",
+      ),
+      provider: "gemini",
+      scope: "user",
+    });
+    roots.push({
+      directory: path.join(home, ".agents", "skills"),
+      provider: "gemini",
+      scope: "user",
+    });
     add("grok", resolveHome(process.env.GROK_HOME, path.join(home, ".grok")), ".agents");
     roots.push({
       directory: path.join(home, ".agents", "skills"),
@@ -215,13 +270,19 @@ export const makeWorkflowSkills = Effect.gen(function* () {
       scope: "user",
     });
     for (const instance of Object.values(settings.providerInstances)) {
-      if (!instance || !["codex", "claudeAgent"].includes(instance.driver)) continue;
+      if (!instance || !["codex", "claudeAgent", "gemini"].includes(instance.driver)) continue;
       const value = object(instance.config).homePath;
       if (typeof value === "string" && value.trim())
         add(
           instance.driver,
-          resolveHome(value, home),
-          instance.driver === "claudeAgent" ? ".claude" : ".agents",
+          instance.driver === "gemini"
+            ? path.join(resolveHome(value, home), ".gemini")
+            : resolveHome(value, home),
+          instance.driver === "claudeAgent"
+            ? ".claude"
+            : instance.driver === "gemini"
+              ? ".gemini"
+              : ".agents",
         );
     }
     const skills: SkillMetadata[] = [];
@@ -291,164 +352,184 @@ export const makeWorkflowSkills = Effect.gen(function* () {
     return { skills, truncated: false };
   }, Effect.mapError(failure));
 
-  const pin = Effect.fn("WorkflowSkills.pin")(function* (
-    binding: SkillBinding,
-    metadata: SkillMetadata,
-  ) {
-    if (!metadata.enabled || !["both", "manual"].includes(metadata.invocation))
-      return yield* new WorkspaceWorkflowError({ message: "직접 호출할 수 없는 스킬입니다." });
-    if (metadata.digest !== binding.digest)
-      return yield* new WorkspaceWorkflowError({
-        message: "스킬 자원이 변경되었습니다. 최신 스킬을 다시 선택해 저장하세요.",
-      });
-    if (binding.mode === "instructions" && metadata.nativeOnly)
-      return yield* new WorkspaceWorkflowError({
-        message: "이 스킬은 제공자 전용 기능을 사용합니다. 설명 전달 방식으로 대체할 수 없습니다.",
-      });
-    const files = yield* manifest(binding.path);
-    if (files.digest !== binding.digest)
-      return yield* new WorkspaceWorkflowError({
-        message: "스킬을 고정하는 동안 원본이 바뀌었습니다.",
-      });
-    const destination = path.join(config.stateDir, "workflow-skills", files.digest);
-    if (yield* fs.exists(destination)) {
-      const existing = yield* manifest(path.join(destination, "source", "SKILL.md"));
-      if (existing.digest !== files.digest)
+  const pin = Effect.fn("WorkflowSkills.pin")(
+    function* (binding: SkillBinding, metadata: SkillMetadata) {
+      if (!metadata.enabled || !["both", "manual"].includes(metadata.invocation))
+        return yield* new WorkspaceWorkflowError({ message: "직접 호출할 수 없는 스킬입니다." });
+      if (metadata.digest !== binding.digest)
         return yield* new WorkspaceWorkflowError({
-          message: "기존 스킬 스냅샷이 변경되었습니다. 실행 중인 버전을 덮어쓰지 않습니다.",
+          message: "스킬 자원이 변경되었습니다. 최신 스킬을 다시 선택해 저장하세요.",
         });
+      if (binding.mode === "instructions" && metadata.nativeOnly)
+        return yield* new WorkspaceWorkflowError({
+          message:
+            "이 스킬은 제공자 전용 기능을 사용합니다. 설명 전달 방식으로 대체할 수 없습니다.",
+        });
+      const files = yield* manifest(binding.path);
+      if (files.digest !== binding.digest)
+        return yield* new WorkspaceWorkflowError({
+          message: "스킬을 고정하는 동안 원본이 바뀌었습니다.",
+        });
+      const destination = path.join(config.stateDir, "workflow-skills", files.digest);
+      if (yield* fs.exists(destination)) {
+        const existing = yield* manifest(path.join(destination, "source", "SKILL.md"));
+        if (existing.digest !== files.digest)
+          return yield* new WorkspaceWorkflowError({
+            message: "기존 스킬 스냅샷이 변경되었습니다. 실행 중인 버전을 덮어쓰지 않습니다.",
+          });
+        return {
+          ...binding,
+          name: metadata.name,
+          snapshotPath: path.join(destination, "source", "SKILL.md"),
+          resources: files.resources,
+        } satisfies SkillBinding;
+      }
+      yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+      const staging = yield* Effect.acquireRelease(
+        fs.makeTempDirectory({ directory: path.dirname(destination), prefix: "pin-" }),
+        (directory) => fs.remove(directory, { recursive: true, force: true }).pipe(Effect.orDie),
+      );
+      for (const resource of files.resources) {
+        const target = path.join(staging, "source", resource.path);
+        yield* fs.makeDirectory(path.dirname(target), { recursive: true });
+        yield* fs.copyFile(path.join(files.root, resource.path), target);
+      }
+      const copied = yield* manifest(path.join(staging, "source", "SKILL.md"));
+      if (copied.digest !== files.digest)
+        return yield* new WorkspaceWorkflowError({
+          message: "고정된 스킬 자원의 해시가 다릅니다.",
+        });
+      yield* fs.rename(staging, destination).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            if (!(yield* fs.exists(destination))) return yield* error;
+            if (
+              (yield* manifest(path.join(destination, "source", "SKILL.md"))).digest !==
+              files.digest
+            )
+              return yield* new WorkspaceWorkflowError({
+                message: "동시에 생성된 스킬 스냅샷의 해시가 다릅니다.",
+              });
+          }),
+        ),
+      );
       return {
         ...binding,
         name: metadata.name,
         snapshotPath: path.join(destination, "source", "SKILL.md"),
         resources: files.resources,
       } satisfies SkillBinding;
-    }
-    yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
-    const staging = yield* fs.makeTempDirectory({
-      directory: path.dirname(destination),
-      prefix: "pin-",
-    });
-    for (const resource of files.resources) {
-      const target = path.join(staging, "source", resource.path);
-      yield* fs.makeDirectory(path.dirname(target), { recursive: true });
-      yield* fs.copyFile(path.join(files.root, resource.path), target);
-    }
-    const copied = yield* manifest(path.join(staging, "source", "SKILL.md"));
-    if (copied.digest !== files.digest)
-      return yield* new WorkspaceWorkflowError({ message: "고정된 스킬 자원의 해시가 다릅니다." });
-    yield* fs.rename(staging, destination).pipe(
-      Effect.catch((error) =>
-        Effect.gen(function* () {
-          if (!(yield* fs.exists(destination))) return yield* error;
+    },
+    Effect.mapError(failure),
+    Effect.scoped,
+  );
+
+  const materialize = Effect.fn("WorkflowSkills.materialize")(
+    function* (
+      bindings: readonly SkillBinding[],
+      driver: string,
+      policy: { runtimeMode: string; model: string; allowAdditionalWorkers: boolean },
+    ) {
+      const native: Array<{ name: string; path: string }> = [];
+      const plugins: string[] = [];
+      const instructions: string[] = [];
+      for (const binding of bindings) {
+        if (!binding.snapshotPath)
+          return yield* new WorkspaceWorkflowError({
+            message: "실행 스킬의 고정 파일이 없습니다.",
+          });
+        const snapshot = yield* manifest(binding.snapshotPath);
+        if (snapshot.digest !== binding.digest)
+          return yield* new WorkspaceWorkflowError({
+            message: "실행 스킬의 고정 자원이 변경되었습니다. 실행을 중단합니다.",
+          });
+        const text = yield* fs.readFileString(binding.snapshotPath);
+        const metadata = yield* Effect.try({
+          try: () => parseWorkflowSkill(text, binding.name),
+          catch: failure,
+        });
+        const unsupported = workflowSkillSupport(metadata, binding.mode, driver, policy);
+        if (unsupported) return yield* new WorkspaceWorkflowError({ message: unsupported });
+        if (binding.mode === "instructions") {
+          if (metadata.nativeOnly)
+            return yield* new WorkspaceWorkflowError({
+              message: "제공자 전용 스킬을 설명 전달 방식으로 실행할 수 없습니다.",
+            });
+          instructions.push(
+            `## Skill: ${binding.name}\nArguments: ${binding.arguments}\nResource root: ${snapshot.root}\n${text}\nRead referenced resources from the pinned resource root only when needed. Do not run scripts merely because they are listed.`,
+          );
+        } else if (driver === "codex") {
+          if (metadata.nativeOnly)
+            return yield* new WorkspaceWorkflowError({
+              message: "Codex가 이 스킬의 제공자 전용 확장을 지원하지 않습니다.",
+            });
+          native.push({ name: binding.name, path: binding.snapshotPath });
+          instructions.push(
+            `Use the selected native skill $${binding.name}. Arguments: ${binding.arguments}. Keep the current permissions and request mode.`,
+          );
+        } else if (driver === "claudeAgent") {
+          const pluginName = `t3-workflow-${binding.digest}`;
+          const plugin = path.join(config.stateDir, "workflow-skills", binding.digest, "plugin");
+          const pluginManifest = encodeJson({
+            name: pluginName,
+            version: "1.0.0",
+            description: "Pinned workflow skill",
+          });
+          if (!(yield* fs.exists(plugin))) {
+            const staging = yield* Effect.acquireRelease(
+              fs.makeTempDirectory({ directory: path.dirname(plugin), prefix: "native-" }),
+              (directory) =>
+                fs.remove(directory, { recursive: true, force: true }).pipe(Effect.orDie),
+            );
+            const skillDirectory = path.join(staging, "skills", "selected");
+            for (const resource of snapshot.resources) {
+              const target = path.join(skillDirectory, resource.path);
+              yield* fs.makeDirectory(path.dirname(target), { recursive: true });
+              yield* fs.copyFile(path.join(snapshot.root, resource.path), target);
+            }
+            yield* fs.makeDirectory(path.join(staging, ".claude-plugin"), { recursive: true });
+            yield* fs.writeFileString(
+              path.join(staging, ".claude-plugin", "plugin.json"),
+              pluginManifest,
+            );
+            yield* fs.rename(staging, plugin).pipe(
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  if (!(yield* fs.exists(plugin))) return yield* error;
+                }),
+              ),
+            );
+          }
           if (
-            (yield* manifest(path.join(destination, "source", "SKILL.md"))).digest !== files.digest
+            (yield* manifest(path.join(plugin, "skills", "selected", "SKILL.md"))).digest !==
+              binding.digest ||
+            (yield* fs.readFileString(path.join(plugin, ".claude-plugin", "plugin.json"))) !==
+              pluginManifest
           )
             return yield* new WorkspaceWorkflowError({
-              message: "동시에 생성된 스킬 스냅샷의 해시가 다릅니다.",
+              message: "고정 native 플러그인이 변경되었습니다.",
             });
-        }),
-      ),
-    );
-    return {
-      ...binding,
-      name: metadata.name,
-      snapshotPath: path.join(destination, "source", "SKILL.md"),
-      resources: files.resources,
-    } satisfies SkillBinding;
-  }, Effect.mapError(failure));
-
-  const materialize = Effect.fn("WorkflowSkills.materialize")(function* (
-    bindings: readonly SkillBinding[],
-    driver: string,
-    policy: { runtimeMode: string; model: string; allowAdditionalWorkers: boolean },
-  ) {
-    const native: Array<{ name: string; path: string }> = [];
-    const plugins: string[] = [];
-    const instructions: string[] = [];
-    for (const binding of bindings) {
-      if (!binding.snapshotPath)
-        return yield* new WorkspaceWorkflowError({ message: "실행 스킬의 고정 파일이 없습니다." });
-      const snapshot = yield* manifest(binding.snapshotPath);
-      if (snapshot.digest !== binding.digest)
-        return yield* new WorkspaceWorkflowError({
-          message: "실행 스킬의 고정 자원이 변경되었습니다. 실행을 중단합니다.",
-        });
-      const text = yield* fs.readFileString(binding.snapshotPath);
-      const metadata = yield* Effect.try({
-        try: () => parseWorkflowSkill(text, binding.name),
-        catch: failure,
-      });
-      const unsupported = workflowSkillSupport(metadata, binding.mode, driver, policy);
-      if (unsupported) return yield* new WorkspaceWorkflowError({ message: unsupported });
-      if (binding.mode === "instructions") {
-        if (metadata.nativeOnly)
-          return yield* new WorkspaceWorkflowError({
-            message: "제공자 전용 스킬을 설명 전달 방식으로 실행할 수 없습니다.",
-          });
-        instructions.push(
-          `## Skill: ${binding.name}\nArguments: ${binding.arguments}\nResource root: ${snapshot.root}\n${text}\nRead referenced resources from the pinned resource root only when needed. Do not run scripts merely because they are listed.`,
-        );
-      } else if (driver === "codex") {
-        if (metadata.nativeOnly)
-          return yield* new WorkspaceWorkflowError({
-            message: "Codex가 이 스킬의 제공자 전용 확장을 지원하지 않습니다.",
-          });
-        native.push({ name: binding.name, path: binding.snapshotPath });
-        instructions.push(
-          `Use the selected native skill $${binding.name}. Arguments: ${binding.arguments}. Keep the current permissions and request mode.`,
-        );
-      } else if (driver === "claudeAgent") {
-        const pluginName = `t3-workflow-${binding.digest}`;
-        const plugin = path.join(config.stateDir, "workflow-skills", binding.digest, "plugin");
-        const pluginManifest = encodeJson({
-          name: pluginName,
-          version: "1.0.0",
-          description: "Pinned workflow skill",
-        });
-        if (!(yield* fs.exists(plugin))) {
-          const staging = yield* fs.makeTempDirectory({
-            directory: path.dirname(plugin),
-            prefix: "native-",
-          });
-          const skillDirectory = path.join(staging, "skills", "selected");
-          for (const resource of snapshot.resources) {
-            const target = path.join(skillDirectory, resource.path);
-            yield* fs.makeDirectory(path.dirname(target), { recursive: true });
-            yield* fs.copyFile(path.join(snapshot.root, resource.path), target);
-          }
-          yield* fs.makeDirectory(path.join(staging, ".claude-plugin"), { recursive: true });
-          yield* fs.writeFileString(
-            path.join(staging, ".claude-plugin", "plugin.json"),
-            pluginManifest,
+          plugins.push(plugin);
+          instructions.push(
+            `Invoke the native Skill tool with skill ${pluginName}:${metadata.name} and arguments ${binding.arguments}. Keep the user's selected permissions, request mode and participant policy.`,
           );
-          yield* fs.rename(staging, plugin).pipe(
-            Effect.catch((error) =>
-              Effect.gen(function* () {
-                if (!(yield* fs.exists(plugin))) return yield* error;
-              }),
-            ),
+        } else if (driver === "gemini") {
+          if (metadata.nativeOnly)
+            return yield* new WorkspaceWorkflowError({
+              message: "Antigravity가 이 스킬의 제공자 전용 확장을 지원하지 않습니다.",
+            });
+          instructions.push(
+            `## Skill: ${binding.name}\nArguments: ${binding.arguments}\nResource root: ${snapshot.root}\n${text}\nRead referenced resources from the pinned resource root only when needed. Do not run scripts merely because they are listed.`,
           );
-        }
-        if (
-          (yield* manifest(path.join(plugin, "skills", "selected", "SKILL.md"))).digest !==
-            binding.digest ||
-          (yield* fs.readFileString(path.join(plugin, ".claude-plugin", "plugin.json"))) !==
-            pluginManifest
-        )
+        } else
           return yield* new WorkspaceWorkflowError({
-            message: "고정 native 플러그인이 변경되었습니다.",
+            message: `${driver}의 고정 native 스킬 호출은 지원되지 않습니다. 지원 상태를 확인하고 방식을 직접 선택하세요.`,
           });
-        plugins.push(plugin);
-        instructions.push(
-          `Invoke the native Skill tool with skill ${pluginName}:${metadata.name} and arguments ${binding.arguments}. Keep the user's selected permissions, request mode and participant policy.`,
-        );
-      } else
-        return yield* new WorkspaceWorkflowError({
-          message: `${driver}의 고정 native 스킬 호출은 지원되지 않습니다. 지원 상태를 확인하고 방식을 직접 선택하세요.`,
-        });
-    }
-    return { native, plugins, instructions: instructions.join("\n\n") };
-  }, Effect.mapError(failure));
+      }
+      return { native, plugins, instructions: instructions.join("\n\n") };
+    },
+    Effect.mapError(failure),
+    Effect.scoped,
+  );
   return { catalog, manifest, pin, materialize };
 });

@@ -99,6 +99,137 @@ const message = (id: MessageId, text: string, streaming = false) => ({
 });
 
 describe("orchestra task lists", () => {
+  it("distinguishes unavailable providers, rejected validation, and opaque execution errors", () => {
+    const provider = {
+      ...node("provider", 0, "failed"),
+      error: "Provider instance missing assigned to role 'researcher' is unavailable",
+    };
+    const worker = { ...node("worker", 1, "failed"), error: "검증 반려 요약" };
+    const validation = {
+      ...node("validator", 2, "completed"),
+      validation: {
+        targetNodeId: worker.id,
+        verdict: "fail" as const,
+        confidence: "high" as const,
+        summary: "잘못된 주장",
+        evidence: ["stop_loss_engine.py:26"],
+        failureClassification: "information" as const,
+        nextAction: "근거 정정",
+        recordedAt: at,
+      },
+    };
+    const unknown = { ...node("unknown", 3, "failed"), error: "unexpected upstream issue" };
+    const [list] = deriveOrchestraTaskLists({
+      ownerThreadId: owner,
+      runs: [run([provider, worker, validation, unknown])],
+      blocks: new Map(),
+      messages: [],
+    });
+    expect(list?.tasks[0]?.diagnostic).toMatchObject({ kind: "provider-unavailable" });
+    expect(list?.tasks[1]?.diagnostic).toMatchObject({
+      kind: "validation-rejected",
+      evidence: ["stop_loss_engine.py:26"],
+      action: "근거 정정",
+    });
+    expect(list?.tasks[3]?.diagnostic).toMatchObject({
+      kind: "execution-error",
+      label: "실행 오류 · 상세 원인 미확인",
+    });
+  });
+
+  it("separates missing handoff files, hash mismatches, and permission failures without inferring other causes", () => {
+    const input = [
+      { ...node("missing", 0, "failed"), error: "handoff input file ENOENT" },
+      { ...node("hash", 1, "failed"), error: "인계 파일 해시 불일치" },
+      { ...node("permission", 2, "failed"), error: "입력 파일 EACCES" },
+      { ...node("other", 3, "failed"), error: "ENOENT" },
+    ];
+    const [list] = deriveOrchestraTaskLists({
+      ownerThreadId: owner,
+      runs: [run(input)],
+      blocks: new Map(),
+      messages: [],
+    });
+    expect(list?.tasks.map((task) => task.diagnostic?.label)).toEqual([
+      "입력 파일 없음",
+      "입력 자료 해시 불일치",
+      "입력 자료 접근 권한 오류",
+      "실행 오류 · 상세 원인 미확인",
+    ]);
+  });
+
+  it("distinguishes safety refusal and uncertain delivery from an ordinary execution failure", () => {
+    const refusal = {
+      ...node("refusal", 0, "awaiting-user"),
+      error: "Your message was flagged by Claude's safeguards.",
+    };
+    const delivery = {
+      ...node("delivery", 1, "awaiting-user"),
+      error: "이전 입력의 전달·종료가 미확인입니다. 자동 재전송을 중단했습니다.",
+    };
+    const [list] = deriveOrchestraTaskLists({
+      ownerThreadId: owner,
+      runs: [run([refusal, delivery])],
+      blocks: new Map(),
+      messages: [],
+    });
+    expect(list?.tasks[0]?.diagnostic?.kind).toBe("safety-refusal");
+    expect(list?.tasks[1]?.diagnostic?.kind).toBe("delivery-unconfirmed");
+    const [sessionBlock] = deriveOrchestraTaskLists({
+      ownerThreadId: owner,
+      runs: [run([{ ...refusal, error: "API Error: Opus 5.5's safeguards flagged this session" }])],
+      blocks: new Map(),
+      messages: [],
+    });
+    expect(sessionBlock?.tasks[0]?.diagnostic?.kind).toBe("safety-refusal");
+  });
+
+  it("does not blame a later failed attempt on an older validation receipt", () => {
+    const later = {
+      ...node("worker", 0, "failed"),
+      error: "later execution failure",
+      attempts: [
+        {
+          number: 1,
+          agent: "codex" as const,
+          role: "implementer" as const,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          strategy: "retry",
+          threadId: owner,
+          status: "failed" as const,
+          output: null,
+          error: "later execution failure",
+          failureClassification: "tool" as const,
+          confidence: null,
+          startedAt: "2026-09-14T04:00:00.000Z",
+          completedAt: "2026-09-14T04:00:01.000Z",
+        },
+      ],
+    };
+    const old = {
+      ...node("validator", 1, "completed"),
+      validation: {
+        targetNodeId: later.id,
+        verdict: "fail" as const,
+        confidence: "high" as const,
+        summary: "old",
+        evidence: [],
+        failureClassification: "validation" as const,
+        nextAction: "old",
+        recordedAt: at,
+      },
+    };
+    const [list] = deriveOrchestraTaskLists({
+      ownerThreadId: owner,
+      runs: [run([later, old])],
+      blocks: new Map(),
+      messages: [],
+    });
+    expect(list?.tasks[0]?.diagnostic?.kind).toBe("execution-error");
+  });
+
   it("explains dependencies and totals only completed attempt durations", () => {
     const producer = {
       ...node("compute", 0, "running"),
@@ -190,7 +321,26 @@ describe("orchestra task lists", () => {
         ...input,
         messages: [{ ...input.messages[0]!, updatedAt: "2026-09-13T04:05:00.000Z" }],
       })[0]?.tasks[0]?.progress,
-    ).toEqual({ summary: "AI 응답 수신", createdAt: "2026-09-13T04:05:00.000Z" });
+    ).toEqual({
+      summary: "AI 응답 수신 · unchanged assistant text",
+      createdAt: "2026-09-13T04:05:00.000Z",
+    });
+    expect(
+      deriveOrchestraTaskLists({
+        ...input,
+        messages: [
+          {
+            ...input.messages[0]!,
+            text: "## [보고]\nDefiLlama 락업 데이터 197개 분석 중",
+            streaming: true,
+            updatedAt: "2026-09-13T04:06:00.000Z",
+          },
+        ],
+      })[0]?.tasks[0]?.progress,
+    ).toEqual({
+      summary: "AI 응답 수신 · DefiLlama 락업 데이터 197개 분석 중",
+      createdAt: "2026-09-13T04:06:00.000Z",
+    });
   });
   it("groups retries under one task and keeps full live bodies, original models and instructions", () => {
     const first = block(1, "failed");

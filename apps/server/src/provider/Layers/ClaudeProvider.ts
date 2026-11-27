@@ -5,6 +5,7 @@ import {
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -22,6 +23,7 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   query as claudeQuery,
+  type ModelInfo as ClaudeModelInfo,
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
   type SDKUserMessage,
@@ -42,6 +44,14 @@ import {
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
+import {
+  CLAUDE_USAGE_PROBE_TIMEOUT_MS,
+  claudeAccountUsage,
+  readClaudeRateLimits,
+  shouldReadClaudeUsage,
+  type ClaudeUsageSnapshot,
+} from "../claudeUsageLimits.ts";
+import { isClaudeConsoleApiAccount } from "../Drivers/ClaudeApiEnvironment.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -54,11 +64,15 @@ const CLAUDE_PRESENTATION = {
 const MINIMUM_CLAUDE_SONNET_5_5_VERSION = "2.1.284";
 const MINIMUM_CLAUDE_OPUS_5_5_VERSION = "2.1.280";
 const MINIMUM_CLAUDE_OPUS_5_VERSION = "2.1.219";
+const MINIMUM_CLAUDE_FABLE_5_2_VERSION = "2.1.321";
+const MINIMUM_CLAUDE_FABLE_5_1_VERSION = "2.1.255";
 const MINIMUM_CLAUDE_FABLE_5_VERSION = "2.1.169";
 const MINIMUM_CLAUDE_OPUS_4_8_VERSION = "2.1.154";
 const MINIMUM_CLAUDE_OPUS_4_7_VERSION = "2.1.111";
 
 const CURRENT_CLAUDE_MODELS = new Set([
+  "claude-fable-5-2",
+  "claude-fable-5-1",
   "claude-fable-5",
   "claude-opus-5-5",
   "claude-opus-5",
@@ -391,9 +405,13 @@ const CLAUDE_MODEL_CATALOG: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
-const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = CLAUDE_MODEL_CATALOG.map((model) =>
-  isLegacyClaudeModel(model.slug) ? { ...model, isLegacy: true } : model,
-);
+const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
+  ...CLAUDE_MODEL_CATALOG,
+  ...CLAUDE_MODEL_CATALOG.filter((model) => model.slug === "claude-fable-5").flatMap((model) => [
+    { ...model, slug: "claude-fable-5-2", name: "Claude Fable 5.2" },
+    { ...model, slug: "claude-fable-5-1", name: "Claude Fable 5.1" },
+  ]),
+].map((model) => (isLegacyClaudeModel(model.slug) ? { ...model, isLegacy: true } : model));
 
 function supportsClaudeSonnet55(version: string | null | undefined): boolean {
   return version ? compareSemverVersions(version, MINIMUM_CLAUDE_SONNET_5_5_VERSION) >= 0 : false;
@@ -431,6 +449,16 @@ function getBuiltInClaudeModelsForVersion(
     }
     if (model.slug === "claude-opus-5") {
       return supportsClaudeOpus5(version);
+    }
+    if (model.slug === "claude-fable-5-2") {
+      return version
+        ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_2_VERSION) >= 0
+        : false;
+    }
+    if (model.slug === "claude-fable-5-1") {
+      return version
+        ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_1_VERSION) >= 0
+        : false;
     }
     if (model.slug === "claude-fable-5") {
       return supportsClaudeFable5(version);
@@ -519,6 +547,8 @@ export function normalizeClaudeCliEffort(
   if (
     effort === "xhigh" &&
     model !== "claude-fable-5" &&
+    model !== "claude-fable-5-1" &&
+    model !== "claude-fable-5-2" &&
     model !== "claude-opus-5-5" &&
     model !== "claude-opus-5" &&
     model !== "claude-opus-4-8" &&
@@ -721,6 +751,7 @@ type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string | undefined;
   /**
    * Active API backend reported by the SDK's `AccountInfo`. Anthropic OAuth
    * login only applies when `"firstParty"`; for Amazon Bedrock (`"bedrock"`)
@@ -728,7 +759,53 @@ type ClaudeCapabilitiesProbe = {
    */
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly models?: ReadonlyArray<ClaudeModelInfo>;
+  readonly usage?: ClaudeUsageSnapshot;
 };
+
+/** Append models reported by the active CLI without changing existing selections. */
+export function mergeClaudeDiscoveredModels(
+  existing: ReadonlyArray<ServerProviderModel>,
+  discovered: ReadonlyArray<ClaudeModelInfo> | undefined,
+): ReadonlyArray<ServerProviderModel> {
+  const models = [...existing];
+  const seen = new Set(models.map((model) => model.slug.toLowerCase()));
+  const aliases = new Set(["default", "opus", "sonnet", "haiku", "fable", "opusplan"]);
+  for (const model of discovered ?? []) {
+    const slug = (model.resolvedModel || model.value).trim();
+    const key = slug.toLowerCase();
+    if (!slug || aliases.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const name = model.displayName?.trim() || slug;
+    const levels = model.supportsEffort ? (model.supportedEffortLevels ?? []) : [];
+    const knownCapabilities = getClaudeModelCapabilities(slug);
+    const capabilities =
+      knownCapabilities !== DEFAULT_CLAUDE_MODEL_CAPABILITIES
+        ? knownCapabilities
+        : createModelCapabilities({
+            optionDescriptors: levels.length
+              ? [
+                  buildSelectOptionDescriptor({
+                    id: "effort",
+                    label: "Reasoning",
+                    options: levels.map((value) => ({
+                      value,
+                      label:
+                        value === "xhigh" ? "Extra High" : value[0]!.toUpperCase() + value.slice(1),
+                    })),
+                  }),
+                ]
+              : [],
+          });
+    models.push({
+      slug,
+      name: name.startsWith("Claude ") ? name : `Claude ${name}`,
+      isCustom: false,
+      capabilities,
+    });
+  }
+  return models;
+}
 
 function parseClaudeInitializationCommands(
   commands: ReadonlyArray<ClaudeSlashCommand> | undefined,
@@ -822,6 +899,8 @@ const probeClaudeCapabilities = (
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
+    const clock = yield* Clock.Clock;
+    const probeStartedAtMs = clock.currentTimeMillisUnsafe();
     const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
     const executablePath = yield* resolveClaudeSdkExecutablePath(
       claudeSettings.binaryPath,
@@ -848,15 +927,42 @@ const probeClaudeCapabilities = (
             readonly email?: string;
             readonly subscriptionType?: string;
             readonly tokenSource?: string;
+            readonly apiKeySource?: string;
             readonly apiProvider?: string;
           }
         | undefined;
+      let usage: ClaudeUsageSnapshot | undefined;
+      if (
+        shouldReadClaudeUsage({
+          authMode: claudeSettings.authMode,
+          apiProvider: account?.apiProvider,
+        })
+      ) {
+        const elapsedMs = clock.currentTimeMillisUnsafe() - probeStartedAtMs;
+        const usageTimeoutMs = Math.min(
+          CLAUDE_USAGE_PROBE_TIMEOUT_MS,
+          Math.max(0, CAPABILITIES_PROBE_TIMEOUT_MS - elapsedMs - 1_000),
+        );
+        const usageResult = await readClaudeRateLimits(q, usageTimeoutMs);
+        if (
+          usageResult.status === "ok" &&
+          (usageResult.rateLimits.primary || usageResult.rateLimits.secondary)
+        ) {
+          usage = {
+            fetchedAt: DateTime.formatIso(DateTime.makeUnsafe(clock.currentTimeMillisUnsafe())),
+            rateLimits: usageResult.rateLimits,
+          };
+        }
+      }
       return {
         email: account?.email,
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
+        apiKeySource: account?.apiKeySource,
         apiProvider: account?.apiProvider,
         slashCommands: parseClaudeInitializationCommands(init.commands),
+        models: init.models,
+        ...(usage ? { usage } : {}),
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(
@@ -999,6 +1105,22 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
+  if (claudeSettings.authMode === "api-key" && !resolvedEnvironment.ANTHROPIC_API_KEY?.trim()) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: true,
+      checkedAt,
+      models,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated" },
+        message:
+          "Claude API 키가 없거나 서버에서 읽을 수 없습니다. 연결 설정과 서버 계정을 확인하세요.",
+      },
+    });
+  }
   const versionUpgradeMessage = supportsClaudeSonnet55(parsedVersion)
     ? undefined
     : supportsClaudeOpus55(parsedVersion)
@@ -1038,18 +1160,45 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  if (claudeSettings.authMode === "api-key" && !isClaudeConsoleApiAccount(capabilities)) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: true,
+      checkedAt,
+      models,
+      slashCommands: dedupedSlashCommands,
+      skills,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unknown" },
+        message:
+          "Claude Console API 키 인증 출처를 확인하지 못했습니다. 구독 계정으로 전환하지 않습니다.",
+      },
+    });
+  }
   const authMetadata =
+    (claudeSettings.authMode === "api-key"
+      ? { type: "apiKey", label: "Claude API Key" }
+      : undefined) ??
     claudeAuthMetadata({
       subscriptionType: capabilities.subscriptionType,
       authMethod: capabilities.tokenSource,
-    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+    }) ??
+    apiProviderAuthMetadata(capabilities.apiProvider);
+  const usage =
+    claudeSettings.authMode !== "api-key" && capabilities.usage
+      ? claudeAccountUsage(capabilities.usage)
+      : undefined;
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
     checkedAt,
-    models,
+    models: mergeClaudeDiscoveredModels(models, capabilities.models),
     slashCommands: dedupedSlashCommands,
     skills,
+    ...(usage ? { usage } : {}),
     probe: {
       installed: true,
       version: parsedVersion,
@@ -1059,7 +1208,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
-      ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
+      ...(claudeSettings.authMode === "api-key"
+        ? {
+            message:
+              "Claude API 키 인증 경로가 설정되었습니다. 키 유효성과 크레딧 사용은 실제 요청에서 확인됩니다.",
+          }
+        : versionUpgradeMessage
+          ? { message: versionUpgradeMessage }
+          : {}),
     },
   });
 });

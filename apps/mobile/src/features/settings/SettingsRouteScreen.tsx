@@ -46,6 +46,7 @@ import {
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { BackgroundWatchNoticeSettings } from "./BackgroundWatchNoticeSettings";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 type NotificationStatus = "checking" | "enabled" | "disabled" | "unsupported";
@@ -533,6 +534,7 @@ function GeneralSettingsSection() {
   return (
     <SettingsSection title="일반">
       <SettingsRow icon="folder" label="프로젝트 묶음" target="SettingsProjectGrouping" />
+      <BackgroundWatchNoticeSettings />
     </SettingsSection>
   );
 }

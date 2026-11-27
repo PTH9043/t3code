@@ -21,6 +21,10 @@ import type {
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
+  WorkspaceKnowledgeDashboardInput,
+  WorkspaceKnowledgeDashboard,
+  WorkspaceWikiLinksInput,
+  WorkspaceWikiLinksResult,
   WorkspaceKnowledgeListInput,
   WorkspaceKnowledgeListResult,
   WorkspacePromptComposeInput,
@@ -86,10 +90,42 @@ export interface ProjectionThreadRuntimeRead {
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
+type DocumentQueries = ReturnType<
+  typeof import("../knowledgeDocuments.ts").makeKnowledgeDocumentQueries
+>;
+
 export interface ProjectionSnapshotQueryShape {
+  readonly listWorkspaceKnowledgeRevisions?: DocumentQueries["listWorkspaceKnowledgeRevisions"];
+  readonly getWorkspaceKnowledgeRevision?: DocumentQueries["getWorkspaceKnowledgeRevision"];
+  readonly knowledgeWriteResult?: DocumentQueries["knowledgeWriteResult"];
+  /** Event-store ordering for watchdog activity recovery; UI activity sequence is not authoritative. */
+  readonly getWatchdogActivitySequences?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<{ id: string; sequence: number }>, ProjectionRepositoryError>;
+  /**
+   * `orchestra.block` rows of `workspace_delegate` runs still marked running or
+   * awaiting the user, across all threads. Read once at server start to close
+   * the blocks a restart left behind. `payload` is the stored JSON text.
+   */
+  readonly getUnfinishedDelegationBlocks?: () => Effect.Effect<
+    ReadonlyArray<{ threadId: string; createdAt: string; payload: string }>,
+    ProjectionRepositoryError
+  >;
+  /** Message IDs whose search memory the user explicitly excluded. */
+  readonly getForgottenThreadMessageIds?: (input: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<ReadonlyArray<string>, ProjectionRepositoryError>;
+  /** Out-of-folder or unclassified message IDs, or null when the current folder is unknown. */
+  readonly getHandoffOutOfScopeMessageIds?: (input: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    readonly messageId: string;
+  }) => Effect.Effect<ReadonlyArray<string> | null, ProjectionRepositoryError>;
   /** Recent immutable account failures, retained when a thread changes native sessions. */
   readonly getRateLimitedAccountIds?: (
     since: string,
+    quotaExhaustionOnly?: boolean,
   ) => Effect.Effect<ReadonlyArray<string>, ProjectionRepositoryError>;
   /** Explicit user choices before a handoff, even when the provider emitted no acknowledgement. */
   readonly getThreadHandoffDecisions?: (input: {
@@ -171,6 +207,12 @@ export interface ProjectionSnapshotQueryShape {
   readonly getCounts: () => Effect.Effect<ProjectionSnapshotCounts, ProjectionRepositoryError>;
 
   /** List knowledge owned by exactly one Workspace; no cross-project query exists. */
+  readonly getWorkspaceKnowledgeDashboard?: (
+    input: WorkspaceKnowledgeDashboardInput,
+  ) => Effect.Effect<WorkspaceKnowledgeDashboard, ProjectionRepositoryError>;
+  readonly getWorkspaceWikiLinks?: (
+    input: WorkspaceWikiLinksInput,
+  ) => Effect.Effect<WorkspaceWikiLinksResult, ProjectionRepositoryError>;
   readonly listWorkspaceKnowledge?: (
     input: WorkspaceKnowledgeListInput,
   ) => Effect.Effect<WorkspaceKnowledgeListResult, ProjectionRepositoryError>;

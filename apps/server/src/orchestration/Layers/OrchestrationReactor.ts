@@ -1,6 +1,8 @@
 import { WorkspaceTaskInbox } from "../WorkspaceTaskInbox.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import { ServerConfig } from "../../config.ts";
 
 import {
   OrchestrationReactor,
@@ -21,6 +23,7 @@ import { SharedLibrarySync } from "../../library/SharedLibrarySync.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
+  const config = Option.getOrUndefined(yield* Effect.serviceOption(ServerConfig));
   const providerCommandReactor = yield* ProviderCommandReactor;
   const checkpointReactor = yield* CheckpointReactor;
   const threadDeletionReactor = yield* ThreadDeletionReactor;
@@ -38,6 +41,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* providerRuntimeIngestion.start();
     yield* providerCommandReactor.start();
     yield* checkpointReactor.start();
+    if (config?.upgradeRoom) return;
     yield* threadDeletionReactor.start();
     yield* workspaceKnowledgeReactor.start();
     yield* workspaceCollaborationReactor.start();

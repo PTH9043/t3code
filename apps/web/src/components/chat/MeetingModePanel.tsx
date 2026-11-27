@@ -1,6 +1,12 @@
-import type { EnvironmentId, ProviderInstanceId, WorkspaceMeetingMode } from "@t3tools/contracts";
+import {
+  resolveSubordinateTeam,
+  type EnvironmentId,
+  type ProviderInstanceId,
+  type WorkspaceMeetingMode,
+} from "@t3tools/contracts";
 import { memo, useEffect } from "react";
-import { CrownIcon, PlusIcon, XIcon } from "lucide-react";
+import { CrownIcon, PlusIcon, UsersIcon, XIcon } from "lucide-react";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
 
 import { Switch } from "../ui/switch";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -13,7 +19,6 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import {
-  MAX_MEETING_SEATS,
   addMeetingComposerSeat,
   setMeetingComposerSeatModel,
   setMeetingComposerSeatOption,
@@ -40,6 +45,48 @@ function defaultSeatModel(options: ReadonlyArray<ModelEsque> | undefined): strin
   return (options.find((option) => !option.isLegacy) ?? options[0]!).slug;
 }
 
+function AutoSeatGlobalSubordinatesButton(props: {
+  readonly environmentId: EnvironmentId;
+  readonly visibleEntries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly currentSeats: ReadonlyArray<{
+    readonly instanceId: ProviderInstanceId;
+    readonly model: string;
+  }>;
+}) {
+  const envSettings = useEnvironmentSettings(props.environmentId);
+  const globalSubordinates = resolveSubordinateTeam(envSettings).members.filter(
+    (member) => member.enabled !== false,
+  );
+  if (globalSubordinates.length === 0) return null;
+  return (
+    <button
+      type="button"
+      data-meeting-auto-seat-subordinates=""
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 text-[11px] font-medium text-foreground transition-colors hover:bg-accent"
+      onClick={() => {
+        for (const member of globalSubordinates) {
+          const entry = props.visibleEntries.find((e) => e.instanceId === member.instanceId);
+          if (!entry) continue;
+          const alreadySeated = props.currentSeats.some(
+            (seat) => seat.instanceId === member.instanceId && seat.model === member.model,
+          );
+          if (alreadySeated) continue;
+          addMeetingComposerSeat({
+            instanceId: member.instanceId,
+            model: member.model,
+            displayName: entry.displayName,
+            ...(member.instructions ? { roleDescription: member.instructions } : {}),
+            options: meetingModelDefaultOptions(entry, member.model),
+          });
+        }
+      }}
+    >
+      <UsersIcon className="size-3" />
+      전역 하위 팀({globalSubordinates.length}명) 합석
+    </button>
+  );
+}
+
 /**
  * Add models as independent participants, choose their conductor and effort,
  * and bound discussion and recovery before sending a topic from the composer.
@@ -51,6 +98,13 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
 }) {
   const config = useMeetingComposerConfig();
   const visibleEntries = props.instanceEntries.filter(isProviderInstancePickerVisible);
+  const providerGroups = groupProviderInstanceEntriesByDriver(visibleEntries).flatMap((group) =>
+    group.entries.map((entry) => ({
+      ...group,
+      label: group.entries.length > 1 ? `${entry.displayName} (${entry.instanceId})` : group.label,
+      entries: [entry],
+    })),
+  );
   // "바로 실행" skips discussion: the chair plans straight away and the seats
   // split the work. The style is its own field, so picking it never touches the
   // discussion side's rounds or mode.
@@ -152,13 +206,16 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             updateMeetingComposerConfig((current) => ({ ...current, chairSeatId }));
           }}
         >
-          <option value="">자동 (첫 참가자)</option>
+          <option value="">감독 AI 선택</option>
           {config.seats.map((seat) => {
             const seatEntry = visibleEntries.find((entry) => entry.instanceId === seat.instanceId);
-            const seatLabel = seatEntry?.driverKind
-              ? (groupProviderInstanceEntriesByDriver(
-                  visibleEntries.filter((e) => e.driverKind === seatEntry.driverKind),
-                )[0]?.label ?? seat.displayName)
+            const sameDriver = visibleEntries.filter(
+              (entry) => entry.driverKind === seatEntry?.driverKind,
+            );
+            const seatLabel = seatEntry
+              ? sameDriver.length > 1
+                ? `${seatEntry.displayName} (${seatEntry.instanceId})`
+                : (groupProviderInstanceEntriesByDriver(sameDriver)[0]?.label ?? seat.displayName)
               : seat.displayName;
             return (
               <option key={seat.id} value={seat.id}>
@@ -171,24 +228,31 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           })}
         </select>
         <span className="font-normal text-muted-foreground">
-          선택한 AI가 계획·배정·검증·최종 정리를 맡습니다.
+          선택한 AI가 사용자의 대화 지시와 역할을 바탕으로 계획·배정·검증·최종 정리를 맡습니다.
         </span>
       </label>
 
-      <div className="mt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        참가자 {config.seats.length > 0 ? `· ${config.seats.length}명` : ""}{" "}
-        <span className="font-normal normal-case">(2–{MAX_MEETING_SEATS}명)</span>
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          참가자 {config.seats.length > 0 ? `· ${config.seats.length}명` : ""}{" "}
+          <span className="font-normal normal-case">(1명 이상)</span>
+        </div>
+        {props.profileTarget ? (
+          <AutoSeatGlobalSubordinatesButton
+            environmentId={props.profileTarget.environmentId}
+            visibleEntries={visibleEntries}
+            currentSeats={config.seats}
+          />
+        ) : null}
       </div>
       <div className="mt-1.5 grid gap-1">
-        {groupProviderInstanceEntriesByDriver(visibleEntries).map((group) => {
-          // Collect all seats across all instances in this group
+        {providerGroups.map((group) => {
+          // Keep each model tied to the account that actually provides it.
           const groupSeats = config.seats.filter((seat) =>
             group.entries.some((entry) => entry.instanceId === seat.instanceId),
           );
-          // Pick first ready instance for new seats
           const firstReadyEntry = group.entries.find(isProviderInstancePickerReady);
           const ready = firstReadyEntry !== undefined;
-          // Merge all models from all instances in this group
           const allOptions = Array.from(
             new Map(
               group.entries.flatMap((entry) => {
@@ -200,10 +264,10 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
           const available = allOptions.filter(
             (option) => !groupSeats.some((seat) => seat.model === option.slug),
           );
-          const nextModel = defaultSeatModel(available);
+          const nextModel = defaultSeatModel(available) ?? defaultSeatModel(allOptions);
 
           return (
-            <div key={group.driverKind} className="space-y-1.5">
+            <div key={group.entries[0]!.instanceId} className="space-y-1.5">
               <div className="rounded-md border border-border/60 px-2 py-2">
                 <div className="flex items-center gap-2">
                   <ProviderInstanceIcon
@@ -224,9 +288,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                     type="button"
                     className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted disabled:opacity-40"
                     aria-label={`${group.label} 모델 추가`}
-                    disabled={
-                      !ready || nextModel === null || config.seats.length >= MAX_MEETING_SEATS
-                    }
+                    disabled={!ready || nextModel === null}
                     onClick={() => {
                       if (nextModel === null || !firstReadyEntry) return;
                       addMeetingComposerSeat({
@@ -250,7 +312,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                   const seatReady = isProviderInstancePickerReady(seatEntry);
                   const modelLabel =
                     allOptions.find((option) => option.slug === seat.model)?.name ?? seat.model;
-                  const isConductor = (config.chairSeatId ?? config.seats[0]?.id) === seat.id;
+                  const isConductor = config.chairSeatId === seat.id;
                   return (
                     <div
                       key={seat.id}
@@ -290,13 +352,7 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                           }
                         >
                           {allOptions.map((option) => (
-                            <option
-                              key={option.slug}
-                              value={option.slug}
-                              disabled={groupSeats.some(
-                                (other) => other.id !== seat.id && other.model === option.slug,
-                              )}
-                            >
+                            <option key={option.slug} value={option.slug}>
                               {option.shortName ?? option.name}
                             </option>
                           ))}
@@ -310,6 +366,23 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
                           <XIcon className="size-3.5" />
                         </button>
                       </div>
+                      <label className="mt-1.5 grid gap-1 text-xs">
+                        <span>사용자가 지정한 역할</span>
+                        <input
+                          className={SELECT_CLASS}
+                          value={seat.roleDescription ?? ""}
+                          placeholder="예: 성능 조사와 근거 확인을 맡아줘"
+                          onChange={(event) => {
+                            const roleDescription = event.currentTarget.value;
+                            updateMeetingComposerConfig((current) => ({
+                              ...current,
+                              seats: current.seats.map((entry) =>
+                                entry.id === seat.id ? { ...entry, roleDescription } : entry,
+                              ),
+                            }));
+                          }}
+                        />
+                      </label>
                       <div className="mt-1.5 flex flex-wrap items-center gap-2">
                         <span className="text-[11px] text-muted-foreground">
                           {isConductor ? "지휘 AI" : "작업 AI"}
@@ -363,6 +436,25 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
             </div>
           );
         })}
+        {config.seats
+          .filter((seat) => !visibleEntries.some((entry) => entry.instanceId === seat.instanceId))
+          .map((seat) => (
+            <div
+              key={seat.id}
+              className="flex items-center gap-2 rounded-md border border-border/60 p-2 text-xs"
+            >
+              <span className="min-w-0 flex-1 break-all">
+                {seat.displayName} · {seat.model} (연결을 찾을 수 없음)
+              </span>
+              <button
+                type="button"
+                aria-label={`${seat.displayName} ${seat.model} 제거`}
+                onClick={() => toggleMeetingComposerSeat(seat)}
+              >
+                제거
+              </button>
+            </div>
+          ))}
         {visibleEntries.length === 0 ? (
           <p className="rounded-md border border-dashed border-border/70 px-2 py-3 text-center text-xs text-muted-foreground">
             사용할 수 있는 제공자 계정이 없습니다.
@@ -415,15 +507,6 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
               updateMeetingComposerConfig((current) => ({ ...current, maxRevisions }));
             }}
             className={cn(SELECT_CLASS, "w-16 text-center")}
-          />
-        </label>
-        <label className="flex items-center justify-between gap-2 text-xs font-medium">
-          <span>선택하지 않은 AI 추가 허용</span>
-          <Switch
-            checked={config.allowAdditionalWorkers}
-            onCheckedChange={(allowAdditionalWorkers) =>
-              updateMeetingComposerConfig((current) => ({ ...current, allowAdditionalWorkers }))
-            }
           />
         </label>
         {!isDirectCollaboration ? (
@@ -502,6 +585,47 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
       </div>
 
       <div className="mt-3 space-y-3 border-t border-border/60 pt-3">
+        <label className="grid gap-1 text-xs font-medium">
+          실행 기간
+          <select
+            aria-label="실행 기간"
+            value={config.executionMode ?? "once"}
+            className={SELECT_CLASS}
+            onChange={(event) => {
+              const executionMode =
+                event.currentTarget.value === "persistent" ? "persistent" : "once";
+              updateMeetingComposerConfig((current) => ({ ...current, executionMode }));
+            }}
+          >
+            <option value="once">한 번 실행</option>
+            <option value="persistent">목표 완료까지 지속</option>
+          </select>
+        </label>
+        {config.executionMode === "persistent" && (
+          <label className="grid gap-1 text-xs font-medium">
+            별도 감시 AI 확인 간격 · 초
+            <input
+              type="number"
+              min={1}
+              step={1}
+              placeholder="지정하지 않으면 감시 안 함"
+              value={config.watchdogIntervalSeconds ?? ""}
+              className={SELECT_CLASS}
+              onChange={(event) => {
+                const raw = event.currentTarget.value;
+                const value = Number(raw);
+                if (raw !== "" && (!Number.isSafeInteger(value) || value <= 0)) return;
+                updateMeetingComposerConfig((current) => {
+                  const { watchdogIntervalSeconds: _previous, ...rest } = current;
+                  return raw === "" ? rest : { ...rest, watchdogIntervalSeconds: value };
+                });
+              }}
+            />
+            <span className="font-normal text-muted-foreground">
+              지정한 감독 AI 모델로 별도 세션을 실행하며 사용량이 발생합니다.
+            </span>
+          </label>
+        )}
         <label className="flex items-center justify-between gap-2 text-xs font-medium">
           <span>
             실행 전 계획 확인
@@ -573,11 +697,11 @@ export const MeetingModePanel = memo(function MeetingModePanel(props: {
         </label>
       </div>
       <p className="mt-3 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
-        {config.seats.length < 2
-          ? "참가자를 2명 이상 선택하세요."
+        {config.seats.length < 1
+          ? "감독 AI를 선택하세요."
           : isDirectCollaboration
             ? `지휘 AI가 계획을 세우고 필요한 작업을 배정합니다. 실패 복구·재계획은 ${config.maxRevisions}회까지 허용합니다. 각 모델의 추론 수준은 위에서 따로 선택할 수 있습니다.`
-            : "입력창에 주제를 쓰고 보내면 이 대화창에서 오케스트라 토론이 시작됩니다. 설정한 라운드가 모두 끝나면 실행으로 넘어갈지, 라운드를 더 할지, 여기서 마칠지 물어봅니다. 오케스트라는 끌 때까지 유지됩니다."}
+            : "입력창에 주제를 쓰고 보내면 이 대화창에서 오케스트라 토론이 시작됩니다. 설정한 라운드가 모두 끝나면 실행으로 넘어갈지, 라운드를 더 할지, 여기서 마칠지 물어봅니다."}
       </p>
     </div>
   );

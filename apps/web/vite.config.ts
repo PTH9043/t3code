@@ -36,9 +36,10 @@ const configuredRelayUrl = repoEnv.VITE_T3CODE_RELAY_URL?.trim() || "";
 const configuredClerkPublishableKey = repoEnv.VITE_CLERK_PUBLISHABLE_KEY?.trim() || "";
 const configuredClerkJwtTemplate = repoEnv.VITE_CLERK_JWT_TEMPLATE?.trim() || "";
 const configuredClerkCliOAuthClientId = repoEnv.VITE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || "";
-const configuredRelayTracingUrl = repoEnv.VITE_RELAY_OTLP_TRACES_URL?.trim() || "";
-const configuredRelayTracingDataset = repoEnv.VITE_RELAY_OTLP_TRACES_DATASET?.trim() || "";
-const configuredRelayTracingToken = repoEnv.VITE_RELAY_OTLP_TRACES_TOKEN?.trim() || "";
+// Outbound third-party relay OTLP telemetry is hard-disabled in this fork.
+const configuredRelayTracingUrl = "";
+const configuredRelayTracingDataset = "";
+const configuredRelayTracingToken = "";
 const configuredHostedAppChannel = process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "";
 const configuredAppVersion = process.env.APP_VERSION?.trim() || pkg.version;
 const configuredHostedAppUrl = (() => {
@@ -70,6 +71,16 @@ const buildSourcemap: boolean | "hidden" =
     : sourcemapEnv === "hidden"
       ? "hidden"
       : true;
+
+const e2eQualityGateProject = {
+  extends: true,
+  test: {
+    name: "e2e",
+    include: ["e2e/**/*.spec.ts"],
+    hookTimeout: 120_000,
+    testTimeout: 120_000,
+  },
+} satisfies TestProjectInlineConfiguration;
 
 const unitTestProject = {
   extends: true,
@@ -152,8 +163,16 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
+// Windows에서 소문자 드라이브 문자(예: d:\...)로 vitest/vite가 실행되면
+// realpath(D:\...)와 모듈 그래프 키가 어긋나 vi.mock 호이스팅이 누락되는 문제를 방지한다.
+const canonicalWebRoot =
+  process.platform === "win32"
+    ? import.meta.dirname.replace(/^[a-z]:/, (drive) => drive.toUpperCase())
+    : import.meta.dirname;
+
 export default defineConfig(() => {
   return {
+    root: canonicalWebRoot,
     assetsInclude: ["**/*.wasm"],
     plugins: [
       desktopDevPipePlugin(),
@@ -264,7 +283,7 @@ export default defineConfig(() => {
       sourcemap: buildSourcemap,
     },
     test: {
-      projects: [defineProject(unitTestProject)],
+      projects: [defineProject(unitTestProject), defineProject(e2eQualityGateProject)],
     },
   };
 });

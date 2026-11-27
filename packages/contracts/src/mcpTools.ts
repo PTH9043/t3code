@@ -9,7 +9,7 @@ export const McpToolId = Schema.Literals([
 ]);
 export type McpToolId = typeof McpToolId.Type;
 
-export const ManagedMcpProvider = Schema.Literals(["codex", "claudeAgent", "grok"]);
+export const ManagedMcpProvider = Schema.Literals(["codex", "claudeAgent", "gemini", "grok"]);
 export type ManagedMcpProvider = typeof ManagedMcpProvider.Type;
 export const McpServerName = Schema.String.check(Schema.isPattern(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/));
 const ManagedMcpConfigBase = {
@@ -32,6 +32,7 @@ export const ManagedMcpServerConfig = Schema.Union([
     transport: Schema.Literal("http"),
     url: Schema.String.check(Schema.isPattern(/^https?:\/\//)),
     headers: Schema.Record(Schema.String, Schema.String),
+    redactedHeaders: Schema.optionalKey(Schema.Array(Schema.String)),
   }),
 ]);
 export type ManagedMcpServerConfig = typeof ManagedMcpServerConfig.Type;
@@ -52,6 +53,10 @@ export const McpToolCatalogEntry = Schema.Struct({
   version: Schema.NullOr(Schema.String),
   source: Schema.String,
   providers: Schema.Array(Schema.String),
+  /** Providers whose native toolset already covers this builtin server; skipped from default auto-injection unless explicitly pinned by a project profile. */
+  nativeRedundantProviders: Schema.optionalKey(Schema.Array(ManagedMcpProvider)),
+  /** Estimated tool count used for session tool-declaration budget guidance (e.g. Antigravity MCP cap). */
+  estimatedToolCount: Schema.optionalKey(Schema.Number),
   status: Schema.Literals(["unchecked", "ready", "missing", "error"]),
   checkedAt: Schema.NullOr(Schema.String),
   tools: Schema.Array(Schema.String),

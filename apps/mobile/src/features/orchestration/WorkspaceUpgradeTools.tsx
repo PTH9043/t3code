@@ -31,7 +31,12 @@ import { uuidv4 as randomUUID } from "../../lib/uuid";
 const isCheck = Schema.is(WorkspaceAutomationCheck);
 const decodeDesign = Schema.decodeUnknownSync(WorkspaceDesignReference);
 
-const providerLabel = { codex: "Codex", claudeAgent: "Claude", grok: "Grok" };
+const providerLabel = {
+  codex: "Codex",
+  claudeAgent: "Claude",
+  gemini: "Antigravity",
+  grok: "Grok",
+};
 const actionLabel = {
   install: "설치",
   update: "업데이트",
@@ -85,20 +90,28 @@ function Extensions({ project }: { project: EnvironmentProject }) {
   const manage = useAtomCommand(serverEnvironment.manageExtension, { reportFailure: false });
   const [catalog, setCatalog] = useState<ExtensionCatalog | null>(null);
   const [provider, setProvider] = useState<ManagedMcpProvider>("grok");
+  const [instanceId, setInstanceId] = useState<ProviderInstanceId | null>(null);
+  const [instances, setInstances] = useState<NonNullable<ExtensionCatalog["instances"]>>([]);
+  const [userSkillScope, setUserSkillScope] = useState(false);
   const [skill, setSkill] = useState(false);
   const [trust, setTrust] = useState(false);
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const refresh = async () => {
+  const refresh = async (account = instanceId) => {
     setBusy(true);
     try {
       const result = await get({
         environmentId: project.environmentId,
-        input: { workspaceRoot: project.workspaceRoot },
+        input: {
+          workspaceRoot: project.workspaceRoot,
+          ...(account ? { providerInstanceId: account } : {}),
+        },
       });
-      if (result._tag === "Success") setCatalog(result.value);
-      else setError("목록 확인에 실패했습니다.");
+      if (result._tag === "Success") {
+        setCatalog(result.value);
+        setInstances(result.value.instances ?? []);
+      } else setError("목록 확인에 실패했습니다.");
     } finally {
       setBusy(false);
     }
@@ -107,7 +120,10 @@ function Extensions({ project }: { project: EnvironmentProject }) {
     setBusy(true);
     setError(null);
     try {
-      const result = await manage({ environmentId: project.environmentId, input });
+      const result = await manage({
+        environmentId: project.environmentId,
+        input: { ...input, ...(instanceId ? { providerInstanceId: instanceId } : {}) },
+      });
       if (result._tag === "Success") {
         setTarget("");
         await refresh();
@@ -126,6 +142,33 @@ function Extensions({ project }: { project: EnvironmentProject }) {
         disabled={busy}
         onPress={() => void refresh()}
       />
+      {instances.length ? (
+        <View className="gap-2">
+          <Text className="text-xs text-foreground">설치·관리할 계정</Text>
+          <View className="flex-row flex-wrap gap-2">
+            <Button
+              label={`${instanceId === null ? "✓ " : ""}기본 계정 모두`}
+              disabled={busy}
+              onPress={() => {
+                setInstanceId(null);
+                void refresh(null);
+              }}
+            />
+            {instances.map((item) => (
+              <Button
+                key={item.instanceId}
+                label={`${instanceId === item.instanceId ? "✓ " : ""}${providerLabel[item.provider]} · ${item.displayName} (${item.instanceId})`}
+                disabled={busy}
+                onPress={() => {
+                  setInstanceId(item.instanceId);
+                  setProvider(item.provider);
+                  void refresh(item.instanceId);
+                }}
+              />
+            ))}
+          </View>
+        </View>
+      ) : null}
       {catalog?.providers
         .filter((item) => item.error)
         .map((item) => (
@@ -168,7 +211,9 @@ function Extensions({ project }: { project: EnvironmentProject }) {
                       ...(entry.scope !== "managed" ? { scope: entry.scope } : {}),
                       action,
                       target: entry.id,
-                      ...(entry.scope === "project" || entry.scope === "local"
+                      ...(entry.kind === "skill" ||
+                      entry.scope === "project" ||
+                      entry.scope === "local"
                         ? { workspaceRoot: project.workspaceRoot }
                         : {}),
                     })
@@ -184,25 +229,78 @@ function Extensions({ project }: { project: EnvironmentProject }) {
         </Text>
       ) : null}
       <View className="flex-row flex-wrap gap-2">
-        {(["grok", "codex", "claudeAgent"] as const).map((id) => (
+        {(["grok", "codex", "claudeAgent", "gemini"] as const).map((id) => (
           <Button
             key={id}
             label={`${provider === id ? "✓ " : ""}${providerLabel[id]}`}
-            onPress={() => setProvider(id)}
+            disabled={busy}
+            onPress={() => {
+              setProvider(id);
+              if (instanceId) {
+                setInstanceId(null);
+                void refresh(null);
+              }
+            }}
           />
         ))}
       </View>
       <View className="flex-row justify-between">
-        <Text className="text-xs text-foreground">로컬 스킬 폴더 설치</Text>
+        <Text className="text-xs text-foreground">스킬 설치</Text>
         <Switch value={skill} onValueChange={setSkill} />
       </View>
+      {skill ? (
+        <View className="flex-row justify-between">
+          <Text className="flex-1 text-xs text-foreground">
+            선택한 계정에 설치 (끄면 프로젝트에 설치)
+          </Text>
+          <Switch value={userSkillScope} onValueChange={setUserSkillScope} />
+        </View>
+      ) : null}
       <TextInput
         accessibilityLabel="설치할 확장 도구 출처"
         className={inputClass}
         value={target}
         onChangeText={setTarget}
-        placeholder={skill ? "서버의 SKILL.md 폴더 절대 경로" : "플러그인 이름·Git URL"}
+        placeholder={
+          skill ? "GitHub 스킬 폴더 주소 또는 서버의 로컬 폴더" : "플러그인 이름·Git URL"
+        }
       />
+      {skill ? (
+        <>
+          <Text className="text-xs text-foreground-muted">
+            공개 GitHub 스킬 폴더나 로컬 SKILL.md 폴더를 선택하세요. 자기소개서 스킬은 T3에서
+            제공하며 개별 ChatGPT GPT를 가져오는 것은 아닙니다.
+          </Text>
+          <View className="flex-row flex-wrap gap-2">
+            <Button
+              label="OpenAI 스킬 살펴보기"
+              onPress={() =>
+                void Linking.openURL("https://github.com/openai/skills/tree/main/skills/.curated")
+              }
+            />
+            <Button
+              label="Anthropic 스킬 살펴보기"
+              onPress={() =>
+                void Linking.openURL("https://github.com/anthropics/skills/tree/main/skills")
+              }
+            />
+            <Button
+              label="한국어 자기소개서 스킬 설치"
+              disabled={busy}
+              onPress={() =>
+                void run({
+                  provider,
+                  kind: "skill",
+                  action: "install",
+                  target: "t3-skill:resume-writing-ko",
+                  workspaceRoot: project.workspaceRoot,
+                  scope: userSkillScope ? "user" : "project",
+                })
+              }
+            />
+          </View>
+        </>
+      ) : null}
       {!skill && provider === "grok" ? (
         <View className="flex-row justify-between">
           <Text className="flex-1 text-xs text-foreground">출처의 도구·훅 실행 허용</Text>
@@ -210,7 +308,8 @@ function Extensions({ project }: { project: EnvironmentProject }) {
         </View>
       ) : null}
       <Text className="text-xs text-foreground-muted">
-        스킬·Claude 플러그인은 프로젝트, Codex·Grok 플러그인은 서버 사용자에 설치됩니다.
+        스킬은 선택한 범위에, Claude 플러그인은 프로젝트에, Codex·Grok 플러그인은 서버 사용자에
+        설치됩니다.
       </Text>
       <Button
         label="설치"
@@ -223,6 +322,7 @@ function Extensions({ project }: { project: EnvironmentProject }) {
             target: target.trim(),
             trust,
             workspaceRoot: project.workspaceRoot,
+            ...(skill ? { scope: userSkillScope ? "user" : "project" } : {}),
           })
         }
       />

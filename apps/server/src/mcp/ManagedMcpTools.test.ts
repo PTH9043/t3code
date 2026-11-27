@@ -1,4 +1,6 @@
 import * as NodeURL from "node:url";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodeHttp from "node:http";
 import { NodeServices } from "@effect/platform-node";
 import { it, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -8,7 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Config from "../config.ts";
 import * as Settings from "../serverSettings.ts";
 import {
-  codexManagedMcpArgs,
+  codexManagedMcpConfig,
   claudeManagedMcpServers,
   makeManagedMcpDefinitions,
   makeManagedMcpResolver,
@@ -43,18 +45,42 @@ it("maps HTTP authentication and stdio environments to all three native transpor
     },
     { name: "files", command: "node", args: ["server.js"], env: [{ name: "MODE", value: "test" }] },
   ]);
-  expect(claudeManagedMcpServers(servers).docs).toMatchObject({
-    headers: { Authorization: "Bearer secret" },
+  const claude = claudeManagedMcpServers(servers);
+  expect(claude.servers.docs).toMatchObject({
+    headers: { Authorization: "${T3_MANAGED_MCP_0_0}" },
   });
-  expect(codexManagedMcpArgs(servers)).toContain(
-    'mcp_servers.docs.http_headers."Authorization"="Bearer secret"',
+  expect(claude.servers.files).toMatchObject({ env: { MODE: "${T3_MANAGED_MCP_1_0}" } });
+  expect(JSON.stringify(claude.servers)).not.toContain("Bearer secret");
+  expect(claude.environment).toEqual({
+    T3_MANAGED_MCP_0_0: "Bearer secret",
+    T3_MANAGED_MCP_1_0: "test",
+  });
+  const codex = codexManagedMcpConfig(servers);
+  expect(codex.args).toContain(
+    'mcp_servers.docs.env_http_headers."Authorization"="T3_MCP_HTTP_HEADER_0_0"',
   );
+  expect(codex.args.join(" ")).not.toContain("Bearer secret");
+  expect(codex.environment.T3_MCP_HTTP_HEADER_0_0).toBe("Bearer secret");
   expect(expandMcpEnvironment("Bearer ${TOKEN} ${MISSING:-fallback}", { TOKEN: "value" })).toBe(
     "Bearer value fallback",
   );
   expect(() => expandMcpEnvironment("${T3_MISSING_TEST_VARIABLE}", {})).toThrow(
     "T3_MISSING_TEST_VARIABLE",
   );
+});
+
+it("preserves empty HTTP headers while keeping nonempty headers out of the command line", () => {
+  const config = codexManagedMcpConfig([
+    {
+      name: "apps",
+      transport: "http",
+      url: "https://example.com/mcp",
+      headers: { "X-Empty": "", Authorization: "Bearer fixture" },
+    },
+  ]);
+  expect(config.args).toContain('mcp_servers.apps.http_headers."X-Empty"=""');
+  expect(config.environment.T3_MCP_HTTP_HEADER_0_0).toBe("Bearer fixture");
+  expect(config.args.join(" ")).not.toContain("Bearer fixture");
 });
 
 it.effect(
@@ -135,6 +161,43 @@ it("discovers every page of a real stdio MCP handshake and closes its child", as
   expect(result).toEqual({ tools: ["first_tool", "second_tool"], version: "1.0.0" });
 });
 
+it("does not follow an HTTP MCP redirect with authentication headers", async () => {
+  let redirectedRequests = 0;
+  const destination = NodeHttp.createServer((_request, response) => {
+    redirectedRequests++;
+    response.end();
+  });
+  await new Promise<void>((resolve) => destination.listen(0, "127.0.0.1", resolve));
+  const destinationAddress = destination.address();
+  if (!destinationAddress || typeof destinationAddress === "string") throw new Error("No port");
+  const source = NodeHttp.createServer((_request, response) => {
+    response.writeHead(302, { Location: `http://127.0.0.1:${destinationAddress.port}/mcp` });
+    response.end();
+  });
+  await new Promise<void>((resolve) => source.listen(0, "127.0.0.1", resolve));
+  try {
+    const sourceAddress = source.address();
+    if (!sourceAddress || typeof sourceAddress === "string") throw new Error("No port");
+    await expect(
+      probeManagedMcpServer(
+        {
+          name: "redirect-fixture",
+          transport: "http",
+          url: `http://127.0.0.1:${sourceAddress.port}/mcp`,
+          headers: { Authorization: "Bearer synthetic-secret" },
+        },
+        process.cwd(),
+      ),
+    ).rejects.toThrow();
+    expect(redirectedRequests).toBe(0);
+  } finally {
+    await Promise.all([
+      new Promise<void>((resolve) => source.close(() => resolve())),
+      new Promise<void>((resolve) => destination.close(() => resolve())),
+    ]);
+  }
+});
+
 it("serializes Windows paths as Codex config values and preserves Claude transport types", () => {
   const definitions = makeManagedMcpDefinitions({
     toolHome: "D:\\tools",
@@ -143,18 +206,20 @@ it("serializes Windows paths as Codex config values and preserves Claude transpo
     join: (...parts) => parts.join("/"),
   });
   const files = definitions.get("filesystem")!;
-  const args = codexManagedMcpArgs([files]);
+  const { args } = codexManagedMcpConfig([files]);
   const serialized = args.find((value) => value.startsWith("mcp_servers.t3-filesystem.args="))!;
   expect(JSON.parse(serialized.split("=").slice(1).join("="))[1]).toBe("D:\\project folder");
   expect(args).toContain('mcp_servers.t3-filesystem.env.ELECTRON_RUN_AS_NODE="1"');
   expect(claudeManagedMcpServers([files])).toMatchObject({
-    "t3-filesystem": { env: { ELECTRON_RUN_AS_NODE: "1" } },
+    servers: { "t3-filesystem": { env: { ELECTRON_RUN_AS_NODE: "${T3_MANAGED_MCP_0_0}" } } },
+    environment: { T3_MANAGED_MCP_0_0: "1" },
   });
   for (const id of ["context7", "filesystem", "sequentialThinking", "claudeTools"] as const) {
     expect(definitions.get(id)).toMatchObject({ env: { ELECTRON_RUN_AS_NODE: "1" } });
   }
   expect(claudeManagedMcpServers([definitions.get("openaiDocs")!])).toEqual({
-    "t3-openai-docs": { type: "http", url: "https://developers.openai.com/mcp" },
+    servers: { "t3-openai-docs": { type: "http", url: "https://developers.openai.com/mcp" } },
+    environment: {},
   });
   expect(definitions.get("claudeTools")).toMatchObject({
     command: process.execPath,
@@ -211,6 +276,22 @@ it.effect(
         "t3-openai-docs",
         "t3-filesystem",
       ]);
+      // Antigravity (`gemini`) skips native-redundant `t3-filesystem` under default environment scope
+      // to protect `t3-code` tool budget, while still receiving non-redundant servers like `t3-openai-docs`.
+      expect((yield* resolver("gemini", project)).map((server) => server.name)).toEqual([
+        "t3-openai-docs",
+      ]);
+      // Explicit project profile acts as the reverse state (opt-in override) for `gemini`.
+      yield* settingsService.updateSettings({
+        mcpProjectProfilesToUpsert: {
+          [project]: { workspaceRoot: project, enabledBuiltins: ["openaiDocs", "filesystem"] },
+        },
+      });
+      expect((yield* resolver("gemini", project)).map((server) => server.name)).toEqual([
+        "t3-openai-docs",
+        "t3-filesystem",
+      ]);
+      yield* settingsService.updateSettings({ mcpProjectProfileRootsToRemove: [project] });
       expect(yield* resolver("cursor", project)).toEqual([]);
       yield* settingsService.updateSettings({ mcpTools: { filesystem: false } });
       expect((yield* resolver("claudeAgent", project)).map((server) => server.name)).toEqual([

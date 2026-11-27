@@ -103,6 +103,7 @@ interface PendingUserInput {
 }
 
 interface GrokSessionContext {
+  readonly httpMcp: boolean;
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
   session: ProviderSession;
@@ -810,6 +811,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
+            httpMcp: started.initializeResult.agentCapabilities?.mcpCapabilities?.http === true,
             currentModelId: boundModelId,
             stopped: false,
           };
@@ -1479,7 +1481,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        workspaceDelegate: (threadId) => sessions.get(threadId)?.httpMcp === true,
+      },
       startSession,
       sendTurn,
       interruptTurn,

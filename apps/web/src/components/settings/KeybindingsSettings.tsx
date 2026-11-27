@@ -59,7 +59,10 @@ import {
   buildWhenVariableOptions,
   commandLabel,
   DEFAULT_WHEN_VARIABLE,
+  formatWhenExpressionBadges,
+  formatWhenVariableLabel,
   isKnownWhenVariable,
+  isWebBrowserReservedKeybinding,
   keybindingConflictLabels,
   keybindingFromKeyboardEvent,
   parseWhenExpressionDraft,
@@ -325,12 +328,9 @@ function WhenVariableSelect({
         className="max-h-72 w-fit min-w-44"
       >
         {options.map((option) => (
-          <SelectItem
-            key={option}
-            value={option}
-            className="min-h-7 w-full py-1 font-mono text-[12px]"
-          >
-            <span className="truncate">{option}</span>
+          <SelectItem key={option} value={option} className="min-h-7 w-full py-1 text-[12px]">
+            <span className="truncate">{formatWhenVariableLabel(option)}</span>
+            <span className="ml-2 font-mono text-[10px] text-muted-foreground">{option}</span>
           </SelectItem>
         ))}
       </SelectContent>
@@ -780,6 +780,8 @@ function KeybindingTableRow({
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, row, createKeybindingRowDraft);
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
+  const whenBadges = formatWhenExpressionBadges(whenDraft);
+  const hasWebBrowserConflict = !isElectron && isWebBrowserReservedKeybinding(keyDraft);
   const isDirty = keyDraft !== row.key || whenDraftExpression !== row.when;
   const displayShortcut = formatShortcutLabel(row.binding.shortcut);
   const canReset = row.source === "Custom" && row.defaultKey !== null;
@@ -862,6 +864,29 @@ function KeybindingTableRow({
             onKeyDown={captureKeybinding}
           />
         )}
+        {hasWebBrowserConflict ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  data-web-browser-conflict="true"
+                  className="inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
+                  style={{
+                    backgroundColor: "var(--status-warning-surface)",
+                    borderColor: "var(--status-warning-border)",
+                    color: "var(--status-warning-fg)",
+                  }}
+                >
+                  브라우저 충돌
+                </span>
+              }
+            />
+            <TooltipPopup side="top" className="max-w-64 whitespace-normal leading-relaxed">
+              웹 브라우저에서는 Ctrl+1..9 단축키가 브라우저 탭 전환으로 먼저 가로채일 수 있습니다.
+              데스크톱 앱에서 사용하거나 다른 단축키로 변경하세요.
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {isDirty ? (
           <Button
             size="xs"
@@ -877,12 +902,28 @@ function KeybindingTableRow({
         <Popover>
           <PopoverTrigger
             className={cn(
-              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
+              "inline-flex min-h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2 py-1 text-left text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
+            title={whenDraftExpression || "항상 적용"}
             aria-label={`${commandLabel(row.command)} 적용 조건 편집`}
           >
-            <span className="truncate">{whenDraftExpression || "항상"}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-1">
+              {whenBadges.map((badge, index) => (
+                <span
+                  key={`${badge}-${index}`}
+                  data-when-condition-badge="true"
+                  className={cn(
+                    "inline-flex max-w-full items-center truncate rounded-md border px-1.5 py-0.5 text-[11px] leading-tight font-medium",
+                    whenDraftExpression
+                      ? "border-border bg-muted/60 text-foreground"
+                      : "border-transparent bg-transparent px-0 text-muted-foreground font-normal",
+                  )}
+                >
+                  {badge}
+                </span>
+              ))}
+            </span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -957,6 +998,8 @@ function NewKeybindingTableRow({
   });
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
+  const whenBadges = formatWhenExpressionBadges(whenDraft);
+  const hasWebBrowserConflict = !isElectron && isWebBrowserReservedKeybinding(keyDraft);
   const conflictLabels = keybindingConflictLabels(allRows, {
     rowId: "new",
     key: keyDraft,
@@ -1039,12 +1082,28 @@ function NewKeybindingTableRow({
         <Popover>
           <PopoverTrigger
             className={cn(
-              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
+              "inline-flex min-h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2 py-1 text-left text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
+            title={whenDraftExpression || "항상 적용"}
             aria-label={`${commandLabelText} 적용 조건 편집`}
           >
-            <span className="truncate">{whenDraftExpression || "항상"}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-1">
+              {whenBadges.map((badge, index) => (
+                <span
+                  key={`${badge}-${index}`}
+                  data-when-condition-badge="true"
+                  className={cn(
+                    "inline-flex max-w-full items-center truncate rounded-md border px-1.5 py-0.5 text-[11px] leading-tight font-medium",
+                    whenDraftExpression
+                      ? "border-border bg-muted/60 text-foreground"
+                      : "border-transparent bg-transparent px-0 text-muted-foreground font-normal",
+                  )}
+                >
+                  {badge}
+                </span>
+              ))}
+            </span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -1279,11 +1338,20 @@ export function KeybindingsSettingsPanel() {
         }
       >
         {!isElectron ? (
-          <div className="flex items-start gap-2 border-b border-warning/20 bg-warning/5 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground sm:px-4">
-            <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
+          <div
+            data-web-keybinding-conflict-banner="true"
+            className="flex items-start gap-2 border-b px-3 py-2.5 text-[12px] leading-relaxed sm:px-4"
+            style={{
+              backgroundColor: "var(--status-warning-surface)",
+              borderColor: "var(--status-warning-border)",
+              color: "var(--status-warning-fg)",
+            }}
+          >
+            <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
             <p>
-              일부 단축키는 T3 Code보다 브라우저가 먼저 사용할 수 있습니다. 단축키를 안정적으로
-              사용하려면 데스크톱 앱을 이용하세요.
+              웹 모드에서는 <strong className="font-semibold">Ctrl+1..9</strong>(브라우저 탭 전환)
+              등 일부 단축키가 T3 Code보다 브라우저에 먼저 전달되어 충돌할 수 있습니다. 단축키를
+              안정적으로 사용하려면 데스크톱 앱을 이용하거나 다른 키 조합으로 변경하세요.
             </p>
           </div>
         ) : null}

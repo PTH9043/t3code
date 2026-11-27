@@ -71,6 +71,9 @@ afterEach(() => {
 describe("desktop launcher process lifetime", () => {
   it("keeps one app across rebuilds and terminates its Windows tree before replacing it", async () => {
     await import("./dev-electron.mjs");
+    const watched = mocks.watch.mock.calls[0][0].files;
+    expect(watched.some((file) => file.endsWith("preview-pick-preload.cjs"))).toBe(true);
+    expect(watched.some((file) => file.endsWith("preview-pip-preload.cjs"))).toBe(true);
     const { onChange } = mocks.watch.mock.calls[0][0];
     for (let build = 0; build < 20; build++) {
       onChange();
@@ -141,5 +144,17 @@ describe("desktop launcher process lifetime", () => {
     signals.get("SIGTERM")();
     await vi.runAllTimersAsync();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("holds the restart lock until the previous app has stopped", async () => {
+    const release = vi.fn(() => expect(running.size).toBe(0));
+    mocks.inspectRestart.mockReturnValue({ safe: true, reason: "idle", release });
+    await import("./dev-electron.mjs");
+    mocks.watch.mock.calls[0][0].onChange();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.spawnSync).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(running.size).toBe(1);
+    signals.get("SIGTERM")();
+    await vi.runAllTimersAsync();
   });
 });

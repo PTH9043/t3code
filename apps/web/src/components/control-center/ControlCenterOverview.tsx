@@ -1,6 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMemo, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   BrainCircuitIcon,
@@ -18,10 +18,12 @@ import { useEnvironments } from "~/state/environments";
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
-import { Button } from "../ui/button";
+import { Button, buttonVariants } from "../ui/button";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "../ui/card";
+import { knowledgeDashboardRoute } from "../knowledge/KnowledgeDocLink";
 import { AddProviderInstanceDialog } from "../settings/AddProviderInstanceDialog";
 import { ProviderAccountUsage } from "../settings/ProviderAccountUsage";
+import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
 import { McpToolsSection } from "../settings/McpToolsSection";
 import { ExtensionsSection } from "../settings/ExtensionsSection";
 import { AttentionInbox } from "./AttentionInbox";
@@ -45,13 +47,15 @@ function StatCard(props: {
   const Icon = props.icon;
   return (
     <Card className="min-w-0">
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Icon className="size-4" />
-          <span className="text-xs font-medium">{props.label}</span>
+      <CardHeader className="p-3 sm:p-4 sm:pb-3">
+        <div className="flex items-center gap-1.5 text-muted-foreground sm:gap-2">
+          <Icon className="size-3.5 shrink-0 sm:size-4" />
+          <span className="truncate text-xs font-medium">{props.label}</span>
         </div>
-        <CardTitle className="text-2xl">{props.value}</CardTitle>
-        <CardDescription>{props.detail}</CardDescription>
+        <CardTitle className="text-xl tabular-nums sm:text-2xl">{props.value}</CardTitle>
+        <CardDescription className="line-clamp-2 text-[11px] sm:text-xs">
+          {props.detail}
+        </CardDescription>
       </CardHeader>
     </Card>
   );
@@ -136,7 +140,10 @@ export function ControlCenterOverview() {
           </Button>
         </section>
 
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <section
+          data-control-center-kpi-grid=""
+          className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4"
+        >
           <StatCard
             icon={FolderKanbanIcon}
             label="독립 프로젝트"
@@ -187,45 +194,73 @@ export function ControlCenterOverview() {
             </CardHeader>
             <CardPanel className="grid gap-2">
               {visibleProjects.map((project) => (
-                <button
+                <div
                   key={`${project.environmentId}:${project.id}`}
-                  type="button"
-                  className="flex min-w-0 items-center gap-3 rounded-xl border border-border/70 bg-background/50 px-4 py-3 text-left transition-colors hover:bg-accent/50"
-                  onClick={() =>
-                    void navigate({
-                      to: "/control-center/$environmentId/$projectId",
-                      params: { environmentId: project.environmentId, projectId: project.id },
-                    })
-                  }
+                  className="grid min-w-0 rounded-xl border border-border/70 bg-background/50 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                 >
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
-                    <FolderKanbanIcon className="size-4" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{project.title}</span>
-                    <span className="block truncate font-mono text-xs text-muted-foreground">
-                      {project.workspaceRoot}
+                  <button
+                    type="button"
+                    className="flex min-w-0 items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() =>
+                      void navigate({
+                        to: "/control-center/$environmentId/$projectId",
+                        params: { environmentId: project.environmentId, projectId: project.id },
+                      })
+                    }
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/8 text-primary">
+                      <FolderKanbanIcon className="size-4" />
                     </span>
-                  </span>
-                  <span className="flex shrink-0 flex-col items-end gap-1">
-                    <Badge variant="success">엄격 격리</Badge>
-                    <Badge
-                      variant={
-                        project.workspaceControl?.conversationRag.enabled === false
-                          ? "outline"
-                          : "info"
-                      }
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">{project.title}</span>
+                      <span className="block truncate font-mono text-xs text-muted-foreground">
+                        {project.workspaceRoot}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 flex-col items-end gap-1">
+                      <Badge variant="success">엄격 격리</Badge>
+                      <Badge
+                        variant={
+                          project.workspaceControl?.conversationRag.enabled === false
+                            ? "outline"
+                            : "info"
+                        }
+                      >
+                        입력 RAG{" "}
+                        {project.workspaceControl?.conversationRag.enabled === false
+                          ? "꺼짐"
+                          : "켜짐"}
+                      </Badge>
+                      <span className="text-[10px] text-muted-foreground">
+                        {environmentLabels.get(project.environmentId) ?? "현재 환경"}
+                      </span>
+                    </span>
+                  </button>
+                  <div className="mr-3 mb-2 flex items-center gap-1.5 justify-self-end sm:mb-0">
+                    <Link
+                      to="/control-center/$environmentId/$projectId"
+                      params={{ environmentId: project.environmentId, projectId: project.id }}
+                      search={{ domain: "home", section: "mission-control" }}
+                      className={buttonVariants({
+                        variant: "default",
+                        size: "sm",
+                      })}
                     >
-                      입력 RAG{" "}
-                      {project.workspaceControl?.conversationRag.enabled === false
-                        ? "꺼짐"
-                        : "켜짐"}
-                    </Badge>
-                    <span className="text-[10px] text-muted-foreground">
-                      {environmentLabels.get(project.environmentId) ?? "현재 환경"}
-                    </span>
-                  </span>
-                </button>
+                      자율 운영실
+                    </Link>
+                    <Link
+                      to={knowledgeDashboardRoute}
+                      params={{ environmentId: project.environmentId, projectId: project.id }}
+                      aria-label={`${project.title} 위키 열기 (${environmentLabels.get(project.environmentId) ?? project.environmentId})`}
+                      className={buttonVariants({
+                        variant: "outline",
+                        size: "sm",
+                      })}
+                    >
+                      위키 열기
+                    </Link>
+                  </div>
+                </div>
               ))}
               {visibleProjects.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center text-sm text-muted-foreground">
@@ -287,11 +322,30 @@ export function ControlCenterOverview() {
                               {provider.driverKind}
                             </Badge>
                           </span>
-                          <span className="block truncate text-[11px] text-muted-foreground">
-                            {provider.snapshot.auth.email ??
-                              provider.snapshot.auth.label ??
-                              provider.instanceId}
-                            {` · ${environmentLabel}`}
+                          <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                            {provider.snapshot.auth.email ? (
+                              <RedactedSensitiveText
+                                value={provider.snapshot.auth.email}
+                                ariaLabel={`${provider.displayName} 인증 이메일 보기 또는 가리기`}
+                                revealTooltip="클릭하여 인증 이메일 표시"
+                                hideTooltip="클릭하여 인증 이메일 가리기"
+                              />
+                            ) : (
+                              <span className="truncate">
+                                {provider.snapshot.auth.label ?? provider.instanceId}
+                              </span>
+                            )}
+                            <span aria-hidden="true">·</span>
+                            {/^DESKTOP-[A-Z0-9-]+$/i.test(environmentLabel) ? (
+                              <RedactedSensitiveText
+                                value={environmentLabel}
+                                ariaLabel="호스트명 보기 또는 가리기"
+                                revealTooltip="클릭하여 호스트명 표시"
+                                hideTooltip="클릭하여 호스트명 가리기"
+                              />
+                            ) : (
+                              <span className="truncate">{environmentLabel}</span>
+                            )}
                           </span>
                         </span>
                         <Badge

@@ -13,6 +13,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   ClaudeSettings,
   ProviderDriverKind,
   ProviderItemId,
@@ -20,29 +21,35 @@ import {
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
+  ProviderExecutionId,
+  WorkspaceCollaborationRunId,
+  WorkspaceTaskNodeId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { resolveTurnDelegateTeam, restrictNativeTeam } from "../subagentSelection.ts";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import {
-  claudeRefusalFallbackModels,
-  makeClaudeAdapter,
-  type ClaudeAdapterLiveOptions,
-} from "./ClaudeAdapter.ts";
+import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodePluginMetadata = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ name: Schema.String })),
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -64,6 +71,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public closeCalls = 0;
+  public reloadSkills?: () => Promise<{ skills: ReadonlyArray<{ name: string }> }>;
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -165,6 +173,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly subordinates?: ClaudeAdapterLiveOptions["subordinates"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -176,6 +185,7 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.subordinates ? { subordinates: config.subordinates } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -203,7 +213,7 @@ function makeHarness(config?: {
       Layer.provideMerge(
         ServerConfig.layerTest(
           config?.cwd ?? "/tmp/claude-adapter-test",
-          config?.baseDir ?? "/tmp",
+          config?.baseDir ?? { prefix: "t3-claude-adapter-test-" },
         ),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -277,6 +287,194 @@ const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
 describe("ClaudeAdapterLive", () => {
+  for (const scenario of ["empty", "nonempty", "global", "inherited", "child"] as const) {
+    it.effect(`enforces the ${scenario} native agent policy in the SDK query`, () => {
+      const harness = makeHarness({ claudeConfig: { launchArgs: "--disallowedTools Read(.env)" } });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const scope = { threadId: THREAD_ID, answeringInstanceId: instanceId, forModel: "opus" };
+        const member = { role: "worker", model: "user-worker", instanceId } as const;
+        const team = resolveTurnDelegateTeam(
+          {
+            providerInstances: { [instanceId]: {} },
+            subordinateModels: [{ ...member, answeringInstanceId: instanceId }],
+            globalSubordinateTeam: scenario === "global" ? [member] : [],
+            threadSubordinateTeams:
+              scenario === "empty" || scenario === "nonempty"
+                ? { [THREAD_ID]: scenario === "empty" ? [] : [member] }
+                : {},
+          },
+          scope,
+        );
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(instanceId, scope.forModel),
+          restrictNativeSubagents: restrictNativeTeam(team),
+          ...(scenario === "child"
+            ? {
+                execution: {
+                  executionId: ProviderExecutionId.make("execution"),
+                  ownerThreadId: ThreadId.make("parent"),
+                  runId: WorkspaceCollaborationRunId.make("run"),
+                  nodeId: WorkspaceTaskNodeId.make("delegate-worker"),
+                  attempt: 1,
+                },
+              }
+            : {}),
+        });
+        const options = harness.getLastCreateQueryInput()?.options;
+        assert.equal(options?.permissionMode, "bypassPermissions");
+        const restricted = scenario !== "inherited";
+        assert.equal(
+          adapter.capabilities.nativeSubagentPolicy?.(THREAD_ID)?.restricted,
+          restricted,
+        );
+        if (!restricted) {
+          assert.isUndefined(options?.disallowedTools);
+          assert.equal(options?.extraArgs?.disallowedTools, "Read(.env)");
+        } else {
+          assert.includeMembers(options?.disallowedTools ?? [], [
+            "Agent",
+            "Task",
+            "Workflow",
+            "Read(.env)",
+          ]);
+          assert.isUndefined(options?.extraArgs?.disallowedTools);
+          assert.notInclude(options?.disallowedTools ?? [], "mcp__t3-code__workspace_delegate");
+          assert.isUndefined(options?.agents);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect("keeps the thread's MCP authorization out of SDK command configuration", () => {
+    const harness = makeHarness();
+    const threadId = ThreadId.make("claude-mcp-secret-test");
+    return Effect.gen(function* () {
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("test-environment"),
+        threadId,
+        providerSessionId: "session",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:2345/mcp",
+        authorizationHeader: "Bearer synthetic-session-secret",
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => clearMcpProviderSession(threadId)));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      expect(options?.mcpServers?.["t3-code"]).toMatchObject({
+        headers: { Authorization: "${T3_MANAGED_MCP_0_0}" },
+      });
+      expect(options?.env?.T3_MANAGED_MCP_0_0).toBe("Bearer synthetic-session-secret");
+      expect(options?.systemPrompt).toMatchObject({
+        append: expect.stringContaining("use only its workspace_delegate roster"),
+      });
+    }).pipe(Effect.provide(harness.layer));
+  });
+  it.effect(
+    "loads a selected skill without restarting the active session or changing permissions",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const source = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-chat-source-" });
+        const skill = path.join(source, "SKILL.md");
+        yield* fs.writeFileString(
+          skill,
+          "---\nname: resume\ndescription: Write a resume.\n---\nUse supplied facts.",
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+        const plugin = harness.getLastCreateQueryInput()?.options.plugins?.at(-1);
+        assert.isDefined(plugin);
+        if (!plugin || plugin.type !== "local") return;
+        const metadata = yield* decodePluginMetadata(
+          yield* fs.readFileString(path.join(plugin.path, ".claude-plugin", "plugin.json")),
+        );
+        let reloads = 0;
+        harness.query.reloadSkills = async () => {
+          reloads++;
+          return { skills: [{ name: `${metadata.name}:resume` }] };
+        };
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "$resume 작성해줘",
+          workflowSkills: [{ name: "resume", path: skill }],
+        });
+        const prompt = yield* Effect.promise(() =>
+          readFirstPromptText(harness.getLastCreateQueryInput()),
+        );
+        expect(prompt).toContain(`/${metadata.name}:resume`);
+        expect(prompt).toContain("$resume 작성해줘");
+        expect(reloads).toBe(1);
+        expect(harness.query.closeCalls).toBe(0);
+        expect(harness.query.setPermissionModeCalls).toEqual([]);
+        expect(yield* fs.exists(path.join(plugin.path, "skills", "resume", "SKILL.md"))).toBe(true);
+        yield* fs.writeFileString(
+          skill,
+          "---\nname: resume\ndescription: Updated.\n---\nNew version.",
+        );
+        const rejectedUpdate = yield* adapter
+          .sendTurn({
+            threadId: THREAD_ID,
+            input: "$resume 다시",
+            workflowSkills: [{ name: "resume", path: skill }],
+          })
+          .pipe(Effect.result);
+        expect(rejectedUpdate._tag).toBe("Failure");
+        if (rejectedUpdate._tag === "Failure")
+          expect(rejectedUpdate.failure.message).toContain("현재 작업이 끝난 뒤");
+        expect(harness.query.closeCalls).toBe(0);
+        expect(harness.query.setModelCalls).toEqual([]);
+        expect(reloads).toBe(1);
+        yield* adapter.stopSession(THREAD_ID);
+        expect(yield* fs.exists(plugin.path)).toBe(false);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+  it.effect(
+    "does not let a selected skill grant tools while the Claude session stays in plan mode",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const source = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-plan-skill-" });
+        const skill = path.join(source, "SKILL.md");
+        yield* fs.writeFileString(skill, "---\nname: resume\nallowed-tools: Bash\n---\nBody");
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "plan", interactionMode: "plan" });
+        harness.query.reloadSkills = async () => ({ skills: [] });
+        const result = yield* adapter
+          .sendTurn({
+            threadId: THREAD_ID,
+            input: "$resume",
+            workflowSkills: [{ name: "resume", path: skill }],
+          })
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        expect(harness.query.setPermissionModeCalls).toEqual(["plan"]);
+        expect(harness.query.closeCalls).toBe(0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
   it.effect(
     "passes independent cache lifetimes to the SDK without overriding inherited defaults",
     () => {
@@ -313,6 +511,25 @@ describe("ClaudeAdapterLive", () => {
       expect(settings ?? {}).not.toHaveProperty("subagentPromptCacheTtl");
     }).pipe(Effect.provide(harness.layer));
   });
+  it.effect("reports a missing workspace before starting a Claude process", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-workspace-" });
+      const cwd = NodePath.join(dir, "missing");
+      const result = yield* adapter
+        .startSession({ threadId: THREAD_ID, cwd, runtimeMode: "full-access" })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.ok(Schema.is(ProviderAdapterValidationError)(result.failure));
+        assert.ok(result.failure.issue.includes(cwd));
+      }
+      assert.ok(!harness.getLastCreateQueryInput());
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("returns validation error for non-claude provider on startSession", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -356,7 +573,9 @@ describe("ClaudeAdapterLive", () => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(
+        ServerConfig.layerTest("/tmp/claude-adapter-test", { prefix: "t3-claude-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -401,11 +620,16 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("continues on another model when safeguards refuse a message", () => {
+  it.effect("keeps the selected model when safeguards refuse after a model change", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
@@ -414,14 +638,89 @@ describe("ClaudeAdapterLive", () => {
         ),
         runtimeMode: "full-access",
       });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.isUndefined(options?.fallbackModel);
+      assert.deepEqual(options?.settings, { switchModelsOnFlag: false });
 
-      const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.fallbackModel, "claude-sonnet-4-6");
-      assert.deepEqual(createInput?.options.settings, { switchModelsOnFlag: true });
-      assert.equal(
-        claudeRefusalFallbackModels("claude-opus-5-5"),
-        "claude-opus-4-8,claude-sonnet-4-6",
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-5-5",
+        ),
+      });
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-5-5[1m]"]);
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Your message was flagged by Claude's safeguards."],
+        session_id: "sdk-session-refusal",
+        uuid: "result-refusal",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const completed = events.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.state, "failed");
+        assert.equal(
+          completed.payload.errorMessage,
+          "Your message was flagged by Claude's safeguards.",
+        );
+      }
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-5-5[1m]"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("explains a safeguard block in Korean and keeps the session resumable", () => {
+    const harness = makeHarness();
+    const refusal =
+      "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup). Try rephrasing the request in a new session or change your model.\n\nDetails: `[cyber]`\n\nRequest ID: req_test";
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
       );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      // The CLI reports an API refusal as a "success" result flagged is_error.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: refusal,
+        stop_reason: "refusal",
+        session_id: "sdk-session-safeguard",
+        uuid: "result-safeguard",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const completed = events.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.state, "failed");
+        assert.equal(
+          completed.payload.errorMessage,
+          `Anthropic 안전장치가 이 요청을 거절했습니다 [cyber]. 이 대화의 이전 기록이 매번 함께 전송되므로 같은 대화에서 이 모델로 다시 보내면 또 거절됩니다. 새 대화를 열거나 다른 모델을 선택해 주세요. (${refusal})`,
+        );
+      }
+      // The person may still switch models in this conversation, so the native session stays.
+      const resumeCursor = (yield* adapter.listSessions())[0]?.resumeCursor as
+        | { readonly resume?: string }
+        | undefined;
+      assert.equal(resumeCursor?.resume, "sdk-session-safeguard");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -735,7 +1034,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
         alwaysThinkingEnabled: false,
-        switchModelsOnFlag: true,
+        switchModelsOnFlag: false,
       });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -759,7 +1058,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.deepEqual(createInput?.options.settings, { switchModelsOnFlag: true });
+      assert.deepEqual(createInput?.options.settings, { switchModelsOnFlag: false });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -784,7 +1083,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
         fastMode: true,
-        switchModelsOnFlag: true,
+        switchModelsOnFlag: false,
       });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -808,7 +1107,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.deepEqual(createInput?.options.settings, { switchModelsOnFlag: true });
+      assert.deepEqual(createInput?.options.settings, { switchModelsOnFlag: false });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -1160,6 +1459,61 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "asks Claude to validate source separately and preserves a failed native Bash check",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const completion = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "item.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const prompt = harness.getLastCreateQueryInput()?.options.systemPrompt;
+        expect(prompt).toMatchObject({
+          preset: "claude_code",
+          append: expect.stringContaining("use Edit or Write"),
+        });
+        expect(prompt).toMatchObject({
+          append: expect.stringMatching(/py_compile\)\s+in a separate tool call/),
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Validate the fixture." });
+
+        const session = { session_id: "fixture-session", parent_tool_use_id: null };
+        const input = { command: String.raw`python -m py_compile "C:\fixture dir\sample.py"` };
+        const id = "fixture-bash-check";
+        harness.query.emit({
+          ...session,
+          type: "stream_event",
+          uuid: "fixture-start",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id, name: "Bash", input },
+          },
+        } as unknown as SDKMessage);
+        const result = {
+          type: "tool_result",
+          tool_use_id: id,
+          is_error: true,
+          content: "SyntaxError: unterminated string literal",
+        };
+        harness.query.emit({
+          ...session,
+          type: "user",
+          uuid: "fixture-result",
+          message: { role: "user", content: [result] },
+        } as unknown as SDKMessage);
+        expect(Array.from(yield* Fiber.join(completion))).toMatchObject([
+          { payload: { status: "failed", data: { toolName: "Bash", input, result } } },
+        ]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("maps Claude reasoning deltas, streamed tool inputs, and tool results", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1239,6 +1593,20 @@ describe("ClaudeAdapterLive", () => {
           index: 1,
         },
       } as unknown as SDKMessage);
+
+      for (const parent of [null, "different-parent"]) {
+        harness.query.emit({
+          type: "assistant",
+          session_id: "sdk-session-tool-streams",
+          uuid: parent ?? "issuing-assistant",
+          parent_tool_use_id: parent,
+          message: {
+            model: parent ? "other-model" : "issuing-model",
+            role: "assistant",
+            content: [{ type: "tool_use", id: "tool-grep-1", name: "Grep", input: {} }],
+          },
+        } as unknown as SDKMessage);
+      }
 
       harness.query.emit({
         type: "user",
@@ -1324,6 +1692,7 @@ describe("ClaudeAdapterLive", () => {
       );
       assert.equal(toolResultUpdated?.type, "item.updated");
       if (toolResultUpdated?.type === "item.updated") {
+        assert.equal(toolResultUpdated.payload.reportedModel, "issuing-model");
         assert.equal(
           (
             toolResultUpdated.payload.data as {
@@ -1761,6 +2130,96 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "gates ordinary chat watches with live room settings and stops only monitor handles",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const settings = yield* ServerSettingsService;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const hooks = harness.getLastCreateQueryInput()?.options.hooks;
+        const before = hooks?.PreToolUse?.[0]?.hooks[0];
+        const wake = hooks?.UserPromptSubmit?.[0]?.hooks[0];
+        if (!before || !wake || !adapter.stopBackgroundWatches)
+          throw new Error("Missing room monitoring controls");
+        const input = { session_id: "sdk-session", transcript_path: "transcript", cwd: "test" };
+        const options = { signal: new AbortController().signal };
+        const checkTool = (tool: string, args: Record<string, unknown> = {}) =>
+          Effect.promise(() =>
+            before(
+              {
+                ...input,
+                hook_event_name: "PreToolUse",
+                tool_name: tool,
+                tool_input: args,
+                tool_use_id: "u",
+              },
+              "u",
+              options,
+            ),
+          );
+        const checkWake = (source: "user" | "schedule_wakeup") =>
+          Effect.promise(() =>
+            wake(
+              {
+                ...input,
+                hook_event_name: "UserPromptSubmit",
+                prompt: "check progress",
+                source,
+              },
+              undefined,
+              options,
+            ),
+          );
+        assert.deepEqual(yield* checkTool("Bash"), {});
+        assert.deepEqual(yield* checkTool("ScheduleWakeup", { stop: true }), {});
+        assert.property(yield* checkTool("Monitor"), "hookSpecificOutput");
+        assert.propertyVal(yield* checkWake("schedule_wakeup"), "decision", "block");
+        assert.deepEqual(yield* checkWake("user"), {});
+        yield* settings.updateSettings({
+          backgroundWatchThreadUpdate: { threadId: THREAD_ID, enabled: true },
+        });
+        assert.deepEqual(yield* checkTool("Monitor"), {});
+        assert.deepEqual(yield* checkWake("schedule_wakeup"), {});
+        const started = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(3),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "work", attachments: [] });
+        for (const kind of ["local_agent", "local_bash", "monitor"]) {
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: kind,
+            task_type: kind,
+            description: kind,
+            session_id: "sdk-session",
+            uuid: kind,
+          } as unknown as SDKMessage);
+        }
+        yield* Fiber.join(started);
+        yield* settings.updateSettings({
+          backgroundWatchThreadUpdate: { threadId: THREAD_ID, enabled: false },
+        });
+        yield* adapter.stopBackgroundWatches(THREAD_ID);
+        assert.deepEqual(harness.query.stopTaskCalls, ["monitor"]);
+        assert.equal(harness.query.interruptCalls.length, 0);
+        assert.property(yield* checkTool("ScheduleWakeup"), "hookSpecificOutput");
+        assert.propertyVal(yield* checkWake("schedule_wakeup"), "decision", "block");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("a plain stop keeps watch loops running; stop-everything takes them down", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2114,7 +2573,9 @@ describe("ClaudeAdapterLive", () => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(
+        ServerConfig.layerTest("/tmp/claude-adapter-test", { prefix: "t3-claude-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -2205,7 +2666,9 @@ describe("ClaudeAdapterLive", () => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(
+        ServerConfig.layerTest("/tmp/claude-adapter-test", { prefix: "t3-claude-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -2499,6 +2962,191 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(progressEvent?.type, "task.progress");
       if (usageEvent && progressEvent) {
         assert.notStrictEqual(usageEvent.eventId, progressEvent.eventId);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("registers an Opus worker for whichever model conducts, by default", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.agents?.worker?.model, "opus");
+      const systemPrompt = options?.systemPrompt;
+      assert.ok(typeof systemPrompt === "object" && !Array.isArray(systemPrompt));
+      if (typeof systemPrompt === "object" && !Array.isArray(systemPrompt)) {
+        assert.include(systemPrompt.append ?? "", "## Conductor mode");
+        assert.include(systemPrompt.append ?? "", "AskUserQuestion");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("uses the configured worker model and leaves conductor mode off when asked", () =>
+    Effect.gen(function* () {
+      for (const [setting, expected] of [
+        ["sonnet", "sonnet"],
+        ["off", undefined],
+      ] as const) {
+        const harness = makeHarness({ claudeConfig: { conductorWorkerModel: setting } });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          const options = harness.getLastCreateQueryInput()?.options;
+          assert.equal(options?.agents?.worker?.model, expected);
+          const systemPrompt = options?.systemPrompt;
+          if (typeof systemPrompt === "object" && !Array.isArray(systemPrompt)) {
+            assert.equal(
+              (systemPrompt.append ?? "").includes("## Conductor mode"),
+              expected !== undefined,
+            );
+          }
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      }
+    }),
+  );
+
+  it.effect("tells the session's model which models work under it, never an execution", () =>
+    Effect.gen(function* () {
+      const codex = ProviderInstanceId.make("codex");
+      for (const isExecution of [false, true]) {
+        const harness = makeHarness({
+          subordinates: Effect.succeed([
+            { role: "worker", account: "Codex", instanceId: codex, model: "gpt-6-sol" },
+            {
+              forModel: "claude-fable-5-2",
+              role: "advisor",
+              account: "Codex",
+              instanceId: codex,
+              model: "gpt-6-astra",
+            },
+          ]),
+        });
+        const threadId = isExecution ? ThreadId.make("claude-subordinate-execution") : THREAD_ID;
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-opus-4-8",
+            ),
+            runtimeMode: "full-access",
+            ...(isExecution
+              ? {
+                  execution: {
+                    executionId: ProviderExecutionId.make(threadId),
+                    ownerThreadId: THREAD_ID,
+                    runId: WorkspaceCollaborationRunId.make("run-1"),
+                    nodeId: WorkspaceTaskNodeId.make("delegate-worker"),
+                    attempt: 1,
+                  },
+                }
+              : {}),
+          });
+          const systemPrompt = harness.getLastCreateQueryInput()?.options.systemPrompt;
+          const append =
+            typeof systemPrompt === "object" && !Array.isArray(systemPrompt)
+              ? (systemPrompt.append ?? "")
+              : "";
+          assert.include(append, "AskUserQuestion");
+          assert.equal(append.includes("<subordinate_models>"), !isExecution);
+          assert.equal(append.includes("- worker — Codex · gpt-6-sol — "), !isExecution);
+          // The advisor is assigned to another answering model.
+          assert.notInclude(append, "gpt-6-astra");
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      }
+    }),
+  );
+
+  it.effect("reports worker subagent spend per model from result modelUsage", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "build it", attachments: [] });
+
+      const modelEntry = (input: number, cacheRead: number, output: number) => ({
+        inputTokens: input,
+        outputTokens: output,
+        cacheReadInputTokens: cacheRead,
+        cacheCreationInputTokens: 0,
+        webSearchRequests: 0,
+        costUSD: 0,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 64_000,
+      });
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1,
+        duration_api_ms: 1,
+        num_turns: 3,
+        result: "done",
+        stop_reason: "end_turn",
+        session_id: "sdk-session-conductor",
+        uuid: "conductor-result",
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 90,
+          output_tokens: 20,
+        },
+        modelUsage: {
+          "claude-fable-5-2": modelEntry(10, 90, 20),
+          "claude-opus-5-5": modelEntry(300, 1700, 400),
+        },
+      } as unknown as SDKMessage);
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const usageEvent = runtimeEvents.find((event) => event.type === "thread.token-usage.updated");
+      assert.equal(usageEvent?.type, "thread.token-usage.updated");
+      if (usageEvent?.type === "thread.token-usage.updated") {
+        assert.deepEqual(
+          usageEvent.payload.consumption?.map((observation) => [
+            observation.model,
+            observation.counts.total,
+            observation.includesNativeChildren,
+          ]),
+          [
+            ["claude-fable-5-2", 120, true],
+            ["claude-opus-5-5", 2400, true],
+          ],
+        );
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -4514,6 +5162,7 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.deepEqual(resolvedEvent.value.payload.answers, {});
+      assert.equal(resolvedEvent.value.payload.reason, "cancelled");
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.deepEqual(permissionResult, {
@@ -4525,6 +5174,102 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect("cancels a pending question when its session stops without an SDK abort", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.ok(canUseTool);
+      const controller = new AbortController();
+      const pending = canUseTool(
+        "AskUserQuestion",
+        { questions: [] },
+        {
+          signal: controller.signal,
+          toolUseID: "tool-stop-question",
+          requestId: "request-stop-question",
+        },
+      );
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "user-input.requested") {
+        assert.fail("Expected user-input.requested event");
+        return;
+      }
+
+      yield* adapter.stopSession(THREAD_ID);
+      assert.equal(controller.signal.aborted, false);
+      assert.deepEqual(yield* Effect.promise(() => pending), {
+        behavior: "deny",
+        message: "User cancelled tool execution.",
+      } satisfies PermissionResult);
+      const resolved = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "user-input.resolved",
+      ).pipe(Stream.runHead);
+      assert.equal(resolved._tag, "Some");
+      if (resolved._tag === "Some" && resolved.value.type === "user-input.resolved") {
+        assert.equal(resolved.value.requestId, requested.value.requestId);
+        assert.equal(resolved.value.payload.reason, "cancelled");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  for (const toolName of ["AskUserQuestion", "Bash"] as const) {
+    it.effect(`cancels an already-aborted ${toolName} request without waiting`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+        const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+        assert.ok(canUseTool);
+        const controller = new AbortController();
+        controller.abort();
+        const result = yield* Effect.promise(() =>
+          canUseTool(
+            toolName,
+            toolName === "AskUserQuestion" ? { questions: [] } : { command: "echo test" },
+            {
+              signal: controller.signal,
+              toolUseID: `tool-pre-aborted-${toolName}`,
+              requestId: `request-pre-aborted-${toolName}`,
+            },
+          ),
+        );
+        assert.deepEqual(result, {
+          behavior: "deny",
+          message: "User cancelled tool execution.",
+        } satisfies PermissionResult);
+
+        const events = yield* Stream.take(adapter.streamEvents, 2).pipe(Stream.runCollect);
+        assert.deepEqual(
+          Array.from(events, (event) => event.type),
+          toolName === "AskUserQuestion"
+            ? ["user-input.requested", "user-input.resolved"]
+            : ["request.opened", "request.resolved"],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
 
   it.effect("writes provider-native observability records when enabled", () => {
     const nativeEvents: Array<{

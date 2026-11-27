@@ -3,11 +3,14 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import * as WorktreeProvisionService from "./WorktreeProvisionService.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { ServerConfig } from "../config.ts";
 
 const localRef = (name: string, worktreePath: string | null) => ({
   name,
@@ -81,10 +84,91 @@ function makeLayer(input: {
 
 const makeTempDir = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
-  return yield* fileSystem.makeTempDirectory({ prefix: "t3-orch-wt-" });
+  return yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-orch-wt-" });
 }).pipe(Effect.provide(NodeServices.layer));
 
 describe("WorktreeProvisionService.provision", () => {
+  it.effect("verifies the actual Git worktree and rejects a different directory", () => {
+    const gitLayer = GitVcsDriver.layer.pipe(
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-worktree-git-config-" })),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.GitVcsDriver;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-real-worktree-" });
+      const repo = path.join(root, "repo");
+      const tree = path.join(root, "tree");
+      const other = path.join(root, "other");
+      yield* fs.makeDirectory(repo);
+      yield* fs.makeDirectory(other);
+      const git = (args: readonly string[]) =>
+        driver.execute({ operation: "worktree-recovery-test", cwd: repo, args, timeoutMs: 10_000 });
+      yield* git(["init"]);
+      yield* git(["config", "user.name", "T3 Test"]);
+      yield* git(["config", "user.email", "t3-test@example.invalid"]);
+      yield* git(["commit", "--allow-empty", "-m", "initial"]);
+      yield* git(["worktree", "add", "-b", "t3-recovery-test", tree, "HEAD"]);
+      yield* Effect.gen(function* () {
+        const service = yield* WorktreeProvisionService.WorktreeProvisionService;
+        assert.isTrue(
+          yield* service.verifyExisting!({
+            projectCwd: repo,
+            worktreePath: tree,
+            branch: "t3-recovery-test",
+          }),
+        );
+        assert.isFalse(
+          yield* service.verifyExisting!({
+            projectCwd: repo,
+            worktreePath: other,
+            branch: "t3-recovery-test",
+          }),
+        );
+        assert.isFalse(
+          yield* service.verifyExisting!({
+            projectCwd: repo,
+            worktreePath: tree,
+            branch: "not-the-branch",
+          }),
+        );
+      }).pipe(Effect.provide(makeLayer({ gitWorkflow: { listRefs: driver.listRefs } })));
+    }).pipe(Effect.provide(gitLayer));
+  });
+  it.effect("verifies a recorded path still belongs to the requested local branch", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const owned = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owned-tree-" });
+      const other = yield* fs.makeTempDirectoryScoped({ prefix: "t3-other-tree-" });
+      const git = makeGitRecorder({ refs: [localRef("t3/owned", owned)] });
+      yield* Effect.gen(function* () {
+        const service = yield* WorktreeProvisionService.WorktreeProvisionService;
+        assert.isTrue(
+          yield* service.verifyExisting!({
+            projectCwd: "/project",
+            worktreePath: owned,
+            branch: "t3/owned",
+          }),
+        );
+        assert.isFalse(
+          yield* service.verifyExisting!({
+            projectCwd: "/project",
+            worktreePath: other,
+            branch: "t3/owned",
+          }),
+        );
+        assert.isFalse(
+          yield* service.verifyExisting!({
+            projectCwd: "/project",
+            worktreePath: owned,
+            branch: "t3/other",
+          }),
+        );
+        assert.equal(git.callsFor("createWorktree").length, 0);
+      }).pipe(Effect.provide(makeLayer({ gitWorkflow: git.gitWorkflow })));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
   it.effect("reuses a stored worktree path whose directory still exists, without git calls", () => {
     const git = makeGitRecorder({});
     return Effect.gen(function* () {
@@ -270,6 +354,26 @@ describe("WorktreeProvisionService.runSetupGate", () => {
       const result = yield* service.runSetupGate({ script, worktreePath: "E:/worktrees/w1" });
       assert.equal(result.status, "failed");
       assert.equal(result.status === "failed" && result.timedOut, true);
+    }).pipe(Effect.provide(makeLayer({ processRunner: runner.processRunner })));
+  });
+
+  it.effect("executes declarative validate and cleanup lifecycle gates (Orca hooks)", () => {
+    const runner = makeRunner({ code: 0, timedOut: false });
+    return Effect.gen(function* () {
+      const service = yield* WorktreeProvisionService.WorktreeProvisionService;
+      const val = yield* service.runValidateGate!({
+        script: { id: "val", name: "Validate", command: "vp test run" },
+        worktreePath: "E:/worktrees/w2",
+      });
+      const clean = yield* service.runCleanupGate!({
+        script: { id: "cln", name: "Cleanup", command: "node cleanup.mjs" },
+        worktreePath: "E:/worktrees/w2",
+      });
+      assert.deepEqual(val, { status: "ok" });
+      assert.deepEqual(clean, { status: "ok" });
+      assert.equal(runner.requests.length, 2);
+      assert.ok(runner.requests[0]?.args.includes("vp test run"));
+      assert.ok(runner.requests[1]?.args.includes("node cleanup.mjs"));
     }).pipe(Effect.provide(makeLayer({ processRunner: runner.processRunner })));
   });
 });

@@ -3,6 +3,7 @@ import type {
   ServerProviderUsage,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
+import { providerQuotaWindows } from "@t3tools/client-runtime/state/token-usage";
 import { GaugeIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
@@ -105,11 +106,7 @@ export function ProviderAccountUsage({
   readonly className?: string;
 }) {
   const credits = creditsLabel(usage);
-  const weekly =
-    usage?.secondary ??
-    (usage?.primary?.windowDurationMinutes === 10_080 ? usage.primary : undefined);
-  const primary = driver === "codex" ? undefined : usage?.primary;
-  const secondary = driver === "codex" ? weekly : usage?.secondary;
+  const quotaWindows = providerQuotaWindows(usage, { includeExtra: true });
   return (
     <section
       className={cn(
@@ -150,15 +147,19 @@ export function ProviderAccountUsage({
         {credits ? <UsageMetric label="크레딧" value={credits} /> : null}
       </dl>
 
-      {primary || secondary ? (
+      {quotaWindows.length > 0 ? (
         <div className="grid gap-3 sm:grid-cols-2">
-          {primary ? <UsageWindow label="단기 한도" window={primary} /> : null}
-          {secondary ? (
+          {quotaWindows.map((window) => (
             <UsageWindow
-              label={driver === "codex" ? "주간 한도" : "장기 한도"}
-              window={secondary}
+              key={window.id}
+              label={driver === "codex" && window.id === "secondary" ? "주간 한도" : window.label}
+              window={{
+                label: window.label,
+                usedPercent: window.usedPercent,
+                ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
+              }}
             />
-          ) : null}
+          ))}
         </div>
       ) : (
         <p className="text-[10px] leading-relaxed text-muted-foreground">

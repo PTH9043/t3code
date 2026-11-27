@@ -20,10 +20,35 @@ export function workspaceSearchExpansion(task: string): ReadonlyArray<string> {
     additions.add("토큰");
     additions.add("사용량");
   }
+  if (/출장/u.test(task) && /숙박비|교통비|식비|일비|여비|한도/u.test(task)) {
+    additions.add("규정");
+  }
+  if (/(?:재정렬|리랭킹|순위\s*융합)/u.test(task)) {
+    additions.add("RRF");
+    additions.add("rerank");
+  }
+  if (/(?:후기\s*청킹|맥락\s*보존\s*청킹)/u.test(task)) {
+    additions.add("chunking");
+  }
   return [...additions];
 }
 
 export function workspaceRetrievalQuery(task: string): string {
   const expansion = workspaceSearchExpansion(task);
   return expansion.length ? `${expansion.join(" ")} ${task}` : task;
+}
+
+/**
+ * Decompose a multi-hop or comparative user question into bounded sub-queries
+ * so Agentic RAG map-reduce and sufficient-context checks can evaluate each facet.
+ */
+export function decomposeRetrievalSubQueries(task: string): ReadonlyArray<string> {
+  const normalized = task.replace(/\s+/gu, " ").trim();
+  if (!normalized) return [];
+  const clauses = normalized
+    .split(/\s*(?:그리고|또한|반면에?|및|(?<=[\p{L}\p{N}])와\/과|;|(?<=\?)\s+)\s*/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4);
+  if (clauses.length <= 1) return [normalized];
+  return [normalized, ...clauses.slice(0, 4)];
 }

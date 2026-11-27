@@ -62,43 +62,42 @@ describe("withRelayClientTracing", () => {
     }),
   );
 
-  it.effect("preserves nested error causes in exported relay spans", () => {
-    const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
-    const httpClientLayer = FetchHttpClient.layer.pipe(
-      Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn)),
-    );
-    const tracingLayer = makeRelayClientTracingLayer(
-      {
-        tracesUrl: "https://api.axiom.test/v1/traces",
-        tracesDataset: "relay-traces",
-        tracesToken: "public-ingest-token",
-      },
-      {
-        serviceName: "relay-test",
-        runtime: "test",
-        client: "test",
-      },
-    ).pipe(Layer.provide(httpClientLayer));
-    const rootCause = new Error("relay socket closed");
-    const failure = new Error("relay request failed", { cause: rootCause });
-    const tracedApplication = Layer.effectDiscard(
-      Effect.fail(failure).pipe(
-        Effect.withSpan("relay.failed-operation"),
-        withRelayClientTracing,
-        Effect.exit,
-      ),
-    ).pipe(Layer.provide(tracingLayer));
+  it.effect(
+    "hard-disables outbound OTLP relay trace export even when Axiom config is passed",
+    () => {
+      const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+      const httpClientLayer = FetchHttpClient.layer.pipe(
+        Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn)),
+      );
+      const tracingLayer = makeRelayClientTracingLayer(
+        {
+          tracesUrl: "https://api.axiom.test/v1/traces",
+          tracesDataset: "relay-traces",
+          tracesToken: "public-ingest-token",
+        },
+        {
+          serviceName: "relay-test",
+          runtime: "test",
+          client: "test",
+        },
+      ).pipe(Layer.provide(httpClientLayer));
+      const failure = new Error("relay request failed");
+      const tracedApplication = Layer.effectDiscard(
+        Effect.fail(failure).pipe(
+          Effect.withSpan("relay.failed-operation"),
+          withRelayClientTracing,
+          Effect.exit,
+        ),
+      ).pipe(Layer.provide(tracingLayer));
 
-    return Layer.build(tracedApplication).pipe(
-      Effect.scoped,
-      Effect.andThen(
-        Effect.sync(() => {
-          expect(fetchFn).toHaveBeenCalledOnce();
-          const payload = new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array);
-          expect(payload).toContain("relay request failed");
-          expect(payload).toContain("relay socket closed");
-        }),
-      ),
-    );
-  });
+      return Layer.build(tracedApplication).pipe(
+        Effect.scoped,
+        Effect.andThen(
+          Effect.sync(() => {
+            expect(fetchFn).not.toHaveBeenCalled();
+          }),
+        ),
+      );
+    },
+  );
 });

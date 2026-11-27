@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 
+import { cn } from "../lib/utils";
 import { RIGHT_PANEL_SHEET_CLASS_NAME } from "../rightPanelLayout";
 import { Sheet, SheetPopup } from "./ui/sheet";
 
@@ -21,7 +22,7 @@ export function RightPanelSheet(props: {
         side="right"
         showCloseButton={false}
         keepMounted
-        className={RIGHT_PANEL_SHEET_CLASS_NAME}
+        className={cn("h-full min-h-0", RIGHT_PANEL_SHEET_CLASS_NAME)}
       >
         {props.children}
       </SheetPopup>

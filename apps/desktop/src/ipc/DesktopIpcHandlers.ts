@@ -1,7 +1,11 @@
 import * as Effect from "effect/Effect";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
-import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
+import {
+  getClientSettings,
+  patchClientSettings,
+  setClientSettings,
+} from "./methods/clientSettings.ts";
 import {
   clearConnectionCatalog,
   getConnectionCatalog,
@@ -47,6 +51,8 @@ import {
 } from "./methods/window.ts";
 import * as PreviewIpc from "./methods/preview.ts";
 import * as JasnaIpc from "./methods/jasna.ts";
+import * as AssistantIpc from "./methods/assistant.ts";
+import * as AssistantVoiceIpc from "./methods/assistantVoice.ts";
 import {
   cancelGoogleSignIn,
   enrollGoogleToT3,
@@ -71,6 +77,21 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
 
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
+  yield* ipc.handle(patchClientSettings);
+  yield* ipc.handle(AssistantIpc.getSettings);
+  yield* ipc.handle(AssistantIpc.setSettings);
+  yield* ipc.handle(AssistantIpc.open);
+  yield* ipc.handle(AssistantIpc.close);
+  yield* ipc.handle(AssistantIpc.publishModelUpdate);
+  yield* ipc.handle(AssistantIpc.getModelSelection);
+  yield* ipc.handle(AssistantVoiceIpc.voiceStatus);
+  yield* ipc.handle(AssistantVoiceIpc.voiceRecordingBegin);
+  yield* ipc.handle(AssistantVoiceIpc.voiceRecordingEnd);
+  yield* ipc.handle(AssistantVoiceIpc.voiceRun);
+  yield* ipc.handle(AssistantVoiceIpc.voiceCancel);
+  yield* ipc.handle(AssistantVoiceIpc.voiceSampleSave);
+  yield* ipc.handle(AssistantVoiceIpc.voiceSampleBegin);
+  yield* ipc.handle(AssistantVoiceIpc.voiceSampleDelete);
   yield* ipc.handle(getConnectionCatalog);
   yield* ipc.handle(setConnectionCatalog);
   yield* ipc.handle(clearConnectionCatalog);

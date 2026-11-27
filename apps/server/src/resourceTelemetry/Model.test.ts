@@ -605,4 +605,83 @@ describe("resource telemetry process model", () => {
     expect(second.groups.backend.processStarts).toBe(3);
     expect(second.groups.backend.processExits).toBe(1);
   });
+
+  it("classifies agy.exe, cmd.exe, python.exe, and conhost.exe as agent CLI / terminal-tool even under Electron desktop tree", () => {
+    const electronStart = 10_000;
+    const result = merge({
+      native: nativeSnapshot(BASE_TIME_MS, [
+        processSample({
+          pid: 300,
+          ppid: 1,
+          startTimeMs: electronStart,
+          name: "electron.exe",
+          command: "C:\\T3\\electron.exe",
+        }),
+        processSample({
+          pid: SERVER_PID,
+          ppid: 300,
+          startTimeMs: electronStart + 100,
+          name: "node.exe",
+          command: "node apps/server/dist/index.mjs",
+        }),
+        processSample({
+          pid: 401,
+          ppid: SERVER_PID,
+          startTimeMs: electronStart + 200,
+          name: "agy.exe",
+          command: "C:\\Users\\user\\.antigravity\\agy.exe acp",
+        }),
+        processSample({
+          pid: 402,
+          ppid: SERVER_PID,
+          startTimeMs: electronStart + 300,
+          name: "cmd.exe",
+          command: "C:\\Windows\\System32\\cmd.exe /c dir",
+        }),
+        processSample({
+          pid: 403,
+          ppid: 402,
+          startTimeMs: electronStart + 400,
+          name: "python.exe",
+          command: "C:\\Python312\\python.exe runtime.py",
+        }),
+        processSample({
+          pid: 404,
+          ppid: 300,
+          startTimeMs: electronStart + 500,
+          name: "conhost.exe",
+          command: "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4",
+        }),
+        processSample({
+          pid: 405,
+          ppid: 300,
+          startTimeMs: electronStart + 600,
+          name: "electron.exe",
+          command:
+            "C:\\T3\\electron.exe --type=utility --utility-sub-type=network.mojom.NetworkService",
+        }),
+      ]),
+      desktop: desktopSnapshot(BASE_TIME_MS, [
+        electronMetric({
+          pid: 300,
+          creationTimeMs: electronStart,
+          type: "Browser",
+          name: "electron",
+        }),
+      ]),
+    });
+
+    const categoryOf = (pid: number) =>
+      result.processes.find((process) => process.identity.pid === pid)?.category;
+
+    expect(categoryOf(300)).toBe("electron-main");
+    expect(categoryOf(SERVER_PID)).toBe("server");
+    expect(categoryOf(401)).toBe("provider-root");
+    expect(categoryOf(402)).toBe("terminal-root");
+    expect(categoryOf(403)).toBe("terminal-root");
+    expect(categoryOf(404)).toBe("terminal-root");
+    expect(categoryOf(405)).toBe("electron-utility");
+    expect(result.groups.backend.processCount).toBe(5);
+    expect(result.groups.electron.processCount).toBe(2);
+  });
 });

@@ -6,7 +6,11 @@ import {
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mergeEnvironmentSettings, resolveEnvironmentIdentificationMode } from "./useSettings";
+import {
+  mergeEnvironmentSettings,
+  normalizeClientSettings,
+  resolveEnvironmentIdentificationMode,
+} from "./useSettings";
 
 describe("resolveEnvironmentIdentificationMode", () => {
   it("keeps identification hidden until client settings hydrate", () => {
@@ -75,5 +79,20 @@ describe("mergeEnvironmentSettings", () => {
 
     expect(settings.providerInstances).toBe(serverSettings.providerInstances);
     expect(settings.favorites).toBe(clientSettings.favorites);
+  });
+});
+
+describe("normalizeClientSettings", () => {
+  it("fills missing or undefined fields such as chatHorizontalInsetPx from defaults", () => {
+    const partial = { ...DEFAULT_CLIENT_SETTINGS } as Record<string, unknown>;
+    delete partial.chatHorizontalInsetPx;
+    expect(normalizeClientSettings(partial).chatHorizontalInsetPx).toBeNull();
+
+    const withUndefined = {
+      ...DEFAULT_CLIENT_SETTINGS,
+      chatHorizontalInsetPx: undefined,
+    } as unknown as Partial<typeof DEFAULT_CLIENT_SETTINGS>;
+    expect(normalizeClientSettings(withUndefined).chatHorizontalInsetPx).toBeNull();
+    expect(normalizeClientSettings({ chatHorizontalInsetPx: 48 }).chatHorizontalInsetPx).toBe(48);
   });
 });

@@ -1,31 +1,51 @@
+import { unifiedExecutionLedger } from "../../t3x/executionLedger/UnifiedExecutionLedger.ts";
+import { WorkerEngineService } from "../../t3x/workerEngine/WorkerEngineService.ts";
+import { WorkerEngineError } from "../../t3x/workerEngine/WorkerEngineStore.ts";
 import {
   graphRevisionCap,
   MAX_NODE_ATTEMPTS,
   INITIAL_PLAN_REVISION,
 } from "../workspaceGraphLimits.ts";
 import { compileWorkflowRun } from "../workspaceWorkflow.ts";
+import { tryExecuteWorkflowV2SpecialNode } from "../workflowV2Runtime.ts";
+import {
+  buildWorkflowAssignmentPrompt,
+  parseWorkflowAssignments,
+  parkRefusedWorkflowAssignment,
+  skipPendingWorkflowAssignments,
+  workflowNeedsAssignment,
+} from "../workspaceWorkflowAssignment.ts";
 import { withWorkspaceRunControl, workspaceRunControl } from "@t3tools/shared/workflow";
 import { WorkspaceWorkflowStore } from "../../persistence/WorkspaceWorkflowStore.ts";
 import { workspaceConversationThreadId } from "../workspaceConversationContext.ts";
 import { WorkspaceDevelopmentGit } from "../WorkspaceDevelopmentGit.ts";
-import { WorkspaceDevelopment } from "../WorkspaceDevelopment.ts";
 import { checkOrchestraDelivery } from "../WorkspaceOrchestraDelivery.ts";
 import { formatWorkspaceRunSummary } from "../workspaceRunSummary.ts";
+import { orchestraExecutionId, parsePersistentVerdict } from "../workspacePersistentRun.ts";
 import { buildMeetingIntakePrompt, parseMeetingIntakeOutput } from "../workspaceMeetingIntake.ts";
+import {
+  compactKnowledgeContent,
+  redactConversationRagSensitiveData,
+} from "../workspaceConversationRag.ts";
 import {
   CommandId,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+  EventId,
   MessageId,
   ThreadId,
   ProviderExecutionId,
+  ProviderDriverKind,
+  WorkspaceAgentControlError,
   WorkspaceKnowledgeItemId,
+  WorkspaceOrchestraBlock,
   WorkspaceTaskNodeId,
+  WorkspaceCollaborationRunId,
+  WorkflowGraphV2,
   type OrchestrationEvent,
   type OrchestrationThread,
   type ProjectId,
   type WorkspaceAgentRoleBinding,
   type WorkspaceCollaborationRun,
-  type WorkspaceCollaborationRunId,
   type WorkspaceCollaborationStep,
   type WorkspaceFailureClassification,
   type WorkspaceMeeting,
@@ -35,6 +55,11 @@ import {
   type WorkspaceTaskNode,
   type WorkspaceTaskValidationReceipt,
 } from "@t3tools/contracts";
+import { resolveEffectiveGlobalAssistant, resolveResponseStyle } from "@t3tools/contracts/settings";
+import {
+  compileGlobalAssistantPrompts,
+  GLOBAL_FACTUALITY_GUARD,
+} from "@t3tools/shared/globalAssistantPrompt";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Data from "effect/Data";
@@ -47,6 +72,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
@@ -60,7 +86,16 @@ import {
 } from "../workspaceContextArtifacts.ts";
 import { renderCompactMeetingContext } from "../workspaceMeetingContext.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
+import {
+  isWorkspaceProviderUnavailable,
+  workspaceProviderUnavailableMessage,
+} from "../workspaceProviderAvailability.ts";
+import { windowsAgentInstructions } from "../../provider/windowsAgentInstructions.ts";
+import { naturalWritingStyle } from "../naturalWritingStyle.ts";
+import { threadResponseStylePrompt } from "../threadResponseStyle.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { planWorkspaceUsageRecovery } from "../workspaceUsageRecovery.ts";
+import { isProviderContentRefusalOutput } from "../../provider/providerContentRefusal.ts";
 import { WorkspaceAgentControl } from "../WorkspaceAgentControl.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { toAgentKnowledgeCaptures } from "../workspaceAgentKnowledge.ts";
@@ -69,15 +104,25 @@ import {
   buildMeetingPlanPrompt,
   buildMeetingStatementPrompt,
   isNodeInterventionQuestion,
+  isNodeSeatSelectionQuestion,
   isProviderContentRefusal,
   meetingAssignmentRoute,
   nextMeetingStep,
   NODE_INTERVENTION_OPTIONS,
+  NODE_REFUSAL_OPTIONS,
   nodeInterventionQuestion,
+  nodeProviderUnavailableQuestion,
+  nodeRequestFormatQuestion,
+  nodeInputDataQuestion,
+  nodeDeliveryUnconfirmedQuestion,
   nodeRefusalQuestion,
+  nodeSeatSelectionOptions,
+  nodeSeatSelectionQuestion,
   parseChairVerdict,
   parseMeetingQuestion,
   parseNodeInterventionDecision,
+  parseNodeRefusalDecision,
+  parseNodeSeatSelectionDecision,
   parseStatementRespondsTo,
   renderMeetingTranscript,
   resolveChairParticipantId,
@@ -100,11 +145,13 @@ import {
   grantsFreeRetryAfterInterruption,
   INTERRUPTED_TURN_ERROR_SUFFIX,
   materializeWorkspaceTaskGraphPlan,
+  normalizeStoppedRecoveryPlan,
   parseWorkspaceSynthesisPayload,
   parseWorkspaceTaskGraphProposal,
   parseWorkspaceValidationDecision,
   readyWorkspaceTaskNodes,
   selectGraphWaveNodes,
+  STOPPED_RECOVERY_CONSTRAINT,
   refreshWorkspaceTaskGraphQueue,
   WorkspaceTaskGraphError,
   type WorkspaceMeetingPlanContext,
@@ -118,8 +165,14 @@ import { WorkspaceWorktreeCleanup } from "./WorkspaceWorktreeCleanup.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationTurnWait } from "../Services/OrchestrationTurnWait.ts";
 import {
+  formatBillingErrorMessage,
+  isNonRetryableBillingError,
+  isNonRetryableWorkerError,
+} from "../../provider/workerFailurePolicy.ts";
+import {
   WorkspaceAgentExecutionError,
   WorkspaceAgentExecutor,
+  type WorkspaceAgentExecutionInput,
 } from "../Services/WorkspaceAgentExecutor.ts";
 import {
   formatRepairDigest,
@@ -127,9 +180,26 @@ import {
   verifiedFormatRepairOutput,
   workspaceExecutionMessageId,
 } from "../workspaceFormatRepair.ts";
-import { orchestraWorkerCandidates, seatAssignedWorkers } from "../workspaceOrchestraRoster.ts";
+import {
+  meetingWithAuthorizedSeats,
+  orchestraWorkerCandidates,
+  seatAssignedWorkers,
+} from "../workspaceOrchestraRoster.ts";
+import {
+  classifyDeterministicWorkspaceFailure,
+  isDeterministicWorkspaceRequestFailure,
+} from "../workspaceTaskFailure.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceMemory } from "../WorkspaceMemory.ts";
+import { WatchdogRuntime, cancelWatchdogsForRun } from "../WatchdogRuntime.ts";
+import {
+  WATCHDOG_PROJECTION_CONSUMER,
+  executeDetachedWatchdog,
+  resumeDetachedWatchdog,
+} from "../WatchdogExecutor.ts";
+import { UPGRADE_ROOM_RUN_ID } from "../UpgradeRoomTurns.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "../../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import {
   WorkspaceCollaborationReactor,
   type WorkspaceCollaborationReactorShape,
@@ -210,10 +280,34 @@ const STRUCTURED_NODE_KINDS: ReadonlyArray<WorkspaceTaskNode["kind"]> = [
 ];
 
 function meetingPlanContext(meeting: WorkspaceMeeting): WorkspaceMeetingPlanContext {
+  const authorized = meetingWithAuthorizedSeats(meeting);
   return {
-    participantIds: meeting.participants.map((participant) => participant.id),
-    chairParticipantId: resolveChairParticipantId(meeting),
+    participantIds: authorized.participants.map((participant) => participant.id),
+    chairParticipantId: resolveChairParticipantId(authorized),
   };
+}
+
+function answeredSeatSelectionNode(
+  meeting: WorkspaceMeeting,
+  graph: WorkspaceTaskGraph,
+): WorkspaceTaskNode | undefined {
+  const answer = meeting.answers.at(-1);
+  if (answer === undefined || !isNodeSeatSelectionQuestion(answer.question)) return undefined;
+  const matching = graph.nodes.filter(
+    (node) =>
+      node.status === "awaiting-user" &&
+      node.parkedQuestion === null &&
+      (answer.nodeId === null || node.id === answer.nodeId) &&
+      answer.question === nodeSeatSelectionQuestion(node.title),
+  );
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+function hasPendingSeatSelectionAnswer(
+  meeting: WorkspaceMeeting,
+  graph: WorkspaceTaskGraph,
+): boolean {
+  return answeredSeatSelectionNode(meeting, graph) !== undefined;
 }
 
 function replaceStep(
@@ -266,12 +360,21 @@ function graphCompatibilitySteps(
     .toSorted((left, right) => left.order - right.order || left.id.localeCompare(right.id))
     .map((node, index) => {
       const attempt = node.attempts.at(-1);
-      const route = resolveNodeAssignmentRoute({ node, meeting, bindings });
+      const unassigned =
+        node.participantId === null &&
+        meeting !== null &&
+        (graph.workflowAssignment?.pendingNodeIds.includes(node.id) === true ||
+          (node.status === "skipped" && graph.workflowSkippedNodeIds?.includes(node.id) === true));
+      const route = unassigned
+        ? meetingAssignmentRoute(meeting, resolveChairParticipantId(meeting))
+        : resolveNodeAssignmentRoute({ node, meeting, bindings });
       if (attempt === undefined && route === null) {
         throw new WorkspaceTaskGraphError(
-          node.participantId === null
-            ? `Missing enabled binding for role '${node.role}'.`
-            : `Missing meeting participant '${node.participantId}'.`,
+          node.participantId === null && meeting !== null
+            ? `통합 작업 단계 '${node.id}'에 선택된 참가자가 없습니다.`
+            : node.participantId === null
+              ? `Missing enabled binding for role '${node.role}'.`
+              : `Missing meeting participant '${node.participantId}'.`,
         );
       }
       return {
@@ -283,7 +386,7 @@ function graphCompatibilitySteps(
               ? "kickoff"
               : "contribution",
         role: node.role,
-        displayName: route?.displayName ?? node.title,
+        displayName: unassigned ? "담당 미정" : (route?.displayName ?? node.title),
         modelSelection: attempt?.modelSelection ?? route!.modelSelection,
         runtimeMode: attempt?.runtimeMode ?? route!.runtimeMode,
         interactionMode: attempt?.interactionMode ?? route!.interactionMode,
@@ -360,6 +463,10 @@ function terminalAssistantOutput(thread: OrchestrationThread): string {
   return text.length > 0 ? text : "Agent completed without a textual handoff.";
 }
 
+const decodeMemoryReceipt = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ id: Schema.String, saved: Schema.Boolean })),
+);
+
 function conciseCause(cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);
   const message = error instanceof Error ? error.message : String(error);
@@ -367,12 +474,48 @@ function conciseCause(cause: Cause.Cause<unknown>): string {
 }
 
 export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
+  const platform = yield* HostProcessPlatform;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const turnWait = yield* OrchestrationTurnWait;
   const agentExecutor = yield* Effect.serviceOption(WorkspaceAgentExecutor);
+  const workerEngineOpt = yield* Effect.serviceOption(WorkerEngineService);
   const memory = yield* Effect.serviceOption(WorkspaceMemory);
   const agentControl = yield* Effect.serviceOption(WorkspaceAgentControl);
-  const development = yield* Effect.serviceOption(WorkspaceDevelopment);
+  const watchdogRuntime = yield* Effect.serviceOption(WatchdogRuntime);
+  const watchdogSettings = yield* Effect.serviceOption(ServerSettingsService);
+  const unconfirmedInstructionNotice = (
+    run: WorkspaceCollaborationRun,
+    nodeId?: WorkspaceTaskNodeId,
+  ) =>
+    Option.isNone(agentControl)
+      ? Effect.succeed("")
+      : agentControl.value
+          .unconfirmedInstructions({
+            projectId: run.projectId,
+            runId: run.id,
+            ...(nodeId === undefined ? {} : { nodeId }),
+          })
+          .pipe(
+            Effect.map((records) =>
+              records.length === 0
+                ? ""
+                : [
+                    `작업자 처리 확인이 없는 지시 ${records.length}건:`,
+                    ...records.map(
+                      (record) =>
+                        `- 받는 작업 ${record.target} · ${record.title} · 상태 ${record.status} · 기록 ${record.id}`,
+                    ),
+                    "이 목록에는 원문이 포함되지 않았습니다. 메시지함의 원문과 확인 상태를 살펴봐야 하며, 제공자 수락은 작업자가 처리했다는 증거가 아닙니다.",
+                  ].join("\n"),
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning("작업자 메시지 확인 상태 조회 실패", { error: error.message }).pipe(
+                Effect.as(
+                  "작업자 메시지 확인 상태를 조회하지 못했습니다. 처리 여부는 미확인입니다.",
+                ),
+              ),
+            ),
+          );
   const deliveryGit = yield* Effect.serviceOption(WorkspaceDevelopmentGit);
   const artifactConfig = yield* Effect.serviceOption(ServerConfig);
   const artifactFs = yield* Effect.serviceOption(FileSystem.FileSystem);
@@ -406,27 +549,85 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     "<t3_folder_history_unclassified>이전 협업 결과와 지속 작업 상태는 당시 폴더 범위를 확인할 수 없어 자동으로 포함하지 않았습니다. 현재 작업 폴더의 확인 여부와는 별개이며, 기존 기록은 보존됩니다. 해당 상태를 확인했다고 추측하지 마세요.</t3_folder_history_unclassified>";
 
   const withRequiredDirectives = Effect.fn("WorkspaceCollaborationReactor.withRequiredDirectives")(
-    function* (run: WorkspaceCollaborationRun, prompt: string) {
+    function* (
+      run: WorkspaceCollaborationRun,
+      prompt: string,
+      userFacing = false,
+      applyResponseStyle = false,
+    ) {
       const unavailable =
         "<t3_memory_unavailable>사용자 필수 지침을 불러오지 못했습니다. 지침을 읽었다고 추측하지 말고 이 사실을 알리세요.</t3_memory_unavailable>";
       const folder = yield* resolveRunFolder(run);
       const directives = Option.isNone(memory)
         ? unavailable
-        : yield* memory.value.context(run.projectId, run.task, true).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("Could not prepare collaboration user directives", {
-                cause,
-              }).pipe(Effect.as(unavailable)),
-            ),
-          );
+        : yield* memory.value
+            .context(run.projectId, run.task, true, undefined, {
+              // The composed workspace prompt already carries the directives it
+              // selected; repeating them only spends input tokens on every node.
+              presentIn: prompt,
+              ...(folder.paths !== undefined && !folder.unavailable
+                ? { folderPaths: folder.paths }
+                : {}),
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not prepare collaboration user directives", {
+                  cause,
+                }).pipe(Effect.as(unavailable)),
+              ),
+            );
       const scopedConversation = yield* loadScopedConversation(run, folder.unavailable);
+      const workflowStyle = run.workflow?.responseStyle;
+      const capturedStyle =
+        workflowStyle === undefined ? run.runContext?.responseStyle : workflowStyle;
+      const liveSettings = Option.isSome(watchdogSettings)
+        ? yield* watchdogSettings.value.getSettings.pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not load global assistant settings", { cause }).pipe(
+                Effect.as(undefined),
+              ),
+            ),
+          )
+        : undefined;
+      const effectiveGlobal = liveSettings
+        ? resolveEffectiveGlobalAssistant(liveSettings)
+        : resolveEffectiveGlobalAssistant({ globalResponseStyle: capturedStyle ?? null });
+      const compiledGlobal = compileGlobalAssistantPrompts(effectiveGlobal, {
+        userMessage: run.task,
+      });
+      const fallbackLegacyStyle =
+        !compiledGlobal.active && applyResponseStyle
+          ? threadResponseStylePrompt(
+              capturedStyle !== undefined
+                ? capturedStyle
+                : liveSettings
+                  ? resolveResponseStyle(liveSettings, run.meeting?.threadId).style
+                  : null,
+            )
+          : undefined;
+      const writingStyleBlock = userFacing
+        ? compiledGlobal.suppressDefaultNaturalWriting
+          ? GLOBAL_FACTUALITY_GUARD
+          : naturalWritingStyle
+        : "";
+      const globalUserFacingBlocks = applyResponseStyle
+        ? compiledGlobal.active
+          ? [compiledGlobal.systemInstructions ?? "", compiledGlobal.playbookBlock ?? ""]
+          : [fallbackLegacyStyle ?? ""]
+        : [compiledGlobal.subordinatePrinciplesBlock ?? ""];
+      const recencyAnchorBlock =
+        applyResponseStyle && compiledGlobal.active ? (compiledGlobal.recencyAnchor ?? "") : "";
       return [
         prompt,
+        writingStyleBlock,
+        ...globalUserFacingBlocks,
+        windowsAgentInstructions(platform),
         directives,
         scopedConversation && !prompt.includes(scopedConversation) ? scopedConversation : "",
         folder.unavailable && !prompt.includes("<t3_folder_memory_unavailable>")
           ? folderUnavailable
           : "",
+        recencyAnchorBlock,
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -479,14 +680,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     },
   );
 
-  const getWorkspaceSemaphore = (projectId: ProjectId) =>
+  const getWorkspaceSemaphore = (key: string) =>
     SynchronizedRef.modifyEffect(workspaceLocksRef, (current) => {
-      const existing = current.get(projectId);
+      const existing = current.get(key);
       if (existing !== undefined) return Effect.succeed([existing, current] as const);
       return Semaphore.make(1).pipe(
         Effect.map((semaphore) => {
           const next = new Map(current);
-          next.set(projectId, semaphore);
+          next.set(key, semaphore);
           return [semaphore, next] as const;
         }),
       );
@@ -514,6 +715,37 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       run,
     });
     const stored = yield* getRun({ projectId: run.projectId, runId: run.id });
+    if (
+      Option.isSome(watchdogRuntime) &&
+      stored.meeting?.threadId &&
+      ["completed", "failed", "cancelled"].includes(stored.status)
+    ) {
+      const journal = watchdogRuntime.value.journal;
+      const threadId = stored.meeting.threadId;
+      yield* Effect.sync(() => cancelWatchdogsForRun(journal, threadId, stored.id)).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("종료된 작업의 감시 중지 요청을 기록하지 못했습니다", {
+                runId: stored.id,
+                cause: conciseCause(cause),
+              }),
+        ),
+      );
+    }
+    if (
+      run.status === "completed" &&
+      stored.status === "running" &&
+      stored.meeting?.pendingSupervisorReview === true
+    ) {
+      // Publish the projected state too: the completion raced with a new
+      // instruction, so subscribers must see that review is still pending.
+      yield* orchestrationEngine.dispatch({
+        type: "project.collaboration.run.update",
+        commandId: CommandId.make(yield* randomUUID),
+        run: stored,
+      });
+    }
     if (Option.isSome(agentControl))
       yield* agentControl.value.reports(stored).pipe(
         Effect.catchCause((cause) =>
@@ -564,6 +796,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }
     return result;
   });
+  const runWorkspaceCwd = Effect.fn("WorkspaceCollaborationReactor.runWorkspaceCwd")(function* (
+    run: WorkspaceCollaborationRun,
+  ) {
+    const project = yield* projectionSnapshotQuery.getProjectShellById(run.projectId);
+    if (Option.isNone(project))
+      return yield* executionError("오케스트라 프로젝트를 찾을 수 없습니다.");
+    const threadId = workspaceConversationThreadId(run);
+    if (!threadId) return project.value.workspaceRoot;
+    const thread = yield* loadThread({ projectId: run.projectId, runId: run.id }, threadId);
+    return Option.isSome(thread)
+      ? (thread.value.worktreePath ?? project.value.workspaceRoot)
+      : project.value.workspaceRoot;
+  });
 
   const resolveRunFolder = Effect.fn("WorkspaceCollaborationReactor.resolveRunFolder")(function* (
     run: WorkspaceCollaborationRun,
@@ -602,8 +847,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     function* (run: WorkspaceCollaborationRun, unavailable: boolean) {
       const threadId = workspaceConversationThreadId(run);
       if (threadId === null) return "";
-      if (unavailable || Option.isNone(memory)) return folderUnavailable;
       const thread = yield* loadThread({ projectId: run.projectId, runId: run.id }, threadId);
+      const request = Option.isSome(thread)
+        ? thread.value.messages.find(
+            (entry) => entry.id === `workflow-request:${run.id}` && entry.role === "user",
+          )
+        : undefined;
+      const currentRequest = request?.text
+        ? `<t3_current_user_request>\n현재 사용자가 이 작업에 직접 입력한 지시이며, 과거 기억이나 기존 작업 설명보다 우선합니다.\n${request.text}\n</t3_current_user_request>`
+        : "";
+      if (unavailable || Option.isNone(memory))
+        return [currentRequest, folderUnavailable].filter(Boolean).join("\n\n");
       const message = Option.isSome(thread)
         ? thread.value.messages
             .filter(
@@ -612,7 +866,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             )
             .at(-1)
         : undefined;
-      if (!message) return folderUnavailable;
+      if (!message) return [currentRequest, folderUnavailable].filter(Boolean).join("\n\n");
       const context = yield* memory.value
         .context(run.projectId, run.task, false, {
           threadId,
@@ -626,7 +880,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             }).pipe(Effect.as(folderUnavailable)),
           ),
         );
-      return `${context}\n\n${unscopedWorkUnavailable}`;
+      return [currentRequest, context, unscopedWorkUnavailable].filter(Boolean).join("\n\n");
     },
   );
 
@@ -643,7 +897,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     const composeWithoutFolder = folder.unavailable && Option.isNone(memory);
     if (folder.unavailable && !composeWithoutFolder) {
       return {
-        prompt: `${run.task}\n\n${folderUnavailable}`,
+        prompt: [run.task, conversation || folderUnavailable].filter(Boolean).join("\n\n"),
         sourceItemIds: [],
         sourceReferences: [],
         ragMatches: [],
@@ -651,26 +905,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         truncated: false,
       };
     }
-    const workflowContext = Option.isSome(development)
-      ? yield* development.value
-          .workflowContext(
-            run.projectId,
-            workspaceConversationThreadId(run) ?? run.runContext?.threadId ?? ThreadId.make(run.id),
-          )
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not prepare the persistent workspace goal context", {
-                cause,
-              }).pipe(Effect.as("")),
-            ),
-          )
-      : "";
-    const task = [run.task, workflowContext]
-      .filter((value) => value.trim().length > 0)
-      .join("\n\n");
     const result = yield* compose({
       projectId: run.projectId,
-      task,
+      task: run.task,
       includeShared: false,
       includeSharedLibrary: false,
       ...(folder.unavailable || folder.paths === undefined ? {} : { contextPaths: folder.paths }),
@@ -679,7 +916,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       includeWorkingMemory: true,
       includeLongTermMemory: true,
       ragLimit: 12,
-      maxContextChars: 40_000,
+      maxContextChars: 24_000,
     });
     return conversation ? { ...result, prompt: `${result.prompt}\n\n${conversation}` } : result;
   });
@@ -820,12 +1057,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       if (input.step.threadId === null) {
         return yield* executionError("Running collaboration step has no thread id.");
       }
+      const unavailable = yield* workspaceProviderUnavailableMessage({
+        registry: providerInstanceRegistry,
+        modelSelection: input.step.modelSelection,
+        role: input.step.role,
+      });
+      if (unavailable !== null) return yield* executionError(unavailable);
       const instance = yield* providerInstanceRegistry.getInstance(
         input.step.modelSelection.instanceId,
       );
       if (instance === undefined || !instance.enabled) {
         return yield* executionError(
-          `Provider instance '${input.step.modelSelection.instanceId}' assigned to role '${input.step.role}' is unavailable.`,
+          "선택한 AI 연결을 사용할 수 없습니다. 작업 중 연결이 변경되었습니다. 설정에서 확인하세요.",
         );
       }
       const expectedDriver =
@@ -885,7 +1128,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           startedAt: input.step.startedAt ?? input.run.createdAt,
         };
         let ownsDelivery = false;
-        const executionId = `orchestra:${input.run.id}:${nodeId}:${attempt.number}`;
+        const executionId = orchestraExecutionId(input.run, nodeId, attempt.number);
         const recordDelivery = (phase: "submitting" | "accepted" | "stopped", confirmed = false) =>
           Effect.gen(function* () {
             yield* orchestrationEngine.dispatch({
@@ -908,115 +1151,190 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 }),
             ),
           );
-        return yield* agentExecutor.value
-          .execute({
-            ...(input.run.workflow
-              ? {
-                  skills:
-                    input.run.workflow.nodeSkills.find((entry) => entry.nodeId === nodeId)
-                      ?.skills ?? [],
-                  skillDriver: instance.driverKind,
-                  allowAdditionalSkillWorkers: input.run.meeting?.allowAdditionalWorkers === true,
-                }
-              : {}),
-            ...(input.run.workflow || (workflowStore && input.node !== undefined)
-              ? {
-                  onBeforeSubmit: Effect.gen(function* () {
-                    if (!workflowStore)
-                      return yield* new WorkspaceAgentExecutionError({
-                        message: "워크플로 전달 기록 서비스를 사용할 수 없습니다.",
-                      });
-                    const safe = yield* workflowStore
-                      .retrySafe(
-                        input.run.id,
-                        String(nodeId),
-                        !input.run.workflow && attempt.number > 1,
-                      )
-                      .pipe(
-                        Effect.mapError(
-                          (error) => new WorkspaceAgentExecutionError({ message: error.message }),
-                        ),
-                      );
-                    if (!safe)
-                      return yield* new WorkspaceAgentExecutionError({
-                        message:
-                          "이전 입력의 전달·종료가 미확인입니다. 자동 재전송을 중단했습니다.",
-                      });
-                    yield* recordDelivery("submitting");
-                    ownsDelivery = true;
-                  }),
-                  submitWithGate: (submit) =>
-                    Effect.gen(function* () {
-                      const current = yield* getRun(runRef).pipe(
-                        Effect.mapError(
-                          (error) => new WorkspaceAgentExecutionError({ message: error.message }),
-                        ),
-                      );
-                      if (current.status === "cancel-requested" || current.status === "cancelled")
-                        return yield* new WorkspaceAgentExecutionError({
-                          message: "사용자가 실행을 중단했습니다.",
-                          interrupted: true,
-                        });
-                      return yield* submit;
-                    }),
-                  onInputAccepted: () => recordDelivery("accepted"),
-                  onSessionStopped: (confirmed) =>
-                    ownsDelivery ? recordDelivery("stopped", confirmed) : Effect.void,
-                }
-              : {}),
-            orchestraPhase: input.node === undefined ? "step" : "task",
-            execution: {
-              executionId: ProviderExecutionId.make(
-                `orchestra:${input.run.id}:${nodeId}:${attempt.number}`,
-              ),
-              ownerThreadId: input.step.threadId,
-              runId: input.run.id,
-              nodeId,
-              attempt: attempt.number,
-            },
-            modelSelection: input.step.modelSelection,
-            ...(attempt.number > 1
-              ? {
-                  resumeFromSessionKey: ThreadId.make(
-                    `orchestra:${input.run.id}:${nodeId}:${attempt.number - 1}`,
-                  ),
-                }
-              : {}),
-            runtimeMode: input.step.runtimeMode,
-            interactionMode: input.step.interactionMode,
-            prompt: yield* withRequiredDirectives(
-              input.run,
-              (input.run.workflow?.requestMode ?? input.run.runContext?.requestMode) === "ask-first"
-                ? `[질문 먼저] 이 작업의 현재 계획과 확인한 사실을 간단히 설명하고, 아직 승인되지 않은 조건은 기본 질문 도구(Codex request_user_input, Claude AskUserQuestion)의 카드로 물어보고 답변을 기다린다. 이미 승인된 조건은 유지하고 다시 묻지 않는다. 질문·권한·계획 모드를 바꾸지 않는다.\n\n${input.prompt}`
-                : input.prompt,
-            ),
-            cwd: input.worktree?.worktreePath ?? project.value.workspaceRoot,
-            title: input.node?.title ?? input.title,
-            displayName: input.step.displayName,
-            instruction: (input.node === undefined
-              ? input.run.task
-              : `${input.node.handoff.task}\n\n완료 기준:\n${input.node.handoff.successCriteria.map((criterion) => `- ${criterion}`).join("\n")}`
-            ).slice(0, 20_000),
-            role: input.node?.role ?? input.step.role,
-            kind:
-              input.node?.kind ??
-              (input.step.phase === "kickoff"
-                ? "orchestration"
-                : input.step.phase === "finalization"
-                  ? "synthesis"
-                  : "implementation"),
-            ...(input.usageContext === undefined ? {} : { usagePhase: input.usageContext.phase }),
-            startedAt: attempt.startedAt,
-          })
-          .pipe(
-            Effect.mapError(
-              (error) =>
-                new WorkspaceCollaborationExecutionError({
-                  message: error.message,
-                  ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
+        const executionInput: WorkspaceAgentExecutionInput = {
+          ...(input.run.workflow
+            ? {
+                skills:
+                  input.run.workflow.nodeSkills.find((entry) => entry.nodeId === nodeId)?.skills ??
+                  [],
+                skillDriver: instance.driverKind,
+                // A provider's child agent is not an additional meeting participant.
+                allowAdditionalSkillWorkers: true,
+              }
+            : {}),
+          ...(input.run.workflow || (workflowStore && input.node !== undefined)
+            ? {
+                onBeforeSubmit: Effect.gen(function* () {
+                  if (!workflowStore)
+                    return yield* new WorkspaceAgentExecutionError({
+                      message: "워크플로 전달 기록 서비스를 사용할 수 없습니다.",
+                    });
+                  const safe = yield* workflowStore
+                    .retrySafe(
+                      input.run.id,
+                      String(nodeId),
+                      !input.run.workflow && attempt.number > 1,
+                    )
+                    .pipe(
+                      Effect.mapError(
+                        (error) => new WorkspaceAgentExecutionError({ message: error.message }),
+                      ),
+                    );
+                  if (!safe)
+                    return yield* new WorkspaceAgentExecutionError({
+                      message: "이전 입력의 전달·종료가 미확인입니다. 자동 재전송을 중단했습니다.",
+                    });
+                  yield* recordDelivery("submitting");
+                  ownsDelivery = true;
                 }),
-            ),
-          );
+                submitWithGate: (submit) =>
+                  Effect.gen(function* () {
+                    const current = yield* getRun(runRef).pipe(
+                      Effect.mapError(
+                        (error) => new WorkspaceAgentExecutionError({ message: error.message }),
+                      ),
+                    );
+                    if (current.status === "cancel-requested" || current.status === "cancelled")
+                      return yield* new WorkspaceAgentExecutionError({
+                        message: "사용자가 실행을 중단했습니다.",
+                        interrupted: true,
+                      });
+                    return yield* submit;
+                  }),
+                onInputAccepted: () => recordDelivery("accepted"),
+                onSessionStopped: (confirmed) =>
+                  ownsDelivery ? recordDelivery("stopped", confirmed) : Effect.void,
+              }
+            : {}),
+          orchestraPhase: input.node === undefined ? "step" : "task",
+          execution: {
+            executionId: ProviderExecutionId.make(executionId),
+            ownerThreadId: input.step.threadId,
+            runId: input.run.id,
+            nodeId,
+            attempt: attempt.number,
+          },
+          modelSelection: input.step.modelSelection,
+          ...(attempt.number > 1
+            ? {
+                resumeFromSessionKey: ThreadId.make(
+                  orchestraExecutionId(input.run, nodeId, attempt.number - 1),
+                ),
+              }
+            : {}),
+          runtimeMode: input.step.runtimeMode,
+          interactionMode: input.step.interactionMode,
+          prompt: yield* withRequiredDirectives(
+            input.run,
+            (input.run.workflow?.requestMode ?? input.run.runContext?.requestMode) === "ask-first"
+              ? `[질문 먼저] 이 작업의 현재 계획과 확인한 사실을 간단히 설명하고, 아직 승인되지 않은 조건은 기본 질문 도구(Codex request_user_input, Claude AskUserQuestion)의 카드로 물어보고 답변을 기다린다. 이미 승인된 조건은 유지하고 다시 묻지 않는다. 질문·권한·계획 모드를 바꾸지 않는다.\n\n${input.prompt}`
+              : input.prompt,
+            input.node?.kind === "synthesis" ||
+              (input.node === undefined && input.step.phase === "finalization"),
+            input.node?.kind === "synthesis" ||
+              (input.node === undefined && input.step.phase === "finalization"),
+          ),
+          cwd:
+            input.worktree?.worktreePath ??
+            thread.value.worktreePath ??
+            project.value.workspaceRoot,
+          title: input.node?.title ?? input.title,
+          displayName: input.step.displayName,
+          instruction: (input.node === undefined
+            ? input.run.task
+            : `${input.node.handoff.task}\n\n완료 기준:\n${input.node.handoff.successCriteria.map((criterion) => `- ${criterion}`).join("\n")}`
+          ).slice(0, 20_000),
+          role: input.node?.role ?? input.step.role,
+          kind:
+            input.node?.kind ??
+            (input.step.phase === "kickoff"
+              ? "orchestration"
+              : input.step.phase === "finalization"
+                ? "synthesis"
+                : "implementation"),
+          ...(input.usageContext === undefined ? {} : { usagePhase: input.usageContext.phase }),
+          startedAt: attempt.startedAt,
+        };
+
+        const runExecution = Option.isSome(workerEngineOpt)
+          ? workerEngineOpt.value
+              .runAndCollect(
+                {
+                  runId: input.run.id,
+                  threadId: input.step.threadId,
+                  callerKind: "orchestra",
+                  role: executionInput.role,
+                  targetInstanceId: executionInput.modelSelection.instanceId,
+                  targetModel: executionInput.modelSelection.model,
+                  specText: (executionInput.instruction ?? input.run.task).slice(0, 4_000),
+                  cwd: executionInput.cwd,
+                  worktreeMode: input.worktree ? "isolated" : "current",
+                },
+                {
+                  dispatchId: executionId,
+                  allowDuplicate: true,
+                  maxRunningPerThread: 32,
+                  skipLedger: true,
+                  ...(input.worktree
+                    ? {
+                        externalWorktree: {
+                          worktreePath: input.worktree.worktreePath,
+                          worktreeBranch: input.worktree.branch,
+                        },
+                      }
+                    : {}),
+                  runner: (req) =>
+                    agentExecutor.value
+                      .execute({
+                        ...executionInput,
+                        onRuntimeEvent: (event) => {
+                          const base = executionInput.onRuntimeEvent
+                            ? executionInput.onRuntimeEvent(event)
+                            : Effect.void;
+                          return base.pipe(
+                            Effect.andThen(req.onActivity(event.type)),
+                            Effect.ignore,
+                          );
+                        },
+                      })
+                      .pipe(
+                        Effect.map((resultText) => ({
+                          resultText,
+                          summary: resultText.slice(0, 400),
+                          exitCode: 0,
+                        })),
+                        Effect.mapError(
+                          (err) =>
+                            new WorkerEngineError({
+                              code: err.interrupted ? "conflict" : "invalid_state",
+                              message: err.message,
+                              details: { interrupted: err.interrupted === true },
+                            }),
+                        ),
+                      ),
+                },
+              )
+              .pipe(
+                Effect.map((res) => res.resultText),
+                Effect.mapError(
+                  (error) =>
+                    new WorkspaceCollaborationExecutionError({
+                      message: error.message,
+                      ...(error.details?.interrupted === true ? { interrupted: true } : {}),
+                    }),
+                ),
+              )
+          : agentExecutor.value.execute(executionInput).pipe(
+              Effect.mapError(
+                (error) =>
+                  new WorkspaceCollaborationExecutionError({
+                    message: error.message,
+                    ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
+                  }),
+              ),
+            );
+
+        return yield* runExecution;
       }
       if (
         input.worktree !== undefined &&
@@ -1152,6 +1470,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               origin: capture.item.origin,
               relativeFolder: capture.item.relativeFolder,
               tags: capture.item.tags,
+              ...(capture.item.provenance ? { provenance: capture.item.provenance } : {}),
               originalChars: capture.originalChars,
               storedChars: capture.storedChars,
               createdAt: capture.item.createdAt,
@@ -1224,6 +1543,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           status: "active",
           origin: "agent",
           relativeFolder: "collaboration-runs",
+          provenance: {
+            runId: run.id,
+            ...(run.meeting?.threadId ? { threadId: run.meeting.threadId } : {}),
+          },
           tags: ["collaboration", "run-memory"],
           createdAt: run.updatedAt,
         });
@@ -1243,6 +1566,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               status: candidate.confidence === "high" ? "active" : "candidate",
               origin: "agent",
               relativeFolder: "collaboration-memory",
+              provenance: {
+                runId: run.id,
+                nodeIds: candidate.sourceNodeIds,
+                confidence: candidate.confidence,
+                ...(candidate.sourceNodeIds.length === 1
+                  ? { nodeId: candidate.sourceNodeIds[0]! }
+                  : {}),
+              },
               tags: [
                 "collaboration",
                 "memory-candidate",
@@ -1266,19 +1597,105 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       ),
     );
 
+  const recordRunProgress = (
+    run: WorkspaceCollaborationRun,
+    status: "continue" | "blocked" | "complete",
+    summary: string,
+    nextTask?: string,
+  ) =>
+    Effect.gen(function* () {
+      const threadId = run.meeting?.threadId;
+      if (!threadId) return;
+      if (Option.isNone(memory))
+        return yield* executionError("폴더 기억 서비스를 사용할 수 없습니다.");
+      const settings = yield* resolveAgentKnowledgeSettings(run.projectId);
+      if (!settings.enabled) return;
+      const cycle = run.meeting?.continuation?.cycle ?? 0;
+      const text = compactKnowledgeContent(
+        [
+          `사용자 요청: ${run.task}`,
+          `작업 상태: ${status}`,
+          `감독 AI의 보고(별도 확인 필요): ${summary}`,
+          ...(nextTask ? [`남은 작업: ${nextTask}`] : []),
+        ].join("\n"),
+        {
+          redactSensitiveData: settings.redactSensitiveData,
+          maxChars: Math.min(8_000, settings.maxOutputChars),
+        },
+      );
+      if (text === null) return;
+      const topic = compactKnowledgeContent(`통합 작업 진행: ${run.task.slice(0, 100)}`, {
+        redactSensitiveData: settings.redactSensitiveData,
+        maxChars: 200,
+      });
+      const result = yield* memory.value.invoke(
+        {
+          projectId: run.projectId,
+          action: "remember",
+          requestId: `orchestra:${run.id}:cycle:${cycle}:${status}`,
+          topic: topic?.content ?? "통합 작업 진행",
+          text: text.content,
+          scope: "project",
+        },
+        { threadId, agentReported: true },
+      );
+      const receipt = yield* decodeMemoryReceipt(result);
+      if (!receipt.saved)
+        return yield* executionError("통합 작업 기록의 저장을 확인하지 못했습니다.");
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.gen(function* () {
+          yield* Effect.logWarning(
+            "통합 작업의 폴더 기억 저장에 실패했습니다. 작업은 계속합니다.",
+            {
+              runId: run.id,
+              cause: conciseCause(cause),
+            },
+          );
+          const threadId = run.meeting?.threadId;
+          if (!threadId) return;
+          const cycle = run.meeting?.continuation?.cycle ?? 0;
+          const id = `orchestra-memory-save-failed:${run.id}:${cycle}:${status}`;
+          const createdAt = yield* nowIso;
+          yield* orchestrationEngine
+            .dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(id),
+              threadId,
+              createdAt,
+              activity: {
+                id: EventId.make(id),
+                kind: "workspace.memory.save-failed",
+                tone: "error",
+                summary: "통합 작업의 폴더 RAG 저장을 확인하지 못했습니다. 작업 기록을 확인하세요.",
+                payload: { runId: run.id, cycle, status },
+                turnId: null,
+                createdAt,
+              },
+            })
+            .pipe(
+              Effect.catchCause((reportCause) =>
+                Effect.logWarning("폴더 기억 저장 실패를 대화에 기록하지 못했습니다.", {
+                  runId: run.id,
+                  cause: conciseCause(reportCause),
+                }),
+              ),
+            );
+        }),
+      ),
+    );
+
   const loadGraphBindings = Effect.fn("WorkspaceCollaborationReactor.loadGraphBindings")(function* (
     projectId: ProjectId,
     meeting: WorkspaceMeeting | null,
   ) {
+    if (meeting !== null) return [];
     const listRoles = projectionSnapshotQuery.listWorkspaceAgentRoles;
     if (listRoles === undefined) {
       return yield* executionError("Workspace role projection is unavailable.");
     }
     const result = yield* listRoles({ projectId });
-    // A meeting supplies its own chair and executors, so the project's role
-    // bindings are optional there. They are still loaded: a meeting graph may
-    // carry an unseated node, and that node still resolves through them.
-    if (meeting === null && roleBinding(result.roles, "coordinator") === undefined) {
+    if (roleBinding(result.roles, "coordinator") === undefined) {
       return yield* executionError(
         "An enabled coordinator role is required before a task graph can start.",
       );
@@ -1317,15 +1734,23 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly title: string;
       readonly prompt: string;
+      readonly executionNodeId?: WorkspaceTaskNodeId;
+      readonly executionId?: ProviderExecutionId;
       readonly usagePhase?: import("@t3tools/contracts").TokenUsagePhase;
     }) {
       const runRef = { projectId: input.run.projectId, runId: input.run.id };
+      const unavailable = yield* workspaceProviderUnavailableMessage({
+        registry: providerInstanceRegistry,
+        modelSelection: input.route.modelSelection,
+        role: input.route.displayName,
+      });
+      if (unavailable !== null) return yield* executionError(unavailable);
       const instance = yield* providerInstanceRegistry.getInstance(
         input.route.modelSelection.instanceId,
       );
-      if (instance === undefined) {
+      if (instance === undefined || !instance.enabled) {
         return yield* executionError(
-          `Provider instance '${input.route.modelSelection.instanceId}' for meeting seat '${input.route.displayName}' is unavailable.`,
+          "선택한 AI 연결을 사용할 수 없습니다. 작업 중 연결이 변경되었습니다. 설정에서 확인하세요.",
         );
       }
       const threadId = input.threadId;
@@ -1351,43 +1776,99 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const project = yield* projectionSnapshotQuery.getProjectShellById(input.run.projectId);
       if (Option.isNone(project))
         return yield* executionError("오케스트라 프로젝트를 찾을 수 없습니다.");
-      const nodeId = WorkspaceTaskNodeId.make(`meeting-${yield* randomUUID}`);
-      const output = yield* agentExecutor.value
-        .execute({
-          orchestraPhase: "meeting",
-          execution: {
-            executionId: ProviderExecutionId.make(`orchestra:${input.run.id}:${nodeId}:1`),
-            ownerThreadId: threadId,
-            runId: input.run.id,
-            nodeId,
-            attempt: 1,
-          },
-          modelSelection: input.route.modelSelection,
-          runtimeMode: input.route.runtimeMode,
-          interactionMode: input.route.interactionMode,
-          cwd: project.value.workspaceRoot,
-          prompt: yield* withRequiredDirectives(input.run, input.prompt),
-          instruction: input.run.task,
-          title:
-            input.run.meeting?.phase === "clarifying"
-              ? "지휘 AI · 질문 먼저"
-              : input.usagePhase === "planning"
-                ? "실행 계획"
-                : "AI 토론",
-          displayName: input.route.displayName,
-          role: "coordinator",
-          kind: "orchestration",
-          startedAt: createdAt,
-        })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new WorkspaceCollaborationExecutionError({
-                message: error.message,
-                ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
-              }),
+      const nodeId =
+        input.executionNodeId ?? WorkspaceTaskNodeId.make(`meeting-${yield* randomUUID}`);
+      const workerInput: WorkspaceAgentExecutionInput = {
+        orchestraPhase: "meeting",
+        execution: {
+          executionId:
+            input.executionId ?? ProviderExecutionId.make(`orchestra:${input.run.id}:${nodeId}:1`),
+          ownerThreadId: threadId,
+          runId: input.run.id,
+          nodeId,
+          attempt: 1,
+        },
+        modelSelection: input.route.modelSelection,
+        runtimeMode: input.route.runtimeMode,
+        interactionMode: input.route.interactionMode,
+        cwd:
+          (Option.isSome(existing) ? existing.value.worktreePath : null) ??
+          project.value.workspaceRoot,
+        prompt: yield* withRequiredDirectives(input.run, input.prompt, true),
+        instruction: input.run.task,
+        title: input.executionNodeId?.startsWith("watchdog-")
+          ? "지속 작업 감시"
+          : input.run.meeting?.phase === "clarifying"
+            ? "지휘 AI · 질문 먼저"
+            : input.usagePhase === "planning"
+              ? "실행 계획"
+              : "AI 토론",
+        displayName: input.route.displayName,
+        role: "coordinator",
+        kind: "orchestration",
+        startedAt: createdAt,
+      };
+      const isWatchdog = input.executionNodeId?.startsWith("watchdog-") === true;
+      let execute = agentExecutor.value.execute(workerInput);
+      if (
+        isWatchdog &&
+        Option.isSome(watchdogRuntime) &&
+        instance.adapter?.capabilities.stopSessionDrainsEvents === true
+      ) {
+        if (Option.isNone(watchdogSettings) || Option.isNone(artifactConfig))
+          return yield* executionError("독립 감시 실행에 필요한 설정을 확인할 수 없습니다.");
+        const settings = yield* watchdogSettings.value.getSettings.pipe(
+          Effect.mapError((error) => executionError(error.message)),
+        );
+        const config =
+          deriveProviderInstanceConfigMap(settings)[input.route.modelSelection.instanceId];
+        if (!config || config.driver !== instance.driverKind)
+          return yield* executionError("선택한 감시 AI의 실행 설정을 확인할 수 없습니다.");
+        execute = (watchdogRuntime.value.execute ?? executeDetachedWatchdog)({
+          journal: watchdogRuntime.value.journal,
+          engine: orchestrationEngine,
+          queries: projectionSnapshotQuery,
+          serverConfig: artifactConfig.value,
+          settings,
+          instance: config,
+          provider: instance.driverKind,
+          worker: workerInput,
+        }).pipe(
+          Effect.mapError((error) =>
+            error instanceof WorkspaceAgentExecutionError
+              ? error
+              : new WorkspaceAgentExecutionError({ message: error.message }),
           ),
         );
+      } else if (isWatchdog && Option.isSome(watchdogRuntime)) {
+        const compatibilityId = `watchdog-compat:${input.run.id}:${instance.driverKind}`;
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(compatibilityId),
+          threadId,
+          createdAt: input.run.createdAt,
+          activity: {
+            id: EventId.make(compatibilityId),
+            kind: "orchestra.watchdog.compatibility",
+            tone: "info",
+            summary:
+              "선택한 AI는 독립 감시의 종료 확인이 아직 지원되지 않아 기존 감시 세션으로 실행합니다. 서버가 재시작되면 실행 중인 감시는 이어지지 않을 수 있습니다.",
+            payload: { runId: input.run.id, provider: instance.driverKind },
+            turnId: null,
+            createdAt: input.run.createdAt,
+          },
+        });
+      }
+      const output = yield* execute.pipe(
+        Effect.mapError(
+          (error) =>
+            new WorkspaceCollaborationExecutionError({
+              message: error.message,
+              ...(error.interrupted === undefined ? {} : { interrupted: error.interrupted }),
+            }),
+        ),
+      );
+      if (isProviderContentRefusalOutput(output)) return yield* executionError(output);
       return { threadId, output } as const;
     },
   );
@@ -1410,8 +1891,17 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         Effect.gen(function* () {
           const current = yield* requireRunContinuable(input.runRef);
           const failure = current.meeting?.turnFailures?.find((entry) => entry.key === key);
-          if (failure && failure.count >= MAX_MEETING_TURN_ATTEMPTS) {
-            return yield* executionError(failure.message);
+          if (
+            failure &&
+            (failure.count >= MAX_MEETING_TURN_ATTEMPTS ||
+              isProviderContentRefusal(failure.message) ||
+              isNonRetryableWorkerError(failure.message))
+          ) {
+            return yield* executionError(
+              isNonRetryableBillingError(failure.message)
+                ? formatBillingErrorMessage(failure.message)
+                : failure.message,
+            );
           }
         });
       const recordTurnFailure = (key: string, message: string) =>
@@ -1419,6 +1909,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const current = yield* requireRunContinuable(input.runRef);
           const meeting = current.meeting;
           if (meeting === null) return yield* executionError("Meeting run lost its meeting state.");
+          const normalizedMessage = isNonRetryableBillingError(message)
+            ? formatBillingErrorMessage(message)
+            : message;
           const failures = meeting.turnFailures ?? [];
           const count = (failures.find((entry) => entry.key === key)?.count ?? 0) + 1;
           yield* persistRun({
@@ -1427,19 +1920,23 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               ...meeting,
               turnFailures: [
                 ...failures.filter((entry) => entry.key !== key),
-                { key, count, message },
+                { key, count, message: normalizedMessage },
               ],
             },
             updatedAt: yield* nowIso,
           });
-          if (count >= MAX_MEETING_TURN_ATTEMPTS) {
-            return yield* executionError(message);
+          if (
+            count >= MAX_MEETING_TURN_ATTEMPTS ||
+            isProviderContentRefusal(normalizedMessage) ||
+            isNonRetryableWorkerError(normalizedMessage)
+          ) {
+            return yield* executionError(normalizedMessage);
           }
           yield* Effect.logWarning("Meeting turn failed; retrying", {
             projectId: input.runRef.projectId,
             runId: input.runRef.runId,
             step: key,
-            error: message,
+            error: normalizedMessage,
           });
         });
 
@@ -1811,13 +2308,119 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
 
           case "plan": {
             if (run.workflow) {
+              let assignments: ReturnType<typeof parseWorkflowAssignments> | undefined;
+              if (workflowNeedsAssignment(run)) {
+                yield* ensureTurnBudget("workflow-assignment");
+                if (meeting.phase === "discussing") {
+                  yield* persistRun({
+                    ...run,
+                    meeting: { ...meeting, phase: "planning" },
+                    updatedAt: yield* nowIso,
+                  });
+                  continue;
+                }
+                const chairId = resolveChairParticipantId(meeting);
+                const failureCount =
+                  meeting.turnFailures?.find((entry) => entry.key === "workflow-assignment")
+                    ?.count ?? 0;
+                const turn = yield* dispatchMeetingTurn({
+                  run,
+                  route: meetingAssignmentRoute(meeting, chairId),
+                  threadId: meetingThreadId,
+                  title: `워크플로 담당자 배정: ${run.task}`,
+                  executionNodeId: WorkspaceTaskNodeId.make("workflow-assignment"),
+                  executionId: ProviderExecutionId.make(
+                    `workflow-assignment:${run.id}:${meeting.continuation?.cycle ?? 0}:${meeting.answers.length}:${failureCount}`,
+                  ),
+                  prompt: buildWorkflowAssignmentPrompt(
+                    run,
+                    input.workspacePrompt,
+                    (yield* prepareMeetingContext(run, meeting)).preparedTranscript,
+                  ),
+                  usagePhase: "planning",
+                }).pipe(
+                  Effect.map((value) => ({ ok: true as const, ...value })),
+                  Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                    Effect.succeed({ ok: false as const, message: error.message }),
+                  ),
+                );
+                if (!turn.ok) {
+                  if (isProviderContentRefusal(turn.message)) {
+                    const current = yield* requireRunContinuable(input.runRef);
+                    if (yield* parkPausedRun(current)) return false;
+                    const updatedAt = yield* nowIso;
+                    const parked = yield* Effect.try({
+                      try: () => parkRefusedWorkflowAssignment(current, turn.message, updatedAt),
+                      catch: (cause) =>
+                        executionError(cause instanceof Error ? cause.message : String(cause)),
+                    });
+                    yield* persistGraphRun(
+                      {
+                        ...current,
+                        meeting: {
+                          ...current.meeting!,
+                          phase: "executing",
+                          pendingQuestion: parked.question,
+                        },
+                      },
+                      parked.graph,
+                      input.bindings,
+                      { status: "running", error: null, updatedAt },
+                    );
+                    return true;
+                  }
+                  yield* recordTurnFailure("workflow-assignment", turn.message);
+                  continue;
+                }
+                run = yield* requireRunContinuable(input.runRef);
+                if (yield* parkPausedRun(run)) return false;
+                const latestMeeting = run.meeting;
+                if (latestMeeting === null)
+                  return yield* executionError("Meeting state is missing.");
+                const raised = parseMeetingQuestion(turn.output);
+                if (raised !== null && !turn.output.includes("<t3_workflow_assignments>")) {
+                  const askedAt = yield* nowIso;
+                  yield* persistRun({
+                    ...run,
+                    meeting: {
+                      ...latestMeeting,
+                      pendingQuestion: {
+                        askedByParticipantId: chairId,
+                        question: raised.question,
+                        options: raised.options,
+                        context: raised.context,
+                        askedAt,
+                        nodeId: null,
+                      },
+                    },
+                    updatedAt: askedAt,
+                  });
+                  continue;
+                }
+                try {
+                  assignments = parseWorkflowAssignments(run, turn.output);
+                } catch (error) {
+                  yield* recordTurnFailure(
+                    "workflow-assignment",
+                    `감독 AI의 작업자 배정을 확인하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  continue;
+                }
+              }
               const graph = yield* Effect.try({
-                try: () => compileWorkflowRun(run),
+                try: () => compileWorkflowRun(run, assignments),
                 catch: (cause) =>
                   executionError(cause instanceof Error ? cause.message : String(cause)),
               });
               yield* persistGraphRun(
-                { ...run, meeting: { ...meeting, phase: "executing" } },
+                {
+                  ...run,
+                  meeting: {
+                    ...run.meeting!,
+                    phase: "executing",
+                    supervisorReviewedInterjections: meeting.interjections.length,
+                  },
+                },
                 graph,
                 input.bindings,
                 { status: "running", updatedAt: yield* nowIso },
@@ -1825,6 +2428,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               return true;
             }
             yield* ensureTurnBudget("plan");
+            const planningMeeting = meetingWithAuthorizedSeats(meeting);
             const providers = yield* Effect.forEach(
               yield* providerInstanceRegistry.listInstances,
               (instance) =>
@@ -1835,7 +2439,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             );
             const availableWorkers = orchestraWorkerCandidates(
               providers.flatMap((provider) => (Option.isSome(provider) ? [provider.value] : [])),
-              meeting,
+              planningMeeting,
             );
             if (meeting.phase === "discussing") {
               // Entering planning is persisted on its own so a crash mid-plan
@@ -1848,6 +2452,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               continue;
             }
             const chairId = resolveChairParticipantId(meeting);
+            if (!planningMeeting.participants.some((seat) => seat.id === chairId)) {
+              yield* recordTurnFailure(
+                "plan",
+                "The configured conductor is not in the user-selected roster.",
+              );
+              continue;
+            }
             const route = meetingAssignmentRoute(meeting, chairId);
             const turn = yield* dispatchMeetingTurn({
               run,
@@ -1855,10 +2466,10 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               threadId: meetingThreadId,
               title: `${meeting.maxRounds === 0 ? "AI 협업" : "AI 회의"}: ${run.task}`,
               prompt: buildMeetingPlanPrompt({
-                ...(yield* prepareMeetingContext(run, meeting)),
+                ...(yield* prepareMeetingContext(run, planningMeeting)),
                 workspacePrompt: input.workspacePrompt,
                 task: run.task,
-                meeting,
+                meeting: planningMeeting,
                 availableWorkers,
               }),
               usagePhase: "planning",
@@ -1872,6 +2483,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               yield* recordTurnFailure("plan", `Meeting planning turn failed: ${turn.message}`);
               continue;
             }
+            run = yield* requireRunContinuable(input.runRef);
+            if (yield* parkPausedRun(run)) return false;
             const raised = parseMeetingQuestion(turn.output);
             if (raised !== null && !turn.output.includes("<t3_task_graph>")) {
               const askedAt = yield* nowIso;
@@ -1897,8 +2510,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             let assignedMeeting = meeting;
             try {
               const planContext = {
-                ...meetingPlanContext(meeting),
-                participantIds: [...meeting.participants, ...availableWorkers].map(
+                ...meetingPlanContext(planningMeeting),
+                participantIds: [...planningMeeting.participants, ...availableWorkers].map(
                   (seat) => seat.id,
                 ),
               };
@@ -1935,7 +2548,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               continue;
             }
             run = yield* persistGraphRun(
-              { ...run, meeting: { ...assignedMeeting, phase: "executing" } },
+              {
+                ...run,
+                meeting: {
+                  ...assignedMeeting,
+                  phase: "executing",
+                  supervisorReviewedInterjections: meeting.interjections.length,
+                },
+              },
               {
                 ...graph,
                 ...(meeting.workspaceBaseline === undefined
@@ -1961,9 +2581,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const route = resolveNodeAssignmentRoute({ node, meeting, bindings });
       if (route === null) {
         return yield* executionError(
-          node.participantId === null
-            ? `Enabled role '${node.role}' is required for '${node.id}'.`
-            : `Meeting participant '${node.participantId}' is required for '${node.id}'.`,
+          node.participantId === null && meeting !== null
+            ? `통합 작업 단계 '${node.id}'에 선택된 참가자가 없습니다.`
+            : node.participantId === null
+              ? `Enabled role '${node.role}' is required for '${node.id}'.`
+              : `Meeting participant '${node.participantId}' is required for '${node.id}'.`,
         );
       }
       if (node.attempts.length === 0) {
@@ -2043,8 +2665,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         Effect.orElseSucceed(() => null),
       );
       if (project === null) return failAll("Workspace is unavailable for worktree provisioning.");
+      const workspaceCwd = yield* runWorkspaceCwd(input.run);
       const status = yield* gitWorkflow
-        .localStatus({ cwd: project.workspaceRoot })
+        .localStatus({ cwd: workspaceCwd })
         .pipe(Effect.orElseSucceed(() => null));
       const baseBranch = status?.isRepo === true ? status.refName : null;
       if (baseBranch === null) {
@@ -2064,7 +2687,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           existing?.branch ?? buildOrchestraWorktreeBranchName(String(input.run.id), chainKey);
         const provisioned = yield* worktreeProvision
           .provision({
-            projectCwd: project.workspaceRoot,
+            projectCwd: workspaceCwd,
             baseBranch,
             branch,
             existingWorktreePath: existing?.worktreePath ?? null,
@@ -2117,6 +2740,12 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       readonly width?: number;
     }) {
       if (input.run.graph === null) return yield* executionError("Task graph is unavailable.");
+      if (
+        input.nodes.some((node) =>
+          input.run.graph?.workflowAssignment?.pendingNodeIds.includes(node.id),
+        )
+      )
+        return yield* executionError("담당자가 아직 정해지지 않은 단계는 실행할 수 없습니다.");
       // Execution sessions share one durable conversation. Writes run alone
       // unless each write chain owns a worktree.
       const isolated = isolatesWorktrees(input.run);
@@ -2229,6 +2858,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         nodes: input.run.graph.nodes.map((node) => {
           const started = replacements.get(String(node.id));
           if (started !== undefined) return started;
+          if (node.status !== "queued" && node.status !== "blocked") return node;
           // Chain members outside the wave adopt the chain's worktree now, so
           // a validation gate scheduled later already knows where to run and
           // the dashboard can offer the diff before the whole chain settles.
@@ -2332,6 +2962,37 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           });
         }
         return Effect.gen(function* () {
+          const rawGraphV2 = input.run.workflow?.definition.graphV2;
+          if (rawGraphV2 !== undefined) {
+            const decodedGraphV2 = Schema.decodeUnknownOption(WorkflowGraphV2)(rawGraphV2);
+            if (Option.isSome(decodedGraphV2)) {
+              const projectShell = yield* projectionSnapshotQuery.getProjectShellById(
+                input.run.projectId,
+              );
+              const targetCwd =
+                node.worktreePath ??
+                (Option.isSome(projectShell) ? projectShell.value.workspaceRoot : process.cwd());
+              const special = yield* tryExecuteWorkflowV2SpecialNode({
+                graphV2: decodedGraphV2.value,
+                nodeId: String(node.id),
+                cwd: targetCwd,
+                workflowValues: input.run.workflow!.values,
+                nodeOutputs: graph.nodes.map((entry) => ({
+                  id: String(entry.id),
+                  status: entry.status,
+                  output: entry.output,
+                })),
+              });
+              if (special.handled) {
+                if (!special.passed) {
+                  return yield* executionError(
+                    special.error ?? `결정론적 v2 단계 "${node.id}" 검증에 실패했습니다.`,
+                  );
+                }
+                return special.output;
+              }
+            }
+          }
           const formatFailure = latestFormatFailure(node);
           let formatRepairOutput: string | undefined;
           if (formatFailure !== undefined) {
@@ -2380,7 +3041,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                   includeRag: needsOptionalMemory,
                   includeWorkingMemory: needsOptionalMemory,
                   includeLongTermMemory: needsOptionalMemory,
-                  maxContextChars: needsOptionalMemory ? 40_000 : 8_000,
+                  maxContextChars: !needsOptionalMemory
+                    ? 8_000
+                    : node.kind === "research" || node.role === "researcher"
+                      ? 8_000
+                      : 24_000,
                 })
               : null;
           const nodePrompt = `${nodeContext?.prompt ?? input.workspacePrompt}${runFolder.unavailable ? `\n\n${folderUnavailable}` : ""}`;
@@ -2399,24 +3064,50 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               : undefined;
           if (nodeContext !== null)
             yield* recordPromptUsage({ projectId: input.run.projectId, ...nodeContext });
+          const supervisorInstructions =
+            input.run.meeting !== null &&
+            node.participantId === resolveChairParticipantId(input.run.meeting) &&
+            input.run.meeting.interjections.length > 0
+              ? `\n\n사용자가 감독 AI에게 전달한 추가 지시입니다. 최신 지시가 이전 작업 계획과 충돌하면 최신 지시를 우선하여 작업을 조정하세요:\n${input.run.meeting.interjections.map((entry) => entry.text).join("\n")}`
+              : "";
+          const assignmentPrompt =
+            graph.workflowAssignment?.gateNodeId === node.id && input.run.meeting !== null
+              ? buildWorkflowAssignmentPrompt(
+                  input.run,
+                  nodePrompt,
+                  (yield* prepareMeetingContext(input.run, input.run.meeting)).preparedTranscript,
+                )
+              : null;
+          const unconfirmed =
+            node.kind === "validation"
+              ? yield* unconfirmedInstructionNotice(input.run, node.validationTargetId ?? undefined)
+              : node.kind === "synthesis"
+                ? yield* unconfirmedInstructionNotice(input.run)
+                : "";
           return yield* ensureThreadAndTurn({
             run: input.run,
             step,
             node,
-            prompt: buildWorkspaceTaskNodePrompt({
-              includeWorkspaceContext: nodeContext !== null || node.kind === "orchestration",
-              ...(contextSource === undefined ? {} : { contextSource }),
-              workspacePrompt: nodePrompt,
-              run: input.run,
-              graph,
-              node,
-              availableAgents,
-              meeting: input.run.meeting,
-              ...(formatRepairOutput === undefined ? {} : { formatRepairOutput }),
-              ...(formatFailure !== undefined && nodeContext !== null
-                ? { formatRepairConstraints: nodeContext.prompt }
-                : {}),
-            }),
+            prompt:
+              (assignmentPrompt ??
+                buildWorkspaceTaskNodePrompt({
+                  includeWorkspaceContext: nodeContext !== null || node.kind === "orchestration",
+                  ...(contextSource === undefined ? {} : { contextSource }),
+                  workspacePrompt: nodePrompt,
+                  run: input.run,
+                  graph,
+                  node,
+                  availableAgents,
+                  meeting: input.run.meeting,
+                  ...(formatRepairOutput === undefined ? {} : { formatRepairOutput }),
+                  ...(formatFailure !== undefined && nodeContext !== null
+                    ? { formatRepairConstraints: nodeContext.prompt }
+                    : {}),
+                })) +
+              supervisorInstructions +
+              (unconfirmed
+                ? `\n\n${unconfirmed}\n처리 확인이 없는 지시가 적용됐다고 단정하지 마세요.`
+                : ""),
             title: node.participantId === null ? `${node.role}: ${node.title}` : node.title,
             // A seat's account is whatever the person picked; only role-bound
             // nodes pin the provider driver to the agent.
@@ -2495,8 +3186,11 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
      */
     readonly consumesRevision?: boolean;
   }): WorkspaceTaskGraph => {
-    const error = input.error.slice(0, 6_000);
-    const consumesRevision = input.consumesRevision ?? true;
+    const error = redactConversationRagSensitiveData(input.error).content.slice(0, 6_000);
+    const consumesRevision =
+      !isWorkspaceProviderUnavailable(input.error) &&
+      !isDeterministicWorkspaceRequestFailure(input.error) &&
+      (input.consumesRevision ?? true);
     const repairSource = latestFormatFailure(input.node);
     const failedAttemptNode = updateLastAttempt(input.node, (attempt) => ({
       ...attempt,
@@ -2511,6 +3205,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }));
     const mayRetry =
       !isProviderContentRefusal(input.error) &&
+      !isWorkspaceProviderUnavailable(input.error) &&
+      !isDeterministicWorkspaceRequestFailure(input.error) &&
       failedAttemptNode.attempts.length < failedAttemptNode.maxAttempts &&
       (!consumesRevision || input.graph.revision < input.revisionCap);
     const node: WorkspaceTaskNode = {
@@ -2538,8 +3234,12 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           summary: mayRetry
             ? latestFormatFailure(failedAttemptNode) !== undefined
               ? `'${node.title}' 단계의 산출물 형식만 복구합니다: ${error}`
-              : `'${node.title}' 단계가 실패해 다른 계정 또는 접근법으로 재시도합니다: ${error}`
-            : `'${node.title}' 단계가 재시도 한도에 도달했습니다: ${error}`,
+              : `'${node.title}' 단계가 실패해 선택한 계정과 모델을 유지하며 원인을 확인하고 재시도합니다: ${error}`
+            : isWorkspaceProviderUnavailable(error)
+              ? `'${node.title}' 단계의 선택된 연결을 복구해야 합니다: ${error}`
+              : isDeterministicWorkspaceRequestFailure(error)
+                ? `'${node.title}' 단계의 입력 오류를 확인해야 합니다: ${error}`
+                : `'${node.title}' 단계가 재시도 한도에 도달했습니다: ${error}`,
           addedNodeIds: [],
           supersededNodeIds: mayRetry ? [] : [node.id],
           occurredAt: input.completedAt,
@@ -2549,7 +3249,9 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         ? latestFormatFailure(failedAttemptNode) !== undefined
           ? `'${node.title}' 단계의 원본을 보존하고 형식만 복구합니다.`
           : `'${node.title}' 단계를 이전과 다른 경로로 재시도합니다.`
-        : `'${node.title}' 단계가 실패해 사용자 개입이 필요합니다.`,
+        : isWorkspaceProviderUnavailable(error)
+          ? error
+          : `'${node.title}' 단계가 실패해 사용자 개입이 필요합니다.`,
     });
   };
 
@@ -2594,7 +3296,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           : input.classification === "assumption"
             ? "잘못된 가정의 영향을 받은 경로를 다시 설계한다."
             : input.classification === "validation"
-              ? "독립적인 교차 검증 경로를 추가한다."
+              ? "독립적으로 검증할 research, implementation 또는 debug 노드를 포함한다. 사용자가 추가 조사나 질문을 중단했다면 새로운 조사를 배정하지 말고 기존 근거와 미확인 사항만 기록하는 research 노드를 사용한다. 중단된 작업을 완료했다고 주장하지 않는다."
               : "동일한 도구와 접근법을 반복하지 않는 대체 경로를 설계한다.";
     const recoveryNode: WorkspaceTaskNode = {
       ...base,
@@ -2686,8 +3388,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           consumesRevision: refused ? false : (failure.consumesRevision ?? true),
         });
         const settled = retried.nodes.find((node) => node.id === failure.node.id);
-        // A run with no meeting has no channel to ask through and keeps the
-        // old failing behaviour.
+        // Role-based runs have no question channel. Keep independent work alive
+        // after a missing provider, then finish as failed with its original reason.
+        if (
+          meeting === null &&
+          settled?.status === "failed" &&
+          isWorkspaceProviderUnavailable(failure.error)
+        ) {
+          const canContinue =
+            retried.nodes.some((node) => node.status === "running") ||
+            readyWorkspaceTaskNodes(retried).length > 0;
+          return canContinue ? { ...retried, status: "executing" } : retried;
+        }
         if (
           settled === undefined ||
           (settled.status !== "failed" && !refused) ||
@@ -2697,20 +3409,29 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         }
         const question = refused
           ? nodeRefusalQuestion(settled.title)
-          : nodeInterventionQuestion(settled.title);
-        const context = failure.error.slice(0, 20_000);
+          : isWorkspaceProviderUnavailable(failure.error)
+            ? nodeProviderUnavailableQuestion(settled.title)
+            : classifyDeterministicWorkspaceFailure(failure.error) === "delivery-unconfirmed"
+              ? nodeDeliveryUnconfirmedQuestion(settled.title)
+              : classifyDeterministicWorkspaceFailure(failure.error) === "request-format"
+                ? nodeRequestFormatQuestion(settled.title)
+                : isDeterministicWorkspaceRequestFailure(failure.error)
+                  ? nodeInputDataQuestion(settled.title)
+                  : nodeInterventionQuestion(settled.title);
+        const context = redactConversationRagSensitiveData(failure.error).content.slice(0, 20_000);
         // Only one question is open at a time. A second node out of retries
         // parks its intervention on itself and is asked once the slot frees —
         // it used to fail the whole run instead, taking every sibling's
         // finished work with it.
-        const slotFree = meeting.pendingQuestion === null;
+        const slotFree =
+          meeting.pendingQuestion === null && !hasPendingSeatSelectionAnswer(meeting, retried);
         if (slotFree) {
           meeting = {
             ...meeting,
             pendingQuestion: {
               askedByParticipantId: settled.participantId,
               question,
-              options: [...NODE_INTERVENTION_OPTIONS],
+              options: [...(refused ? NODE_REFUSAL_OPTIONS : NODE_INTERVENTION_OPTIONS)],
               context,
               askedAt: completedAt,
               nodeId: settled.id,
@@ -2729,7 +3450,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               ? null
               : {
                   question,
-                  options: [...NODE_INTERVENTION_OPTIONS],
+                  options: [...(refused ? NODE_REFUSAL_OPTIONS : NODE_INTERVENTION_OPTIONS)],
                   context,
                   intervention: true,
                   raisedAt: completedAt,
@@ -2745,6 +3466,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         if (current === undefined || current.status !== "running") continue;
         const completedAt = yield* nowIso;
         if (result.error !== undefined) {
+          const safeError = redactConversationRagSensitiveData(result.error).content;
           const selection = current.attempts.at(-1)?.modelSelection;
           const instance =
             selection && input.run.orchestra?.resumeAfterLimit === true
@@ -2753,7 +3475,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const snapshot = instance ? yield* instance.snapshot.getSnapshot : undefined;
           const recovery = planWorkspaceUsageRecovery({
             enabled: input.run.orchestra?.resumeAfterLimit === true,
-            error: result.error,
+            error: safeError,
             providerInstanceId: selection?.instanceId ?? "",
             ...(snapshot?.usage ? { usage: snapshot.usage } : {}),
             ...(current.usageRecovery ? { previous: current.usageRecovery } : {}),
@@ -2764,14 +3486,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             const waiting = updateLastAttempt(current, (attempt) => ({
               ...attempt,
               status: "failed",
-              error: result.error!,
+              error: safeError,
               completedAt,
             }));
             graph = refreshWorkspaceTaskGraphQueue({
               ...replaceGraphNode(graph, result.nodeId, {
                 ...waiting,
                 status: "queued",
-                error: result.error,
+                error: safeError,
                 completedAt: null,
                 usageRecovery: recovery,
                 maxAttempts: Math.min(
@@ -2795,7 +3517,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           graph = failOrParkNode({
             graph,
             node: freeRetry ? { ...current, maxAttempts: current.maxAttempts + 1 } : current,
-            error: result.error,
+            error: safeError,
             classification: "tool",
             completedAt,
             consumesRevision: !freeRetry,
@@ -2818,8 +3540,40 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           truncateNodeOutput(result.output),
         );
         try {
+          if (isProviderContentRefusalOutput(result.output)) throw new Error(result.output);
+          const isWorkflowAssignment = graph.workflowAssignment?.gateNodeId === current.id;
+          const assignmentQuestion = isWorkflowAssignment
+            ? parseMeetingQuestion(result.output)
+            : null;
+          if (
+            isWorkflowAssignment &&
+            (assignmentQuestion === null || result.output.includes("<t3_workflow_assignments>"))
+          ) {
+            const assignments = parseWorkflowAssignments(freshRun, result.output);
+            const pending = new Set(graph.workflowAssignment!.pendingNodeIds);
+            const { workflowAssignment: _assignment, ...remaining } = graph;
+            graph = refreshWorkspaceTaskGraphQueue({
+              ...remaining,
+              nodes: graph.nodes.map((node) =>
+                node.id === current.id
+                  ? {
+                      ...withCompletedAttempt,
+                      status: "completed" as const,
+                      output: storedOutput,
+                      error: null,
+                      completedAt,
+                    }
+                  : pending.has(node.id)
+                    ? { ...node, participantId: assignments.get(node.id)! }
+                    : node,
+              ),
+              nextAction: "감독자가 남은 단계의 담당자를 정했습니다.",
+            });
+            continue;
+          }
           if (
             current.kind === "orchestration" &&
+            !isWorkflowAssignment &&
             !input.run.workflow?.definition.nodes.some((node) => node.id === current.id)
           ) {
             if (graph.revision >= revisionCap) {
@@ -2827,8 +3581,14 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 `Task graph revision limit ${revisionCap - INITIAL_PLAN_REVISION} has been reached.`,
               );
             }
-            const proposal = parseWorkspaceTaskGraphProposal(result.output, planContext);
+            const parsedProposal = parseWorkspaceTaskGraphProposal(result.output, planContext);
+            const recordOnlyProposal =
+              current.failureClassification === null
+                ? null
+                : normalizeStoppedRecoveryPlan({ proposal: parsedProposal, meeting });
+            const proposal = recordOnlyProposal ?? parsedProposal;
             if (
+              recordOnlyProposal === null &&
               current.failureClassification === "information" &&
               !proposal.nodes.some((node) => node.kind === "research")
             ) {
@@ -2837,6 +3597,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               );
             }
             if (
+              recordOnlyProposal === null &&
               current.failureClassification === "implementation" &&
               !proposal.nodes.some(
                 (node) => node.kind === "debug" || node.kind === "implementation",
@@ -2930,22 +3691,33 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               };
               graph = replaceGraphNode(graph, String(target.id), failedTarget);
               if (decision.followUpNodes.length > 0) {
+                const recordOnlyFollowUp = normalizeStoppedRecoveryPlan({
+                  proposal: {
+                    summary: decision.summary,
+                    nextAction: decision.nextAction,
+                    nodes: decision.followUpNodes,
+                  },
+                  meeting,
+                });
+                const followUpNodes = recordOnlyFollowUp?.nodes ?? decision.followUpNodes;
                 if (graph.revision >= revisionCap) {
                   throw new WorkspaceTaskGraphError(
                     `Task graph revision limit ${revisionCap - INITIAL_PLAN_REVISION} has been reached.`,
                   );
                 }
                 if (
+                  recordOnlyFollowUp === null &&
                   classification === "information" &&
-                  !decision.followUpNodes.some((node) => node.kind === "research")
+                  !followUpNodes.some((node) => node.kind === "research")
                 ) {
                   throw new WorkspaceTaskGraphError(
                     "Information recovery requires a research node assigned to an available participant or role.",
                   );
                 }
                 if (
+                  recordOnlyFollowUp === null &&
                   classification === "implementation" &&
-                  !decision.followUpNodes.some(
+                  !followUpNodes.some(
                     (node) => node.kind === "debug" || node.kind === "implementation",
                   )
                 ) {
@@ -2955,17 +3727,15 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 }
                 if (
                   classification === "validation" &&
-                  !decision.followUpNodes.some(
-                    (node) => node.agent === "codex" || node.agent === "grok",
-                  )
+                  !followUpNodes.some((node) => node.agent === "codex" || node.agent === "grok")
                 ) {
                   throw new WorkspaceTaskGraphError(
                     "Validation recovery requires an independently validated research, implementation, or debug node.",
                   );
                 }
-                const followUpIds = new Set(decision.followUpNodes.map((node) => node.id));
+                const followUpIds = new Set(followUpNodes.map((node) => node.id));
                 const knownNodes = new Map(graph.nodes.map((node) => [String(node.id), node]));
-                for (const followUp of decision.followUpNodes) {
+                for (const followUp of followUpNodes) {
                   for (const dependencyId of followUp.dependsOn) {
                     if (followUpIds.has(dependencyId)) continue;
                     const dependency = knownNodes.get(dependencyId);
@@ -2996,7 +3766,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                   proposal: {
                     summary: decision.summary,
                     nextAction: decision.nextAction,
-                    nodes: decision.followUpNodes,
+                    nodes: followUpNodes,
                   },
                   bindings: input.bindings,
                   meeting: planContext,
@@ -3049,10 +3819,37 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               });
               continue;
             }
+            const skipped = new Set(graph.workflowSkippedNodeIds ?? []);
+            const unperformed = graph.nodes.filter((node) => skipped.has(node.id));
+            const workflowResult = unperformed.length
+              ? [
+                  synthesis.finalOutput,
+                  "\n미수행 단계: 사용자가 배정을 건너뛰어 다음 단계와 종속 작업은 실행하지 않았습니다.",
+                  ...unperformed.map((node) => `- ${node.title} (${node.id})`),
+                ].join("\n")
+              : synthesis.finalOutput;
+            const recordedStop = current.dependsOn.some((id) => {
+              const validation = graph.nodes.find((node) => node.id === id);
+              const target = graph.nodes.find((node) => node.id === validation?.validationTargetId);
+              return target?.handoff.constraints.includes(STOPPED_RECOVERY_CONSTRAINT) === true;
+            });
+            const unresolved = graph.nodes.filter((node) => node.status === "failed");
+            const resultBeforeMailboxNotice =
+              recordedStop && unresolved.length > 0
+                ? [
+                    workflowResult,
+                    "\n사용자의 지시에 따라 추가 조사는 중단하고 기존 내용을 기록했습니다. 다음 실패 단계는 해결되지 않았습니다:",
+                    ...unresolved.map((node) => `- ${node.title} (${node.id})`),
+                  ].join("\n")
+                : workflowResult;
+            const mailboxNotice = yield* unconfirmedInstructionNotice(input.run);
+            const finalResult = mailboxNotice
+              ? `${resultBeforeMailboxNotice}\n\n${mailboxNotice}`
+              : resultBeforeMailboxNotice;
             const completedNode: WorkspaceTaskNode = {
               ...withCompletedAttempt,
               status: "completed",
-              output: truncateNodeOutput(synthesis.finalOutput),
+              output: truncateNodeOutput(finalResult),
               error: null,
               confidence: synthesis.confidence,
               completedAt,
@@ -3065,7 +3862,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               repairApproved: synthesis.repairApproved,
               memoryCandidates: synthesis.memoryCandidates,
             };
-            finalOutput = synthesis.finalOutput;
+            finalOutput = finalResult;
             continue;
           }
 
@@ -3075,6 +3872,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             meeting !== null &&
             current.participantId !== null &&
             (!STRUCTURED_NODE_KINDS.includes(current.kind) ||
+              isWorkflowAssignment ||
               (current.kind === "orchestration" &&
                 input.run.workflow?.definition.nodes.some((node) => node.id === current.id)))
           ) {
@@ -3083,7 +3881,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               // First asker wins the single question slot; a later asker keeps
               // its question on the node and is asked once the slot frees,
               // rather than re-running to raise it again.
-              const slotFree = meeting.pendingQuestion === null;
+              const slotFree =
+                meeting.pendingQuestion === null && !hasPendingSeatSelectionAnswer(meeting, graph);
               graph = replaceGraphNode(graph, result.nodeId, {
                 ...withCompletedAttempt,
                 status: "awaiting-user",
@@ -3140,7 +3939,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 formatRepair: {
                   messageId: workspaceExecutionMessageId({
                     executionId: ProviderExecutionId.make(
-                      `orchestra:${input.run.id}:${current.id}:${attempt.number}`,
+                      orchestraExecutionId(input.run, current.id, attempt.number),
                     ),
                     attempt: attempt.number,
                   }),
@@ -3183,9 +3982,18 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                   .join(", ")}`,
         };
       }
+      const pendingSupervisorReview =
+        graph.status === "completed" &&
+        meeting !== null &&
+        (meeting.pendingSupervisorReview === true ||
+          meeting.interjections.length > (meeting.supervisorReviewedInterjections ?? 0));
+      if (pendingSupervisorReview && meeting !== null)
+        meeting = { ...meeting, pendingSupervisorReview: true };
       const status =
         graph.status === "completed"
-          ? freshRun.orchestra?.completionCheck === true
+          ? freshRun.orchestra?.completionCheck === true ||
+            freshRun.orchestra?.executionMode === "persistent" ||
+            pendingSupervisorReview
             ? "running"
             : "completed"
           : graph.status === "failed"
@@ -3242,7 +4050,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     yield* requireRunContinuable(runRef);
     const result =
       Option.isSome(project) && Option.isSome(deliveryGit)
-        ? yield* checkOrchestraDelivery(current, project.value.workspaceRoot, checkedAt).pipe(
+        ? yield* checkOrchestraDelivery(current, yield* runWorkspaceCwd(current), checkedAt).pipe(
             Effect.provideService(WorkspaceDevelopmentGit, deliveryGit.value),
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.catch((error) =>
@@ -3267,16 +4075,32 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           };
     current = yield* requireRunContinuable(runRef);
     if (current.graph === null) return current;
+    const pendingSupervisorReview =
+      current.meeting !== null &&
+      (current.meeting.pendingSupervisorReview === true ||
+        current.meeting.interjections.length >
+          (current.meeting.supervisorReviewedInterjections ?? 0));
     return yield* persistRun({
       ...current,
-      status: result.status === "passed" ? "completed" : "running",
+      status:
+        result.status === "passed" &&
+        current.orchestra?.executionMode !== "persistent" &&
+        !pendingSupervisorReview
+          ? "completed"
+          : "running",
       graph: { ...current.graph, delivery: result },
       meeting:
         current.meeting === null
           ? null
           : {
               ...current.meeting,
-              phase: result.status === "passed" ? "done" : current.meeting.phase,
+              pendingSupervisorReview,
+              phase:
+                result.status === "passed" &&
+                current.orchestra?.executionMode !== "persistent" &&
+                !pendingSupervisorReview
+                  ? "done"
+                  : current.meeting.phase,
             },
       updatedAt: yield* nowIso,
     });
@@ -3317,6 +4141,192 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     let run = yield* getRun(runRef);
     if (!run.graph?.nodes.some((node) => node.status === "running") && (yield* parkPausedRun(run)))
       return;
+    const interval = run.orchestra?.watchdogIntervalSeconds;
+    if (run.orchestra?.executionMode === "persistent" && interval !== undefined) {
+      const stopWatchdog = yield* Deferred.make<void>();
+      yield* forkParked(
+        Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
+          (event.type === "project.collaboration-run-cancel-requested" &&
+            event.payload.projectId === runRef.projectId &&
+            event.payload.runId === runRef.runId) ||
+          (event.type === "project.deleted" && event.payload.projectId === runRef.projectId)
+            ? Effect.gen(function* () {
+                if (Option.isSome(watchdogRuntime) && run.meeting?.threadId) {
+                  const journal = watchdogRuntime.value.journal;
+                  const threadId = run.meeting.threadId;
+                  yield* Effect.sync(() =>
+                    cancelWatchdogsForRun(journal, threadId, runRef.runId),
+                  ).pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("감시 실행 중지 요청을 기록하지 못했습니다", {
+                        runId: runRef.runId,
+                        cause: conciseCause(cause),
+                      }),
+                    ),
+                  );
+                }
+                yield* Deferred.succeed(stopWatchdog, undefined);
+              })
+            : Effect.void,
+        ),
+        { startImmediately: true },
+      );
+      yield* forkParked(
+        Effect.gen(function* () {
+          let reportedFailure = false;
+          while (true) {
+            let remainingSeconds = interval;
+            while (remainingSeconds > 0) {
+              const chunk = Math.min(remainingSeconds, 86_400);
+              yield* Effect.sleep(chunk * 1_000);
+              remainingSeconds -= chunk;
+            }
+            const retrieved = yield* getRun(runRef).pipe(
+              Effect.map(Option.some),
+              Effect.catch((error) =>
+                Effect.logWarning("지속 작업 감시 상태 조회 실패; 다음 주기에 다시 확인합니다", {
+                  runId: runRef.runId,
+                  error: error.message,
+                }).pipe(Effect.as(Option.none())),
+              ),
+            );
+            if (Option.isNone(retrieved)) continue;
+            const current = retrieved.value;
+            if (["completed", "failed", "cancelled", "cancel-requested"].includes(current.status))
+              return;
+            const meeting = current.meeting;
+            if (
+              current.status !== "running" ||
+              workspaceRunControl(current).control !== "active" ||
+              meeting === null ||
+              meeting.threadId === null ||
+              meeting.pendingQuestion !== null ||
+              current.graph?.planReview?.status === "pending"
+            )
+              continue;
+            if (
+              Option.isSome(watchdogRuntime) &&
+              (yield* Effect.sync(() =>
+                watchdogRuntime.value.journal.listUnsettledForRun(
+                  meeting.threadId!,
+                  current.id,
+                  WATCHDOG_PROJECTION_CONSUMER,
+                ),
+              )).length > 0
+            )
+              continue;
+            const chairId = resolveChairParticipantId(meeting);
+            const route = meetingAssignmentRoute(meeting, chairId);
+            const supervisorRole = meeting.participants.find(
+              (participant) => participant.id === chairId,
+            )?.roleDescription;
+            const nodeId = WorkspaceTaskNodeId.make(`watchdog-${yield* randomUUID}`);
+            const executionId = ProviderExecutionId.make(`orchestra:${current.id}:${nodeId}:1`);
+            if (Option.isSome(agentControl)) {
+              const registered = yield* agentControl.value
+                .beginSupervisor({
+                  projectId: current.projectId,
+                  runId: current.id,
+                  threadId: meeting.threadId,
+                  providerInstanceId: route.modelSelection.instanceId,
+                  executionId,
+                })
+                .pipe(
+                  Effect.as(true),
+                  Effect.catch((error) =>
+                    Effect.logWarning("지속 작업 감시 세션 준비 실패", {
+                      runId: current.id,
+                      error: error.message,
+                    }).pipe(Effect.as(false)),
+                  ),
+                );
+              if (!registered) continue;
+            }
+            const nodes = current.graph?.nodes ?? [];
+            const checked = yield* dispatchMeetingTurn({
+              run: current,
+              route,
+              threadId: meeting.threadId,
+              title: "지속 작업 감시",
+              executionNodeId: nodeId,
+              executionId,
+              prompt: [
+                "당신은 이 지속 작업을 위한 별도 감시 세션입니다. 지정된 감독자와 같은 모델을 사용하지만 독립적인 실행입니다.",
+                "사용자의 목표와 최신 지시, 현재 단계와 실패 근거를 확인하세요. 시간이 흘렀다는 사실만으로 멈춤이나 실패라고 단정하지 마세요.",
+                "확인된 문제가 있으면 원인과 다음 조치를 설명하고, 필요한 경우 실행 중인 작업자에게 메시지함으로 지시하세요. 전달과 실제 수신·반영은 구분하세요.",
+                "다른 작업자가 수정 중인 파일을 동시에 수정하지 말고, 사용자가 중지하거나 입력을 기다리는 작업을 임의로 재개하지 마세요. 안전 필터를 다른 모델이나 계정으로 우회하지 마세요.",
+                ...(supervisorRole ? [`사용자가 정한 감독자 역할: ${supervisorRole}`] : []),
+                `원래 목표: ${current.task}`,
+                `사용자의 추가 지시:\n${meeting.interjections.map((entry) => entry.text).join("\n") || "없음"}`,
+                `현재 단계: ${meeting.phase}; 실행 상태: ${current.status}; 그래프 상태: ${current.graph?.status ?? "아직 계획 중"}`,
+                `작업 단계(목록은 요약이며 전체 결과의 증거가 아닙니다):\n${nodes.map((node) => `${node.id} · ${node.title} · 목표 ${node.handoff.goal} · ${node.status} · 시도 ${node.attempts.length} · 시작 ${node.startedAt ?? "미확인"} · 오류 ${node.error ?? "없음"} · 검증 ${node.validation?.summary ?? "없음"}`).join("\n") || "아직 없음"}`,
+                ...(Option.isSome(agentControl)
+                  ? [
+                      `작업자에게 workspace_mailbox send를 사용할 수 있습니다. projectId=${current.projectId}, runId=${current.id}, toNodeId는 위 단계 ID입니다.`,
+                    ]
+                  : []),
+              ].join("\n\n"),
+            }).pipe(
+              Effect.ensuring(
+                Option.isSome(agentControl)
+                  ? agentControl.value.endSupervisor(executionId)
+                  : Effect.void,
+              ),
+              Effect.as(true),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* Effect.logWarning("지속 작업 감시 확인 실패", {
+                    runId: current.id,
+                    error: error.message,
+                  });
+                  if (!reportedFailure) {
+                    const id = `orchestra-watchdog-failed:${yield* randomUUID}`;
+                    const createdAt = yield* nowIso;
+                    yield* orchestrationEngine
+                      .dispatch({
+                        type: "thread.activity.append",
+                        commandId: CommandId.make(id),
+                        threadId: meeting.threadId!,
+                        createdAt,
+                        activity: {
+                          id: EventId.make(id),
+                          kind: "orchestra.watchdog.failed",
+                          tone: "error",
+                          summary: `감시 AI 확인 실패: ${error.message.slice(0, 400)}`,
+                          payload: { runId: current.id },
+                          turnId: null,
+                          createdAt,
+                        },
+                      })
+                      .pipe(
+                        Effect.catchCause((cause) =>
+                          Cause.hasInterruptsOnly(cause)
+                            ? Effect.failCause(cause)
+                            : Effect.logWarning("감시 오류를 대화에 기록하지 못했습니다.", {
+                                cause: conciseCause(cause),
+                              }),
+                        ),
+                      );
+                  }
+                  return false;
+                }),
+              ),
+            );
+            reportedFailure = !checked;
+          }
+        }).pipe(
+          Effect.raceFirst(Deferred.await(stopWatchdog)),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("지속 작업 감시 중단", {
+                  runId: runRef.runId,
+                  cause: conciseCause(cause),
+                }),
+          ),
+        ),
+      );
+    }
     if (Option.isSome(agentControl))
       yield* agentControl.value
         .reports(run)
@@ -3338,7 +4348,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const project = yield* projectionSnapshotQuery.getProjectShellById(run.projectId);
       if (Option.isSome(project)) {
         const baseline = yield* deliveryGit.value
-          .inspect(project.value.workspaceRoot)
+          .inspect(yield* runWorkspaceCwd(run))
           .pipe(Effect.option);
         if (Option.isSome(baseline))
           run = yield* persistRun({
@@ -3400,7 +4410,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         const project = yield* projectionSnapshotQuery.getProjectShellById(run.projectId);
         if (Option.isSome(project)) {
           const baseline = yield* deliveryGit.value
-            .inspect(project.value.workspaceRoot)
+            .inspect(yield* runWorkspaceCwd(run))
             .pipe(Effect.option);
           if (Option.isSome(baseline))
             graph = { ...graph, workspaceBaseline: baseline.value.fingerprint };
@@ -3415,11 +4425,188 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }
 
     const finished = yield* Queue.unbounded<{
-      readonly nodeId: string;
+      readonly nodeId: string | null;
       readonly cause: WorkspaceCollaborationCancelled | WorkspaceCollaborationExecutionError | null;
     }>();
     const inFlight = new Set<string>();
     const resultLock = yield* Semaphore.make(1);
+    // Live reviews are advisory; the durable final review still checks every
+    // instruction against the completed work. A restart may repeat a live
+    // review rather than incorrectly treating an interrupted one as complete.
+    let liveReviewedInterjections = run.meeting?.supervisorReviewedInterjections ?? 0;
+    yield* forkParked(
+      Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
+        (event.type === "project.collaboration-run-answered" ||
+          event.type === "project.collaboration-run-interjected") &&
+        event.payload.projectId === runRef.projectId &&
+        event.payload.runId === runRef.runId
+          ? Queue.offer(finished, { nodeId: null, cause: null }).pipe(Effect.asVoid)
+          : Effect.void,
+      ),
+      { startImmediately: true },
+    );
+    const parkRefusalAnswer = (answerCount: number) =>
+      resultLock.withPermit(
+        Effect.gen(function* () {
+          const current = yield* requireRunContinuable(runRef);
+          const meeting = current.meeting;
+          const answer = meeting?.answers[answerCount - 1];
+          if (
+            current.graph === null ||
+            meeting === null ||
+            meeting.pendingQuestion !== null ||
+            answer === undefined ||
+            meeting.answers.length !== answerCount ||
+            !isNodeInterventionQuestion(answer.question) ||
+            isNodeSeatSelectionQuestion(answer.question) ||
+            parseNodeRefusalDecision(answer.answer) !== null
+          )
+            return current;
+          const node = current.graph.nodes.find(
+            (candidate) =>
+              candidate.status === "awaiting-user" &&
+              (answer.nodeId === null
+                ? candidate.parkedQuestion === null
+                : candidate.id === answer.nodeId) &&
+              candidate.error !== null &&
+              isProviderContentRefusal(candidate.error),
+          );
+          if (node === undefined) return current;
+          const question = nodeRefusalQuestion(node.title);
+          return yield* persistGraphRun(
+            {
+              ...current,
+              meeting: {
+                ...meeting,
+                pendingSupervisorReview: true,
+                ...(!/다른\s*(?:좌석|참가자|계정|모델|에이전트|ai)|우회|bypass|circumvent/iu.test(
+                  answer.answer,
+                )
+                  ? { refusalInstructionReview: { answerCount, status: "pending" as const } }
+                  : {}),
+                pendingQuestion: {
+                  askedByParticipantId: node.participantId,
+                  question,
+                  options: [...NODE_REFUSAL_OPTIONS],
+                  context: `안전 필터를 다른 모델로 우회할 수 없습니다. 입력은 기록했으며 이 단계의 재시도·건너뛰기·종료는 명시적으로 선택해 주세요. ${node.error ?? ""}`,
+                  askedAt: yield* nowIso,
+                  nodeId: node.id,
+                },
+              },
+            },
+            current.graph,
+            bindings,
+            { updatedAt: yield* nowIso },
+          );
+        }),
+      );
+    const handleSeatSelectionAnswer = (answerCount: number) =>
+      resultLock.withPermit(
+        Effect.gen(function* () {
+          const current = yield* requireRunContinuable(runRef);
+          const meeting = current.meeting;
+          const answer = meeting?.answers[answerCount - 1];
+          if (
+            current.graph === null ||
+            meeting === null ||
+            meeting.pendingQuestion !== null ||
+            answer === undefined ||
+            meeting.answers.length !== answerCount
+          )
+            return { run: current, handled: false };
+          const authorized = meetingWithAuthorizedSeats(meeting);
+          const node = answeredSeatSelectionNode(meeting, current.graph);
+          if (node === undefined) return { run: current, handled: false };
+          const decision = parseNodeSeatSelectionDecision(answer.answer, authorized.participants);
+          const askedAt = yield* nowIso;
+          if (decision === null) {
+            const saved = yield* persistGraphRun(
+              {
+                ...current,
+                meeting: {
+                  ...meeting,
+                  pendingQuestion: {
+                    askedByParticipantId: null,
+                    question: nodeSeatSelectionQuestion(node.title),
+                    options: nodeSeatSelectionOptions(authorized.participants),
+                    context:
+                      "현재 허용된 좌석의 선택지 또는 정확한 좌석 ID를 선택해 주세요. 재시도나 추가 지시만으로는 배정을 변경하지 않습니다.",
+                    askedAt,
+                    nodeId: node.id,
+                  },
+                },
+              },
+              current.graph,
+              bindings,
+              { updatedAt: askedAt },
+            );
+            return { run: saved, handled: true };
+          }
+          if (decision.kind === "stop")
+            return yield* new WorkspaceCollaborationCancelled({ runRef });
+          let graph = refreshWorkspaceTaskGraphQueue({
+            ...current.graph,
+            nodes: current.graph.nodes.map((candidate) => {
+              if (candidate.id !== node.id) return candidate;
+              if (decision.kind === "skip")
+                return {
+                  ...candidate,
+                  status: "completed" as const,
+                  output: candidate.output ?? "(사용자가 이 단계를 건너뛰었습니다.)",
+                  completedAt: askedAt,
+                };
+              return {
+                ...candidate,
+                participantId: decision.participantId,
+                status: "queued" as const,
+              };
+            }),
+          });
+          if (decision.kind === "skip" && graph.workflowAssignment?.gateNodeId === node.id)
+            graph = skipPendingWorkflowAssignments(graph, askedAt);
+          const next = graph.nodes
+            .filter(
+              (candidate) =>
+                candidate.status === "awaiting-user" && candidate.parkedQuestion !== null,
+            )
+            .toSorted((left, right) => left.order - right.order)[0];
+          if (next === undefined || next.parkedQuestion === null) {
+            const saved = yield* persistGraphRun(current, graph, bindings, { updatedAt: askedAt });
+            return { run: saved, handled: true };
+          }
+          const parked = next.parkedQuestion;
+          const saved = yield* persistGraphRun(
+            {
+              ...current,
+              meeting: {
+                ...meeting,
+                pendingQuestion: {
+                  askedByParticipantId: isNodeSeatSelectionQuestion(parked.question)
+                    ? null
+                    : next.participantId,
+                  question: parked.question,
+                  options: isNodeSeatSelectionQuestion(parked.question)
+                    ? nodeSeatSelectionOptions(authorized.participants)
+                    : parked.options,
+                  context: parked.context,
+                  askedAt,
+                  nodeId: next.id,
+                },
+              },
+            },
+            {
+              ...graph,
+              nodes: graph.nodes.map((candidate) =>
+                candidate.id === next.id ? { ...candidate, parkedQuestion: null } : candidate,
+              ),
+              nextAction: parked.question,
+            },
+            bindings,
+            { updatedAt: askedAt },
+          );
+          return { run: saved, handled: true };
+        }),
+      );
     while (
       run.graph !== null &&
       (!["completed", "failed"].includes(run.graph.status) || inFlight.size > 0)
@@ -3449,15 +4636,267 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
         return;
       if (run.graph?.planReview?.status === "pending") return;
       if (run.graph === null) return;
-      if (run.meeting !== null && inFlight.size === 0) {
-        if (run.meeting.pendingQuestion !== null) return;
-        if (run.graph.nodes.some((node) => node.status === "awaiting-user")) {
+      if (
+        run.meeting?.pendingQuestion === null &&
+        hasPendingSeatSelectionAnswer(run.meeting, run.graph)
+      ) {
+        const selection = yield* handleSeatSelectionAnswer(run.meeting.answers.length);
+        run = selection.run;
+        if (selection.handled) continue;
+        if (run.graph === null) return;
+      }
+      if (
+        inFlight.size > 0 &&
+        workspaceRunControl(run).control === "active" &&
+        run.meeting !== null &&
+        run.meeting.threadId !== null &&
+        run.meeting.pendingQuestion === null &&
+        run.meeting.interjections.length > liveReviewedInterjections
+      ) {
+        const meeting = run.meeting;
+        const chairId = resolveChairParticipantId(meeting);
+        const chairBusy = run.graph.nodes.some(
+          (node) => node.status === "running" && node.participantId === chairId,
+        );
+        if (!chairBusy && meeting.threadId !== null) {
+          const observed = meeting.interjections.length;
+          const instructions = meeting.interjections.slice(liveReviewedInterjections, observed);
+          const role = meeting.participants.find(
+            (participant) => participant.id === chairId,
+          )?.roleDescription;
+          const route = meetingAssignmentRoute(meeting, chairId);
+          const reviewNodeId = WorkspaceTaskNodeId.make(`live-review-${yield* randomUUID}`);
+          const reviewExecutionId = ProviderExecutionId.make(
+            `orchestra:${run.id}:${reviewNodeId}:1`,
+          );
+          if (Option.isSome(agentControl))
+            yield* agentControl.value
+              .beginSupervisor({
+                projectId: run.projectId,
+                runId: run.id,
+                threadId: meeting.threadId,
+                providerInstanceId: route.modelSelection.instanceId,
+                executionId: reviewExecutionId,
+              })
+              .pipe(Effect.mapError((error) => executionError(error.message)));
+          const review = dispatchMeetingTurn({
+            run,
+            route,
+            threadId: meeting.threadId,
+            title: "진행 중 추가 지시 검토",
+            executionNodeId: reviewNodeId,
+            executionId: reviewExecutionId,
+            prompt: [
+              "사용자가 진행 중인 통합 작업에 추가 지시를 보냈습니다. 감독자 역할에 따라 현재 작업과 지시를 검토하고 대화창에 실제 상태와 필요한 조치를 설명하세요.",
+              "다른 작업자가 실행 중입니다. 같은 파일을 동시에 수정하지 말고, 전달하거나 적용하지 않은 지시는 적용했다고 말하지 마세요. 안전 필터를 다른 모델이나 계정으로 우회하지 마세요.",
+              ...(role ? [`사용자가 지정한 감독자 역할: ${role}`] : []),
+              `원래 목표: ${run.task}`,
+              `실행 중인 단계: ${run.graph.nodes
+                .filter((node) => node.status === "running")
+                .map((node) => `${node.id}: ${node.title}`)
+                .join(", ")}`,
+              ...(Option.isSome(agentControl)
+                ? [
+                    `필요한 작업자에게 workspace_mailbox send로 지시를 전달하세요. projectId=${run.projectId}, runId=${run.id}, toNodeId는 위 단계 ID이며 전송마다 고유한 requestId를 쓰세요. 전송은 보관을 뜻하고 수신·반영 확인은 별개입니다.`,
+                  ]
+                : []),
+              `사용자의 추가 지시:\n${instructions.map((entry) => entry.text).join("\n")}`,
+            ].join("\n\n"),
+          });
+          const result = yield* review.pipe(
+            Effect.ensuring(
+              Option.isSome(agentControl)
+                ? agentControl.value.endSupervisor(reviewExecutionId)
+                : Effect.void,
+            ),
+            Effect.map(() => null),
+            Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+              Effect.succeed(error.message),
+            ),
+          );
+          liveReviewedInterjections = observed;
+          if (result !== null)
+            yield* Effect.logWarning(
+              "진행 중 감독자 지시 검토 실패; 최종 검토에서 다시 확인합니다.",
+              {
+                runId: run.id,
+                error: result,
+              },
+            );
+          run = yield* requireRunContinuable(runRef);
+          continue;
+        }
+      }
+      if (inFlight.size > 0 && run.meeting?.pendingQuestion === null) {
+        const answer = run.meeting.answers.at(-1);
+        const refusalAnswer = answer === undefined ? null : parseNodeRefusalDecision(answer.answer);
+        const interventionNode =
+          answer !== undefined &&
+          isNodeInterventionQuestion(answer.question) &&
+          !isNodeSeatSelectionQuestion(answer.question) &&
+          run.graph.nodes.find(
+            (node) =>
+              node.status === "awaiting-user" &&
+              (answer.nodeId === null ? node.parkedQuestion === null : node.id === answer.nodeId) &&
+              node.error !== null,
+          );
+        if (interventionNode && refusalAnswer?.kind === "stop")
+          return yield* new WorkspaceCollaborationCancelled({ runRef });
+        if (
+          answer !== undefined &&
+          interventionNode &&
+          interventionNode.error !== null &&
+          isProviderContentRefusal(interventionNode.error) &&
+          refusalAnswer === null
+        ) {
+          run = yield* parkRefusalAnswer(run.meeting.answers.length);
+          continue;
+        }
+      }
+      if (
+        run.meeting !== null &&
+        (inFlight.size === 0 || run.meeting.refusalInstructionReview?.status === "pending")
+      ) {
+        const pendingRefusalReview = run.meeting.refusalInstructionReview;
+        if (pendingRefusalReview?.status === "pending") {
+          const answer = run.meeting.answers[pendingRefusalReview.answerCount - 1];
+          const threadId = run.meeting.threadId;
+          const chairId = resolveChairParticipantId(run.meeting);
+          const chairRole = run.meeting.participants.find(
+            (participant) => participant.id === chairId,
+          )?.roleDescription;
+          const result =
+            answer === undefined || threadId === null
+              ? { _tag: "Failure" as const, failure: "추가 지시 또는 대화 기록을 찾지 못했습니다." }
+              : yield* dispatchMeetingTurn({
+                  run,
+                  route: meetingAssignmentRoute(run.meeting, chairId),
+                  threadId,
+                  title: "대기 중 추가 지시 검토",
+                  executionNodeId: WorkspaceTaskNodeId.make(
+                    `refusal-review-${pendingRefusalReview.answerCount}`,
+                  ),
+                  executionId: ProviderExecutionId.make(
+                    `orchestra-refusal-review:${run.id}:${pendingRefusalReview.answerCount}`,
+                  ),
+                  prompt: [
+                    inFlight.size > 0
+                      ? "사용자가 통합 작업에 추가 지시를 보냈습니다. 지정된 감독자 역할에 따라 지시를 검토하고 다른 실행 중인 작업과 충돌하지 않도록 필요한 조치를 안내하세요. 실행 중인 작업과 같은 파일을 수정하지 마세요."
+                      : "사용자가 통합 작업에 추가 지시를 보냈습니다. 지정된 감독자 역할에 따라 지시를 검토하고 가능한 독립 작업을 진행하세요.",
+                    ...(chairRole ? [`사용자가 지정한 감독자 역할: ${chairRole}`] : []),
+                    "안전 필터가 거절한 단계는 보류 상태입니다. 다른 모델이나 계정으로 그 거절을 우회하거나 해당 단계를 다시 실행하지 마세요. 질문에 대한 선택은 사용자가 직접 합니다.",
+                    `사용자의 추가 지시: ${answer.answer}`,
+                    ...(answer.imageReferences ?? []).map(
+                      (image) =>
+                        `사용자가 첨부한 이미지: ${JSON.stringify(image.name)}; 서버 파일: ${JSON.stringify(image.path)}`,
+                    ),
+                  ].join("\n\n"),
+                }).pipe(
+                  Effect.map(() => ({ _tag: "Success" as const })),
+                  Effect.catchTag("WorkspaceCollaborationExecutionError", (error) =>
+                    Effect.succeed({ _tag: "Failure" as const, failure: error.message }),
+                  ),
+                );
+          const fresh = yield* resultLock.withPermit(requireRunContinuable(runRef));
+          if (
+            fresh.meeting?.refusalInstructionReview?.answerCount ===
+              pendingRefusalReview.answerCount &&
+            fresh.meeting.refusalInstructionReview.status === "pending"
+          ) {
+            const failed = result._tag === "Failure";
+            const failureNotice = failed
+              ? `\n감독자 추가 지시 검토 실패: ${result.failure}`.slice(0, 20_000)
+              : "";
+            if (failed && threadId !== null) {
+              const activityId = `orchestra-refusal-review-failed:${run.id}:${pendingRefusalReview.answerCount}`;
+              const createdAt = yield* nowIso;
+              yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.activity.append",
+                  commandId: CommandId.make(activityId),
+                  threadId,
+                  createdAt,
+                  activity: {
+                    id: EventId.make(activityId),
+                    kind: "orchestra.instruction-review.failed",
+                    tone: "error",
+                    summary: `감독자 추가 지시 검토 실패: ${result.failure.slice(0, 400)}`,
+                    payload: { runId: run.id, answerCount: pendingRefusalReview.answerCount },
+                    turnId: null,
+                    createdAt,
+                  },
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning(
+                          "감독자 추가 지시 검토 실패를 대화에 표시하지 못했습니다.",
+                          {
+                            cause: Cause.pretty(cause),
+                          },
+                        ),
+                  ),
+                );
+            }
+            run = yield* resultLock.withPermit(
+              Effect.gen(function* () {
+                const current = yield* requireRunContinuable(runRef);
+                if (
+                  current.meeting?.refusalInstructionReview?.answerCount !==
+                    pendingRefusalReview.answerCount ||
+                  current.meeting.refusalInstructionReview.status !== "pending"
+                )
+                  return current;
+                return yield* persistRun({
+                  ...current,
+                  meeting: {
+                    ...current.meeting,
+                    refusalInstructionReview: {
+                      answerCount: pendingRefusalReview.answerCount,
+                      status: failed ? "failed" : "completed",
+                      ...(failed ? { error: result.failure } : {}),
+                    },
+                    ...(failed && current.meeting.pendingQuestion !== null
+                      ? {
+                          pendingQuestion: {
+                            ...current.meeting.pendingQuestion,
+                            context:
+                              current.meeting.pendingQuestion.context.slice(
+                                0,
+                                20_000 - failureNotice.length,
+                              ) + failureNotice,
+                          },
+                        }
+                      : {}),
+                  },
+                  updatedAt: yield* nowIso,
+                });
+              }),
+            );
+          } else {
+            run = fresh;
+          }
+          continue;
+        }
+        if (
+          run.meeting.pendingQuestion !== null &&
+          run.meeting.pendingQuestion.nodeId === null &&
+          !isNodeInterventionQuestion(run.meeting.pendingQuestion.question)
+        )
+          return;
+        if (
+          run.meeting.pendingQuestion === null &&
+          !isNodeSeatSelectionQuestion(run.meeting.answers.at(-1)?.question ?? "") &&
+          run.graph.nodes.some((node) => node.status === "awaiting-user")
+        ) {
           // The person answered; parked seats rejoin the queue and re-run with
           // the recorded decision in their prompt. A node parked because its
           // retries ran out (`awaiting-user` WITH an error) also takes the
           // person's verdict on what to do with it.
           const lastAnswer = run.meeting.answers.at(-1) ?? null;
-          const verdict =
+          const authorized = meetingWithAuthorizedSeats(run.meeting);
+          let verdict =
             lastAnswer !== null && isNodeInterventionQuestion(lastAnswer.question)
               ? parseNodeInterventionDecision(lastAnswer.answer)
               : null;
@@ -3472,6 +4911,19 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           const answered = (node: WorkspaceTaskNode): boolean =>
             node.status === "awaiting-user" &&
             (answeredNodeId !== null ? node.id === answeredNodeId : node.parkedQuestion === null);
+          const refusedNode = run.graph.nodes.find(
+            (node) => answered(node) && node.error !== null && isProviderContentRefusal(node.error),
+          );
+          const refusalDecision =
+            refusedNode !== undefined && lastAnswer !== null
+              ? parseNodeRefusalDecision(lastAnswer.answer)
+              : null;
+          if (refusedNode !== undefined && refusalDecision === null) {
+            if (lastAnswer === null) return;
+            run = yield* parkRefusalAnswer(run.meeting.answers.length);
+            continue;
+          }
+          if (refusalDecision !== null) verdict = refusalDecision;
           const parkedNext =
             run.graph.nodes
               .filter((node) => node.status === "awaiting-user" && node.parkedQuestion !== null)
@@ -3479,6 +4931,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               .find((node) => !answered(node)) ?? null;
 
           if (verdict?.kind === "stop") {
+            if (lastAnswer !== null && parseNodeRefusalDecision(lastAnswer.answer)?.kind === "stop")
+              return yield* new WorkspaceCollaborationCancelled({ runRef });
             const stopped = refreshWorkspaceTaskGraphQueue({
               ...run.graph,
               status: "failed" as const,
@@ -3497,7 +4951,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
             return;
           }
 
-          const graph = refreshWorkspaceTaskGraphQueue({
+          let graph = refreshWorkspaceTaskGraphQueue({
             ...run.graph,
             nodes: run.graph.nodes.map((node) => {
               if (!answered(node)) return node;
@@ -3522,7 +4976,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               // Hand it to another seat the person already picked — never to an
               // account outside the meeting, which would run as someone they
               // did not choose. With no one else seated, retry in place.
-              const nextSeat = run.meeting!.participants.find(
+              const nextSeat = meetingWithAuthorizedSeats(run.meeting!).participants.find(
                 (participant) => participant.id !== node.participantId,
               );
               // A new seat is a new driver: its conversation starts fresh.
@@ -3531,8 +4985,12 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 : { ...granted, participantId: nextSeat.id, threadId: null };
             }),
           });
-          // The slot is free again: the next node waiting with a question of
-          // its own is asked now, and the run parks until that answer lands.
+          if (
+            verdict?.kind === "skip" &&
+            run.graph.workflowAssignment?.gateNodeId === answeredNodeId
+          )
+            graph = skipPendingWorkflowAssignments(graph, answeredAt);
+          // Publish the next node's question while independent work continues.
           if (parkedNext !== null && parkedNext.parkedQuestion !== null) {
             const parked = parkedNext.parkedQuestion;
             run = yield* persistGraphRun(
@@ -3541,9 +4999,13 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
                 meeting: {
                   ...run.meeting,
                   pendingQuestion: {
-                    askedByParticipantId: parkedNext.participantId,
+                    askedByParticipantId: isNodeSeatSelectionQuestion(parked.question)
+                      ? null
+                      : parkedNext.participantId,
                     question: parked.question,
-                    options: parked.options,
+                    options: isNodeSeatSelectionQuestion(parked.question)
+                      ? nodeSeatSelectionOptions(authorized.participants)
+                      : parked.options,
                     context: parked.context,
                     askedAt: answeredAt,
                     nodeId: parkedNext.id,
@@ -3560,7 +5022,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               bindings,
               { updatedAt: answeredAt },
             );
-            return;
+            continue;
           }
           run = yield* persistGraphRun(run, graph, bindings, { updatedAt: answeredAt });
           continue;
@@ -3568,13 +5030,78 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       }
       const scheduled = yield* resultLock.withPermit(
         Effect.gen(function* () {
-          const current = yield* requireRunContinuable(runRef);
+          let current = yield* requireRunContinuable(runRef);
           if (
             workspaceRunControl(current).control !== "active" ||
             current.graph === null ||
-            current.meeting?.pendingQuestion ||
+            (current.meeting?.pendingQuestion &&
+              current.meeting.pendingQuestion.nodeId === null &&
+              !isNodeInterventionQuestion(current.meeting.pendingQuestion.question)) ||
             ["completed", "failed"].includes(current.graph.status)
           )
+            return { run: current, provisionErrors: new Map<string, string>() };
+          if (current.meeting !== null) {
+            const authorized = meetingWithAuthorizedSeats(current.meeting);
+            const authorizedIds = new Set(authorized.participants.map((seat) => seat.id));
+            const unselectedIds = new Set(
+              current.meeting.participants
+                .filter((seat) => !authorizedIds.has(seat.id))
+                .map((seat) => seat.id),
+            );
+            const unselected = readyWorkspaceTaskNodes(current.graph).filter(
+              (node) => node.participantId !== null && unselectedIds.has(node.participantId),
+            );
+            if (unselected.length > 0) {
+              const askedAt = yield* nowIso;
+              const first = current.meeting.pendingQuestion === null ? unselected[0] : undefined;
+              const options = nodeSeatSelectionOptions(authorized.participants);
+              const context =
+                "기존 배정과 기록은 보존됩니다. 현재 허용된 좌석을 직접 선택해야 이 단계의 다음 시도를 시작합니다.";
+              const unselectedNodeIds = new Set(unselected.map((node) => node.id));
+              const meeting =
+                first === undefined
+                  ? current.meeting
+                  : {
+                      ...current.meeting,
+                      pendingQuestion: {
+                        askedByParticipantId: null,
+                        question: nodeSeatSelectionQuestion(first.title),
+                        options,
+                        context,
+                        askedAt,
+                        nodeId: first.id,
+                      },
+                    };
+              const graph = {
+                ...current.graph,
+                nodes: current.graph.nodes.map((node) =>
+                  !unselectedNodeIds.has(node.id)
+                    ? node
+                    : {
+                        ...node,
+                        status: "awaiting-user" as const,
+                        parkedQuestion:
+                          node.id === first?.id
+                            ? null
+                            : {
+                                question: nodeSeatSelectionQuestion(node.title),
+                                options,
+                                context,
+                                intervention: true,
+                                raisedAt: askedAt,
+                              },
+                      },
+                ),
+              };
+              current = yield* persistGraphRun(
+                { ...current, meeting },
+                refreshWorkspaceTaskGraphQueue({ ...graph, status: "executing" }),
+                bindings,
+                { updatedAt: askedAt },
+              );
+            }
+          }
+          if (current.graph === null)
             return { run: current, provisionErrors: new Map<string, string>() };
           const ready = dispatchableWorkspaceTaskNodes(current.graph, {
             width: graphWaveWidth(current),
@@ -3588,6 +5115,7 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
               : Math.max(
                   0,
                   current.orchestra.maxWorkerTurns -
+                    (current.meeting?.continuation?.workerTurns ?? 0) -
                     current.graph.nodes.reduce((count, node) => count + node.attempts.length, 0),
                 );
           if (ready.length > 0 && remaining === 0 && inFlight.size === 0)
@@ -3656,18 +5184,158 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
           return;
         }
         if (run.graph !== null && ["completed", "failed"].includes(run.graph.status)) break;
+        const failedNode = run.graph?.nodes.find(
+          (node) =>
+            node.status === "failed" &&
+            node.error !== null &&
+            isWorkspaceProviderUnavailable(node.error),
+        );
+        if (run.meeting === null && run.graph !== null && failedNode?.error) {
+          const finishedAt = yield* nowIso;
+          yield* persistGraphRun(
+            run,
+            { ...run.graph, status: "failed", nextAction: failedNode.error },
+            bindings,
+            { status: "failed", error: failedNode.error, updatedAt: finishedAt },
+          );
+          return;
+        }
+        if (
+          run.graph?.nodes.some((node) => node.status === "awaiting-user") &&
+          isNodeSeatSelectionQuestion(run.meeting?.answers.at(-1)?.question ?? "")
+        )
+          return;
         return yield* executionError(
           "Task graph is deadlocked: no runnable task or active worker.",
         );
       }
       const settled = yield* Queue.take(finished);
-      inFlight.delete(settled.nodeId);
+      if (settled.nodeId !== null) inFlight.delete(settled.nodeId);
       if (settled.cause !== null) return yield* settled.cause;
       run = yield* requireRunContinuable(runRef);
     }
     if (yield* parkPausedRun(run)) return;
     run = yield* finalizeDelivery(runRef);
-    if (run.status === "completed") yield* captureRunMemory(run);
+    if (
+      run.status === "running" &&
+      run.graph?.status === "completed" &&
+      (run.orchestra?.executionMode === "persistent" ||
+        run.meeting?.pendingSupervisorReview === true) &&
+      run.meeting !== null
+    ) {
+      const chairId = resolveChairParticipantId(run.meeting);
+      if (run.meeting.threadId === null)
+        return yield* executionError("지속 작업의 대화창을 확인할 수 없습니다.");
+      const observedInterjections = run.meeting.interjections.length;
+      const mailboxNotice = yield* unconfirmedInstructionNotice(run);
+      const turn = yield* dispatchMeetingTurn({
+        run,
+        route: meetingAssignmentRoute(run.meeting, chairId),
+        threadId: run.meeting.threadId,
+        title: "지속 작업 진행 판단",
+        prompt: [
+          "사용자가 요청한 통합 작업의 감독자입니다. 현재 목표와 조건을 기준으로 완료 여부를 판단하세요.",
+          "완료되지 않았다면 확인한 결과와 남은 작업을 바탕으로 필요한 일을 계속하세요. 안전 필터를 다른 모델로 우회하지 마세요.",
+          "실제 진행이 불가능하고 사용자 입력이나 외부 상태가 필요한 경우에만 blocked를 선택하세요.",
+          `원래 목표: ${run.task}`,
+          `이번 실행 결과: ${run.finalOutput ?? run.graph.nextAction}`,
+          `검증 상태: ${run.graph.delivery ? `${run.graph.delivery.status} · ${run.graph.delivery.detail}` : "별도 검증 설정 없음"}`,
+          `대화 및 추가 지시: ${renderMeetingTranscript(run.meeting)}`,
+          ...(mailboxNotice
+            ? [mailboxNotice, "확인이 없는 지시가 처리됐다고 단정하지 말고 남은 상태를 명시하세요."]
+            : []),
+          '반드시 <t3_persistent_verdict>{"decision":"complete"|"continue"|"blocked","summary":"확인한 결과와 근거","nextTask":"continue일 때 필요한 다음 작업"}</t3_persistent_verdict> 형식으로 답하세요.',
+        ].join("\n\n"),
+        usagePhase: "planning",
+      });
+      if (isProviderContentRefusal(turn.output))
+        return yield* executionError(
+          `감독 AI의 안전 필터로 진행 판단이 차단됐습니다: ${turn.output}`,
+        );
+      const verdict = yield* Effect.try({
+        try: () => parsePersistentVerdict(turn.output),
+        catch: (cause) => executionError(cause instanceof Error ? cause.message : String(cause)),
+      });
+      run = yield* requireRunContinuable(runRef);
+      if (yield* parkPausedRun(run)) return;
+      if (run.meeting === null || run.graph === null) return;
+      if (
+        verdict.decision !== "continue" &&
+        run.meeting.interjections.length > observedInterjections
+      ) {
+        yield* enqueue(runRef);
+        return;
+      }
+      const checkedAt = yield* nowIso;
+      if (verdict.decision === "blocked") {
+        yield* recordRunProgress(run, "blocked", verdict.summary);
+        run = yield* requireRunContinuable(runRef);
+        run = yield* persistRun({
+          ...run,
+          status: "failed",
+          error: verdict.summary,
+          updatedAt: checkedAt,
+        });
+      } else if (verdict.decision === "complete") {
+        if (run.orchestra?.completionCheck === true && run.graph.delivery?.status !== "passed") {
+          return yield* executionError(
+            "감독자는 완료로 판단했지만 요청된 최종 검증이 통과하지 않았습니다.",
+          );
+        }
+        const latestMailboxNotice = yield* unconfirmedInstructionNotice(run);
+        run = yield* persistRun({
+          ...run,
+          status: "completed",
+          meeting: {
+            ...run.meeting,
+            phase: "done",
+            pendingSupervisorReview: false,
+            supervisorReviewedInterjections: observedInterjections,
+          },
+          finalOutput: latestMailboxNotice
+            ? `${verdict.summary}\n\n${latestMailboxNotice}`
+            : verdict.summary,
+          error: null,
+          updatedAt: checkedAt,
+        });
+        if (run.status === "running" && run.meeting?.pendingSupervisorReview === true) {
+          yield* enqueue(runRef);
+          return;
+        }
+      } else {
+        yield* recordRunProgress(run, "continue", verdict.summary, verdict.nextTask);
+        run = yield* requireRunContinuable(runRef);
+        if (run.meeting === null || run.graph === null) return;
+        run = yield* persistRun({
+          ...run,
+          graph: null,
+          steps: [],
+          meeting: {
+            ...run.meeting,
+            phase: "planning",
+            pendingSupervisorReview: false,
+            supervisorReviewedInterjections: observedInterjections,
+            turnFailures: [],
+            continuation: {
+              cycle: (run.meeting.continuation?.cycle ?? 0) + 1,
+              workerTurns:
+                (run.meeting.continuation?.workerTurns ?? 0) +
+                run.graph.nodes.reduce((count, node) => count + node.attempts.length, 0),
+              summary: verdict.summary,
+              nextTask: verdict.nextTask!.trim(),
+            },
+          },
+          finalOutput: null,
+          error: null,
+          updatedAt: checkedAt,
+        });
+        yield* enqueue(runRef);
+      }
+    }
+    if (run.status === "completed") {
+      yield* recordRunProgress(run, "complete", run.finalOutput ?? "작업 완료 보고 없음");
+      yield* captureRunMemory(run);
+    }
   }, Effect.scoped);
 
   const executeRun = Effect.fn("WorkspaceCollaborationReactor.executeRun")(function* (
@@ -3967,25 +5635,69 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
   );
 
   const executeSafely = (runRef: RunRef) =>
-    executeRun(runRef).pipe(
-      Effect.catchTag("WorkspaceCollaborationCancelled", () => finalizeCancelled(runRef)),
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
-        const error = conciseCause(cause);
-        return finalizeFailed(runRef, error).pipe(
-          Effect.catchCause((finalizeCause) =>
-            Effect.logError("Workspace collaboration run failed and could not be finalized", {
-              projectId: runRef.projectId,
-              runId: runRef.runId,
-              error,
-              finalizeError: conciseCause(finalizeCause),
-            }),
-          ),
-        );
-      }),
-      Effect.andThen(publishRunSummary(runRef)),
-      Effect.andThen(cleanupTerminalRunWorktrees(runRef)),
-    );
+    Effect.gen(function* () {
+      const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+      const initialRun = yield* getRun(runRef).pipe(Effect.option);
+      const executionKind = Option.isSome(initialRun)
+        ? initialRun.value.meeting !== null
+          ? ("meeting" as const)
+          : initialRun.value.workflow !== null
+            ? ("workflow_v2" as const)
+            : ("orchestra" as const)
+        : ("orchestra" as const);
+      const effectiveThreadId = Option.isSome(initialRun)
+        ? (initialRun.value.meeting?.threadId ??
+          initialRun.value.workflow?.threadId ??
+          runRef.projectId)
+        : runRef.projectId;
+      let finalStatus: "completed" | "cancelled" | "failed" = "completed";
+      let finalError: string | null = null;
+      yield* unifiedExecutionLedger.beginEffect({
+        executionId: runRef.runId,
+        executionKind,
+        threadId: effectiveThreadId,
+        projectId: runRef.projectId,
+        summary: `${executionKind}:${runRef.runId}`,
+        startedAtMs,
+      });
+      yield* executeRun(runRef).pipe(
+        Effect.catchTag("WorkspaceCollaborationCancelled", () => {
+          finalStatus = "cancelled";
+          return finalizeCancelled(runRef);
+        }),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            finalStatus = "cancelled";
+            return Effect.failCause(cause);
+          }
+          const error = conciseCause(cause);
+          finalStatus = "failed";
+          finalError = error;
+          return finalizeFailed(runRef, error).pipe(
+            Effect.catchCause((finalizeCause) =>
+              Effect.logError("Workspace collaboration run failed and could not be finalized", {
+                projectId: runRef.projectId,
+                runId: runRef.runId,
+                error,
+                finalizeError: conciseCause(finalizeCause),
+              }),
+            ),
+          );
+        }),
+        Effect.andThen(publishRunSummary(runRef)),
+        Effect.andThen(cleanupTerminalRunWorktrees(runRef)),
+        Effect.ensuring(
+          Effect.sync(() => {
+            unifiedExecutionLedger.finish({
+              executionId: runRef.runId,
+              executionKind,
+              status: finalStatus,
+              errorMessage: finalError,
+            });
+          }),
+        ),
+      );
+    });
 
   const releaseClaim = (key: string) =>
     SynchronizedRef.update(claimedRunsRef, (current) => {
@@ -4031,8 +5743,21 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     }
     yield* TxRef.update(outstanding, (count) => count + 1).pipe(Effect.tx);
     yield* forkParked(
-      getWorkspaceSemaphore(runRef.projectId).pipe(
+      getRun(runRef).pipe(
+        Effect.flatMap((run) => {
+          const threadId = workspaceConversationThreadId(run);
+          const key = run.meeting
+            ? `${run.projectId}:conversation:${threadId ?? run.id}`
+            : run.projectId;
+          return getWorkspaceSemaphore(key);
+        }),
         Effect.flatMap((semaphore) => semaphore.withPermit(executeSafely(runRef))),
+        Effect.catchCause((cause) =>
+          Effect.logError("Could not start workspace collaboration run", {
+            runId: runRef.runId,
+            cause: conciseCause(cause),
+          }),
+        ),
         Effect.ensuring(releaseClaim(key)),
       ),
     );
@@ -4047,6 +5772,8 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
       const scheduledRuns = runs.filter(
         (run) =>
           (run.source === "schedule" || run.source === "automation") &&
+          // A run attached to a conversation belongs to that conversation alone.
+          run.meeting?.threadId === undefined &&
           run.status !== "cancel-requested",
       );
       yield* Effect.forEach(
@@ -4066,10 +5793,12 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     },
   );
 
+  // Conversation runs must not preempt unrelated project automation, including on recovery.
   const enqueueRequestedRun = (run: WorkspaceCollaborationRun, preempt: boolean) =>
-    (preempt ? preemptScheduledRuns(run.projectId) : Effect.void).pipe(
-      Effect.andThen(enqueue({ projectId: run.projectId, runId: run.id })),
-    );
+    (preempt && run.meeting?.threadId === undefined
+      ? preemptScheduledRuns(run.projectId)
+      : Effect.void
+    ).pipe(Effect.andThen(enqueue({ projectId: run.projectId, runId: run.id })));
 
   /**
    * Deleting a project has to stop its collaboration work too. Without this the run keeps
@@ -4140,35 +5869,267 @@ export const makeWorkspaceCollaborationReactor = Effect.gen(function* () {
     return Effect.void;
   };
 
-  const enqueueStartupRuns = runRepository.listResumable().pipe(
-    Effect.flatMap((runs) => {
-      const ordered = [...runs].toSorted((left, right) => {
-        const priority = (left.source === "user" ? 0 : 1) - (right.source === "user" ? 0 : 1);
-        return priority !== 0
-          ? priority
-          : left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  const recoverInterruptedWatchdogs = Effect.fn("recoverInterruptedWatchdogs")(function* (
+    run: WorkspaceCollaborationRun,
+    startupSequence: number,
+  ) {
+    const threadId = run.meeting?.threadId;
+    if (threadId && run.status === "cancel-requested" && Option.isSome(watchdogRuntime)) {
+      const journal = watchdogRuntime.value.journal;
+      yield* Effect.sync(() => cancelWatchdogsForRun(journal, threadId, run.id));
+    }
+    if (
+      !threadId ||
+      run.orchestra?.watchdogIntervalSeconds === undefined ||
+      !projectionSnapshotQuery.getWatchdogActivitySequences
+    )
+      return;
+    const thread = yield* projectionSnapshotQuery.getThreadRuntimeContext(threadId, {
+      messages: true,
+      activityKinds: ["orchestra.block"],
+    });
+    if (Option.isNone(thread) || thread.value.projectId !== run.projectId) return;
+    const sequences = new Map(
+      (yield* projectionSnapshotQuery.getWatchdogActivitySequences(threadId)).map((entry) => [
+        entry.id,
+        entry.sequence,
+      ]),
+    );
+    for (const activity of thread.value.activities) {
+      const sequence = sequences.get(activity.id);
+      if (
+        activity.kind !== "orchestra.block" ||
+        sequence === undefined ||
+        sequence > startupSequence ||
+        !Schema.is(WorkspaceOrchestraBlock)(activity.payload)
+      )
+        continue;
+      const block = activity.payload;
+      if (
+        (block.status !== "running" && block.status !== "awaiting-user") ||
+        block.runId !== run.id ||
+        block.ownerThreadId !== threadId ||
+        !block.nodeId.startsWith("watchdog-")
+      )
+        continue;
+      if (Option.isSome(watchdogRuntime)) {
+        const journal = watchdogRuntime.value.journal;
+        const detached = yield* Effect.sync(() =>
+          journal.getByExecution(threadId, block.executionId),
+        );
+        if (detached) {
+          if (run.status === "cancel-requested")
+            yield* Effect.sync(() => journal.requestCancel(detached.id));
+          const identity = yield* Effect.sync(() => journal.executionProvider(detached.id));
+          const project = yield* projectionSnapshotQuery.getProjectShellById(run.projectId);
+          if (
+            identity &&
+            identity.providerInstanceId === block.modelSelection.instanceId &&
+            Option.isSome(project)
+          ) {
+            const worker = {
+              execution: {
+                executionId: block.executionId,
+                ownerThreadId: block.ownerThreadId,
+                runId: block.runId,
+                nodeId: block.nodeId,
+                attempt: block.attempt,
+              },
+              modelSelection: block.modelSelection,
+              runtimeMode: thread.value.runtimeMode,
+              interactionMode: thread.value.interactionMode,
+              cwd: thread.value.worktreePath ?? project.value.workspaceRoot,
+              prompt: "",
+              title: block.title,
+              displayName: block.displayName,
+              role: block.role,
+              kind: block.kind,
+              ...(block.instruction === undefined ? {} : { instruction: block.instruction }),
+              ...(block.usageWorkId === undefined ? {} : { usageWorkId: block.usageWorkId }),
+              ...(block.usagePhase === undefined ? {} : { usagePhase: block.usagePhase }),
+              startedAt: activity.createdAt,
+            };
+            const activate = Option.isSome(agentControl)
+              ? agentControl.value.beginSupervisor({
+                  projectId: run.projectId,
+                  runId: run.id,
+                  threadId,
+                  providerInstanceId: block.modelSelection.instanceId,
+                  executionId: block.executionId,
+                })
+              : Effect.fail(
+                  new WorkspaceAgentControlError({
+                    message: "감독자 권한 서비스를 확인할 수 없습니다.",
+                  }),
+                );
+            const deactivate = Option.isSome(agentControl)
+              ? agentControl.value.endSupervisor(block.executionId)
+              : Effect.void;
+            yield* forkParked(
+              resumeDetachedWatchdog({
+                journal,
+                engine: orchestrationEngine,
+                queries: projectionSnapshotQuery,
+                jobId: detached.id,
+                consumer: WATCHDOG_PROJECTION_CONSUMER,
+                provider: ProviderDriverKind.make(identity.provider),
+                providerInstanceId: block.modelSelection.instanceId,
+                worker,
+                activate,
+                deactivate,
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.failCause(cause)
+                    : Effect.logWarning("독립 감시 실행을 다시 연결하지 못했습니다", {
+                        runId: run.id,
+                        executionId: block.executionId,
+                        cause: conciseCause(cause),
+                      }),
+                ),
+              ),
+              { startImmediately: true },
+            );
+          }
+          // A separate worker might still be running. Its journal and proof,
+          // not a server restart, determine whether it was interrupted.
+          continue;
+        }
+      }
+      // Terminal-run reconciliation only concerns jobs present in the durable
+      // journal. Do not rewrite unrelated historical in-process blocks.
+      if (["completed", "failed", "cancelled"].includes(run.status)) continue;
+      const message = thread.value.messages.find((item) => item.id === block.messageId);
+      const createdAt = yield* nowIso;
+      const key = `${block.executionId}:${block.attempt}`;
+      // Completing the partial message first lets a later boot retry the status
+      // update if this process is interrupted between the two commands.
+      if (message?.streaming && message.role === "assistant") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`watchdog-restart:${key}:complete`),
+          threadId,
+          messageId: block.messageId,
+          createdAt,
+        });
+      }
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`watchdog-restart:${key}:status`),
+        threadId,
+        createdAt,
+        activity: {
+          ...activity,
+          tone: "error",
+          summary:
+            "서버 중단으로 감시 실행이 끊겼습니다. 이전 실행의 처리 결과는 확인되지 않았습니다.",
+          payload: { ...block, status: "failed" },
+        },
       });
-      // The per-request `preempt` flag lives on the event, not on the run, so recovery
-      // cannot read back what a particular request asked for. It falls back to the default
-      // for the run's source, which finishes a preemption that a crash interrupted while
-      // still leaving server-started integrity runs alone.
-      return Effect.forEach(ordered, (run) => enqueueRequestedRun(run, run.source === "user"), {
-        concurrency: 1,
-        discard: true,
-      });
-    }),
-    Effect.catchCause((cause) =>
-      Effect.logWarning("Workspace collaboration startup recovery failed", {
-        cause: conciseCause(cause),
+    }
+  });
+
+  const enqueueStartupRuns = (startupSequence: number) =>
+    runRepository.listResumable().pipe(
+      Effect.flatMap((runs) => {
+        const ordered = [...runs].toSorted((left, right) => {
+          const priority = (left.source === "user" ? 0 : 1) - (right.source === "user" ? 0 : 1);
+          return priority !== 0
+            ? priority
+            : left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+        });
+        // The per-request `preempt` flag lives on the event, not on the run, so recovery
+        // cannot read back what a particular request asked for. It falls back to the default
+        // for the run's source, which finishes a preemption that a crash interrupted while
+        // still leaving server-started integrity runs alone.
+        return Effect.forEach(
+          ordered,
+          (run) =>
+            recoverInterruptedWatchdogs(run, startupSequence).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.logWarning("Interrupted watchdog recovery failed", {
+                      runId: run.id,
+                      cause: conciseCause(cause),
+                    }),
+              ),
+              Effect.andThen(enqueueRequestedRun(run, run.source === "user")),
+            ),
+          {
+            concurrency: 1,
+            discard: true,
+          },
+        );
       }),
-    ),
-  );
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Workspace collaboration startup recovery failed", {
+          cause: conciseCause(cause),
+        }),
+      ),
+    );
 
   const start: WorkspaceCollaborationReactorShape["start"] = Effect.fn("start")(function* () {
+    const startupSequence = yield* orchestrationEngine.latestSequence;
     yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueEvent), {
       startImmediately: true,
     });
-    yield* enqueueStartupRuns;
+    if (Option.isSome(watchdogRuntime)) {
+      const journal = watchdogRuntime.value.journal;
+      // Upgrade room turns are reattached by their own owner, never cancelled as runs.
+      const active = yield* Effect.sync(() =>
+        journal
+          .listReconciliationContexts(WATCHDOG_PROJECTION_CONSUMER)
+          .filter((entry) => entry.runId !== UPGRADE_ROOM_RUN_ID),
+      );
+      const reconciledTerminalRuns = new Set<string>();
+      yield* Effect.forEach(
+        active,
+        (entry) =>
+          Effect.gen(function* () {
+            const owner = yield* projectionSnapshotQuery.getThreadRuntimeContext(
+              ThreadId.make(entry.threadId),
+            );
+            if (Option.isNone(owner) || owner.value.deletedAt !== null) {
+              yield* Effect.sync(() => journal.requestCancel(entry.id));
+              return;
+            }
+            const project = yield* projectionSnapshotQuery.getProjectShellById(
+              owner.value.projectId,
+            );
+            const run = Option.isSome(project)
+              ? yield* runRepository.getById({
+                  projectId: owner.value.projectId,
+                  runId: WorkspaceCollaborationRunId.make(entry.runId),
+                })
+              : Option.none();
+            if (
+              Option.isNone(run) ||
+              ["cancel-requested", "cancelled", "completed", "failed"].includes(run.value.status)
+            )
+              yield* Effect.sync(() => journal.requestCancel(entry.id));
+            if (
+              Option.isSome(run) &&
+              ["cancelled", "completed", "failed"].includes(run.value.status) &&
+              !reconciledTerminalRuns.has(`${entry.threadId}:${entry.runId}`)
+            ) {
+              reconciledTerminalRuns.add(`${entry.threadId}:${entry.runId}`);
+              yield* recoverInterruptedWatchdogs(run.value, startupSequence);
+            }
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.logWarning("시작 중 감시 실행의 소속을 확인하지 못했습니다", {
+                    executionId: entry.id,
+                    cause: conciseCause(cause),
+                  }),
+            ),
+          ),
+        { concurrency: 1, discard: true },
+      );
+    }
+    yield* enqueueStartupRuns(startupSequence);
     // D7 startup sweep: the live-event cleanup misses worktrees a crash left
     // behind. Deferred past boot so it never competes with startup recovery.
     yield* forkParked(

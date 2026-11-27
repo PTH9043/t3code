@@ -87,6 +87,12 @@ const makeDesktopWindowLayer = (selectedAction: Deferred.Deferred<string>) =>
     zoomMain: (direction) =>
       Deferred.succeed(selectedAction, `zoom-${direction}`).pipe(Effect.asVoid),
     syncAppearance: Effect.void,
+    getAssistantSettings: Effect.die("unexpected assistant settings"),
+    setAssistantSettings: () => Effect.die("unexpected assistant settings"),
+    openAssistant: Effect.die("unexpected assistant window"),
+    closeAssistant: Effect.die("unexpected assistant window"),
+    getAssistantModel: () => Effect.die("unexpected assistant model"),
+    setAssistantModel: () => Effect.die("unexpected assistant model"),
   } satisfies DesktopWindow.DesktopWindow["Service"]);
 
 const makeElectronMenuLayer = (
@@ -102,6 +108,7 @@ const makeElectronMenuLayer = (
 const configureMenu = (
   selectedAction: Deferred.Deferred<string>,
   applicationMenuTemplate: Deferred.Deferred<readonly Electron.MenuItemConstructorOptions[]>,
+  platform: DesktopEnvironment.MakeDesktopEnvironmentInput["platform"] = environmentInput.platform,
 ) =>
   Effect.gen(function* () {
     const menu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
@@ -115,7 +122,7 @@ const configureMenu = (
         Layer.provideMerge(electronDialogLayer),
         Layer.provideMerge(electronAppLayer),
         Layer.provideMerge(
-          DesktopEnvironment.layer(environmentInput).pipe(
+          DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
             Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({}))),
           ),
         ),
@@ -173,6 +180,33 @@ describe("DesktopApplicationMenu", () => {
 
       settingsClick({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "open-settings");
+    }),
+  );
+
+  it.effect("opens the upgrade tab only in the Windows window whose menu was clicked", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const template = yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+      yield* configureMenu(selectedAction, template, "win32");
+      const submenu = (yield* Deferred.await(template)).find(
+        (item) => item.label === "보기",
+      )?.submenu;
+      const click =
+        Array.isArray(submenu) &&
+        submenu.find((item) => item.label === "AutoUsage 업그레이드")?.click;
+      if (typeof click !== "function") throw new Error("Missing native upgrade tab menu action.");
+      const sent: string[] = [];
+      const window = {
+        isDestroyed: () => false,
+        webContents: { send: (channel: string) => sent.push(channel) },
+      };
+      click({} as Electron.MenuItem, undefined, {} as KeyboardEvent);
+      click(
+        {} as Electron.MenuItem,
+        window as unknown as Electron.BrowserWindow,
+        {} as KeyboardEvent,
+      );
+      assert.deepEqual(sent, ["desktop:upgrade-room-tab-menu"]);
     }),
   );
 

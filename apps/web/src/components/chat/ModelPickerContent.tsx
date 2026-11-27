@@ -2,7 +2,6 @@ import {
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
-  PROVIDER_DISPLAY_NAMES,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
@@ -11,6 +10,10 @@ import { ChevronRightIcon, SearchIcon } from "lucide-react";
 import type { WorkspaceDevelopmentPanelProps } from "./WorkspaceDevelopmentPanel";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
+import {
+  modelPickerProviderGroupKey,
+  modelPickerProviderGroupLabel,
+} from "./modelPickerProviderGroups";
 import {
   modelPickerLegacySectionKey,
   modelPickerModelKey,
@@ -52,6 +55,11 @@ type ModelPickerItem = {
   subProvider?: string;
   instanceId: ProviderInstanceId;
   driverKind: ProviderDriverKind;
+  /**
+   * Shared by the rail and model list so separate API accounts keep their
+   * own model rows and request routing identity.
+   */
+  accountGroupKey: string;
   instanceDisplayName: string;
   instanceAccentColor?: string | undefined;
   continuationGroupKey?: string | undefined;
@@ -67,6 +75,8 @@ function ModelListSeparator() {
 export const ModelPickerContent = memo(function ModelPickerContent(props: {
   /** The instance currently selected in the composer (combobox "value"). */
   activeInstanceId: ProviderInstanceId;
+  /** Open on a usable account while the composer has no usable model selection. */
+  preferReadyAccount?: boolean;
   model: string;
   /**
    * When set, the picker is locked to the given driver kind — typically
@@ -125,6 +135,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         // When locked, prime the sidebar to the currently-active instance
         // so jumping into the picker keeps the focused instance visible.
         return props.activeInstanceId;
+      }
+      if (props.preferReadyAccount) {
+        const usableAccounts = instanceEntries.filter(
+          (entry) =>
+            isProviderInstancePickerReady(entry) &&
+            (modelOptionsByInstance.get(entry.instanceId)?.length ?? 0) > 0,
+        );
+        return (
+          usableAccounts.find((entry) => entry.instanceId === props.activeInstanceId)?.instanceId ??
+          usableAccounts[0]?.instanceId ??
+          props.activeInstanceId
+        );
       }
       return favorites.length > 0 ? "favorites" : props.activeInstanceId;
     },
@@ -229,10 +251,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (!readyInstanceSet.has(instanceId)) {
         continue;
       }
-      const accountGroupKey =
-        entry.driverKind === "opencode"
-          ? `${entry.driverKind}:${PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName}`
-          : entry.driverKind;
+      // Keep independently billed API connections in their own model group.
+      const accountGroupKey = modelPickerProviderGroupKey(entry);
       for (const model of models) {
         const driverModelKey = `${accountGroupKey}:${model.slug}`;
         const item = {
@@ -243,7 +263,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           ...(model.isLegacy ? { isLegacy: true } : {}),
           instanceId,
           driverKind: entry.driverKind,
-          instanceDisplayName: PROVIDER_DISPLAY_NAMES[entry.driverKind] ?? entry.displayName,
+          accountGroupKey,
+          instanceDisplayName: modelPickerProviderGroupLabel(entry),
           ...(entry.accentColor ? { instanceAccentColor: entry.accentColor } : {}),
           ...(entry.continuationGroupKey
             ? { continuationGroupKey: entry.continuationGroupKey }
@@ -296,19 +317,23 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return [...available, ...disabled];
   }, [instanceEntries, isLocked, matchesLockedProvider]);
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
-  const selectedModelDriverKind = useMemo(() => {
+  const selectedAccountGroupKey = useMemo(() => {
     if (selectedInstanceId === "favorites") return null;
-    return entryByInstanceId.get(selectedInstanceId)?.driverKind ?? null;
+    const entry = entryByInstanceId.get(selectedInstanceId);
+    if (!entry) return null;
+    // Use the same account grouping as the sidebar and flattened models.
+    return modelPickerProviderGroupKey(entry);
   }, [entryByInstanceId, selectedInstanceId]);
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
     [instanceEntries],
   );
 
-  // Filter models by the visible driver group, not by its hidden account instance.
-  // Same-driver instances are intentionally one UI option; filtering by exact
-  // instance would make the deduplicated list disappear when a non-representative
-  // account is selected internally.
+  // Filter models by the selected account group, not by its hidden account
+  // instance. For opencode the group is keyed by each account's configured
+  // display name (Antseed/DeepSeek/GLM stay separate); other drivers group by
+  // driver kind. Filtering by exact instance would make the deduplicated list
+  // disappear when a non-representative account is selected internally.
   // Filter models based on search query and selected instance
   const filteredModels = useMemo(() => {
     let result = flatModels;
@@ -391,8 +416,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       result = result.filter((m) => matchesLockedProvider(m));
       if (selectedInstanceId === "favorites") {
         result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
-      } else if (selectedModelDriverKind !== null) {
-        result = result.filter((m) => m.driverKind === selectedModelDriverKind);
+      } else if (selectedAccountGroupKey !== null) {
+        result = result.filter((m) => m.accountGroupKey === selectedAccountGroupKey);
       }
     } else if (selectedInstanceId === "favorites") {
       result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
@@ -413,7 +438,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     props.lockedProvider,
     searchQuery,
     selectedInstanceId,
-    selectedModelDriverKind,
+    selectedAccountGroupKey,
   ]);
 
   const legacySection = useMemo(() => {

@@ -6,6 +6,8 @@
  *
  * @module ExternalLauncher
  */
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import {
   EDITORS,
   ExternalLauncherError,
@@ -22,8 +24,9 @@ import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -66,13 +69,6 @@ interface TargetPathAndPosition {
 }
 
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
-const POWERSHELL_ARGUMENTS_PREFIX = [
-  "-NoProfile",
-  "-NonInteractive",
-  "-ExecutionPolicy",
-  "Bypass",
-  "-EncodedCommand",
-] as const;
 
 const DETACHED_IGNORE_STDIO_OPTIONS = {
   detached: true,
@@ -106,6 +102,8 @@ const CommandLookupEnvConfig = Config.all({
   Path: Config.string("Path").pipe(Config.option),
   path: Config.string("path").pipe(Config.option),
   PATHEXT: Config.string("PATHEXT").pipe(Config.option),
+  SYSTEMROOT: Config.string("SYSTEMROOT").pipe(Config.option),
+  windir: Config.string("windir").pipe(Config.option),
 }).pipe(Config.map(compactEnv));
 
 const readBrowserLaunchEnv = BrowserLaunchEnvConfig.pipe(Effect.orElseSucceed(() => ({})));
@@ -171,28 +169,6 @@ const resolveAvailableCommand = Effect.fn("externalLauncher.resolveAvailableComm
   return Option.none();
 });
 
-function encodeUtf16LeBase64(input: string): string {
-  const bytes = new Uint8Array(input.length * 2);
-  for (let index = 0; index < input.length; index += 1) {
-    const code = input.charCodeAt(index);
-    bytes[index * 2] = code & 0xff;
-    bytes[index * 2 + 1] = code >>> 8;
-  }
-  return Encoding.encodeBase64(bytes);
-}
-
-function escapePowerShellStringLiteral(input: string): string {
-  return `'${input.replaceAll("'", "''")}'`;
-}
-
-function resolvePowerShellPath(env: NodeJS.ProcessEnv = {}): string {
-  return `${env.SYSTEMROOT || env.windir || String.raw`C:\Windows`}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-}
-
-function resolveWslPowerShellPath(): string {
-  return "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
-}
-
 function shouldUseWindowsBrowserFromWsl(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv = {},
@@ -207,12 +183,9 @@ function shouldUseWindowsBrowserFromWsl(
 }
 
 function resolveWindowsBrowserLaunch(target: string, command: string): ProcessLaunch {
-  const encodedCommand = encodeUtf16LeBase64(
-    `$ProgressPreference = 'SilentlyContinue'; Start ${escapePowerShellStringLiteral(target)}`,
-  );
   return {
     command,
-    args: [...POWERSHELL_ARGUMENTS_PREFIX, encodedCommand],
+    args: [target],
     options: {
       detached: true,
       shell: false,
@@ -223,14 +196,21 @@ function resolveWindowsBrowserLaunch(target: string, command: string): ProcessLa
   };
 }
 
-function fileManagerCommandForPlatform(platform: NodeJS.Platform): string {
+function windowsExplorerPath(env: NodeJS.ProcessEnv = {}): string {
+  return `${env.SYSTEMROOT || env.windir || String.raw`C:\Windows`}\\explorer.exe`;
+}
+
+function fileManagerCommandsForPlatform(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = {},
+): ReadonlyArray<string> {
   switch (platform) {
     case "darwin":
-      return "open";
+      return ["open"];
     case "win32":
-      return "explorer";
+      return [windowsExplorerPath(env), "explorer"];
     default:
-      return "xdg-open";
+      return ["xdg-open"];
   }
 }
 
@@ -248,11 +228,11 @@ function buildBrowserLaunch(
   }
 
   if (platform === "win32") {
-    return resolveWindowsBrowserLaunch(target, resolvePowerShellPath(env));
+    return resolveWindowsBrowserLaunch(target, windowsExplorerPath(env));
   }
 
   if (shouldUseWindowsBrowserFromWsl(platform, env)) {
-    return resolveWindowsBrowserLaunch(target, resolveWslPowerShellPath());
+    return resolveWindowsBrowserLaunch(target, "/mnt/c/Windows/explorer.exe");
   }
 
   return {
@@ -271,8 +251,11 @@ const buildAvailableEditors = Effect.fn("externalLauncher.buildAvailableEditors"
     (editor) =>
       Effect.gen(function* () {
         if (editor.commands === null) {
-          const command = fileManagerCommandForPlatform(platform);
-          return (yield* isCommandAvailable(command, { env })) ? editor.id : null;
+          const command = yield* resolveAvailableCommand(
+            fileManagerCommandsForPlatform(platform, env),
+            env,
+          );
+          return Option.isSome(command) ? editor.id : null;
         }
         const command = yield* resolveAvailableCommand(editor.commands, env);
         return Option.isSome(command) ? editor.id : null;
@@ -311,7 +294,7 @@ const resolveAvailableEditors = Effect.fn("externalLauncher.resolveAvailableEdit
 // Expiry uses the monotonic clock (Clock.currentTimeNanos), matching the
 // command-resolution cache in @t3tools/shared/shell, so a backward wall-clock
 // adjustment cannot keep an expired entry alive.
-const EDITOR_DISCOVERY_CACHE_TTL_NANOS = 60_000_000_000n;
+const EDITOR_DISCOVERY_CACHE_TTL_NANOS = 300_000_000_000n;
 
 interface EditorDiscoveryCacheEntry {
   readonly editors: ReadonlyArray<EditorId>;
@@ -345,6 +328,8 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
 ): Effect.fn.Return<EditorLaunch, ExternalLauncherError, FileSystem.FileSystem | Path.Path> {
   const platform = yield* HostProcessPlatform;
   const env = yield* readCommandLookupEnv;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   yield* Effect.annotateCurrentSpan({
     "externalLauncher.editor": input.editor,
     "externalLauncher.cwd": input.cwd,
@@ -372,13 +357,88 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* new ExternalLauncherUnsupportedEditorError({ editor: input.editor });
   }
 
+  const parsedTarget = parseTargetPathAndPosition(input.cwd);
+  const rawTarget = Option.match(parsedTarget, {
+    onNone: () => input.cwd,
+    onSome: ({ path: stripped }) => stripped,
+  });
+  const normalizedTarget = normalizeFileManagerTarget(rawTarget, platform);
+  const statInfo = yield* fileSystem.stat(normalizedTarget).pipe(Effect.option);
+  const isFile = Option.isSome(statInfo) && statInfo.value.type === "File";
+  const fallbackParent = Option.isNone(statInfo)
+    ? yield* Effect.suspend(() => {
+        const parent = dirnameForPlatform(normalizedTarget, platform, path);
+        if (!parent || parent === normalizedTarget) return Effect.succeed(Option.none<string>());
+        return fileSystem.stat(parent).pipe(
+          Effect.map((info) => (info.type === "Directory" ? Option.some(parent) : Option.none())),
+          Effect.orElseSucceed(() => Option.none<string>()),
+        );
+      })
+    : Option.none<string>();
+
+  const finalTarget = Option.getOrElse(fallbackParent, () => normalizedTarget);
+  const args = resolveFileManagerArgs({
+    platform,
+    target: finalTarget,
+    isFile: Option.isNone(fallbackParent) && isFile,
+    dirname: (value) => dirnameForPlatform(value, platform, path),
+  });
+
+  const fileManagerCommands = fileManagerCommandsForPlatform(platform, env);
+  const fileManagerCommand = Option.getOrElse(
+    yield* resolveAvailableCommand(fileManagerCommands, env),
+    () => fileManagerCommands[0] ?? "explorer",
+  );
+
   return {
     editor: editorDef.id,
-    target: input.cwd,
-    command: fileManagerCommandForPlatform(platform),
-    args: [input.cwd],
+    target: finalTarget,
+    command: fileManagerCommand,
+    args,
   };
 });
+
+function dirnameForPlatform(value: string, platform: NodeJS.Platform, path: Path.Path): string {
+  if (platform !== "win32") {
+    return path.dirname(value);
+  }
+  const normalized = value.replaceAll("/", "\\").replace(/\\+$/, "");
+  if (/^[A-Za-z]:$/.test(normalized)) {
+    return `${normalized}\\`;
+  }
+  const idx = normalized.lastIndexOf("\\");
+  if (idx < 0) return normalized;
+  const parent = normalized.slice(0, idx);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+function normalizeFileManagerTarget(target: string, platform: NodeJS.Platform): string {
+  const trimmed = target.trim();
+  if (platform !== "win32") {
+    return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
+  }
+  const backslashed = trimmed.replaceAll("/", "\\");
+  // Keep drive root like "D:\" intact; strip trailing backslashes on subfolders because explorer.exe is strict.
+  if (/^[A-Za-z]:\\+$/.test(backslashed)) {
+    return `${backslashed.slice(0, 2)}\\`;
+  }
+  return backslashed.replace(/\\+$/, "");
+}
+
+function resolveFileManagerArgs(input: {
+  readonly platform: NodeJS.Platform;
+  readonly target: string;
+  readonly isFile: boolean;
+  readonly dirname: (value: string) => string;
+}): ReadonlyArray<string> {
+  if (input.platform === "win32") {
+    return input.isFile ? [`/select,${input.target}`] : [input.target];
+  }
+  if (input.platform === "darwin") {
+    return input.isFile ? ["-R", input.target] : [input.target];
+  }
+  return [input.isFile ? input.dirname(input.target) : input.target];
+}
 
 const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   launch: ProcessLaunch,
@@ -411,6 +471,47 @@ const launchBrowser = Effect.fn("externalLauncher.launchBrowser")(function* (
   );
 });
 
+export class WindowsFileManagerSpawnError extends Data.TaggedError("WindowsFileManagerSpawnError")<{
+  readonly cause: unknown;
+}> {}
+
+export type WindowsFileManagerSpawnerFn = (input: {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly shell: boolean;
+}) => Effect.Effect<void, WindowsFileManagerSpawnError>;
+
+const defaultWindowsFileManagerSpawner: WindowsFileManagerSpawnerFn = (input) =>
+  Effect.callback<void, WindowsFileManagerSpawnError>((resume) => {
+    let settled = false;
+    const child = NodeChildProcess.spawn(input.command, [...input.args], {
+      detached: true,
+      shell: input.shell,
+      stdio: "ignore",
+      // Explicit windowsHide: false so explorer.exe receives SW_SHOWNORMAL
+      // instead of inheriting NodeChildProcessSpawner's hardcoded windowsHide: true.
+      windowsHide: false,
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      resume(Effect.fail(new WindowsFileManagerSpawnError({ cause: error })));
+    });
+    child.once("spawn", () => {
+      if (settled) return;
+      settled = true;
+      child.unref();
+      resume(Effect.void);
+    });
+  });
+
+export const WindowsFileManagerSpawner = Context.Reference<WindowsFileManagerSpawnerFn>(
+  "t3/process/externalLauncher/WindowsFileManagerSpawner",
+  {
+    defaultValue: () => defaultWindowsFileManagerSpawner,
+  },
+);
+
 const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(function* (
   launch: EditorLaunch,
 ): Effect.fn.Return<
@@ -418,6 +519,7 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   ExternalLauncherError,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
+  const platform = yield* HostProcessPlatform;
   const env = yield* readCommandLookupEnv;
   if (!(yield* isCommandAvailable(launch.command, { env }))) {
     return yield* new ExternalLauncherCommandNotFoundError({
@@ -427,6 +529,27 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   }
 
   const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, { env });
+  if (platform === "win32" && launch.editor === "file-manager") {
+    const spawnVisible = yield* WindowsFileManagerSpawner;
+    yield* spawnVisible({
+      command: spawnCommand.command,
+      args: spawnCommand.args,
+      shell: spawnCommand.shell,
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new ExternalLauncherEditorSpawnError({
+            editor: launch.editor,
+            target: launch.target,
+            command: spawnCommand.command,
+            args: spawnCommand.args,
+            cause: error.cause,
+          }),
+      ),
+    );
+    return;
+  }
+
   yield* launchAndUnref(
     {
       command: spawnCommand.command,
@@ -466,21 +589,58 @@ export const make = Effect.gen(function* () {
   const editorDiscoveryCache = yield* Ref.make<Option.Option<EditorDiscoveryCacheEntry>>(
     Option.none(),
   );
+  const inFlightDiscovery = yield* Ref.make<
+    Option.Option<Deferred.Deferred<ReadonlyArray<EditorId>>>
+  >(Option.none());
+
   const cachedAvailableEditors = Effect.gen(function* () {
     const nowNanos = yield* Clock.currentTimeNanos;
     const entry = yield* Ref.get(editorDiscoveryCache);
     if (Option.isSome(entry) && entry.value.expiresAtNanos > nowNanos) {
       return entry.value.editors;
     }
-    const editors = yield* provideCommandResolutionServices(resolveAvailableEditors());
-    yield* Ref.set(
-      editorDiscoveryCache,
-      Option.some({
-        editors,
-        expiresAtNanos: nowNanos + EDITOR_DISCOVERY_CACHE_TTL_NANOS,
-      }),
+    const freshDeferred = yield* Deferred.make<ReadonlyArray<EditorId>>();
+    type ClaimResult = {
+      readonly isLeader: boolean;
+      readonly deferred: Deferred.Deferred<ReadonlyArray<EditorId>>;
+    };
+    const existingOrFresh: ClaimResult = yield* Ref.modify(
+      inFlightDiscovery,
+      (
+        current,
+      ): readonly [ClaimResult, Option.Option<Deferred.Deferred<ReadonlyArray<EditorId>>>] =>
+        Option.isSome(current)
+          ? [{ isLeader: false, deferred: current.value }, current]
+          : [{ isLeader: true, deferred: freshDeferred }, Option.some(freshDeferred)],
     );
-    return editors;
+    if (!existingOrFresh.isLeader) {
+      return yield* Deferred.await(existingOrFresh.deferred);
+    }
+    return yield* provideCommandResolutionServices(resolveAvailableEditors()).pipe(
+      Effect.tap((editors) =>
+        Effect.gen(function* () {
+          const completedAtNanos = yield* Clock.currentTimeNanos;
+          yield* Ref.set(
+            editorDiscoveryCache,
+            Option.some({
+              editors,
+              expiresAtNanos: completedAtNanos + EDITOR_DISCOVERY_CACHE_TTL_NANOS,
+            }),
+          );
+          yield* Deferred.succeed(freshDeferred, editors);
+        }),
+      ),
+      Effect.onInterrupt(() =>
+        Ref.update(inFlightDiscovery, (current) =>
+          Option.isSome(current) && current.value === freshDeferred ? Option.none() : current,
+        ).pipe(Effect.andThen(Deferred.interrupt(freshDeferred))),
+      ),
+      Effect.ensuring(
+        Ref.update(inFlightDiscovery, (current) =>
+          Option.isSome(current) && current.value === freshDeferred ? Option.none() : current,
+        ),
+      ),
+    );
   });
 
   return ExternalLauncher.of({

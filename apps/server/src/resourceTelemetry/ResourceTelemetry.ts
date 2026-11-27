@@ -84,14 +84,36 @@ export class ResourceTelemetry extends Context.Service<
   }
 >()("t3/resourceTelemetry/ResourceTelemetry") {}
 
+const RECENT_HISTORY_FALLBACK_MAX_SNAPSHOTS = 360;
+const RECENT_HISTORY_FALLBACK_RETENTION_MS = 60 * 60_000;
+const INITIAL_HISTORY_SEED_WINDOW_MS = 15 * 60_000;
+
 interface TelemetryState {
   readonly nativeSnapshot: Option.Option<ResourceMonitorSnapshotEvent>;
+  readonly recentNativeSnapshots: ReadonlyArray<ResourceMonitorSnapshotEvent>;
   readonly desktopSnapshot: Option.Option<DesktopHostTelemetrySnapshot>;
   readonly previous: ReadonlyMap<string, ProcessState>;
   readonly counters: TelemetryCounters;
   readonly latest: ResourceTelemetrySnapshot;
   readonly lastNativeSequence: number;
   readonly lastNativeGeneration: number;
+}
+
+function appendRecentNativeSnapshot(
+  existing: ReadonlyArray<ResourceMonitorSnapshotEvent>,
+  snapshot: ResourceMonitorSnapshotEvent,
+): ReadonlyArray<ResourceMonitorSnapshotEvent> {
+  const cutoffMs = snapshot.sampledAtUnixMs - RECENT_HISTORY_FALLBACK_RETENTION_MS;
+  const filtered = existing.filter(
+    (entry) =>
+      entry.sampledAtUnixMs >= cutoffMs &&
+      entry.sampledAtUnixMs <= snapshot.sampledAtUnixMs &&
+      !(entry.sequence === snapshot.sequence && entry.sampledAtUnixMs === snapshot.sampledAtUnixMs),
+  );
+  const next = [...filtered, snapshot];
+  return next.length > RECENT_HISTORY_FALLBACK_MAX_SNAPSHOTS
+    ? next.slice(next.length - RECENT_HISTORY_FALLBACK_MAX_SNAPSHOTS)
+    : next;
 }
 
 interface LiveTelemetryState {
@@ -225,6 +247,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
   };
   const state = yield* Ref.make<TelemetryState>({
     nativeSnapshot: Option.none(),
+    recentNativeSnapshots: [],
     desktopSnapshot: initialDesktop,
     previous: new Map(),
     counters: emptyTelemetryCounters(),
@@ -267,6 +290,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
     readonly desktopSnapshot?: DesktopHostTelemetrySnapshot;
     readonly updatePrevious: boolean;
     readonly publishWhenLive?: boolean;
+    readonly suppressPublish?: boolean;
   }): Effect.Effect<ResourceTelemetrySnapshot> =>
     mutex.withPermits(1)(
       Effect.gen(function* () {
@@ -285,6 +309,12 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
         const nativeSnapshot = incomingNativeSnapshot
           ? Option.some(incomingNativeSnapshot.snapshot)
           : current.nativeSnapshot;
+        const recentNativeSnapshots = incomingNativeSnapshot
+          ? appendRecentNativeSnapshot(
+              current.recentNativeSnapshots,
+              incomingNativeSnapshot.snapshot,
+            )
+          : current.recentNativeSnapshots;
         const desktopSnapshot = input.desktopSnapshot
           ? Option.some(input.desktopSnapshot)
           : current.desktopSnapshot;
@@ -346,6 +376,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
         };
         yield* Ref.set(state, {
           nativeSnapshot,
+          recentNativeSnapshots,
           desktopSnapshot,
           previous: merged.previous,
           counters: merged.counters,
@@ -354,12 +385,39 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
             incomingNativeSnapshot?.snapshot.sequence ?? current.lastNativeSequence,
           lastNativeGeneration: incomingNativeSnapshot?.generation ?? current.lastNativeGeneration,
         });
-        if (!input.publishWhenLive || (yield* Ref.get(liveState)).retainCount > 0) {
+        if (
+          !input.suppressPublish &&
+          (!input.publishWhenLive || (yield* Ref.get(liveState)).retainCount > 0)
+        ) {
           yield* PubSub.publish(changes, snapshot);
         }
         return snapshot;
       }),
     );
+
+  const seedBaselineFromHistory = Effect.gen(function* () {
+    const current = yield* Ref.get(state);
+    if (Option.isSome(current.nativeSnapshot)) return;
+    const historyResult = yield* Effect.result(
+      nativeClient.readHistory(INITIAL_HISTORY_SEED_WINDOW_MS),
+    );
+    if (Result.isFailure(historyResult) || historyResult.success.length === 0) {
+      return;
+    }
+    const nativeHealth = yield* nativeClient.health;
+    const generation = nativeHealth.restartCount;
+    const ordered = historyResult.success.toSorted(
+      (left, right) =>
+        left.sampledAtUnixMs - right.sampledAtUnixMs || left.sequence - right.sequence,
+    );
+    for (const snapshot of ordered) {
+      yield* rebuild({
+        nativeSnapshot: { generation, snapshot },
+        updatePrevious: true,
+        suppressPublish: true,
+      });
+    }
+  });
 
   const ingestNative = (snapshot: NativeTelemetryClient.NativeTelemetrySnapshot) =>
     rebuild({ nativeSnapshot: snapshot, updatePrevious: true });
@@ -399,9 +457,8 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
           ),
           Effect.forkIn(scope),
         );
-        yield* nativeClient.sampleNow.pipe(
-          Effect.flatMap(ingestNative),
-          Effect.ignore,
+        yield* seedBaselineFromHistory.pipe(
+          Effect.andThen(nativeClient.sampleNow.pipe(Effect.flatMap(ingestNative), Effect.ignore)),
           Effect.forkIn(scope),
         );
         yield* Ref.set(liveState, { retainCount: 1, scope: Option.some(scope) });
@@ -434,7 +491,6 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
 
   const readHistory: ResourceTelemetry["Service"]["readHistory"] = (input) =>
     Effect.gen(function* () {
-      const readAt = yield* DateTime.now;
       const normalizedInput = normalizeResourceTelemetryHistoryInput(input);
       const historyResult = yield* Effect.result(
         nativeClient.readHistory(normalizedInput.windowMs),
@@ -444,11 +500,17 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
           cause: historyResult.failure.message,
         });
       }
+      // Capture readAt AFTER nativeClient.readHistory resolves so snapshots
+      // recorded while the IPC request was in flight are not dropped as "future".
+      const readAt = yield* DateTime.now;
       const [nativeHealth, desktopHealth] = yield* Effect.all([
         nativeClient.health,
         desktopReceiver.health,
       ]);
       const current = yield* Ref.get(state);
+      const sidecarSnapshots = Result.isSuccess(historyResult) ? historyResult.success : [];
+      const snapshots =
+        sidecarSnapshots.length > 0 ? sidecarSnapshots : current.recentNativeSnapshots;
       return buildResourceTelemetryHistory({
         readAt,
         windowMs: normalizedInput.windowMs,
@@ -457,7 +519,7 @@ export const make = Effect.fn("resourceTelemetry.resourceTelemetry.make")(functi
         serverPid: process.pid,
         sidecarPid: Option.map(nativeHealth.hello, (hello) => hello.sidecarPid),
         desktopSnapshot: current.desktopSnapshot,
-        snapshots: Result.isSuccess(historyResult) ? historyResult.success : [],
+        snapshots,
         health: buildHealth({
           native: nativeHealth,
           desktop: desktopHealth,

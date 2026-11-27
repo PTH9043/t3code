@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Markdown,
   type CustomRenderers,
@@ -172,6 +172,7 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
 
 export function FileMarkdownPreview(props: {
   readonly markdown: string;
+  readonly footer?: ReactNode;
   readonly onRefresh?: () => Promise<void> | void;
 }) {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
@@ -221,6 +222,7 @@ export function FileMarkdownPreview(props: {
             {props.markdown}
           </Markdown>
         )}
+        {props.footer}
       </View>
     </ScrollView>
   );

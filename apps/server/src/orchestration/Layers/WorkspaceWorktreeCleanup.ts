@@ -15,9 +15,11 @@ import {
   type WorkspaceWorktreeCleanupResult,
 } from "@t3tools/contracts";
 import { isOrchestraWorktreeBranch } from "@t3tools/shared/git";
+import { cleanupProjectScript, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { ProjectionWorkspaceCollaborationRunRepository } from "../../persistence/Services/ProjectionWorkspaceCollaborationRuns.ts";
 
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import { WorktreeProvisionService } from "../../git/WorktreeProvisionService.ts";
 import * as ReviewService from "../../review/ReviewService.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -72,6 +74,7 @@ export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const runRepository = yield* ProjectionWorkspaceCollaborationRunRepository;
   const fileSystem = yield* FileSystem.FileSystem;
+  const worktreeProvisionOpt = yield* Effect.serviceOption(WorktreeProvisionService);
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4;
   // One teardown at a time: parallel `git worktree remove` calls fight over
@@ -205,6 +208,43 @@ export const make = Effect.gen(function* () {
         ),
       { concurrency: 1, discard: true },
     );
+    const cleanupHook = cleanupProjectScript(project.scripts ?? []);
+    if (
+      cleanupHook !== null &&
+      Option.isSome(worktreeProvisionOpt) &&
+      worktreeProvisionOpt.value.runCleanupGate !== undefined &&
+      (yield* directoryExists(input.worktreePath))
+    ) {
+      yield* bestEffort(
+        `cleanup hook '${cleanupHook.name}'`,
+        worktreeProvisionOpt.value
+          .runCleanupGate({
+            script: {
+              id: cleanupHook.id,
+              name: cleanupHook.name,
+              command: cleanupHook.command,
+            },
+            env: projectScriptRuntimeEnv({
+              project: { cwd: project.workspaceRoot },
+              worktreePath: input.worktreePath,
+            }),
+            worktreePath: input.worktreePath,
+          })
+          .pipe(
+            Effect.flatMap((gate) =>
+              gate.status === "ok"
+                ? Effect.void
+                : Effect.logWarning("WorkspaceWorktreeCleanup: cleanup hook returned non-zero", {
+                    script: cleanupHook.name,
+                    worktreePath: input.worktreePath,
+                    exitCode: gate.exitCode,
+                    timedOut: gate.timedOut,
+                    outputTail: gate.outputTail,
+                  }),
+            ),
+          ),
+      );
+    }
     yield* removeWorktreeWithRetry({
       projectCwd: project.workspaceRoot,
       worktreePath: input.worktreePath,

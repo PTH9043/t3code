@@ -19,6 +19,9 @@ release-mock/
 apps/web/.playwright
 apps/web/playwright-report
 apps/web/src/components/__screenshots__
+# Personal Live2D SDK and model downloads are kept local, not committed.
+apps/web/public/agent-characters/live2dcubismcore.min.js
+apps/web/public/agent-characters/live2d-models/
 .vitest-*
 __screenshots__/
 .tanstack
@@ -36,3 +39,15 @@ node_modules/
 *.log
 .env*
 !.env.example
+# Local archives, personal logs, and Windows directory junctions to .agents/skills
+/codex-history-archive-*/
+/Claude outputs/
+/Gemini_개발_오류_보고서.pdf
+/.claude/skills/
+/.gemini/skills/
+/.claude/settings.local.json
+/CLAUDE.local.md
+/progress.txt
+/LESSONS.md
+/docs/archive/progress-2026-11-archive.md
+/docs/operations/gpt-sol-work-brief.md

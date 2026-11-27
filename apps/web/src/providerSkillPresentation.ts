@@ -27,8 +27,15 @@ export function formatProviderSkillInstallSource(
   skill: Pick<ServerProviderSkill, "path" | "scope">,
 ): string | null {
   const normalizedPath = normalizePathSeparators(skill.path);
-  if (normalizedPath.includes("/.codex/plugins/") || normalizedPath.includes("/.agents/plugins/")) {
+  if (
+    normalizedPath.includes("/.codex/plugins/") ||
+    normalizedPath.includes("/.agents/plugins/") ||
+    normalizedPath.includes("/.gemini/config/plugins/")
+  ) {
     return "App";
+  }
+  if (normalizedPath.includes("/builtin/skills/")) {
+    return "System";
   }
 
   const normalizedScope = skill.scope?.trim().toLowerCase();

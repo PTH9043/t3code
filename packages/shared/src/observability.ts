@@ -683,3 +683,44 @@ function parseBigInt(input: string): bigint {
     return 0n;
   }
 }
+
+const LOOPBACK_OTLP_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isOtelEnvFlagTruthy(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+/**
+ * Allows OTLP export only to local loopback collectors and honors
+ * `T3CODE_OTEL_SDK_DISABLED` / `OTEL_SDK_DISABLED`. Non-loopback external
+ * destinations (e.g. `ingest.t3.codes`, `api.axiom.co`, remote hosts) are
+ * always rejected so telemetry cannot be exfiltrated off-host.
+ */
+export function resolveLoopbackOnlyOtlpUrl(
+  rawUrl: string | undefined,
+  env: Readonly<Record<string, string | undefined>> = typeof process !== "undefined"
+    ? process.env
+    : {},
+): string | undefined {
+  if (
+    isOtelEnvFlagTruthy(env.T3CODE_OTEL_SDK_DISABLED) ||
+    isOtelEnvFlagTruthy(env.OTEL_SDK_DISABLED)
+  ) {
+    return undefined;
+  }
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+    const hostname = parsed.hostname.trim().toLowerCase();
+    return LOOPBACK_OTLP_HOSTNAMES.has(hostname) ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+}

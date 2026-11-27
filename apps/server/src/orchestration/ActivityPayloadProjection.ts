@@ -1,3 +1,10 @@
+import {
+  parseStructuredToolOutput,
+  projectToolActivityOperation,
+  redactCommandLineForDisplay,
+  redactToolActivityText,
+  toolActivityCallIdentity,
+} from "@t3tools/shared/toolActivity";
 import type {
   OrchestrationEvent,
   OrchestrationThreadActivity,
@@ -52,6 +59,8 @@ function collectChangedFiles(
   }
 
   pushChangedFile(target, seen, record.path);
+  pushChangedFile(target, seen, record.Path);
+  pushChangedFile(target, seen, record.file_path);
   pushChangedFile(target, seen, record.filePath);
   pushChangedFile(target, seen, record.relativePath);
   pushChangedFile(target, seen, record.filename);
@@ -62,6 +71,10 @@ function collectChangedFiles(
     "item",
     "result",
     "input",
+    "rawInput",
+    "locations",
+    // OpenCode keeps a tool part's arguments under `state.input`.
+    "state",
     "data",
     "changes",
     "files",
@@ -244,16 +257,34 @@ function projectRawOutput(value: unknown): Record<string, unknown> | undefined {
     };
   }
 
+  const output = asTrimmedString(rawOutput.output);
+  if (output) {
+    const parsed = parseStructuredToolOutput(output);
+    const summary = parsed.outputSnippet ?? summarizeToolTextOutput(output);
+    return summary
+      ? {
+          content: redactToolActivityText(summary, 220),
+          ...(parsed.exitCode !== undefined ? { exitCode: parsed.exitCode } : {}),
+          ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
+        }
+      : parsed.exitCode !== undefined || parsed.durationMs !== undefined
+        ? {
+            ...(parsed.exitCode !== undefined ? { exitCode: parsed.exitCode } : {}),
+            ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
+          }
+        : undefined;
+  }
+
   const content = asTrimmedString(rawOutput.content);
   if (content) {
     const summary = summarizeToolTextOutput(content);
-    return summary ? { content: summary } : undefined;
+    return summary ? { content: redactToolActivityText(summary, 220) } : undefined;
   }
 
   const stdout = asTrimmedString(rawOutput.stdout);
   if (stdout) {
     const summary = summarizeToolTextOutput(stdout);
-    return summary ? { content: summary } : undefined;
+    return summary ? { content: redactToolActivityText(summary, 220) } : undefined;
   }
 
   return undefined;
@@ -263,9 +294,7 @@ function projectRawOutput(value: unknown): Record<string, unknown> | undefined {
  * Removes activity payload fields that no current client reads while retaining
  * the full payload in persistence and the event store.
  */
-export function projectActivityPayload(
-  activity: OrchestrationThreadActivity,
-): OrchestrationThreadActivity {
+function slimActivityPayload(activity: OrchestrationThreadActivity): OrchestrationThreadActivity {
   const payload = asRecord(activity.payload);
   const data = asRecord(payload?.data);
   if (!payload || !data) {
@@ -287,8 +316,20 @@ export function projectActivityPayload(
   if (item) {
     projectedData.item = item;
   }
-  if ("command" in data) {
-    projectedData.command = data.command;
+  const rawInput = asRecord(data.rawInput);
+  const rawCommand = data.command ?? rawInput?.CommandLine ?? rawInput?.command;
+  if (rawCommand !== undefined) {
+    projectedData.command =
+      typeof rawCommand === "string"
+        ? (redactCommandLineForDisplay(rawCommand, 240) ?? rawCommand)
+        : rawCommand;
+  }
+  const intent =
+    asTrimmedString(data.intent) ??
+    asTrimmedString(rawInput?.toolSummary) ??
+    asTrimmedString(asRecord(data.input)?.description);
+  if (intent) {
+    projectedData.intent = redactToolActivityText(intent, 120);
   }
 
   const changedFiles: string[] = [];
@@ -317,6 +358,80 @@ export function projectActivityPayload(
       data: projectedData,
     },
   };
+}
+
+function identifier(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,255}$/.test(value)
+    ? value
+    : undefined;
+}
+
+/** Receipts for updates previously omitted from snapshots carry no saved command, title or output. */
+function compactToolReceipt(
+  activity: OrchestrationThreadActivity,
+  payload: Record<string, unknown>,
+) {
+  const fields: Record<string, unknown> = { toolActivityReceiptOnly: true };
+  for (const key of [
+    "itemType",
+    "status",
+    "toolActivityTurnState",
+    "provider",
+    "providerInstanceId",
+    "providerSessionId",
+    "providerTurnId",
+    "executionId",
+    "messageId",
+    "agentId",
+    "parentToolUseId",
+    "taskId",
+    "reportedModel",
+    "attemptId",
+    "attempt",
+    "attemptNumber",
+  ] as const) {
+    if (identifier(payload[key]) !== undefined) fields[key] = payload[key];
+  }
+  return { ...activity, summary: "Tool updated", payload: fields };
+}
+
+function projectToolPayload(activity: OrchestrationThreadActivity, compact: boolean) {
+  const operation = projectToolActivityOperation(activity);
+  const original = asRecord(activity.payload);
+  if (!operation || !original) return slimActivityPayload(activity);
+  const projected = compact
+    ? compactToolReceipt(activity, original)
+    : slimActivityPayload(activity);
+  // The descriptor may classify a raw command. Only expose paths that were already visible.
+  const visible =
+    operation.targetPaths.length || operation.confirmedDiffPaths?.length
+      ? new Set(
+          projectToolActivityOperation(compact ? slimActivityPayload(activity) : projected)
+            ?.targetPaths,
+        )
+      : undefined;
+  const { targetPaths, confirmedDiffPaths, ...facts } = operation;
+  return {
+    ...projected,
+    payload: {
+      ...asRecord(projected.payload),
+      ...toolActivityCallIdentity(original),
+      toolActivityOperation: {
+        ...facts,
+        targetPaths: targetPaths.filter((path) => visible?.has(path)),
+        ...(confirmedDiffPaths
+          ? { confirmedDiffPaths: confirmedDiffPaths.filter((path) => visible?.has(path)) }
+          : {}),
+      },
+    },
+  };
+}
+
+export function projectActivityPayload(
+  activity: OrchestrationThreadActivity,
+): OrchestrationThreadActivity {
+  return projectToolPayload(activity, false);
 }
 
 /**
@@ -365,15 +480,8 @@ function dropStaleContextWindowActivities(
   );
 }
 
-/**
- * Identity both clients use to fold a tool lifecycle row into the call it
- * belongs to (`deriveToolLifecycleCollapseKey` in web's `session-logic` and
- * mobile's `threadActivity`): an explicit `data.toolCallId` when the adapter
- * emits one, otherwise the itemType/title/detail triple. Returns null for rows
- * with no identity at all — those never collapse on the client either, so they
- * must not be dropped here.
- */
-function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | null {
+/** Historical snapshot compression key. Matching it controls payload width only. */
+function legacyProjectionKey(activity: OrchestrationThreadActivity): string | null {
   const payload = asRecord(activity.payload);
   if (!payload) {
     return null;
@@ -397,73 +505,24 @@ function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | 
   return [itemType, label, detail].join("");
 }
 
-/**
- * Drops `tool.updated` rows a `tool.completed` row already supersedes. An
- * update is the in-flight snapshot of a call; once the call completes, the
- * completion carries the final state and the clients fold every matching
- * update into it, so shipping the updates buys nothing — 47k such rows exist
- * in one real database, and a single thread carries 2,291 of them totalling
- * ~1MB post-slimming.
- *
- * Matching is per turn for the same reason `dropStaleContextWindowActivities`
- * retains per turn: a live `thread.reverted` makes the client discard whole
- * turns, so a completion in a different turn could vanish and leave the
- * dropped update unrepresented. The completion must also come *after* the
- * update within the turn — a later update belongs to a subsequent call that
- * reuses the same identity and is still in flight. Rows without a lifecycle
- * identity pass through, matching the clients, which never collapse them.
- * Live `thread.activity-appended` events are untouched: updates still stream
- * in real time and the completion supersedes them on the client as before.
- *
- * Deliberate divergence from client collapse: clients fold only *adjacent*
- * lifecycle rows, so a superseded update separated from its completion by an
- * interleaved parallel call renders as its own row today, and this drop
- * removes it. Measured against a real database, that affects 1.5% of dropped
- * rows (553 of 36,581), all pure in-flight state whose final result the
- * retained completion still shows. Dropping them is intentional; matching
- * adjacency server-side would forfeit most of the win for parallel-heavy
- * threads, which are exactly the heavy ones. Superseding completions always
- * carry a payload superset of their updates (verified across all 49,515
- * update rows: zero dropped rows held a client-merged field — detail, title,
- * command, item, kind, files — their completion lacked), so no expanded-row
- * content is lost.
- */
-function dropSupersededToolUpdatedActivities(
+/** Keep event identities on reload. The legacy display key controls only the size of each
+ * receipt; it never assigns a call ID or merges events from parallel tools. */
+export function projectThreadActivities(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ReadonlyArray<OrchestrationThreadActivity> {
-  const completionIndicesByKey = new Map<string, number[]>();
-  for (let index = 0; index < activities.length; index += 1) {
-    const activity = activities[index]!;
-    if (activity.kind !== "tool.completed") {
-      continue;
-    }
-    const identity = toolLifecycleIdentity(activity);
-    if (!identity) {
-      continue;
-    }
-    const key = `${activity.turnId ?? ""} ${identity}`;
-    const indices = completionIndicesByKey.get(key);
-    if (indices) {
-      indices.push(index);
-    } else {
-      completionIndicesByKey.set(key, [index]);
-    }
+  const rows = dropStaleContextWindowActivities(activities);
+  const projected = new Array<OrchestrationThreadActivity>(rows.length);
+  const completed = new Set<string>();
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]!;
+    const isLifecycle = row.kind === "tool.updated" || row.kind === "tool.completed";
+    const identity = isLifecycle ? legacyProjectionKey(row) : null;
+    const key = identity === null ? null : JSON.stringify([row.turnId, identity]);
+    const compact = row.kind === "tool.updated" && key !== null && completed.has(key);
+    projected[index] = projectToolPayload(row, compact);
+    if (row.kind === "tool.completed" && key !== null) completed.add(key);
   }
-  if (completionIndicesByKey.size === 0) {
-    return activities;
-  }
-
-  return activities.filter((activity, index) => {
-    if (activity.kind !== "tool.updated") {
-      return true;
-    }
-    const identity = toolLifecycleIdentity(activity);
-    if (!identity) {
-      return true;
-    }
-    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""} ${identity}`);
-    return !indices?.some((completionIndex) => completionIndex > index);
-  });
+  return projected;
 }
 
 export function projectThreadDetailSnapshot(
@@ -473,9 +532,7 @@ export function projectThreadDetailSnapshot(
     ...snapshot,
     thread: {
       ...snapshot.thread,
-      activities: dropSupersededToolUpdatedActivities(
-        dropStaleContextWindowActivities(snapshot.thread.activities),
-      ).map(projectActivityPayload),
+      activities: projectThreadActivities(snapshot.thread.activities),
     },
   };
 }

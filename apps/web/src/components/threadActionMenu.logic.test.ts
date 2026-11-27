@@ -26,7 +26,7 @@ describe("buildThreadActionMenuItems", () => {
         ...baseState,
         supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
       }),
-    ).toEqual(["rename", "mark-unread", "copy-path", "delete"]);
+    ).toEqual(["open-viewer", "rename", "mark-unread", "copy-path", "delete"]);
   });
 
   it("includes branch items only for threads with a branch", () => {
@@ -62,5 +62,13 @@ describe("buildThreadActionMenuItems", () => {
   it("marks delete as destructive and keeps it last", () => {
     const items = buildThreadActionMenuItems({ ...baseState, branch: "main" });
     expect(items.at(-1)).toMatchObject({ id: "delete", destructive: true });
+  });
+
+  it("includes open-in-file-manager when supported", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      supports: { ...baseState.supports, openInFileManager: true },
+    });
+    expect(items.map((item) => item.id)).toContain("open-in-file-manager");
   });
 });

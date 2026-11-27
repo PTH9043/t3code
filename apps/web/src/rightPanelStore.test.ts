@@ -481,4 +481,22 @@ describe("rightPanelStore", () => {
       ),
     ).toEqual(["terminal:term-1", "browser:tab-b", "browser:tab-c"]);
   });
+
+  it("opens, toggles, and closes the singleton workers surface", () => {
+    useRightPanelStore.getState().open(refA, "workers");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("workers");
+
+    useRightPanelStore.getState().toggle(refA, "workers");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    useRightPanelStore.getState().toggle(refA, "workers");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("workers");
+
+    useRightPanelStore.getState().closeSurface(refA, "workers");
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: false,
+      activeSurfaceId: null,
+      surfaces: [],
+    });
+  });
 });

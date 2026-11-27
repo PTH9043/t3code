@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import * as Updates from "expo-updates";
 
 import {
   createAppUpdateLaunchCheck,
@@ -216,6 +217,30 @@ describe("runAppUpdateCheck", () => {
 });
 
 describe("createAppUpdateLaunchCheck", () => {
+  it("skips Expo update checks in development clients", async () => {
+    vi.stubGlobal("__DEV__", true);
+    try {
+      const checkOnLaunch = createAppUpdateLaunchCheck();
+      expect(checkOnLaunch()).toBeUndefined();
+      await runAppUpdateCheck();
+      expect(Updates.checkForUpdateAsync).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("explains why a manual update check is unavailable in a development client", async () => {
+    vi.stubGlobal("__DEV__", true);
+    try {
+      const onFailure = vi.fn();
+      await runAppUpdateCheck({ onFailure });
+      expect(onFailure).toHaveBeenCalledWith("Updates are not available in development builds.");
+      expect(Updates.checkForUpdateAsync).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("checks at most once for each JavaScript launch", async () => {
     const client = makeUpdateClient();
     const checkOnLaunch = createAppUpdateLaunchCheck(client);

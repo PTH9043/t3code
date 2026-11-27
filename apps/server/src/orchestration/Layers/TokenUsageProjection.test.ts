@@ -745,6 +745,69 @@ it.layer(SqlitePersistenceMemory)("TokenUsageProjection", (it) => {
       }),
   );
 
+  it.effect("treats subagent spend reported inside Claude modelUsage as covered", () =>
+    Effect.gen(function* () {
+      const projection = yield* makeTokenUsageProjection;
+      yield* projection.apply(request(170, "conductor", "conductor-request"));
+      yield* projection.apply(session(171, "conductor", "conductor-turn"));
+      yield* projection.apply(
+        event(172, "thread.activity-appended", "conductor", {
+          threadId: "conductor",
+          activity: {
+            id: "worker",
+            createdAt: now,
+            tone: "info",
+            kind: "task.started",
+            summary: "Worker",
+            turnId: "conductor-turn",
+            payload: { agentKind: "agent", taskId: "worker-1" },
+          },
+        }),
+      );
+      const observation = (model: string, total: number) => ({
+        sourceId: `claude:session:result:${model}`,
+        mode: "execution-total" as const,
+        provider: "claude",
+        model,
+        isFinal: true,
+        includesNativeChildren: true,
+        counts: { ...emptyTokenCounts(), total, input: total, output: 0 },
+      });
+      yield* projection.apply(
+        event(173, "thread.activity-appended", "conductor", {
+          threadId: "conductor",
+          activity: {
+            id: "conductor-usage",
+            createdAt: now,
+            tone: "info",
+            kind: "context-window.updated",
+            summary: "Context window updated",
+            turnId: "conductor-turn",
+            payload: {
+              consumption: [
+                observation("claude-fable-5-2", 300),
+                observation("claude-opus-5-5", 1200),
+              ],
+            },
+          },
+        }),
+      );
+      yield* projection.apply(session(174, "conductor", null, "ready"));
+      const report = yield* projection.getReport({ threadId: ThreadId.make("conductor") });
+      assert.strictEqual(report.counts.total, 1500);
+      assert.notInclude(report.issues, "native-child-coverage-unknown");
+      assert.strictEqual(report.coverage, "reported");
+      assert.strictEqual(report.finality, "final");
+      assert.deepStrictEqual(
+        report.breakdown.map((row) => [row.model, row.counts.total]).toSorted(),
+        [
+          ["claude-fable-5-2", 300],
+          ["claude-opus-5-5", 1200],
+        ],
+      );
+    }),
+  );
+
   it.effect("paginates equal timestamps by unique request sequence", () =>
     Effect.gen(function* () {
       const projection = yield* makeTokenUsageProjection;

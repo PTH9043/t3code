@@ -92,6 +92,7 @@ export const WorkspaceAgentControlAction = Schema.Union([
   Schema.Struct({
     ...WorkspaceAgentControlLookup.fields,
     action: Schema.Literal("read"),
+    recordId: Schema.optionalKey(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     ...WorkspaceAgentControlLookup.fields,

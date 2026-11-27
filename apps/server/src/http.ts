@@ -5,7 +5,7 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
-import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import { decodeOtlpTraceRecords, resolveLoopbackOnlyOtlpUrl } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -40,6 +40,8 @@ import {
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+import { evictAllOllamaVram, vramArbiter } from "./background/VramArbiter.ts";
+import * as Schema from "effect/Schema";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -128,6 +130,110 @@ class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecor
   readonly bodyJson: OtlpTracer.TraceData;
 }> {}
 
+const VramAcquireRequestSchema = Schema.Struct({
+  owner: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+  ttlSeconds: Schema.optional(Schema.Number),
+  evictOllama: Schema.optional(Schema.Boolean),
+  ollamaEndpoint: Schema.optional(Schema.String),
+});
+const decodeVramAcquireRequest = Schema.decodeUnknownOption(VramAcquireRequestSchema);
+
+const VramReleaseRequestSchema = Schema.Struct({
+  leaseId: Schema.optional(Schema.String),
+});
+const decodeVramReleaseRequest = Schema.decodeUnknownOption(VramReleaseRequestSchema);
+
+const VRAM_ARBITER_STATUS_PATH = "/api/runtime/vram-arbiter";
+const VRAM_ARBITER_ACQUIRE_PATH = "/api/runtime/vram-arbiter/acquire";
+const VRAM_ARBITER_RELEASE_PATH = "/api/runtime/vram-arbiter/release";
+
+export const vramArbiterRouteLayer = Layer.mergeAll(
+  HttpRouter.add(
+    "GET",
+    VRAM_ARBITER_STATUS_PATH,
+    Effect.gen(function* () {
+      yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+      const config = yield* ServerConfig.ServerConfig;
+      return HttpServerResponse.jsonUnsafe(vramArbiter.getStatus(config.stateDir));
+    }).pipe(
+      Effect.catchTags({
+        EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+        EnvironmentInternalError: HttpServerRespondable.toResponse,
+        EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+      }),
+    ),
+  ),
+  HttpRouter.add(
+    "POST",
+    VRAM_ARBITER_ACQUIRE_PATH,
+    Effect.gen(function* () {
+      yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+      const config = yield* ServerConfig.ServerConfig;
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const rawBody = yield* request.json.pipe(Effect.orElseSucceed(() => ({})));
+      const parsed: typeof VramAcquireRequestSchema.Type = Option.getOrElse(
+        decodeVramAcquireRequest(rawBody),
+        (): typeof VramAcquireRequestSchema.Type => ({}),
+      );
+      const ttlMs =
+        typeof parsed.ttlSeconds === "number" && Number.isFinite(parsed.ttlSeconds)
+          ? parsed.ttlSeconds * 1000
+          : undefined;
+      const lease = vramArbiter.acquireLease({
+        stateDir: config.stateDir,
+        owner: parsed.owner ?? "local-training",
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        ...(ttlMs !== undefined ? { ttlMs } : {}),
+      });
+      const eviction =
+        parsed.evictOllama === false
+          ? { evicted: [] as ReadonlyArray<string>, warnings: [] as ReadonlyArray<string> }
+          : yield* evictAllOllamaVram(parsed.ollamaEndpoint);
+      return HttpServerResponse.jsonUnsafe({
+        lease,
+        evicted: eviction.evicted,
+        warnings: eviction.warnings,
+        status: vramArbiter.getStatus(config.stateDir),
+      });
+    }).pipe(
+      Effect.catchTags({
+        EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+        EnvironmentInternalError: HttpServerRespondable.toResponse,
+        EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+      }),
+    ),
+  ),
+  HttpRouter.add(
+    "POST",
+    VRAM_ARBITER_RELEASE_PATH,
+    Effect.gen(function* () {
+      yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+      const config = yield* ServerConfig.ServerConfig;
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const rawBody = yield* request.json.pipe(Effect.orElseSucceed(() => ({})));
+      const parsed: typeof VramReleaseRequestSchema.Type = Option.getOrElse(
+        decodeVramReleaseRequest(rawBody),
+        (): typeof VramReleaseRequestSchema.Type => ({}),
+      );
+      const released = vramArbiter.releaseLease({
+        stateDir: config.stateDir,
+        ...(parsed.leaseId ? { leaseId: parsed.leaseId } : {}),
+      });
+      return HttpServerResponse.jsonUnsafe({
+        released,
+        status: vramArbiter.getStatus(config.stateDir),
+      });
+    }).pipe(
+      Effect.catchTags({
+        EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+        EnvironmentInternalError: HttpServerRespondable.toResponse,
+        EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+      }),
+    ),
+  ),
+);
+
 export const otlpTracesProxyRouteLayer = HttpRouter.add(
   "POST",
   OTLP_TRACES_PROXY_PATH,
@@ -135,7 +241,7 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
     yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
     const config = yield* ServerConfig.ServerConfig;
-    const otlpTracesUrl = config.otlpTracesUrl;
+    const otlpTracesUrl = resolveLoopbackOnlyOtlpUrl(config.otlpTracesUrl);
     const browserTraceCollector = yield* BrowserTraceCollector.BrowserTraceCollector;
     const httpClient = yield* HttpClient.HttpClient;
     const bodyJson = cast<unknown, OtlpTracer.TraceData>(yield* request.json);

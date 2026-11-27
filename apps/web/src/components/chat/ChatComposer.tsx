@@ -1,3 +1,4 @@
+import { isRecoverableUserInputRequestId } from "@t3tools/contracts";
 import type {
   ApprovalRequestId,
   EnvironmentId,
@@ -10,6 +11,7 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  ThreadTurnStartBootstrap,
 } from "@t3tools/contracts";
 import {
   ProviderDriverKind,
@@ -19,11 +21,15 @@ import {
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import { mergeChatProjectSkills } from "@t3tools/client-runtime/state/chat-project-skills";
+import type { ResponseStyleUiVariant } from "@t3tools/client-runtime/state/response-style-presentation";
+import { resolveComposerPlaceholder } from "~/responseStyleUi";
+import { orchestrationEnvironment } from "~/state/orchestration";
+import { useEnvironmentQuery } from "~/state/query";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
   memo,
-  type ReactNode,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -32,7 +38,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { reconcileAutomaticAccountSwitch } from "@t3tools/client-runtime/state/account-auto-switch";
 import {
   clampCollapsedComposerCursor,
   type ComposerTrigger,
@@ -65,6 +71,8 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ChatWorkflowLauncher } from "./ChatWorkflowLauncher";
+import { exactWorkflowModelSelection } from "./chatWorkflow";
+import { availableAssistantModel } from "./assistantComposer";
 import { ComposerStashMenu } from "./ComposerStashMenu";
 import { ComposerFilePicker } from "./ComposerFilePicker";
 import { fileDropTargetKey, useProjectFileDropStore } from "../../projectFileDropStore";
@@ -99,12 +107,7 @@ import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerOrchestraQuestionPanel } from "./ComposerOrchestraQuestionPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
-import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
-import {
-  COMPOSER_REQUEST_MODES,
-  toggleComposerRequestMode,
-  useComposerRequestMode,
-} from "../../askFirstStore";
+import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import { useMeetingComposerConfig } from "../../meetingComposerStore";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
@@ -114,113 +117,32 @@ import {
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
-import { ContextWindowMeter } from "./ContextWindowMeter";
-import { TokenUsageButton } from "./TokenUsageButton";
+import { ProviderQuotaPill, TokenUsageButton } from "./TokenUsageButton";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
-
-type ComposerCommandMenuPosition = {
-  bottom: number;
-  left: number;
-  maxHeight: number;
-  width: number;
-};
-
-function composerCommandMenuPositionsEqual(
-  a: ComposerCommandMenuPosition,
-  b: ComposerCommandMenuPosition,
-): boolean {
-  return (
-    a.bottom === b.bottom && a.left === b.left && a.maxHeight === b.maxHeight && a.width === b.width
-  );
-}
-
-function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children: ReactNode }) {
-  const [position, setPosition] = useState<ComposerCommandMenuPosition | null>(null);
-
-  useLayoutEffect(() => {
-    const anchor = props.anchor;
-    if (!anchor) {
-      setPosition(null);
-      return;
-    }
-
-    const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      const next = {
-        bottom: window.innerHeight - rect.top + 8,
-        left: rect.left,
-        maxHeight: Math.max(96, rect.top - 24),
-        width: rect.width,
-      };
-      setPosition((current) =>
-        current && composerCommandMenuPositionsEqual(current, next) ? current : next,
-      );
-    };
-
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-
-    const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updatePosition);
-    if (observer) {
-      // The composer is centered and capped at a max width, so opening a side
-      // panel slides it sideways without ever resizing it. Watching the anchor
-      // alone would leave the menu behind; the ancestors are what shrink, and
-      // they resize on every frame of the panel animation.
-      observer.observe(anchor);
-      for (let element = anchor.parentElement; element; element = element.parentElement) {
-        observer.observe(element);
-      }
-    }
-
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-    };
-  }, [props.anchor]);
-
-  if (!position) return null;
-
-  return createPortal(
-    <div
-      className="pointer-events-auto fixed z-[70]"
-      style={{
-        bottom: position.bottom,
-        left: position.left,
-        maxHeight: position.maxHeight,
-        width: position.width,
-      }}
-    >
-      {props.children}
-    </div>,
-    document.body,
-  );
-}
+import {
+  ComposerCommandMenuLayer,
+  isVideoOnlyModelSlug,
+  sanitizeProviderDisplayAlias,
+  extendReplacementRangeForTrailingSpace,
+  syncTerminalContextsByIds,
+  terminalContextIdListsEqual,
+  isInsideComposerFloatingLayer,
+  ComposerFooterModeControls,
+  ComposerFooterPrimaryActions,
+  RequestModeControl,
+} from "./ChatComposerSubparts";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
-import {
-  BotIcon,
-  CircleAlertIcon,
-  MessageCircleQuestionIcon,
-  PencilRulerIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  SparklesIcon,
-  XIcon,
-} from "lucide-react";
+import { CircleAlertIcon, PencilRulerIcon, XIcon } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderDisplayName, getProviderInteractionModeToggle } from "../../providerModels";
 import {
   applyProviderInstanceSettings,
+  isProviderInstancePickerReady,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   resolveProviderDriverKindForInstanceSelection,
@@ -241,265 +163,7 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
-
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "승인 필요",
-    description: "명령 실행과 파일 변경 전에 확인합니다.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "수정 자동 승인",
-    description: "파일 수정은 자동 승인하고 다른 작업은 확인합니다.",
-    icon: PenLineIcon,
-  },
-  auto: {
-    label: "자동",
-    description: "지원하는 제공자는 일반 작업을 자동 승인하고, 나머지는 확인합니다.",
-    icon: SparklesIcon,
-  },
-  "full-access": {
-    label: "전체 권한",
-    description: "추가 확인 없이 명령 실행과 파일 수정을 허용합니다.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
-const COMPOSER_FLOATING_LAYER_SELECTOR = [
-  '[data-slot="popover-popup"]',
-  '[data-slot="menu-popup"]',
-  '[data-slot="select-popup"]',
-  '[data-slot="combobox-popup"]',
-  '[data-slot="autocomplete-popup"]',
-].join(",");
-
-const extendReplacementRangeForTrailingSpace = (
-  text: string,
-  rangeEnd: number,
-  replacement: string,
-): number => {
-  if (!replacement.endsWith(" ")) {
-    return rangeEnd;
-  }
-  return text[rangeEnd] === " " ? rangeEnd + 1 : rangeEnd;
-};
-
-const syncTerminalContextsByIds = (
-  contexts: ReadonlyArray<TerminalContextDraft>,
-  ids: ReadonlyArray<string>,
-): TerminalContextDraft[] => {
-  const contextsById = new Map(contexts.map((context) => [context.id, context]));
-  return ids.flatMap((id) => {
-    const context = contextsById.get(id);
-    return context ? [context] : [];
-  });
-};
-
-const terminalContextIdListsEqual = (
-  contexts: ReadonlyArray<TerminalContextDraft>,
-  ids: ReadonlyArray<string>,
-): boolean =>
-  contexts.length === ids.length && contexts.every((context, index) => context.id === ids[index]);
-
-function isInsideComposerFloatingLayer(element: Element): boolean {
-  return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
-}
-
-const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
-  showInteractionModeToggle: boolean;
-  interactionMode: ProviderInteractionMode;
-  runtimeMode: RuntimeMode;
-  onToggleInteractionMode: () => void;
-  onRuntimeModeChange: (mode: RuntimeMode) => void;
-}) {
-  const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
-  const RuntimeModeIcon = runtimeModeOption.icon;
-  const interactionModeTooltip =
-    props.interactionMode === "plan"
-      ? "계획 모드 — 클릭하면 일반 작업 모드로 돌아갑니다"
-      : "기본 모드 — 클릭하면 계획 모드로 전환합니다";
-
-  const interactionModeToggle = props.showInteractionModeToggle ? (
-    <>
-      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <ComposerControl
-              className={cn(
-                "shrink-0 whitespace-nowrap",
-                props.interactionMode === "plan"
-                  ? "bg-accent text-accent-foreground hover:bg-accent/80"
-                  : "text-secondary-label hover:text-foreground",
-              )}
-              type="button"
-              onClick={props.onToggleInteractionMode}
-              aria-label={interactionModeTooltip}
-            />
-          }
-        >
-          {props.interactionMode === "plan" ? (
-            <ComposerControlIcon icon={PencilRulerIcon} className="text-current opacity-100" />
-          ) : (
-            <ComposerControlIcon icon={BotIcon} opticalSize="large" />
-          )}
-          <span className="sr-only sm:not-sr-only">
-            {props.interactionMode === "plan" ? "계획" : "작업"}
-          </span>
-        </TooltipTrigger>
-        <TooltipPopup side="top">{interactionModeTooltip}</TooltipPopup>
-      </Tooltip>
-    </>
-  ) : null;
-
-  return (
-    <>
-      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-
-      <Tooltip>
-        <Select
-          value={props.runtimeMode}
-          onValueChange={(value) => props.onRuntimeModeChange(value!)}
-        >
-          <TooltipTrigger
-            render={<ComposerSelectControl className="font-medium" aria-label="실행 모드" />}
-          >
-            <ComposerControlIcon icon={RuntimeModeIcon} />
-            <SelectValue>{runtimeModeOption.label}</SelectValue>
-          </TooltipTrigger>
-          <SelectPopup alignItemWithTrigger={false}>
-            {runtimeModeOptions.map((mode) => {
-              const option = runtimeModeConfig[mode];
-              const OptionIcon = option.icon;
-              return (
-                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid min-w-0 flex-1 gap-0.5">
-                      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        {option.label}
-                      </span>
-                      <span className="text-muted-foreground text-xs leading-4">
-                        {option.description}
-                      </span>
-                    </div>
-                  </div>
-                </SelectItem>
-              );
-            })}
-          </SelectPopup>
-        </Select>
-        <TooltipPopup side="top">{runtimeModeOption.description}</TooltipPopup>
-      </Tooltip>
-
-      {interactionModeToggle}
-    </>
-  );
-});
-
-const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
-  compact: boolean;
-  activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
-  activeThreadProviderDisplayName: string | null;
-  isPreparingWorktree: boolean;
-  pendingAction: {
-    questionIndex: number;
-    isLastQuestion: boolean;
-    canAdvance: boolean;
-    isResponding: boolean;
-    isComplete: boolean;
-  } | null;
-  isRunning: boolean;
-  showPlanFollowUpPrompt: boolean;
-  promptHasText: boolean;
-  isSendBusy: boolean;
-  sendDisabledReason: string | null;
-  isConnecting: boolean;
-  isEnvironmentUnavailable: boolean;
-  hasSendableContent: boolean;
-  preserveComposerFocusOnPointerDown?: boolean;
-  onPreviousPendingQuestion: () => void;
-  onInterrupt: () => void;
-  onImplementPlanInNewThread: () => void;
-}) {
-  return (
-    <>
-      {props.activeContextWindow ? (
-        <ContextWindowMeter
-          usage={props.activeContextWindow}
-          providerDisplayName={props.activeThreadProviderDisplayName}
-        />
-      ) : null}
-      {props.isPreparingWorktree ? (
-        <span className="text-secondary-label text-xs">작업 트리 준비 중...</span>
-      ) : null}
-      <ComposerPrimaryActions
-        compact={props.compact}
-        pendingAction={props.pendingAction}
-        isRunning={props.isRunning}
-        showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
-        promptHasText={props.promptHasText}
-        isSendBusy={props.isSendBusy}
-        sendDisabledReason={props.sendDisabledReason}
-        isConnecting={props.isConnecting}
-        isEnvironmentUnavailable={props.isEnvironmentUnavailable}
-        isPreparingWorktree={props.isPreparingWorktree}
-        hasSendableContent={props.hasSendableContent}
-        preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
-        onPreviousPendingQuestion={props.onPreviousPendingQuestion}
-        onInterrupt={props.onInterrupt}
-        onImplementPlanInNewThread={props.onImplementPlanInNewThread}
-      />
-    </>
-  );
-});
-
-const RequestModeControl = memo(function RequestModeControl() {
-  const mode = useComposerRequestMode();
-  return (
-    <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="요청 방식">
-      {COMPOSER_REQUEST_MODES.filter((option) => option.value !== "direct").map((option) => {
-        const enabled = mode === option.value;
-        return (
-          <Tooltip key={option.value}>
-            <TooltipTrigger
-              render={
-                <ComposerControl
-                  className={cn(
-                    "shrink-0 whitespace-nowrap",
-                    enabled && "bg-accent text-accent-foreground hover:bg-accent/80",
-                  )}
-                  type="button"
-                  aria-label={option.label}
-                  aria-pressed={enabled}
-                  data-request-mode-toggle={option.value}
-                  onClick={() => toggleComposerRequestMode(option.value)}
-                />
-              }
-            >
-              <ComposerControlIcon
-                icon={option.value === "ask-first" ? MessageCircleQuestionIcon : PencilRulerIcon}
-              />
-              <span>{option.label}</span>
-            </TooltipTrigger>
-            <TooltipPopup side="top">
-              {enabled ? "켜짐 · 다시 누르면 끕니다. " : "꺼짐 · "}
-              {option.description}
-            </TooltipPopup>
-          </Tooltip>
-        );
-      })}
-    </div>
-  );
-});
-
-// --------------------------------------------------------------------------
-// Handle exposed to ChatView
-// --------------------------------------------------------------------------
+export { isVideoOnlyModelSlug, sanitizeProviderDisplayAlias } from "./ChatComposerSubparts";
 
 export interface ChatComposerHandle {
   addFiles: (files: File[]) => boolean;
@@ -534,6 +198,7 @@ export interface ChatComposerHandle {
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
+    workflowModelSelection: ModelSelection | null;
     providerAvailable: boolean;
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
@@ -545,10 +210,25 @@ export interface ChatComposerHandle {
 // Props
 // --------------------------------------------------------------------------
 
+export interface RoomModelPicker {
+  providers: readonly ServerProvider[];
+  placeholder: string | null;
+  disabled: boolean;
+  error: string;
+  onSelect: (instanceId: ProviderInstanceId, model: string) => void;
+}
+
 export interface ChatComposerProps {
+  onViewerModelChange?: ((selection: ModelSelection | null) => void) | undefined;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   workflowProject?: EnvironmentProject | null;
+  getWorkflowBootstrap?: (
+    model: ModelSelection,
+    title: string,
+  ) => ThreadTurnStartBootstrap | undefined;
+  workflowBootstrapUnavailableReason?: string;
+  onDraftWorkflowStarting?: (starting: boolean) => void;
   development?: WorkspaceDevelopmentPanelProps | null;
   developmentUnavailableReason?: string;
   routeKind: "server" | "draft";
@@ -568,6 +248,7 @@ export interface ChatComposerProps {
   phase: SessionPhase;
   isConnecting: boolean;
   isSendBusy: boolean;
+  integratedWorkActive?: boolean;
   sendDisabledReason: string | null;
   isPreparingWorktree: boolean;
   environmentUnavailable: {
@@ -604,8 +285,14 @@ export interface ChatComposerProps {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  workflowInteractionMode?: ProviderInteractionMode;
 
   // Provider / model
+  assistantModelLocked?: boolean;
+  roomModelPicker?: RoomModelPicker;
+  assistantModelSelection?: ModelSelection;
+  /** Look of the conversation's response style; it supplies the idle input placeholder. */
+  responseStyleVariant?: ResponseStyleUiVariant;
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
@@ -654,6 +341,7 @@ export interface ChatComposerProps {
     nextCursor: number,
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
+    focusEditor?: boolean,
   ) => void;
 
   onProviderModelSelect: (
@@ -672,6 +360,8 @@ export interface ChatComposerProps {
   onExpandImage: (preview: ExpandedImagePreview) => void;
 }
 
+const EMPTY_CHAT_PROJECT_SKILLS: ServerProvider["skills"] = [];
+
 // --------------------------------------------------------------------------
 // Component
 // --------------------------------------------------------------------------
@@ -687,7 +377,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     isServerThread,
-    isLocalDraftThread: _isLocalDraftThread,
+    isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
@@ -798,6 +488,77 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (store) => store.syncPersistedAttachments,
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  const accountSwitchCursor = useRef<{ thread: string; id: string | null } | null>(null);
+  useEffect(() => {
+    if (!activeThreadId || !activeThreadActivities) return;
+    const thread = `${environmentId}:${activeThreadId}`;
+    const activity = activeThreadActivities.findLast(
+      (item) => item.kind === "provider.account.auto-switched",
+    );
+    const cursor = accountSwitchCursor.current;
+    if (!cursor || cursor.thread !== thread) {
+      accountSwitchCursor.current = { thread, id: activity?.id ?? null };
+      return;
+    }
+    if (!activity || cursor.id === activity.id) return;
+    const payload = activity.payload as { nextInstanceId?: unknown } | null;
+    if (payload?.nextInstanceId !== activeThreadModelSelection?.instanceId) return;
+    accountSwitchCursor.current = { thread, id: activity.id };
+    const draft = getComposerDraft(composerDraftTarget);
+    const draftSelection = draft?.activeProvider
+      ? draft.modelSelectionByProvider[draft.activeProvider]
+      : undefined;
+    const next = reconcileAutomaticAccountSwitch(
+      activity,
+      activeThreadModelSelection,
+      draftSelection,
+    );
+    if (next)
+      useComposerDraftStore
+        .getState()
+        .setModelSelection(composerDraftTarget, next, { replaceOptions: true });
+  }, [
+    activeThreadActivities,
+    activeThreadId,
+    activeThreadModelSelection,
+    composerDraftTarget,
+    environmentId,
+    getComposerDraft,
+  ]);
+  // Once a server thread's persisted modelSelection matches the local composer
+  // draft override (e.g. after sending a turn), clear the redundant draft
+  // override so future server-side model updates or room switches are never
+  // shadowed by stale localStorage state.
+  useEffect(() => {
+    if (!isServerThread || !activeThreadModelSelection || composerDraft.exactModel) return;
+    const activeDraftProvider = composerDraft.activeProvider;
+    if (!activeDraftProvider || activeDraftProvider !== activeThreadModelSelection.instanceId) {
+      return;
+    }
+    const draftSelection = composerDraft.modelSelectionByProvider[activeDraftProvider];
+    if (draftSelection?.model !== activeThreadModelSelection.model) {
+      return;
+    }
+    const draftOptions = draftSelection.options ?? [];
+    const threadOptions = activeThreadModelSelection.options ?? [];
+    if (
+      draftOptions.length !== threadOptions.length ||
+      draftOptions.some(
+        (opt, index) =>
+          opt.id !== threadOptions[index]?.id || opt.value !== threadOptions[index]?.value,
+      )
+    ) {
+      return;
+    }
+    useComposerDraftStore.getState().clearModelSelection(composerDraftTarget);
+  }, [
+    activeThreadModelSelection,
+    composerDraft.activeProvider,
+    composerDraft.exactModel,
+    composerDraft.modelSelectionByProvider,
+    composerDraftTarget,
+    isServerThread,
+  ]);
 
   // ------------------------------------------------------------------
   // Model state
@@ -805,20 +566,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Instance-aware projection of the wire provider list. One entry per
   // configured instance (default built-in + any custom `providerInstances.*`),
   // sorted default-first per driver kind for a stable picker order.
+  const roomCatalog = props.roomModelPicker?.providers;
   const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(
     () =>
       sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
+        roomCatalog
+          ? deriveProviderInstanceEntries(roomCatalog).map((entry) => ({
+              ...entry,
+              individualAccount: true,
+            }))
+          : applyProviderInstanceSettings(
+              deriveProviderInstanceEntries(providerStatuses),
+              settings,
+            ),
       ),
-    [providerStatuses, settings],
+    [providerStatuses, settings, roomCatalog],
   );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const threadProvider =
-    activeThread?.session?.providerInstanceId ??
     activeThreadModelSelection?.instanceId ??
+    activeThread?.session?.providerInstanceId ??
     activeProjectDefaultModelSelection?.instanceId ??
     null;
-  const explicitSelectedInstanceId = selectedProviderByThreadId ?? threadProvider;
+  const assistantModelLocked = props.assistantModelLocked === true;
+  const assistantModelSelection = props.assistantModelSelection;
+  const copiedSelection =
+    !assistantModelLocked && composerDraft.exactModel && composerDraft.activeProvider
+      ? composerDraft.modelSelectionByProvider[composerDraft.activeProvider]
+      : undefined;
+  const explicitSelectedInstanceId = assistantModelLocked
+    ? (assistantModelSelection?.instanceId ?? null)
+    : (selectedProviderByThreadId ?? threadProvider);
 
   const unlockedSelectedProvider =
     resolveProviderDriverKindForInstanceSelection(
@@ -856,10 +634,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   //   5. First enabled entry overall / default instance for the kind.
   //
   const selectedInstanceId = useMemo<ProviderInstanceId>(() => {
+    if (assistantModelLocked)
+      return assistantModelSelection?.instanceId ?? NO_PROVIDER_MODEL_SELECTION.instanceId;
+    if (copiedSelection) return copiedSelection.instanceId;
     const candidates: Array<string | null | undefined> = [
       composerDraft.activeProvider,
-      activeThread?.session?.providerInstanceId,
       activeThreadModelSelection?.instanceId,
+      activeThread?.session?.providerInstanceId,
       activeProjectDefaultModelSelection?.instanceId,
     ];
     for (const candidate of candidates) {
@@ -902,6 +683,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     lockedProvider,
     providerInstanceEntries,
     requestedDriverKind,
+    assistantModelLocked,
+    assistantModelSelection?.instanceId,
+    copiedSelection,
   ]);
 
   // Resolve the active instance's snapshot by `instanceId` so a custom
@@ -911,28 +695,67 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => providerInstanceEntries.find((entry) => entry.instanceId === selectedInstanceId),
     [providerInstanceEntries, selectedInstanceId],
   );
-  const noProviderAvailable = selectedProviderEntry === undefined;
+  const availableAssistantSelection = assistantModelLocked
+    ? availableAssistantModel(
+        assistantModelSelection,
+        selectedProviderEntry,
+        selectedProviderEntry ? getAppModelOptionsForInstance(settings, selectedProviderEntry) : [],
+      )
+    : null;
+  const noProviderAvailable =
+    selectedProviderEntry === undefined ||
+    (assistantModelLocked && !availableAssistantSelection) ||
+    Boolean(
+      copiedSelection &&
+      (!isProviderInstancePickerReady(selectedProviderEntry) ||
+        !availableAssistantModel(
+          copiedSelection,
+          selectedProviderEntry,
+          getAppModelOptionsForInstance(settings, selectedProviderEntry),
+        )),
+    );
   // The driver kind follows the instance that will actually run the turn,
   // which can differ from the persisted selection when that selection is
   // disabled.
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
 
-  const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
-    threadRef: composerDraftTarget,
-    providers: providerStatuses,
-    selectedProvider,
-    selectedInstanceId,
-    threadModelSelection: activeThreadModelSelection,
-    projectModelSelection: activeProjectDefaultModelSelection,
-    settings,
-  });
-  const selectedProviderStatus = useMemo(
-    () => selectedProviderEntry?.snapshot ?? null,
-    [selectedProviderEntry],
-  );
+  const { modelOptions: composerModelOptions, selectedModel: draftSelectedModel } =
+    useEffectiveComposerModelState({
+      threadRef: composerDraftTarget,
+      providers: providerStatuses,
+      selectedProvider,
+      selectedInstanceId,
+      threadModelSelection: activeThreadModelSelection,
+      projectModelSelection: activeProjectDefaultModelSelection,
+      settings,
+    });
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
+    [selectedProviderEntry],
+  );
+  // ERR-29: Prevent video-only models (e.g. wan-v3 / video generators) from being
+  // auto-selected as the default in new text/coding chats when the user has not
+  // explicitly picked one.
+  const hasExplicitDraftModelPick = Boolean(
+    composerDraft.modelSelectionByProvider[selectedInstanceId]?.model ||
+    activeThreadModelSelection?.model,
+  );
+  const guardedDraftSelectedModel = useMemo(() => {
+    if (hasExplicitDraftModelPick || !isVideoOnlyModelSlug(draftSelectedModel)) {
+      return draftSelectedModel;
+    }
+    const textCandidate =
+      selectedProviderModels.find(
+        (candidate) => candidate.isDefault && !isVideoOnlyModelSlug(candidate.slug),
+      ) ?? selectedProviderModels.find((candidate) => !isVideoOnlyModelSlug(candidate.slug));
+    return textCandidate?.slug ?? draftSelectedModel;
+  }, [draftSelectedModel, hasExplicitDraftModelPick, selectedProviderModels]);
+  const selectedModel = assistantModelLocked
+    ? (assistantModelSelection?.model ?? "")
+    : (copiedSelection?.model ?? guardedDraftSelectedModel);
+  const selectedProviderStatus = useMemo(
+    () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
 
@@ -940,6 +763,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => getComposerPromptInjectionState(prompt),
     [prompt],
   );
+  const currentModelOptions = copiedSelection
+    ? copiedSelection.options
+    : composerModelOptions?.[selectedInstanceId];
   const composerProviderState = useMemo(
     () =>
       getComposerProviderState({
@@ -947,20 +773,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         model: selectedModel,
         models: selectedProviderModels,
         promptInjectionState: composerPromptInjectionState,
-        modelOptions: composerModelOptions?.[selectedInstanceId],
+        modelOptions: assistantModelLocked ? assistantModelSelection?.options : currentModelOptions,
       }),
     [
-      composerModelOptions,
+      currentModelOptions,
       composerPromptInjectionState,
-      selectedInstanceId,
       selectedModel,
       selectedProvider,
       selectedProviderModels,
+      assistantModelLocked,
+      assistantModelSelection?.options,
     ],
   );
 
   const selectedPromptEffort = composerProviderState.promptEffort;
-  const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
+  const selectedModelOptionsForDispatch = copiedSelection
+    ? copiedSelection.options
+    : composerProviderState.modelOptionsForDispatch;
   // Plan mode is a legacy feature behind Settings → Beta. With the flag off,
   // ChatView forces the effective mode to "default", so hiding the toggle
   // can't trap anyone in plan mode.
@@ -973,8 +802,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [planModeUiEnabled, providerStatuses, selectedProvider],
   );
   const selectedModelSelection = useMemo<ModelSelection>(
-    () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
-    [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
+    () =>
+      assistantModelLocked && assistantModelSelection
+        ? assistantModelSelection
+        : (copiedSelection ??
+          createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch)),
+    [
+      assistantModelLocked,
+      assistantModelSelection,
+      selectedInstanceId,
+      selectedModel,
+      selectedModelOptionsForDispatch,
+      copiedSelection,
+    ],
+  );
+  const { onViewerModelChange } = props;
+  useLayoutEffect(() => {
+    onViewerModelChange?.(
+      noProviderAvailable || !selectedModelSelection.model ? null : selectedModelSelection,
+    );
+  }, [noProviderAvailable, onViewerModelChange, selectedModelSelection]);
+  const workflowModelSelection = exactWorkflowModelSelection(
+    assistantModelLocked
+      ? assistantModelSelection
+      : composerDraft.activeProvider
+        ? composerDraft.modelSelectionByProvider[composerDraft.activeProvider]
+        : activeThreadModelSelection,
+    selectedModelSelection,
+    !noProviderAvailable,
   );
   const selectedModelForPicker = selectedModel;
   // Instance-keyed option list so the picker can show each configured
@@ -1004,15 +859,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => deriveLatestContextWindowSnapshot(activeThreadActivities ?? []),
     [activeThreadActivities],
   );
+  const activeThreadProvider = useMemo(
+    () => providerStatuses.find((p) => p.instanceId === selectedInstanceId) ?? null,
+    [providerStatuses, selectedInstanceId],
+  );
   const activeThreadProviderDisplayName = useMemo(() => {
     if (!activeThreadModelSelection) return null;
     const entry = providerStatuses.find(
       (p) => p.instanceId === activeThreadModelSelection.instanceId,
     );
     if (entry) {
-      return getProviderDisplayName(providerStatuses, entry.driver);
+      return sanitizeProviderDisplayAlias(
+        entry.displayName,
+        getProviderDisplayName(providerStatuses, entry.driver),
+      );
     }
-    return formatProviderDisplayName(activeThreadModelSelection.instanceId);
+    return sanitizeProviderDisplayAlias(
+      formatProviderDisplayName(activeThreadModelSelection.instanceId),
+      null,
+    );
   }, [providerStatuses, activeThreadModelSelection]);
 
   // ------------------------------------------------------------------
@@ -1104,6 +969,57 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Derived: composer trigger / menu
   // ------------------------------------------------------------------
   const composerTriggerKind = composerTrigger?.kind ?? null;
+  const chatSkillsQuery = useEnvironmentQuery(
+    props.workflowProject
+      ? orchestrationEnvironment.chatProjectSkills({
+          environmentId,
+          input: {
+            projectId: props.workflowProject.id,
+            ...(routeKind === "server" && activeThreadId ? { threadId: activeThreadId } : {}),
+          },
+        })
+      : null,
+  );
+  useEffect(() => {
+    if (
+      (composerTriggerKind === "skill" || composerTriggerKind === "slash-command") &&
+      props.workflowProject?.id
+    )
+      chatSkillsQuery.refresh();
+  }, [composerTriggerKind, props.workflowProject?.id, chatSkillsQuery.refresh]);
+  const scopedSkills =
+    selectedProvider === "codex"
+      ? chatSkillsQuery.data?.codex
+      : selectedProvider === "claudeAgent"
+        ? chatSkillsQuery.data?.claudeAgent
+        : selectedProvider === "gemini"
+          ? (chatSkillsQuery.data?.gemini ?? chatSkillsQuery.data?.grok)
+          : chatSkillsQuery.data?.grok;
+  // Skills installed for the other AIs are offered here too; the server
+  // resolves a `$name` mention against the same shared list.
+  const otherProviderSkills = useMemo(
+    () =>
+      providerStatuses.flatMap((status) =>
+        status.instanceId === selectedProviderStatus?.instanceId ? [] : status.skills,
+      ),
+    [providerStatuses, selectedProviderStatus?.instanceId],
+  );
+  const chatSkills = useMemo(
+    () =>
+      mergeChatProjectSkills(
+        selectedProviderStatus?.skills ?? [],
+        scopedSkills ?? EMPTY_CHAT_PROJECT_SKILLS,
+        gitCwd ?? props.workflowProject?.workspaceRoot,
+        otherProviderSkills,
+      ),
+    [
+      selectedProviderStatus?.skills,
+      scopedSkills,
+      gitCwd,
+      props.workflowProject?.workspaceRoot,
+      otherProviderSkills,
+    ],
+  );
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
   const workspaceEntries = useComposerPathSearch({
@@ -1114,6 +1030,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
+    const skillItemsFor = (query: string) =>
+      searchProviderSkills(chatSkills, query).map((skill) => ({
+        id: `skill:${selectedProvider}:${skill.name}`,
+        type: "skill" as const,
+        provider: selectedProvider,
+        skill,
+        label: formatProviderSkillDisplayName(skill),
+        description:
+          skill.shortDescription ??
+          skill.description ??
+          (skill.scope ? `${skill.scope} 스킬` : "제공자 스킬 실행"),
+      }));
     if (composerTrigger.kind === "path") {
       return workspaceEntries.entries.map((entry) => ({
         id: `path:${entry.kind}:${entry.path}`,
@@ -1164,25 +1092,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
+      // "/" lists skills after the commands and narrows both as the user types;
+      // picking a skill inserts the same `$name` token the "$" menu does.
+      const skillItems = skillItemsFor(composerTrigger.query);
       if (!query) {
-        return slashCommandItems;
+        return [...slashCommandItems, ...skillItems];
       }
-      return searchSlashCommandItems(slashCommandItems, query);
+      return [...searchSlashCommandItems(slashCommandItems, query), ...skillItems];
     }
     if (composerTrigger.kind === "skill") {
-      return searchProviderSkills(selectedProviderStatus?.skills ?? [], composerTrigger.query).map(
-        (skill) => ({
-          id: `skill:${selectedProvider}:${skill.name}`,
-          type: "skill" as const,
-          provider: selectedProvider,
-          skill,
-          label: formatProviderSkillDisplayName(skill),
-          description:
-            skill.shortDescription ??
-            skill.description ??
-            (skill.scope ? `${skill.scope} 스킬` : "제공자 스킬 실행"),
-        }),
-      );
+      return skillItemsFor(composerTrigger.query);
     }
     return [];
   }, [
@@ -1190,6 +1109,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeUiEnabled,
     selectedProvider,
     selectedProviderStatus,
+    chatSkills,
     workspaceEntries.entries,
   ]);
 
@@ -1294,7 +1214,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ...(routeKind === "draft" && draftId ? { draftId } : {}),
     model: selectedModel,
     models: selectedProviderModels,
-    modelOptions: composerModelOptions?.[selectedInstanceId],
+    modelOptions: currentModelOptions,
     prompt,
     onPromptChange: setPromptFromTraits,
   });
@@ -1309,7 +1229,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ...(routeKind === "draft" && draftId ? { draftId } : {}),
     model: selectedModel,
     models: selectedProviderModels,
-    modelOptions: composerModelOptions?.[selectedInstanceId],
+    modelOptions: currentModelOptions,
     prompt,
     onPromptChange: setPromptFromTraits,
   });
@@ -1322,7 +1242,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             canAdvance: activePendingProgress.canAdvance,
             isResponding: activePendingIsResponding,
             isComplete: Boolean(activePendingResolvedAnswers),
-            isCancelable: activePendingUserInput?.requestId.startsWith("async:") ?? false,
+            isCancelable: isRecoverableUserInputRequestId(activePendingUserInput?.requestId),
           }
         : null,
     [
@@ -2792,6 +2712,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
+        workflowModelSelection,
         providerAvailable: !noProviderAvailable,
         selectedProvider,
         selectedModel,
@@ -2826,6 +2747,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedModel,
       selectedModelOptionsForDispatch,
       selectedModelSelection,
+      workflowModelSelection,
       noProviderAvailable,
       selectedPromptEffort,
       selectedProvider,
@@ -2839,26 +2761,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <form
       ref={composerFormRef}
       onSubmit={submitComposer}
-      className="mx-auto w-full min-w-0 max-w-3xl"
+      className="mx-auto w-full min-w-0"
       data-chat-composer-form="true"
     >
       <ChatWorkflowLauncher
         project={props.workflowProject ?? null}
         contextKey={activeThreadId ?? draftId ?? "draft"}
-        threadId={isServerThread ? activeThreadId : null}
+        threadId={
+          isServerThread || (isLocalDraftThread && meetingConfig.enabled) ? activeThreadId : null
+        }
         prompt={prompt}
         attachmentCount={composerImages.length}
         startBlocked={
           isSendBusy ||
+          props.integratedWorkActive === true ||
           isPreparingWorktree ||
           isComposerApprovalState ||
           pendingUserInputs.length > 0 ||
           showPlanFollowUpPrompt
         }
         runtimeMode={runtimeMode}
-        interactionMode={interactionMode}
+        interactionMode={props.workflowInteractionMode ?? interactionMode}
         meetingConfig={meetingConfig}
-        currentModel={noProviderAvailable ? null : selectedModelSelection}
+        currentModel={
+          meetingConfig.enabled
+            ? workflowModelSelection
+            : noProviderAvailable
+              ? null
+              : selectedModelSelection
+        }
+        {...(props.getWorkflowBootstrap ? { getBootstrap: props.getWorkflowBootstrap } : {})}
+        {...(props.onDraftWorkflowStarting
+          ? { onDraftStarting: props.onDraftWorkflowStarting }
+          : {})}
         open={isAiTaskOpen}
         onOpenChange={setIsAiTaskOpen}
         instanceEntries={providerInstanceEntries}
@@ -2870,11 +2805,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           onProviderModelSelect(model.instanceId, model.model, model.options)
         }
         unavailableReason={
-          environmentUnavailable
+          props.workflowBootstrapUnavailableReason ??
+          (meetingConfig.enabled && !workflowModelSelection
+            ? "선택한 대화 모델을 확인할 수 없습니다. 모델 설정을 확인하세요."
+            : null) ??
+          (environmentUnavailable
             ? `${environmentUnavailable.label}에 연결한 뒤 실행하세요.`
             : isConnecting
               ? "연결 중입니다."
-              : null
+              : null)
         }
       />
       <div
@@ -2956,6 +2895,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
+                  onChangeCustomAnswer={(questionId, value) =>
+                    onChangeActivePendingUserInputCustomAnswer(
+                      questionId,
+                      value,
+                      0,
+                      0,
+                      false,
+                      false,
+                    )
+                  }
                 />
                 {activePendingUserInput &&
                 activePendingProgress?.activeQuestion &&
@@ -3030,6 +2979,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
+                onChangeCustomAnswer={(questionId, value) =>
+                  onChangeActivePendingUserInputCustomAnswer(questionId, value, 0, 0, false, false)
+                }
               />
               <div className="px-3 pb-3 sm:px-4">
                 <div
@@ -3041,16 +2993,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 >
                   <button
                     type="button"
-                    className={cn(
-                      "min-w-0 flex-1 truncate bg-transparent py-1.5 text-left text-sm",
-                      activePendingProgress?.customAnswer ? "text-foreground" : "text-placeholder",
-                      !activePendingProgress?.activeQuestion?.multiSelect && "px-3 py-2",
-                    )}
-                    onPointerDown={(event) => event.preventDefault()}
+                    className="min-w-0 flex-1 px-3 py-2 text-left text-sm text-secondary-label"
                     onClick={expandMobileComposer}
-                    aria-label="직접 답변 작성"
                   >
-                    {activePendingProgress?.customAnswer || "직접 답변 작성"}
+                    이미지 첨부
                   </button>
                   {activePendingProgress?.activeQuestion ? (
                     <ComposerPrimaryActions
@@ -3322,49 +3268,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </div>
               )}
 
-            <div className="relative">
-              <ComposerPromptEditor
-                editorRef={composerEditorRef}
-                value={
-                  isComposerApprovalState
-                    ? ""
-                    : activePendingProgress
-                      ? activePendingProgress.customAnswer
-                      : prompt
-                }
-                cursor={composerCursor}
-                terminalContexts={
-                  !isComposerApprovalState && pendingUserInputs.length === 0
-                    ? composerTerminalContexts
-                    : []
-                }
-                skills={selectedProviderStatus?.skills ?? []}
-                {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
-                onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
-                onChange={onPromptChange}
-                onCommandKeyDown={onComposerCommandKey}
-                onPaste={onComposerPaste}
-                placeholder={
-                  isComposerApprovalState
-                    ? (activePendingApproval?.detail ?? "승인 요청을 처리하면 계속할 수 있습니다")
-                    : activePendingProgress
-                      ? "직접 답변하거나, 선택한 항목을 사용하려면 비워 두세요"
-                      : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "계획을 다듬을 의견을 입력하거나, 바로 구현하려면 비워 두세요"
-                        : projectSelectionRequired
-                          ? "위에서 프로젝트를 선택해 대화를 시작하세요"
-                          : noProviderAvailable
-                            ? "메시지를 보내려면 설정에서 제공자를 활성화하세요"
-                            : phase === "disconnected"
-                              ? "후속 변경을 요청하거나 파일을 첨부하세요"
-                              : "무엇이든 물어보세요. @ 파일/폴더, $ 스킬, / 명령을 사용할 수 있어요"
-                }
-                disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
-              />
+            <div className="relative" spellCheck={false}>
+              {!activePendingProgress ? (
+                <ComposerPromptEditor
+                  editorRef={composerEditorRef}
+                  value={isComposerApprovalState ? "" : prompt}
+                  cursor={composerCursor}
+                  terminalContexts={
+                    !isComposerApprovalState && pendingUserInputs.length === 0
+                      ? composerTerminalContexts
+                      : []
+                  }
+                  skills={chatSkills}
+                  {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
+                  onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
+                  onChange={onPromptChange}
+                  onCommandKeyDown={onComposerCommandKey}
+                  onPaste={onComposerPaste}
+                  placeholder={resolveComposerPlaceholder({
+                    approvalState: isComposerApprovalState,
+                    approvalDetail: activePendingApproval?.detail,
+                    planFollowUp: Boolean(showPlanFollowUpPrompt && activeProposedPlan),
+                    projectSelectionRequired,
+                    roomSendDisabledReason: props.roomModelPicker ? sendDisabledReason : null,
+                    noProviderAvailable,
+                    disconnected: phase === "disconnected",
+                    responseStyleVariant: props.responseStyleVariant ?? "standard",
+                  })}
+                  disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
+                />
+              ) : null}
               {showMobilePendingAnswerActions ? (
                 <div
                   data-chat-composer-mobile-pending-actions="true"
-                  className="absolute bottom-0 right-0 flex justify-end"
+                  className="flex justify-end px-3 pb-3"
                 >
                   <ComposerPrimaryActions
                     compact
@@ -3426,7 +3363,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     focusComposer();
                   }}
                 />
-                {noProviderAvailable ? (
+                {copiedSelection && noProviderAvailable && (
+                  <span role="status" className="text-xs text-muted-foreground">
+                    가져온 계정 또는 모델을 사용할 수 없습니다. 전송하려면 다른 모델을 선택하세요.
+                  </span>
+                )}
+                {props.roomModelPicker?.error && (
+                  <span role="alert">{props.roomModelPicker.error}</span>
+                )}
+                {noProviderAvailable && !copiedSelection && !props.roomModelPicker ? (
                   <Button
                     type="button"
                     size="sm"
@@ -3440,10 +3385,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </Button>
                 ) : (
                   <ProviderModelPicker
+                    disabled={
+                      props.roomModelPicker?.disabled ?? props.assistantModelLocked === true
+                    }
                     compact={isComposerFooterCompact}
-                    activeInstanceId={selectedInstanceId}
+                    activeInstanceId={
+                      props.roomModelPicker?.placeholder
+                        ? (providerInstanceEntries[0]?.instanceId ?? selectedInstanceId)
+                        : selectedInstanceId
+                    }
+                    {...(props.roomModelPicker?.placeholder
+                      ? { triggerPlaceholder: props.roomModelPicker.placeholder }
+                      : {})}
                     model={selectedModelForPickerWithCustomFallback}
-                    lockedProvider={lockedProvider}
+                    lockedProvider={props.roomModelPicker ? null : lockedProvider}
                     lockedContinuationGroupKey={lockedContinuationGroupKey}
                     meetingTarget={composerDraftTarget}
                     development={
@@ -3463,7 +3418,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     instanceEntries={providerInstanceEntries}
                     keybindings={keybindings}
                     modelOptionsByInstance={modelOptionsByInstance}
-                    triggerClassName="-ms-px ps-0"
+                    triggerClassName="-ms-px ps-0 min-w-[140px]"
                     terminalOpen={terminalOpen}
                     open={isComposerModelPickerOpen}
                     {...(composerProviderState.modelPickerIconClassName
@@ -3475,7 +3430,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onOpenChange={(open) => {
                       setIsComposerModelPickerOpen(open);
                     }}
-                    {...(props.workflowProject
+                    {...(props.workflowProject && !props.roomModelPicker
                       ? {
                           onOpenAiTask: () => {
                             setIsComposerModelPickerOpen(false);
@@ -3483,7 +3438,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           },
                         }
                       : {})}
-                    {...(getModelDisabledReason ? { getModelDisabledReason } : {})}
+                    {...(getModelDisabledReason && !props.roomModelPicker
+                      ? { getModelDisabledReason }
+                      : {})}
                     onInstanceModelChange={onProviderModelSelect}
                   />
                 )}
@@ -3565,8 +3522,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     environmentId={environmentId}
                     threadId={activeThreadId}
                     busy={phase === "running"}
+                    providerUsage={activeThreadProvider?.usage}
+                    providerDisplayName={sanitizeProviderDisplayAlias(
+                      activeThreadProvider?.displayName,
+                      activeThreadProviderDisplayName,
+                    )}
+                    selectedModel={selectedModelForPickerWithCustomFallback}
                   />
-                ) : null}
+                ) : (
+                  <ProviderQuotaPill
+                    usage={activeThreadProvider?.usage}
+                    providerDisplayName={sanitizeProviderDisplayAlias(
+                      activeThreadProvider?.displayName,
+                      activeThreadProviderDisplayName,
+                    )}
+                    selectedModel={selectedModelForPickerWithCustomFallback}
+                  />
+                )}
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}

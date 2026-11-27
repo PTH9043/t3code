@@ -80,6 +80,12 @@ export interface AcpPermissionRequest {
   readonly toolCall?: AcpToolCallState;
 }
 
+export interface AcpAvailableCommand {
+  readonly name: string;
+  readonly description?: string;
+  readonly inputHint?: string;
+}
+
 export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ModeChanged";
@@ -107,6 +113,27 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ThoughtDelta";
+      readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "UsageUpdated";
+      readonly used: number;
+      readonly size: number;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly commands: ReadonlyArray<AcpAvailableCommand>;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ConfigOptionsUpdated";
+      readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
       readonly rawPayload: unknown;
     };
 
@@ -248,7 +275,8 @@ function extractCommandFromTitle(title: string | undefined): string | undefined 
 
 function extractToolCallCommand(rawInput: unknown, title: string | undefined): string | undefined {
   if (isRecord(rawInput)) {
-    const directCommand = normalizeCommandValue(rawInput.command);
+    const directCommand =
+      normalizeCommandValue(rawInput.CommandLine) ?? normalizeCommandValue(rawInput.command);
     if (directCommand) {
       return directCommand;
     }
@@ -262,6 +290,19 @@ function extractToolCallCommand(rawInput: unknown, title: string | undefined): s
     }
   }
   return extractCommandFromTitle(title);
+}
+
+function extractToolCallSummaryIntent(rawInput: unknown): string | undefined {
+  if (!isRecord(rawInput)) {
+    return undefined;
+  }
+  const candidate =
+    typeof rawInput.toolSummary === "string"
+      ? rawInput.toolSummary.trim()
+      : typeof rawInput.description === "string"
+        ? rawInput.description.trim()
+        : "";
+  return candidate.length > 0 ? candidate : undefined;
 }
 
 function extractTextContentFromToolCallContent(
@@ -326,11 +367,13 @@ function makeToolCallState(
   }
   const title = input.title?.trim() || undefined;
   const command = extractToolCallCommand(input.rawInput, title);
+  const summaryIntent = extractToolCallSummaryIntent(input.rawInput);
   const textContent = extractTextContentFromToolCallContent(input.content);
   const normalizedTitle =
-    title && title.toLowerCase() !== "terminal" && title.toLowerCase() !== "tool call"
+    summaryIntent ??
+    (title && title.toLowerCase() !== "terminal" && title.toLowerCase() !== "tool call"
       ? title
-      : undefined;
+      : undefined);
   const data: Record<string, unknown> = { toolCallId };
   const kind = normalizeToolKind(input.kind);
   if (kind) {
@@ -338,6 +381,9 @@ function makeToolCallState(
   }
   if (command) {
     data.command = command;
+  }
+  if (summaryIntent) {
+    data.intent = summaryIntent;
   }
   if (input.rawInput !== undefined) {
     data.rawInput = input.rawInput;
@@ -572,6 +618,66 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           rawPayload: params,
         });
       }
+      break;
+    }
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ThoughtDelta",
+          text: upd.content.text,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "usage_update": {
+      if (
+        typeof upd.used === "number" &&
+        Number.isFinite(upd.used) &&
+        upd.used >= 0 &&
+        typeof upd.size === "number" &&
+        Number.isFinite(upd.size) &&
+        upd.size > 0
+      ) {
+        events.push({
+          _tag: "UsageUpdated",
+          used: Math.floor(upd.used),
+          size: Math.floor(upd.size),
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "available_commands_update": {
+      const commands: AcpAvailableCommand[] = [];
+      for (const entry of upd.availableCommands) {
+        const name = entry.name.trim().replace(/^\/+/, "");
+        if (!name) continue;
+        const description = entry.description?.trim() || undefined;
+        const rawInput = isRecord(entry.input) ? entry.input : undefined;
+        const inputHint =
+          typeof rawInput?.hint === "string" && rawInput.hint.trim().length > 0
+            ? rawInput.hint.trim()
+            : undefined;
+        commands.push({
+          name,
+          ...(description ? { description } : {}),
+          ...(inputHint ? { inputHint } : {}),
+        });
+      }
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        commands,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "config_option_update": {
+      events.push({
+        _tag: "ConfigOptionsUpdated",
+        configOptions: upd.configOptions,
+        rawPayload: params,
+      });
       break;
     }
     default:

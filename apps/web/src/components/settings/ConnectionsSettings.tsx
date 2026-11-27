@@ -54,6 +54,7 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { Input } from "../ui/input";
 import { GoogleAccountSection } from "./GoogleAccountSection";
+import { TelegramChannelsSection } from "./TelegramChannelsSection";
 import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
@@ -3022,6 +3023,7 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer>
       <GoogleAccountSection />
+      <TelegramChannelsSection />
       {canManageLocalBackend ? (
         <>
           <SettingsSection title="이 실행 환경">

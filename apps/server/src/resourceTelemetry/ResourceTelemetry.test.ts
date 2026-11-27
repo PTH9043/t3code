@@ -644,4 +644,116 @@ describe("ResourceTelemetry", () => {
       }).pipe(Effect.provide(layer));
     }),
   );
+
+  it.effect(
+    "seeds live baseline from sidecar history so first live snapshot reports non-zero rates and CPU time",
+    () =>
+      Effect.gen(function* () {
+        const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
+        const historySample1 = nativeSnapshot({
+          sequence: 1,
+          sampledAtUnixMs: startedAt - 2_000,
+          childCpuTimeMs: 1_000,
+          childWriteBytes: 10_000,
+        });
+        const historySample2 = nativeSnapshot({
+          sequence: 2,
+          sampledAtUnixMs: startedAt - 1_000,
+          childCpuTimeMs: 1_250,
+          childWriteBytes: 14_000,
+        });
+        const liveSample = nativeSnapshot({
+          sequence: 3,
+          sampledAtUnixMs: startedAt,
+          childCpuTimeMs: 1_650,
+          childWriteBytes: 22_000,
+        });
+        const nativeLayer = NativeTelemetryClient.layerTest({
+          readHistory: () => Effect.succeed([historySample1, historySample2]),
+          sampleNow: Effect.succeed(nativeGeneration(liveSample, 0)),
+          health: Effect.succeed({
+            status: "healthy",
+            hello: Option.none(),
+            lastSampleAt: Option.some(DateTime.makeUnsafe(startedAt)),
+            lastError: Option.none(),
+            restartCount: 0,
+            sampleIntervalMs: 2_000,
+          }),
+        });
+        const telemetryLayer = ResourceTelemetry.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              nativeLayer,
+              DesktopTelemetryReceiver.layerTest(),
+              ResourceAttribution.layer,
+            ),
+          ),
+        );
+
+        const firstLive = yield* Stream.runHead(
+          Effect.gen(function* () {
+            const telemetry = yield* ResourceTelemetry.ResourceTelemetry;
+            return telemetry.changes;
+          }).pipe(Stream.unwrap),
+        ).pipe(Effect.provide(telemetryLayer));
+
+        const snapshot = Option.getOrThrow(firstLive);
+        const codex = snapshot.processes.find((entry) => entry.identity.pid === 4_242);
+        expect(codex?.category).toBe("provider-root");
+        expect(codex?.cpuPercent).toBe(40);
+        expect(codex?.ioWriteBytesPerSecond).toBe(8_000);
+        expect(snapshot.groups.allT3.cpuTimeMs).toBeGreaterThan(0);
+        expect(snapshot.groups.allT3.ioWriteBytesPerSecond).toBe(8_000);
+      }),
+  );
+
+  it.effect(
+    "captures readHistory readAt after native IPC so newly recorded snapshots are not dropped",
+    () =>
+      Effect.gen(function* () {
+        const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
+        const nativeLayer = NativeTelemetryClient.layerTest({
+          readHistory: () =>
+            Effect.gen(function* () {
+              yield* TestClock.adjust(Duration.millis(500));
+              return [
+                nativeSnapshot({
+                  sequence: 1,
+                  sampledAtUnixMs: startedAt + 400,
+                  childCpuTimeMs: 500,
+                  childWriteBytes: 4_000,
+                }),
+              ];
+            }),
+          health: Effect.succeed({
+            status: "healthy",
+            hello: Option.none(),
+            lastSampleAt: Option.some(DateTime.makeUnsafe(startedAt + 400)),
+            lastError: Option.none(),
+            restartCount: 0,
+            sampleIntervalMs: 10_000,
+          }),
+        });
+        const telemetryLayer = ResourceTelemetry.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              nativeLayer,
+              DesktopTelemetryReceiver.layerTest(),
+              ResourceAttribution.layer,
+            ),
+          ),
+        );
+
+        const history = yield* Effect.gen(function* () {
+          const telemetry = yield* ResourceTelemetry.ResourceTelemetry;
+          return yield* telemetry.readHistory({
+            windowMs: 15 * 60_000,
+            bucketMs: 30_000,
+          });
+        }).pipe(Effect.provide(telemetryLayer));
+
+        expect(history.retainedSampleCount).toBeGreaterThan(0);
+        expect(history.topProcesses.some((entry) => entry.identity.pid === 4_242)).toBe(true);
+      }),
+  );
 });

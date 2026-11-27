@@ -2,10 +2,11 @@ import { makeWorkflowSkills } from "../WorkflowSkills.ts";
 import {
   CommandId,
   EventId,
-  RuntimeRequestId,
+  NonNegativeInt,
   ThreadId,
-  WorkspaceKnowledgeItemId,
+  TurnId,
   WorkspaceOrchestraBlock,
+  isToolLifecycleItemType,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -15,13 +16,21 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ServerConfig } from "../../config.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { withFullAccessExecutionPolicy } from "../../provider/fullAccessExecutionPolicy.ts";
+import { ORDERED_SEARCH_INSTRUCTIONS } from "../../research/orderedSearchInstructions.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
+import {
+  formatBillingErrorMessage,
+  isNonRetryableBillingError,
+  recordUnavailableModelFromError,
+} from "../../provider/workerFailurePolicy.ts";
 import { workspaceRetryResumeCursor } from "../workspaceSessionResume.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -31,16 +40,19 @@ import {
   WorkspaceAgentExecutionError,
   type WorkspaceAgentExecutionInput,
 } from "../Services/WorkspaceAgentExecutor.ts";
-import { runtimeEventToActivities } from "./ProviderRuntimeIngestion.ts";
+import { projectWorkspaceAgentActivities } from "./WorkspaceAgentActivities.ts";
+import { captureWorkspaceResearch } from "./WorkspaceResearchCapture.ts";
 import { workspaceExecutionMessageId } from "../workspaceFormatRepair.ts";
 import { WorkspaceAgentControl } from "../WorkspaceAgentControl.ts";
 import { describeInputComposition } from "../inputComposition.ts";
-import {
-  knowledgeContentDigest,
-  redactConversationRagSensitiveData,
-} from "../workspaceConversationRag.ts";
 const isOrchestraBlock = Schema.is(WorkspaceOrchestraBlock);
-const encodeResearchData = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const isDelegateReceipt = Schema.is(
+  Schema.Struct({
+    supervisorTurnId: TurnId,
+    workerTurnId: TurnId,
+    reportStart: NonNegativeInt,
+  }),
+);
 
 export const WorkspaceAgentExecutorLive = Layer.effect(
   WorkspaceAgentExecutor,
@@ -50,6 +62,7 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
     const queries = yield* ProjectionSnapshotQuery;
     const directory = yield* Effect.serviceOption(ProviderSessionDirectory);
     const agentControl = yield* Effect.serviceOption(WorkspaceAgentControl);
+    const settings = yield* Effect.serviceOption(ServerSettingsService);
     const skillFs = yield* Effect.serviceOption(FileSystem.FileSystem);
     const skillPath = yield* Effect.serviceOption(Path.Path);
     const skillConfig = yield* Effect.serviceOption(ServerConfig);
@@ -58,6 +71,17 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
     const execute = Effect.fn("WorkspaceAgentExecutor.execute")(
       function* (input: WorkspaceAgentExecutionInput) {
         const { execution } = input;
+        yield* Effect.annotateCurrentSpan({
+          "t3.thread_id": execution.ownerThreadId,
+          "t3.execution_id": execution.executionId,
+          "t3.run_id": execution.runId,
+          "t3.node_id": execution.nodeId,
+          "t3.provider_instance_id": input.modelSelection.instanceId,
+          "t3.model": input.modelSelection.model,
+          "t3.execution_role": input.role,
+          ...(input.delegatingTurnId ? { "t3.turn_id": input.delegatingTurnId } : {}),
+          ...(input.orchestraPhase ? { "t3.orchestra_phase": input.orchestraPhase } : {}),
+        });
         // Provider adapters historically call their opaque session key threadId. No conversation is
         // created for this key: only the owning thread receives messages and activities.
         const sessionKey = input.persistentSessionKey ?? ThreadId.make(execution.executionId);
@@ -77,8 +101,27 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
             !previous.streaming &&
             isOrchestraBlock(previousBlock) &&
             previousBlock.status === "completed"
-          )
-            return previous.text;
+          ) {
+            if (!input.delegatingTurnId) return previous.text;
+            if (
+              isDelegateReceipt(previousBlock) &&
+              previousBlock.supervisorTurnId === input.delegatingTurnId &&
+              previousBlock.instruction === input.instruction &&
+              previousBlock.executionId === execution.executionId &&
+              previousBlock.attempt === execution.attempt &&
+              previousBlock.ownerThreadId === execution.ownerThreadId &&
+              previousBlock.runId === execution.runId &&
+              previousBlock.nodeId === execution.nodeId &&
+              previousBlock.modelSelection.instanceId === input.modelSelection.instanceId &&
+              previousBlock.modelSelection.model === input.modelSelection.model
+            ) {
+              const report = previous.text.slice(previousBlock.reportStart);
+              if (report.trim()) return report;
+            }
+            return yield* new WorkspaceAgentExecutionError({
+              message: "이전 위임 결과의 접수 기록을 확인할 수 없습니다.",
+            });
+          }
           const createdAt = yield* now;
           if (isOrchestraBlock(previousBlock)) {
             yield* engine.dispatch({
@@ -116,6 +159,14 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
         }
         const finished = yield* Deferred.make<string, WorkspaceAgentExecutionError>();
         let output = "";
+        // A new tool call makes preceding prose a progress update. Keep the whole
+        // transcript on the timeline, and return the worker's post-tool report.
+        let reportStart = 0;
+        let submitted = false;
+        let workerTurnId: TurnId | undefined;
+        const earlyEvents: ProviderRuntimeEvent[] = [];
+        const receiptLock = Semaphore.makeUnsafe(1);
+        const streamedItems = new Set<string>();
         let pendingText = "";
         let pendingAt = input.startedAt;
         let deltaIndex = 0;
@@ -150,7 +201,13 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
               kind: "orchestra.block",
               tone: status === "failed" ? "error" : "info",
               summary: input.title,
-              payload: { ...block, status },
+              payload: {
+                ...block,
+                status,
+                ...(input.delegatingTurnId ? { supervisorTurnId: input.delegatingTurnId } : {}),
+                ...(workerTurnId ? { workerTurnId } : {}),
+                ...(input.delegatingTurnId && status === "completed" ? { reportStart } : {}),
+              },
               turnId: null,
               createdAt: input.startedAt,
             },
@@ -173,13 +230,34 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
             output += delta;
             pendingText += delta;
             pendingAt = createdAt;
+            if (input.onPartialOutput) {
+              const current = input.delegatingTurnId ? output.slice(reportStart) : output;
+              input.onPartialOutput(current);
+            }
           });
         yield* recordStatus("running");
         yield* flush();
 
+        const complete = () => {
+          const report = input.delegatingTurnId ? output.slice(reportStart) : output;
+          return input.delegatingTurnId && !report.trim()
+            ? Deferred.fail(
+                finished,
+                new WorkspaceAgentExecutionError({
+                  message: "하위 모델이 배정된 작업의 최종 결과를 반환하지 않았습니다.",
+                }),
+              )
+            : Deferred.succeed(finished, report);
+        };
         const consume = Effect.fn("WorkspaceAgentExecutor.consume")(function* (
           event: ProviderRuntimeEvent,
         ) {
+          yield* Effect.annotateCurrentSpan({
+            "t3.thread_id": execution.ownerThreadId,
+            "t3.execution_id": execution.executionId,
+            "t3.event_type": event.type,
+            ...(event.turnId ? { "t3.turn_id": event.turnId } : {}),
+          });
           if (
             terminal ||
             event.execution?.executionId !== execution.executionId ||
@@ -188,68 +266,50 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
             return;
           if (seenEvents.has(event.eventId)) return;
           seenEvents.add(event.eventId);
-          if (input.onRuntimeEvent) yield* input.onRuntimeEvent(event);
-          if (event.type === "item.completed" && event.payload.itemType === "web_search") {
-            const dataText =
-              event.payload.data === undefined
-                ? undefined
-                : yield* encodeResearchData(event.payload.data);
-            const detail = redactConversationRagSensitiveData(
-              [event.payload.title, event.payload.detail, dataText].filter(Boolean).join("\n"),
-            ).content.slice(0, 80_000);
-            if (detail.length > 0)
-              yield* engine
-                .dispatch({
-                  type: "project.knowledge.item.upsert",
-                  commandId: CommandId.make(`orchestra-research:${blockKey}:${event.eventId}`),
-                  projectId: owner.value.projectId,
-                  itemId: WorkspaceKnowledgeItemId.make(
-                    `research-${knowledgeContentDigest(`${blockKey}:${event.eventId}`, 32)}`,
-                  ),
-                  kind: "long-term-memory",
-                  title: redactConversationRagSensitiveData(
-                    `${input.title}: ${event.payload.title ?? "검색 기록"}`,
-                  ).content.slice(0, 200),
-                  content: detail,
-                  status: "active",
-                  origin: "agent",
-                  scope: "project",
-                  appliesToFolder: null,
-                  relativeFolder: "research",
-                  tags: ["research", "unverified", "orchestra"],
-                  research: {
-                    query: redactConversationRagSensitiveData(event.payload.title ?? input.title)
-                      .content,
-                    sources: [
-                      ...new Set(
-                        (detail.match(/https?:\/\/[^\s<>"\\]+/g) ?? []).map((url) =>
-                          url.replace(/[),.;\]}]+$/g, ""),
-                        ),
-                      ),
-                    ].slice(0, 40),
-                    capturedAt: event.createdAt,
-                    verification: "unverified",
-                  },
-                  createdAt: event.createdAt,
-                })
-                .pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("Orchestra research capture failed", {
-                      executionId: execution.executionId,
-                      cause: Cause.pretty(cause),
-                    }),
-                  ),
-                );
+          if (
+            input.delegatingTurnId &&
+            workerTurnId &&
+            event.turnId &&
+            event.turnId !== workerTurnId
+          ) {
+            if (event.type !== "turn.started" || !completedAwaitingInput || !pendingRequests.size)
+              return;
+            workerTurnId = event.turnId;
+            reportStart = output.length;
           }
+          if (input.onRuntimeEvent) yield* input.onRuntimeEvent(event);
+          yield* captureWorkspaceResearch({
+            engine,
+            projectId: owner.value.projectId,
+            execution,
+            title: input.title,
+            modelSelection: input.modelSelection,
+            event,
+          });
           if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
+            if (input.delegatingTurnId && event.itemId && event.payload.delta)
+              streamedItems.add(event.itemId);
             yield* append(event.payload.delta, event.createdAt);
+          }
+          if (
+            input.delegatingTurnId &&
+            event.type === "item.started" &&
+            isToolLifecycleItemType(event.payload.itemType)
+          ) {
+            reportStart = output.length;
           }
           if (
             event.type === "item.completed" &&
             event.payload.itemType === "assistant_message" &&
-            output.length === 0 &&
+            (input.delegatingTurnId && event.itemId
+              ? !streamedItems.has(event.itemId)
+              : output.length === reportStart) &&
+            (!input.delegatingTurnId ||
+              event.payload.status === undefined ||
+              event.payload.status === "completed") &&
             event.payload.detail !== undefined
           ) {
+            if (input.delegatingTurnId && event.itemId) streamedItems.add(event.itemId);
             yield* append(event.payload.detail, event.createdAt);
           }
           // Reuse the request/activity translation used by ordinary chat, with a unique request key.
@@ -262,36 +322,7 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
             if (event.type === "request.resolved" || event.type === "user-input.resolved")
               pendingRequests.delete(requestId);
           }
-          const scopedEvent =
-            requestId === undefined
-              ? event
-              : {
-                  ...event,
-                  requestId: RuntimeRequestId.make(`${execution.executionId}:${requestId}`),
-                };
-          for (const activity of runtimeEventToActivities(scopedEvent)) {
-            const payload =
-              activity.payload !== null && typeof activity.payload === "object"
-                ? activity.payload
-                : {};
-            yield* engine.dispatch({
-              type: "thread.activity.append",
-              threadId: execution.ownerThreadId,
-              commandId: CommandId.make(`orchestra-activity:${blockKey}:${activity.id}`),
-              createdAt: event.createdAt,
-              activity: {
-                ...activity,
-                id: EventId.make(`orchestra:${blockKey}:${activity.id}`),
-                turnId: null,
-                payload: {
-                  ...payload,
-                  executionId: execution.executionId,
-                  providerRequestId: requestId,
-                  messageId,
-                },
-              },
-            });
-          }
+          yield* projectWorkspaceAgentActivities({ engine, execution, messageId, event });
           if (event.type === "request.opened" || event.type === "user-input.requested")
             yield* recordStatus("awaiting-user");
           if (event.type === "request.resolved" || event.type === "user-input.resolved")
@@ -313,7 +344,7 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
               );
             } else if (event.turnId === completedAwaitingInput.turnId) {
               terminal = true;
-              yield* Deferred.succeed(finished, output);
+              yield* complete();
             }
           }
           if (event.type === "turn.completed") {
@@ -323,7 +354,7 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
               return;
             }
             terminal = true;
-            if (event.payload.state === "completed") yield* Deferred.succeed(finished, output);
+            if (event.payload.state === "completed") yield* complete();
             else
               yield* Deferred.fail(
                 finished,
@@ -355,9 +386,45 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
             );
           }
         });
+        const routeEvent = (event: ProviderRuntimeEvent) => {
+          if (!input.delegatingTurnId) return consume(event);
+          const source = event.execution;
+          if (
+            source?.executionId !== execution.executionId ||
+            source.attempt !== execution.attempt ||
+            source.ownerThreadId !== execution.ownerThreadId ||
+            source.runId !== execution.runId ||
+            source.nodeId !== execution.nodeId ||
+            event.threadId !== execution.ownerThreadId ||
+            event.providerInstanceId !== input.modelSelection.instanceId
+          )
+            return Effect.void;
+          return receiptLock.withPermit(
+            Effect.suspend(() => {
+              // Failures and approval requests must remain actionable even when submit is blocked.
+              const immediate =
+                event.type === "session.exited" ||
+                event.type === "runtime.error" ||
+                event.type === "turn.aborted" ||
+                (event.type === "turn.completed" && event.payload.state !== "completed");
+              if (immediate) return consume(event);
+              if (!submitted) return Effect.void;
+              const request =
+                event.type === "request.opened" ||
+                event.type === "request.resolved" ||
+                event.type === "user-input.requested" ||
+                event.type === "user-input.resolved";
+              if (!workerTurnId && !request) {
+                earlyEvents.push(event);
+                return Effect.void;
+              }
+              return consume(event);
+            }),
+          );
+        };
         yield* forkParked(
           Stream.runForEach(provider.streamEvents, (event) =>
-            consume(event).pipe(
+            routeEvent(event).pipe(
               Effect.catchCause((cause) =>
                 Deferred.fail(
                   finished,
@@ -456,10 +523,20 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
                   );
               })
             : { native: [], plugins: [], instructions: "" };
+          const hasSearchModels = Option.isSome(settings)
+            ? yield* settings.value.getSettings.pipe(
+                Effect.map((value) => value.searchModels.length > 0),
+                Effect.orElseSucceed(() => false),
+              )
+            : false;
           const taskPrompt = withFullAccessExecutionPolicy(
-            pinnedSkills.instructions
-              ? `${input.prompt}\n\n${pinnedSkills.instructions}`
-              : input.prompt,
+            [
+              input.prompt,
+              pinnedSkills.instructions,
+              hasSearchModels && ORDERED_SEARCH_INSTRUCTIONS,
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
             input.runtimeMode,
             input.interactionMode,
           );
@@ -566,7 +643,17 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
                 (error) => new WorkspaceAgentExecutionError({ message: error.message }),
               ),
             );
-          const receipt = yield* input.submitWithGate ? input.submitWithGate(submit) : submit;
+          const submission = Effect.suspend(() => {
+            submitted = true;
+            return submit;
+          });
+          const receipt = yield* input.submitWithGate
+            ? input.submitWithGate(submission)
+            : submission;
+          if (input.delegatingTurnId && receipt.threadId !== sessionKey)
+            return yield* new WorkspaceAgentExecutionError({
+              message: "다른 작업 세션의 접수 응답입니다.",
+            });
           if (prepared && Option.isSome(agentControl))
             yield* agentControl.value
               .settleInput(prepared, true)
@@ -576,20 +663,50 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
                 ),
               );
           if (input.onInputAccepted) yield* input.onInputAccepted(receipt);
+          if (input.delegatingTurnId)
+            yield* receiptLock.withPermit(
+              Effect.gen(function* () {
+                workerTurnId = receipt.turnId;
+                yield* recordStatus(pendingRequests.size ? "awaiting-user" : "running");
+                for (const event of earlyEvents) yield* consume(event);
+                earlyEvents.length = 0;
+              }),
+            );
           return yield* Deferred.await(finished);
         });
         return yield* run.pipe(
-          Effect.raceFirst(Deferred.await(finished)),
+          Effect.raceFirst(
+            input.delegatingTurnId
+              ? Deferred.await(finished).pipe(Effect.andThen(Effect.never))
+              : Deferred.await(finished),
+          ),
           Effect.tap(() => recordStatus("completed")),
           Effect.onError((cause) =>
             Effect.gen(function* () {
               const error = Cause.squash(cause);
+              const isTimeout =
+                error instanceof WorkspaceAgentExecutionError && error.timedOut === true;
               const cancelled =
-                Cause.hasInterruptsOnly(cause) ||
-                (error instanceof WorkspaceAgentExecutionError && error.interrupted === true);
+                !isTimeout &&
+                (Cause.hasInterruptsOnly(cause) ||
+                  (error instanceof WorkspaceAgentExecutionError && error.interrupted === true));
               yield* recordStatus(cancelled ? "cancelled" : "failed");
+              const rawReason =
+                error instanceof WorkspaceAgentExecutionError
+                  ? error.message
+                  : Cause.hasInterruptsOnly(cause)
+                    ? "사용자가 실행을 중단했습니다."
+                    : Cause.pretty(cause);
+              const reason = isNonRetryableBillingError(rawReason)
+                ? formatBillingErrorMessage(rawReason)
+                : rawReason;
+              recordUnavailableModelFromError({
+                providerInstanceId: input.modelSelection.instanceId,
+                model: input.modelSelection.model,
+                errorMessage: rawReason,
+              });
               yield* append(
-                `\n\n${cancelled ? "실행 중단" : "실행 오류"}: ${error instanceof WorkspaceAgentExecutionError ? error.message : Cause.pretty(cause)}`,
+                `\n\n${isTimeout ? "실행 시간 초과" : cancelled ? "실행 중단" : "실행 오류"}: ${reason}`,
                 yield* now,
               );
             }).pipe(Effect.orDie),
@@ -656,6 +773,39 @@ export const WorkspaceAgentExecutorLive = Layer.effect(
               });
             }).pipe(Effect.orDie),
           ),
+          Effect.catchCause((cause) => {
+            const error = Cause.squash(cause);
+            const partial = (input.delegatingTurnId ? output.slice(reportStart) : output).trim();
+            if (error instanceof WorkspaceAgentExecutionError) {
+              const isBilling = isNonRetryableBillingError(error.message);
+              return Effect.fail(
+                new WorkspaceAgentExecutionError({
+                  message: isBilling ? formatBillingErrorMessage(error.message) : error.message,
+                  ...(error.interrupted !== undefined ? { interrupted: error.interrupted } : {}),
+                  ...(error.timedOut !== undefined ? { timedOut: error.timedOut } : {}),
+                  ...((error.partialOutput ?? (partial ? partial : undefined))
+                    ? { partialOutput: error.partialOutput ?? partial }
+                    : {}),
+                  ...(isBilling || error.nonRetryable ? { nonRetryable: true } : {}),
+                  ...(error.errorCategory
+                    ? { errorCategory: error.errorCategory }
+                    : isBilling
+                      ? { errorCategory: "billing" as const }
+                      : {}),
+                }),
+              );
+            }
+            const rawMessage = Cause.pretty(cause);
+            const isBilling = isNonRetryableBillingError(rawMessage);
+            return Effect.fail(
+              new WorkspaceAgentExecutionError({
+                message: isBilling ? formatBillingErrorMessage(rawMessage) : rawMessage,
+                interrupted: Cause.hasInterruptsOnly(cause),
+                ...(partial ? { partialOutput: partial } : {}),
+                ...(isBilling ? { nonRetryable: true, errorCategory: "billing" as const } : {}),
+              }),
+            );
+          }),
         );
       },
       Effect.scoped,

@@ -20,8 +20,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as PubSub from "effect/PubSub";
-import * as Record from "effect/Record";
-import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 
 import { ProviderUnsupportedError, type ProviderAdapterError } from "../Errors.ts";
@@ -80,14 +78,6 @@ export const makeAdapterRegistryMock = (adapters: KindAdapterMap): ProviderAdapt
       });
     },
     listInstances: () => Effect.succeed(Array.from(byInstanceId.keys())),
-    listProviders: () =>
-      Effect.succeed(
-        Record.keys(
-          Record.filterMap(adapters, (adapter, kind) =>
-            adapter !== undefined ? Result.succeed(kind) : Result.failVoid,
-          ),
-        ),
-      ),
     // Static test fixtures don't reload; an empty stream is enough to
     // satisfy the shape. Tests exercising hot-reload build their own
     // stream via the real `ProviderInstanceRegistry`.

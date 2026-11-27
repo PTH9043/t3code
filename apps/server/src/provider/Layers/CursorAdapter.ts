@@ -126,6 +126,7 @@ interface PendingUserInput {
 }
 
 interface CursorSessionContext {
+  readonly httpMcp: boolean;
   readonly threadId: ThreadId;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
@@ -768,6 +769,7 @@ export function makeCursorAdapter(
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
+            httpMcp: started.initializeResult.agentCapabilities?.mcpCapabilities?.http === true,
             stopped: false,
           };
 
@@ -934,6 +936,7 @@ export function makeCursorAdapter(
           }
           ctx.session = {
             ...ctx.session,
+            status: "running",
             activeTurnId: turnId,
             updatedAt: yield* nowIso,
           };
@@ -1056,6 +1059,11 @@ export function makeCursorAdapter(
           Effect.ensuring(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
+              if (ctx.promptsInFlight === 0 && ctx.session.activeTurnId === turnId) {
+                const { activeTurnId: _, ...idleSession } = ctx.session;
+                ctx.activeTurnId = undefined;
+                ctx.session = { ...idleSession, status: "ready" };
+              }
             }),
           ),
         );
@@ -1166,7 +1174,10 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        workspaceDelegate: (threadId) => sessions.get(threadId)?.httpMcp === true,
+      },
       startSession,
       sendTurn,
       interruptTurn,

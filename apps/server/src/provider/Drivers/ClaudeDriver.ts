@@ -43,6 +43,7 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { makeClaudeApiEnvironment } from "./ClaudeApiEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
@@ -121,16 +122,38 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const { cwd } = yield* ServerConfig;
+      const { cwd, stateDir } = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv =
+        config.authMode === "api-key"
+          ? makeClaudeApiEnvironment(environment)
+          : mergeProviderInstanceEnvironment(environment);
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
       });
-      const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
+      const effectiveConfig = {
+        ...config,
+        enabled,
+        ...(config.authMode === "api-key"
+          ? { homePath: path.join(stateDir, "provider-instances", instanceId, "claude-api-home") }
+          : {}),
+      } satisfies ClaudeSettings;
+      if (config.authMode === "api-key") {
+        yield* fileSystem.makeDirectory(effectiveConfig.homePath, { recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "Claude API 계정의 작업 폴더를 만들지 못했습니다.",
+                cause,
+              }),
+          ),
+        );
+      }
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,

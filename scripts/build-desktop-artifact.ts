@@ -2,11 +2,11 @@
 
 import * as NodeModule from "node:module";
 import * as NodeProcess from "node:process";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
@@ -20,6 +20,14 @@ import {
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import {
+  resolvePackagingPnpm,
+  windowsCargoTargetDir,
+  windowsPackagingBuildSteps,
+  WINDOWS_STAGE_INSTALL_ARGS,
+} from "./packaging/windows-packaging.ts";
+import { preflightWindowsSigning, verifyNativeSignature } from "./packaging/windows-signing.ts";
+import { createWindowsStageLock } from "./packaging/windows-stage-lock.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -381,7 +389,7 @@ export class MissingDesktopBuildInputError extends Schema.TaggedErrorClass<Missi
   {
     artifact: DesktopBuildInputArtifact,
     artifactPath: Schema.String,
-    buildCommand: Schema.Literal("vp run build:desktop"),
+    buildCommand: Schema.String,
   },
 ) {
   override get message(): string {
@@ -620,7 +628,7 @@ interface StagePackageJson {
   readonly author: string;
   readonly main: string;
   readonly build: Record<string, unknown>;
-  readonly dependencies: Record<string, unknown>;
+  readonly dependencies: Record<string, string>;
   readonly devDependencies: {
     readonly electron: string;
   };
@@ -642,6 +650,7 @@ export const DESKTOP_FILE_EXCLUSIONS = [
 // so nothing is duplicated.
 export const WINDOWS_ASAR_UNPACK = ["apps/server/dist/**", "**/node_modules/**"] as const;
 export const DESKTOP_EXTRA_RESOURCES = [
+  { from: "apps/desktop/resources/assistant-voice", to: "assistant-voice" },
   {
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
@@ -1010,20 +1019,6 @@ function getPatchedDependencyPackageName(patchKey: string): string {
   return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
 }
 
-const AzureTrustedSigningOptionsConfig = Config.all({
-  publisherName: Config.string("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
-  endpoint: Config.string("AZURE_TRUSTED_SIGNING_ENDPOINT"),
-  certificateProfileName: Config.string("AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME"),
-  codeSigningAccountName: Config.string("AZURE_TRUSTED_SIGNING_ACCOUNT_NAME"),
-  fileDigest: Config.string("AZURE_TRUSTED_SIGNING_FILE_DIGEST").pipe(Config.withDefault("SHA256")),
-  timestampDigest: Config.string("AZURE_TRUSTED_SIGNING_TIMESTAMP_DIGEST").pipe(
-    Config.withDefault("SHA256"),
-  ),
-  timestampRfc3161: Config.string("AZURE_TRUSTED_SIGNING_TIMESTAMP_RFC3161").pipe(
-    Config.withDefault("http://timestamp.acs.microsoft.com"),
-  ),
-});
-
 const BuildEnvConfig = Config.all({
   platform: Config.schema(BuildPlatform, "T3CODE_DESKTOP_PLATFORM").pipe(Config.option),
   target: Config.string("T3CODE_DESKTOP_TARGET").pipe(Config.option),
@@ -1181,6 +1176,7 @@ const runCommand = Effect.fn("runCommand")(function* (
 
 const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input: {
   readonly repoRoot: string;
+  readonly targetDir?: string;
   readonly stageResourcesDir: string;
   readonly platform: typeof BuildPlatform.Type;
   readonly arch: typeof BuildArch.Type;
@@ -1194,7 +1190,7 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
   const builtBinaries: string[] = [];
 
   for (const rustTarget of rustTargets) {
-    const spawnCommand = yield* resolveSpawnCommand("cargo", [
+    const cargoArgs = [
       "build",
       "--locked",
       "--release",
@@ -1202,11 +1198,12 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
       manifestPath,
       "--target",
       rustTarget,
-    ]);
+      ...(input.targetDir ? ["--target-dir", input.targetDir] : []),
+    ];
     yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      ChildProcess.make(NodeProcess.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
         cwd: input.repoRoot,
-        shell: spawnCommand.shell,
+        shell: false,
       }),
       {
         label: `cargo build resource monitor (${rustTarget})`,
@@ -1215,8 +1212,7 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
     );
 
     const binaryPath = path.join(
-      input.repoRoot,
-      "native/resource-monitor/target",
+      input.targetDir ?? path.join(input.repoRoot, "native/resource-monitor/target"),
       rustTarget,
       "release",
       executableName,
@@ -1535,6 +1531,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
+  windowsPublisherName?: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -1624,7 +1621,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       signAndEditExecutable: true,
     };
     if (signed) {
-      winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
+      if (!windowsPublisherName) throw new Error("Missing Windows signing preflight");
+      buildConfig.forceCodeSigning = true;
+      winConfig.signtoolOptions = {
+        publisherName: windowsPublisherName,
+        signingHashAlgorithms: ["sha256"],
+        sign: NodeModule.createRequire(import.meta.url).resolve("./packaging/windows-signing.ts"),
+      };
     }
     buildConfig.win = winConfig;
   }
@@ -1730,11 +1733,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcessPlatform;
-  const vpCommand = (args: readonly string[]) => ({
-    command: NodeProcess.execPath,
-    args: [path.join(repoRoot, "node_modules", "vite-plus", "bin", "vp"), ...args],
-    shell: false,
-  });
+  const windowsSigning =
+    options.platform === "win" && options.signed
+      ? preflightWindowsSigning(NodeProcess.env, hostPlatform)
+      : undefined;
+  const vp = path.join(repoRoot, "node_modules/vite-plus/bin/vp");
+  const windowsPnpm =
+    hostPlatform === "win32"
+      ? resolvePackagingPnpm(repoRoot, rootPackageJson.packageManager)
+      : undefined;
   const workspaceConfig = yield* readWorkspaceConfig();
   const workspaceCatalog = workspaceConfig.catalog ?? {};
   const workspaceOverrides = workspaceConfig.overrides ?? {};
@@ -1805,14 +1812,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = vpCommand(["run", "build:desktop"]);
-    yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: repoRoot,
-        shell: spawnCommand.shell,
-      }),
-      { label: "vp run build:desktop", verbose: options.verbose },
-    );
+    const steps = windowsPnpm
+      ? windowsPackagingBuildSteps(repoRoot)
+      : [{ cwd: repoRoot, args: [vp, "run", "build:desktop"] }];
+    for (const { cwd, args } of steps) {
+      yield* runCommand(ChildProcess.make(NodeProcess.execPath, args, { cwd, shell: false }), {
+        label: `node ${args.join(" ")}`,
+        verbose: options.verbose,
+      });
+    }
   }
 
   const requiredBuildInputs = [
@@ -1820,11 +1828,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     { artifact: "desktop-resources", artifactPath: distDirs.desktopResources },
     { artifact: "server-dist", artifactPath: distDirs.serverDist },
   ] as const;
+  const buildCommand = windowsPnpm
+    ? `node scripts/build-desktop-artifact.ts --platform ${options.platform} --arch ${options.arch} --target ${options.target}`
+    : "vp run build:desktop";
   for (const input of requiredBuildInputs) {
     if (!(yield* fs.exists(input.artifactPath))) {
       return yield* new MissingDesktopBuildInputError({
         ...input,
-        buildCommand: "vp run build:desktop",
+        buildCommand,
       });
     }
   }
@@ -1833,7 +1844,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     return yield* new MissingDesktopBuildInputError({
       artifact: "bundled-server-client",
       artifactPath: bundledClientEntry,
-      buildCommand: "vp run build:desktop",
+      buildCommand,
     });
   }
 
@@ -1868,7 +1879,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform === "win") {
     yield* runCommand(
       ChildProcess.make(
-        "node",
+        NodeProcess.execPath,
         [
           path.join(repoRoot, "native/windows-file-drop/build.mjs"),
           "--architecture",
@@ -1883,6 +1894,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
   yield* stageResourceMonitor({
     repoRoot,
+    ...(windowsPnpm && {
+      targetDir: windowsCargoTargetDir(repoRoot, stageRoot, NodeProcess.env.CARGO_TARGET_DIR),
+    }),
     stageResourcesDir,
     platform: options.platform,
     arch: options.arch,
@@ -1978,6 +1992,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
         : undefined,
+      windowsSigning?.publisherName,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -2005,13 +2020,32 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = vpCommand(STAGE_INSTALL_ARGS);
+  if (windowsPnpm) {
+    const source = yield* fs.readFileString(path.join(repoRoot, "pnpm-lock.yaml"));
+    const lock = createWindowsStageLock(
+      parseYaml(source),
+      stagePackageJson,
+      stagePatchedDependencies,
+    );
+    yield* fs.writeFileString(path.join(stageAppDir, "pnpm-lock.yaml"), stringifyYaml(lock));
+  }
+  const installArgs = windowsPnpm
+    ? [
+        "--require",
+        path.join(repoRoot, "scripts/lib/packaging-pnpm-no-children.cjs"),
+        windowsPnpm,
+        ...WINDOWS_STAGE_INSTALL_ARGS,
+      ]
+    : [vp, ...STAGE_INSTALL_ARGS];
   yield* runCommand(
-    ChildProcess.make(installCommand.command, installCommand.args, {
+    ChildProcess.make(NodeProcess.execPath, installArgs, {
       cwd: stageAppDir,
-      shell: installCommand.shell,
+      shell: false,
     }),
-    { label: "vp install --prod", verbose: options.verbose },
+    {
+      label: windowsPnpm ? `pnpm ${WINDOWS_STAGE_INSTALL_ARGS.join(" ")}` : "vp install --prod",
+      verbose: options.verbose,
+    },
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 
@@ -2046,6 +2080,21 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     delete buildEnv.APPLE_API_ISSUER;
   }
 
+  if (options.platform === "win") {
+    // Neither the native Azure hook nor an unsigned build uses local CSC certificates.
+    for (const key of Object.keys(buildEnv)) {
+      if (/^(WIN_)?CSC_(LINK|KEY_PASSWORD)$/i.test(key)) delete buildEnv[key];
+    }
+    if (windowsSigning) {
+      const { metadata, publisherName: _publisher, ...command } = windowsSigning;
+      const metadataFile = path.join(stageRoot, "azure-signing-metadata.json");
+      yield* fs.writeFileString(metadataFile, yield* encodeJsonString(metadata));
+      buildEnv.T3CODE_NATIVE_WINDOWS_SIGNING = yield* encodeJsonString({
+        ...command,
+        metadataFile,
+      });
+    }
+  }
   if (hostPlatform === "win32") {
     const python = yield* resolvePythonForNodeGyp();
     if (python) {
@@ -2066,11 +2115,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     `[desktop-artifact] Building ${options.platform}/${options.target} (arch=${options.arch}, version=${appVersion})...`,
   );
   const builderArgs = [
-    "exec",
-    "--filter",
-    "@t3tools/desktop",
-    "--",
-    "electron-builder",
     "--projectDir",
     stageAppDir,
     platformConfig.cliFlag,
@@ -2078,15 +2122,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     "--publish",
     "never",
   ];
-  const builderCommand = vpCommand(builderArgs);
+  const builderCli = windowsPnpm
+    ? [path.join(repoRoot, "scripts/windows-electron-builder.cjs"), windowsPnpm]
+    : [vp, "exec", "--filter", "@t3tools/desktop", "--", "electron-builder"];
   yield* runCommand(
-    ChildProcess.make(builderCommand.command, builderCommand.args, {
+    ChildProcess.make(NodeProcess.execPath, [...builderCli, ...builderArgs], {
       cwd: repoRoot,
       env: buildEnv,
-      shell: builderCommand.shell,
+      shell: false,
     }),
     {
-      label: `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`,
+      label: `electron-builder ${builderArgs.join(" ")}`,
       verbose: options.verbose,
     },
   );
@@ -2101,6 +2147,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const stageEntries = yield* fs.readDirectory(stageDistDir);
+  if (windowsSigning) {
+    const installers = stageEntries.filter((entry) => /\.(exe|msi|appx|msix)$/i.test(entry));
+    if (options.target === "nsis" && !installers.some((entry) => /\.exe$/i.test(entry))) {
+      throw new Error("Signed NSIS build produced no installer to verify");
+    }
+    for (const entry of installers) {
+      verifyNativeSignature(path.join(stageDistDir, entry), windowsSigning.tool);
+    }
+  }
   yield* fs.makeDirectory(options.outputDir, { recursive: true });
 
   const copiedArtifacts: string[] = [];
@@ -2152,7 +2207,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   skipBuild: Flag.boolean("skip-build").pipe(
     Flag.withDescription(
-      "Skip `vp run build:desktop` and use existing dist artifacts (env: T3CODE_DESKTOP_SKIP_BUILD).",
+      "Skip the web/server/desktop build and use existing dist artifacts (env: T3CODE_DESKTOP_SKIP_BUILD).",
     ),
     Flag.optional,
   ),

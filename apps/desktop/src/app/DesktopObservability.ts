@@ -1,5 +1,11 @@
 import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
-import { makeLocalFileTracer, makeTraceSink } from "@t3tools/shared/observability";
+import {
+  makeLocalFileTracer,
+  makeTraceSink,
+  resolveLoopbackOnlyOtlpUrl,
+  type TraceRecord,
+  type TraceSink,
+} from "@t3tools/shared/observability";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -340,10 +346,12 @@ const readPersistedOtlpTracesUrl: Effect.Effect<
 
 const resolveOtlpTracesUrl = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  if (Option.isSome(environment.otlpTracesUrl)) {
-    return environment.otlpTracesUrl;
-  }
-  return yield* readPersistedOtlpTracesUrl;
+  const candidate = Option.isSome(environment.otlpTracesUrl)
+    ? environment.otlpTracesUrl
+    : yield* readPersistedOtlpTracesUrl;
+  return Option.flatMap(candidate, (url) =>
+    Option.fromUndefinedOr(resolveLoopbackOnlyOtlpUrl(url)),
+  );
 });
 
 const writeDevelopmentConsoleOutput = (
@@ -568,6 +576,19 @@ const desktopLoggerLayer = Layer.mergeAll(
   Layer.succeed(References.MinimumLogLevel, "Info"),
 );
 
+export const DESKTOP_ROUTINE_SPAN_MAX_DURATION_MS = 50;
+
+/**
+ * Mirrors server `traceRetention.ts`: drops event-less successful spans faster than 50ms
+ * so routine sub-millisecond IPC/env spans do not rotate 60MB+ of disk traces.
+ */
+export function shouldPersistDesktopTraceRecord(record: TraceRecord): boolean {
+  if (record.type !== "effect-span") return true;
+  if (record.exit._tag !== "Success") return true;
+  if (record.events.length > 0) return true;
+  return !(record.durationMs < DESKTOP_ROUTINE_SPAN_MAX_DURATION_MS);
+}
+
 const tracerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -579,6 +600,16 @@ const tracerLayer = Layer.unwrap(
       maxFiles: DESKTOP_LOG_FILE_MAX_FILES,
       batchWindowMs: DESKTOP_TRACE_BATCH_WINDOW_MS,
     });
+    const filteredSink: TraceSink = {
+      filePath: sink.filePath,
+      flush: sink.flush,
+      close: sink.close,
+      push: (record) => {
+        if (shouldPersistDesktopTraceRecord(record)) {
+          sink.push(record);
+        }
+      },
+    };
     const delegate = Option.isNone(otlpTracesUrl)
       ? undefined
       : yield* OtlpTracer.make({
@@ -597,7 +628,7 @@ const tracerLayer = Layer.unwrap(
       maxBytes: DESKTOP_LOG_FILE_MAX_BYTES,
       maxFiles: DESKTOP_LOG_FILE_MAX_FILES,
       batchWindowMs: DESKTOP_TRACE_BATCH_WINDOW_MS,
-      sink,
+      sink: filteredSink,
       ...(delegate ? { delegate } : {}),
     });
 

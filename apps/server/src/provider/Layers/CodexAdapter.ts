@@ -7,12 +7,21 @@
  *
  * @module CodexAdapterLive
  */
-import { makeManagedMcpResolver, codexManagedMcpArgs } from "../../mcp/ManagedMcpTools.ts";
+import { makeManagedMcpResolver, codexManagedMcpConfig } from "../../mcp/ManagedMcpTools.ts";
+import { unifiedExecutionLedger } from "../../t3x/executionLedger/UnifiedExecutionLedger.ts";
+import {
+  guardCodexWatchTools,
+  isManagedClaudeStdio,
+  openCodexWatchPermission,
+} from "../../mcp/CodexWatchPermission.ts";
+import { backgroundWatchPolicy, ServerSettingsService } from "../../serverSettings.ts";
+import * as Option from "effect/Option";
 import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
   EventId,
+  type ModelSelection,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -32,6 +41,12 @@ import {
 import * as Effect from "effect/Effect";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import {
+  buildSubordinateRoster,
+  resolveSubagentModelForModel,
+  subordinatesForModel,
+  type SubordinateRow,
+} from "../subagentSelection.ts";
 import { codexTokenConsumption } from "../tokenConsumption.ts";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
@@ -49,6 +64,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { restrictNativeSubagents } from "../nativeSubagents.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -92,13 +108,30 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Models the user placed under this account (server settings), read for each turn. */
+  readonly subordinates?: Effect.Effect<ReadonlyArray<SubordinateRow>>;
 }
 
 interface CodexAdapterSessionContext {
+  readonly nativeSubagentsRestricted: boolean;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly eventEpoch: string;
+  /** Sub-agent model the session's app-server was started with, if any. */
+  readonly subagentModel: string | undefined;
+  /**
+   * Set once a turn had to name a sub-agent model in its instructions. Later
+   * turns keep naming the current one, so an earlier instruction in the
+   * conversation never outlives the answering model it was written for.
+   */
+  namesSubagentModel: boolean;
+  /** The session is itself a subordinate or orchestra participant: it gets no subordinate roster. */
+  readonly isExecution: boolean;
+  /** Model of this account answering the latest turn; unknown until a turn or the session names one. */
+  answeringModel: string | undefined;
+  readonly activeCollabAgentIds: Set<string>;
   stopped: boolean;
 }
 
@@ -711,6 +744,18 @@ function mapCollabAgentEvent(
           ? { reasoningOutputTokens: count(total?.reasoningOutputTokens) }
           : {}),
       };
+      // The child is its own app-server thread, so the parent's
+      // thread/tokenUsage never contains this spend. Report it as a separate
+      // cumulative counter on the turn that spawned the child; that also tells
+      // the usage projection its native children are measured, not unknown.
+      // The source id stays the child thread id (no session epoch): the
+      // projection's cursor then survives a restart, and a child first seen
+      // here was spawned in this session, so its counter starts at zero.
+      const consumption = codexTokenConsumption(agentThreadId, total).map((observation) => ({
+        ...observation,
+        startsAtZero: true,
+        includesNativeChildren: true,
+      }));
       return [
         {
           ...base,
@@ -723,6 +768,16 @@ function mapCollabAgentEvent(
             timelineBypass: true,
           },
         },
+        ...(consumption.length > 0
+          ? [
+              {
+                ...base,
+                eventId: EventId.make(`${base.eventId}:child-usage`),
+                type: "thread.token-usage.updated" as const,
+                payload: { consumption },
+              },
+            ]
+          : []),
       ];
     }
     case "collabAgent/item": {
@@ -768,6 +823,18 @@ function mapCollabAgentEvent(
     default:
       return [];
   }
+}
+
+/** Child thread id carried by the session runtime's synthetic `collabAgent/*` events. */
+function collabAgentThreadId(event: ProviderEvent): string | undefined {
+  const payload = event.payload;
+  return typeof payload === "object" &&
+    payload !== null &&
+    "agentThreadId" in payload &&
+    typeof payload.agentThreadId === "string" &&
+    payload.agentThreadId.length > 0
+    ? payload.agentThreadId
+    : undefined;
 }
 
 function mapToRuntimeEvents(
@@ -1668,6 +1735,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
   const resolveManagedMcp = yield* makeManagedMcpResolver();
+  const watchSettings = yield* Effect.serviceOption(ServerSettingsService);
+  const runWatchCheck = Effect.runPromiseWith(yield* Effect.context<never>());
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const path = yield* Path.Path;
@@ -1683,6 +1752,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const resolveSubagentModel = (selection: ModelSelection | undefined) =>
+    resolveSubagentModelForModel({
+      fallback: codexConfig.subagentModel,
+      byModel: codexConfig.subagentModelByModel,
+      model: selection?.instanceId === boundInstanceId ? selection.model : undefined,
+    });
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1706,13 +1781,60 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const managedServers = yield* resolveManagedMcp(PROVIDER, input.cwd);
+        const sessionScope = yield* Scope.make("sequential");
+        let sessionScopeTransferred = false;
+        yield* Effect.addFinalizer(() =>
+          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+        );
+        const watchAllowed = Option.isNone(watchSettings)
+          ? Effect.succeed(false)
+          : backgroundWatchPolicy(watchSettings.value).current.pipe(
+              Effect.map((policy) => policy.backgroundWatchThreadIds.includes(input.threadId)),
+            );
+        const watchGate =
+          !input.execution && managedServers.some(isManagedClaudeStdio)
+            ? yield* Effect.acquireRelease(
+                Effect.tryPromise({
+                  try: () => openCodexWatchPermission(() => runWatchCheck(watchAllowed)),
+                  catch: (cause) =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      detail: "Could not open the room watch permission channel.",
+                      cause,
+                    }),
+                }),
+                (gate) => Effect.promise(() => gate.close()),
+              ).pipe(Effect.provideService(Scope.Scope, sessionScope))
+            : undefined;
+        const managedMcp = codexManagedMcpConfig(
+          watchGate ? guardCodexWatchTools(managedServers, watchGate.address) : managedServers,
+        );
+        const nativeSubagentsRestricted = restrictNativeSubagents(input);
+        const subagentModel = nativeSubagentsRestricted
+          ? undefined
+          : resolveSubagentModel(input.modelSelection);
+        // Sub-agents spawned without an explicit model run on this one; an
+        // agent definition that pins its own model still wins.
+        const subagentArgs = subagentModel
+          ? ["-c", `agents.default_subagent_model="${subagentModel}"`]
+          : [];
         const runtimeInput: CodexSessionRuntimeOptions = {
+          ...(watchGate ? { watchAllowed } : {}),
+          ...(nativeSubagentsRestricted ? { restrictNativeSubagents: true } : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
-          ...(options?.environment ? { environment: options.environment } : {}),
+          ...(options?.environment || Object.keys(managedMcp.environment).length
+            ? {
+                environment: {
+                  ...(options?.environment ?? process.env),
+                  ...managedMcp.environment,
+                },
+              }
+            : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
@@ -1726,25 +1848,26 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
+                  ...managedMcp.environment,
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
-                  ...codexManagedMcpArgs(managedServers),
+                  ...subagentArgs,
+                  ...managedMcp.args,
                   "-c",
                   `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
                   "-c",
                   'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  // workspace_delegate waits up to four minutes for a subordinate;
+                  // Codex otherwise cuts an MCP tool call at its 60 s default.
+                  "-c",
+                  "mcp_servers.t3-code.tool_timeout_sec=300",
                 ],
               }
-            : managedServers.length > 0
-              ? { appServerArgs: codexManagedMcpArgs(managedServers) }
+            : managedServers.length > 0 || subagentArgs.length > 0
+              ? { appServerArgs: [...subagentArgs, ...managedMcp.args] }
               : {}),
         };
-        const sessionScope = yield* Scope.make("sequential");
-        let sessionScopeTransferred = false;
-        yield* Effect.addFinalizer(() =>
-          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-        );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
         const runtime = yield* createRuntime(runtimeInput).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
@@ -1768,6 +1891,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         let latestConsumption:
           | Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
           | undefined;
+        // Child agents are separate native threads with their own counters.
+        // Their last observation per child is confirmed final when that
+        // child's turn completes or the child closes.
+        const latestChildConsumption = new Map<
+          string,
+          Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
+        >();
         // Native resume can either carry the previous total or reset it. A separate
         // epoch prevents permanent regressions; an unproven resumed counter starts
         // with a baseline so historical usage is never charged to the retry again.
@@ -1784,15 +1914,40 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
         let runtimeExited = false;
+        const activeCollabAgentIds = new Set<string>();
         const eventFiber = yield* Stream.runForEach(
           runtime.events,
           (event) =>
             Effect.gen(function* () {
               yield* writeNativeEvent(event);
+              if (event.method === "collabAgent/started") {
+                const agentThreadId = collabAgentThreadId(event);
+                if (agentThreadId) {
+                  const execId = `codex-subagent:${event.threadId}:${agentThreadId}`;
+                  activeCollabAgentIds.add(execId);
+                  unifiedExecutionLedger.begin({
+                    executionId: execId,
+                    executionKind: "codex_subagent",
+                    threadId: event.threadId,
+                    parentRunId: event.turnId ?? null,
+                    summary: `Codex 서브에이전트: ${agentThreadId}`,
+                    provider: PROVIDER,
+                    model: subagentModel ?? null,
+                  });
+                }
+              }
               const runtimeEvents = mapToRuntimeEvents(
                 event,
                 event.threadId,
               ).flatMap<ProviderRuntimeEvent>((mapped) => {
+                if (
+                  mapped.type === "thread.token-usage.updated" &&
+                  event.method === "collabAgent/tokenUsage"
+                ) {
+                  const agentThreadId = collabAgentThreadId(event);
+                  if (agentThreadId) latestChildConsumption.set(agentThreadId, mapped);
+                  return [mapped];
+                }
                 if (mapped.type === "thread.token-usage.updated") {
                   latestConsumption = {
                     ...mapped,
@@ -1832,6 +1987,38 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 }
                 return [mapped];
               });
+              if (
+                event.method === "collabAgent/turnCompleted" ||
+                event.method === "collabAgent/closed"
+              ) {
+                const agentThreadId = collabAgentThreadId(event);
+                if (agentThreadId) {
+                  const execId = `codex-subagent:${event.threadId}:${agentThreadId}`;
+                  activeCollabAgentIds.delete(execId);
+                  unifiedExecutionLedger.finish({
+                    executionId: execId,
+                    executionKind: "codex_subagent",
+                    status: "completed",
+                  });
+                }
+                const finalUsage = agentThreadId
+                  ? latestChildConsumption.get(agentThreadId)
+                  : undefined;
+                if (agentThreadId && finalUsage) {
+                  latestChildConsumption.delete(agentThreadId);
+                  runtimeEvents.push({
+                    ...finalUsage,
+                    eventId: EventId.make(`${event.id}:child-final-usage`),
+                    createdAt: event.createdAt,
+                    payload: {
+                      consumption: finalUsage.payload.consumption?.map((observation) => ({
+                        ...observation,
+                        isFinal: true,
+                      })),
+                    },
+                  });
+                }
+              }
               if (runtimeEvents.length === 0) {
                 yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                   method: event.method,
@@ -1907,10 +2094,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
 
         sessions.set(input.threadId, {
+          nativeSubagentsRestricted,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
           eventFiber,
+          eventEpoch: counterEpoch,
+          subagentModel,
+          namesSubagentModel: false,
+          isExecution: input.execution !== undefined,
+          answeringModel:
+            input.modelSelection?.instanceId === boundInstanceId
+              ? input.modelSelection.model
+              : undefined,
+          activeCollabAgentIds,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -1958,6 +2155,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
+    // The app-server keeps the sub-agent model it was started with. When the
+    // answering model changed to one with a different assignment, this turn's
+    // instructions name the model to spawn with instead.
+    const subagentModel =
+      !session.nativeSubagentsRestricted && input.modelSelection?.instanceId === boundInstanceId
+        ? resolveSubagentModel(input.modelSelection)
+        : session.subagentModel;
+    if (subagentModel !== session.subagentModel) session.namesSubagentModel = true;
+    if (input.modelSelection?.instanceId === boundInstanceId)
+      session.answeringModel = input.modelSelection.model;
+    // Read per turn: the person can change the assignments, or the answering
+    // model, in the middle of a conversation.
+    const subordinateRoster =
+      session.nativeSubagentsRestricted || session.isExecution || !options?.subordinates
+        ? undefined
+        : buildSubordinateRoster(
+            subordinatesForModel(yield* options.subordinates, session.answeringModel),
+          );
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -1968,6 +2183,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
+        ...(input.nativePolicySteerTurnId
+          ? { nativePolicySteerTurnId: input.nativePolicySteerTurnId }
+          : {}),
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.workflowSkills ? { skills: input.workflowSkills } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
@@ -1981,6 +2199,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(serviceTier ? { serviceTier } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+        ...(session.namesSubagentModel
+          ? { subagentModel: subagentModel ?? input.modelSelection?.model }
+          : {}),
+        ...(subordinateRoster ? { subordinateRoster } : {}),
+        ...(input.globalSystemInstructions
+          ? { globalSystemInstructions: input.globalSystemInstructions }
+          : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
@@ -2091,13 +2316,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session: CodexAdapterSessionContext,
   ) {
     if (session.stopped) {
-      return;
+      return false;
     }
     session.stopped = true;
+    for (const execId of session.activeCollabAgentIds) {
+      unifiedExecutionLedger.finish({
+        executionId: execId,
+        executionKind: "codex_subagent",
+        status: "cancelled",
+        errorMessage: "Codex 세션 종료로 인해 서브에이전트 작업이 중단되었습니다.",
+      });
+    }
+    session.activeCollabAgentIds.clear();
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
+    return true;
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
@@ -2106,7 +2341,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       if (!session) {
         return;
       }
-      yield* stopSessionInternal(session);
+      if (!(yield* stopSessionInternal(session))) return;
+      const at = yield* DateTime.now;
+      yield* Queue.offer(runtimeEventQueue, {
+        type: "session.exited",
+        eventId: EventId.make(`codex-explicit-stop:${session.eventEpoch}`),
+        provider: PROVIDER,
+        threadId,
+        createdAt: DateTime.formatIso(at),
+        payload: { exitKind: "graceful", reason: "Session stopped." },
+      });
     });
 
   const listSessions: CodexAdapterShape["listSessions"] = () =>
@@ -2137,12 +2381,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      workspaceDelegate: () => true,
+      nativeSubagentPolicy: (threadId) => {
+        const context = sessions.get(threadId);
+        return context && { restricted: context.nativeSubagentsRestricted };
+      },
+      stopSessionDrainsEvents: true,
     },
     startSession,
     sendTurn,
     interruptTurn,
     readThread,
     rollbackThread,
+    stopBackgroundWatches: (threadId) =>
+      sessions
+        .get(threadId)
+        ?.runtime.stopBackgroundWatches?.pipe(
+          Effect.mapError((error) => mapCodexRuntimeError(threadId, "mcpServer/tool/call", error)),
+        ) ?? Effect.void,
     respondToRequest,
     respondToUserInput,
     stopSession,

@@ -25,9 +25,13 @@ export function ContextWindowMeter(props: {
   const totalProcessedTokens = usage.totalProcessedTokens ?? null;
   const showTotalProcessed = totalProcessedTokens !== null && totalProcessedTokens > 0;
   const isOverloaded = normalizedPercentage > 90;
+  const isElevated = normalizedPercentage > 75;
   const usageColor = isOverloaded
     ? "var(--color-error)"
-    : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
+    : isElevated
+      ? "var(--color-warning, var(--color-primary))"
+      : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
+  const visibleContextLabel = usedPercentage ?? formatContextWindowTokens(usage.usedTokens);
 
   return (
     <Popover>
@@ -39,7 +43,8 @@ export function ContextWindowMeter(props: {
           <button
             type="button"
             className={cn(
-              "inline-flex size-7 cursor-pointer items-center justify-center rounded-full border border-transparent text-muted-foreground outline-none transition-colors",
+              "inline-flex h-7 cursor-pointer items-center justify-center gap-1.5 rounded-full border border-border/50 bg-muted/35 px-2 text-xs font-medium tabular-nums outline-none transition-colors",
+              isOverloaded ? "text-error" : isElevated ? "text-foreground" : "text-foreground/85",
               "hover:bg-accent data-[pressed]:bg-accent",
               "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
             )}
@@ -49,7 +54,7 @@ export function ContextWindowMeter(props: {
                 : `컨텍스트 창에서 토큰 ${formatContextWindowTokens(usage.usedTokens)}개 사용됨`
             }
           >
-            <span className="relative flex size-5 items-center justify-center">
+            <span className="relative flex size-4 shrink-0 items-center justify-center">
               <svg
                 viewBox="0 0 24 24"
                 className="-rotate-90 absolute inset-0 size-full transform-gpu"
@@ -77,6 +82,7 @@ export function ContextWindowMeter(props: {
                 />
               </svg>
             </span>
+            <span data-context-window-percent="true">{visibleContextLabel}</span>
           </button>
         }
       />

@@ -54,6 +54,61 @@ const exists = (filePath: string) =>
 
 const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
 
+it.effect("bootstraps past the default event read limit in a single start", () =>
+  Effect.gen(function* () {
+    const projectionPipeline = yield* OrchestrationProjectionPipeline;
+    const eventStore = yield* OrchestrationEventStore;
+    const sql = yield* SqlClient.SqlClient;
+    const now = "2026-01-01T00:00:00.000Z";
+    const projectId = ProjectId.make("project-many-events");
+    yield* eventStore.append({
+      type: "project.created",
+      eventId: EventId.make("many-created"),
+      aggregateKind: "project",
+      aggregateId: projectId,
+      occurredAt: now,
+      commandId: CommandId.make("many-create"),
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      payload: {
+        projectId,
+        title: "Initial",
+        workspaceRoot: "/tmp/project-many-events",
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    yield* sql`
+      WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<1001)
+      INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+        command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+      )
+      SELECT 'many-update-' || n, 'project', ${projectId}, n, 'project.meta-updated', ${now},
+        NULL, NULL, NULL, 'client',
+        json_object('projectId', ${projectId}, 'title', 'Title ' || n, 'updatedAt', ${now}), '{}'
+      FROM numbers
+    `;
+    for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
+      const sequence = projector === ORCHESTRATION_PROJECTOR_NAMES.projects ? 0 : 1002;
+      yield* sql`INSERT INTO projection_state(projector,last_applied_sequence,updated_at)
+        VALUES (${projector}, ${sequence}, ${now})
+        ON CONFLICT(projector) DO UPDATE SET last_applied_sequence=excluded.last_applied_sequence`;
+    }
+    yield* projectionPipeline.bootstrap;
+    const [row] = yield* sql<{
+      title: string;
+    }>`SELECT title FROM projection_projects WHERE project_id=${projectId}`;
+    assert.equal(row?.title, "Title 1001");
+    const [state] = yield* sql<{ sequence: number }>`SELECT last_applied_sequence AS sequence
+      FROM projection_state WHERE projector=${ORCHESTRATION_PROJECTOR_NAMES.projects}`;
+    assert.equal(state?.sequence, 1002);
+  }).pipe(Effect.provide(makeProjectionPipelinePrefixedTestLayer("t3-many-events-"))),
+);
+
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>
     Effect.gen(function* () {
@@ -2576,6 +2631,66 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
   "OrchestrationProjectionPipeline pending turn cleanup",
   (it) => {
+    it.effect(
+      "links released room turns to their own requests rather than the newest pending request",
+      () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.make("autousage-upgrade-room");
+          const queued = [1, 2, 3].map((n) => ({
+            messageId: MessageId.make(`message-room-${n}`),
+            requestedAt: `2026-02-26T14:00:0${n}.000Z`,
+            turnId: TurnId.make(`upgrade-room:job-${n}`),
+            startedAt: `2026-02-26T14:01:0${n}.000Z`,
+          }));
+          const envelope = (key: string, occurredAt: string) => ({
+            eventId: EventId.make(`evt-${key}`),
+            aggregateKind: "thread" as const,
+            aggregateId: threadId,
+            occurredAt,
+            commandId: CommandId.make(`cmd-${key}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-${key}`),
+            metadata: {},
+          });
+          for (const { messageId, requestedAt } of queued) {
+            yield* eventStore.append({
+              ...envelope(messageId, requestedAt),
+              type: "thread.turn-start-requested",
+              payload: { threadId, messageId, createdAt: requestedAt, runtimeMode: "full-access" },
+            });
+          }
+          for (const { turnId, startedAt, messageId, requestedAt } of queued) {
+            yield* eventStore.append({
+              ...envelope(turnId, startedAt),
+              type: "thread.session-set",
+              payload: {
+                threadId,
+                turnRequest: { messageId, requestedAt },
+                session: {
+                  threadId,
+                  status: "running",
+                  providerName: "codex",
+                  runtimeMode: "full-access",
+                  activeTurnId: turnId,
+                  lastError: null,
+                  updatedAt: startedAt,
+                },
+              },
+            });
+          }
+          yield* projectionPipeline.bootstrap;
+          const rows = yield* sql`
+          SELECT turn_id AS "turnId", pending_message_id AS "messageId",
+                 requested_at AS "requestedAt", started_at AS "startedAt"
+          FROM projection_turns WHERE thread_id = ${threadId} ORDER BY requested_at
+        `;
+          assert.deepEqual(rows, queued);
+        }),
+    );
+
     it.effect("clears pending turn starts when startup reaches a terminal session state", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;

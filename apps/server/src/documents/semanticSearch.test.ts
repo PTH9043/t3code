@@ -2,15 +2,24 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import { expect, it } from "vite-plus/test";
 import {
   boundedEmbeddingText,
   cleanupSemanticVectors,
   cosineSimilarity,
+  hammingDistanceBinary,
+  initSqliteVecHybridSchema,
   makeSemanticSearch,
+  quantizeBinaryVector,
   reciprocalRankFusion,
+  searchWorkspaceHybridSqliteVec,
   semanticContentKey,
   semanticScopeKey,
+  semanticVectorStorePath,
+  serializeFloat32Vector,
+  sliceAndNormalizeMatryoshka,
+  upsertSqliteVecHybridChunk,
   type SemanticCandidate,
   type SemanticScope,
 } from "./semanticSearch.ts";
@@ -39,6 +48,19 @@ it("combines keyword and semantic evidence while discarding low similarity match
   expect(cosineSimilarity([0, 0], [1, 0])).toBe(0);
   expect(cosineSimilarity([1], [1, 0])).toBe(0);
 });
+it("requires stronger evidence for semantic-only results while preserving keyword ranks", () => {
+  const result = reciprocalRankFusion(
+    ["lexical", "corroborated"],
+    [
+      { id: "semantic-only", similarity: 0.56 },
+      { id: "below", similarity: 0.5599 },
+      { id: "corroborated", similarity: 0.48 },
+      { id: "lexical", similarity: 0.3 },
+    ],
+  );
+  expect(result.map(([id]) => id)).toEqual(["corroborated", "lexical", "semantic-only"]);
+});
+
 it("reuses content vectors, invalidates changed documents and scopes projects and models", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-semantic-"));
   const calls: string[][] = [];
@@ -421,10 +443,11 @@ it("keeps partial evidence and reports the interruption when a search is cancell
   }
 });
 
-it("previews and removes only old unreferenced vectors, preserving current and fresh files and originals", async () => {
+it("previews and removes only old unreferenced legacy JSON vectors, preserving current and fresh files and originals", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-semantic-cleanup-"));
   const search = makeSemanticSearch({
     now: () => 0,
+    storageMode: "legacy-json",
     embed: async ({ texts }) => texts.map(() => [1, 0]),
   });
   const input = {
@@ -468,6 +491,165 @@ it("previews and removes only old unreferenced vectors, preserving current and f
     await NodeFSP.access(path(0));
     await NodeFSP.access(path(2));
     expect(await NodeFSP.readFile(original, "utf8")).toBe("original transcript\n");
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("performs 2-stage Binary Quantization Hamming oversampling + Float32 cosine reranking + FTS5 RRF hybrid search in SQLite", () => {
+  const mrl = sliceAndNormalizeMatryoshka([3, 4, 0, 0, 99, 100], 4);
+  expect(mrl).toHaveLength(4);
+  expect(mrl[0]).toBeCloseTo(0.6, 5);
+  expect(mrl[1]).toBeCloseTo(0.8, 5);
+  expect(serializeFloat32Vector(mrl).byteLength).toBe(16);
+
+  const qA = quantizeBinaryVector([1, -1, 1, -1, 1, 1, -1, -1]);
+  const qB = quantizeBinaryVector([1, -1, -1, -1, 1, -1, -1, -1]);
+  expect(hammingDistanceBinary(qA, qB)).toBe(2);
+
+  const db = new NodeSqlite.DatabaseSync(":memory:");
+  try {
+    initSqliteVecHybridSchema(db, 8);
+    upsertSqliteVecHybridChunk(db, {
+      chunkId: "chunk-auth",
+      workspaceId: "ws-1",
+      filePath: "src/auth/session.ts",
+      content: "Session token validation and refresh logic for TS-999",
+      embedding: [0.9, 0.8, 0.1, -0.2, 0.4, 0.5, -0.1, 0.2],
+    });
+    upsertSqliteVecHybridChunk(db, {
+      chunkId: "chunk-db",
+      workspaceId: "ws-1",
+      filePath: "src/db/sqlite.ts",
+      content: "SQLite WAL checkpoint and connection pooling",
+      embedding: [-0.8, -0.7, 0.9, 0.5, -0.4, -0.3, 0.8, -0.2],
+    });
+    upsertSqliteVecHybridChunk(db, {
+      chunkId: "chunk-other-ws",
+      workspaceId: "ws-2",
+      filePath: "src/secret.ts",
+      content: "Session token validation TS-999 in another workspace",
+      embedding: [0.9, 0.8, 0.1, -0.2, 0.4, 0.5, -0.1, 0.2],
+    });
+
+    const hits = searchWorkspaceHybridSqliteVec(
+      db,
+      "ws-1",
+      "TS-999 session token",
+      [0.88, 0.79, 0.12, -0.18, 0.39, 0.51, -0.11, 0.19],
+      { topK: 5, oversampleFactor: 5, rrfK: 60 },
+    );
+
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    expect(hits[0]?.chunkId).toBe("chunk-auth");
+    expect(hits[0]?.bm25Rank).toBe(1);
+    expect(hits[0]?.cosineDistance).not.toBeNull();
+    expect(hits[0]?.cosineDistance!).toBeLessThan(0.05);
+    expect(hits.some((h) => h.chunkId === "chunk-other-ws")).toBe(false);
+  } finally {
+    db.close();
+  }
+});
+
+it("persists vectors in unified v4/vectors.sqlite, promotes legacy v3 JSON without re-embedding, and reclaims stale rows", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-semantic-v4-"));
+  let nowMs = 1_000;
+  let embedCalls = 0;
+  const embed = async ({ texts }: { readonly texts: readonly string[] }) => {
+    embedCalls++;
+    return texts.map((text) =>
+      text.includes("legacy-hit") || text.includes("target-hit")
+        ? [0.95, 0.2, 0.1, -0.3, 0.5, 0.4, -0.2, 0.6]
+        : [-0.9, -0.3, 0.8, 0.4, -0.5, -0.2, 0.7, -0.4],
+    );
+  };
+  const legacySearch = makeSemanticSearch({ now: () => nowMs, storageMode: "legacy-json", embed });
+  const sqliteSearch = makeSemanticSearch({ now: () => nowMs, embed });
+  const scope: SemanticScope = {
+    stateDir: directory,
+    projectId: "proj-v4",
+    endpoint: "http://127.0.0.1:11434",
+    model: "bge-m3",
+  };
+  const legacyCandidate: SemanticCandidate = {
+    id: "legacy-1",
+    title: "Legacy",
+    content: "legacy-hit memory note",
+  };
+  const extraCandidates: SemanticCandidate[] = Array.from({ length: 24 }, (_, idx) => ({
+    id: `doc-${idx}`,
+    title: `Doc ${idx}`,
+    content: idx === 12 ? "target-hit architecture doc" : `noise document number ${idx}`,
+  }));
+
+  try {
+    // 1. Seed a legacy v3 JSON vector file
+    await legacySearch.index({
+      ...scope,
+      candidates: [legacyCandidate],
+      signal: new AbortController().signal,
+    });
+    const callsAfterLegacy = embedCalls;
+
+    // 2. Index 24 new candidates into unified SQLite v4 store
+    await sqliteSearch.index({
+      ...scope,
+      candidates: extraCandidates,
+      signal: new AbortController().signal,
+    });
+    await NodeFSP.access(semanticVectorStorePath(directory));
+
+    // 3. Search across legacy + v4 candidates: legacy candidate is read and promoted without re-embedding it
+    const callsBeforeSearch = embedCalls;
+    const result = await sqliteSearch({
+      ...scope,
+      query: "target-hit",
+      candidates: [legacyCandidate, ...extraCandidates],
+      signal: new AbortController().signal,
+    });
+    expect(embedCalls).toBe(callsBeforeSearch + 1); // query embedding only
+    expect(result.indexed).toBe(25);
+    expect(
+      result.ranked
+        .slice(0, 2)
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual(["doc-12", "legacy-1"]);
+    expect(callsAfterLegacy).toBe(1);
+
+    // 4. Delete the legacy JSON file; subsequent search still finds legacy-1 from v4/vectors.sqlite
+    await NodeFSP.rm(NodePath.join(directory, "semantic-rag", "v3"), {
+      recursive: true,
+      force: true,
+    });
+    const afterPromotion = await sqliteSearch({
+      ...scope,
+      query: "target-hit",
+      candidates: [legacyCandidate],
+      signal: new AbortController().signal,
+    });
+    expect(afterPromotion.indexed).toBe(1);
+
+    // 5. Cleanup reclaims old unreferenced SQLite rows while keeping referenced rows
+    const keepKey = semanticContentKey(legacyCandidate);
+    const preview = await cleanupSemanticVectors({
+      ...scope,
+      olderThan: 10_000,
+      apply: false,
+      referenced: async (key) => key === keepKey,
+      signal: new AbortController().signal,
+    });
+    expect(preview.eligibleFiles).toBe(24);
+    expect(preview.removedFiles).toBe(0);
+
+    const applied = await cleanupSemanticVectors({
+      ...scope,
+      olderThan: 10_000,
+      apply: true,
+      referenced: async (key) => key === keepKey,
+      signal: new AbortController().signal,
+    });
+    expect(applied.removedFiles).toBe(24);
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }

@@ -47,6 +47,7 @@ export interface ComposerBannerStackItem {
   readonly actionClassName?: string;
   readonly dismissLabel?: string;
   readonly onDismiss?: () => void;
+  readonly dismissImmediately?: boolean;
 }
 
 interface ComposerBannerStackProps {
@@ -84,7 +85,12 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
   const firstStackedItem = stackedItems[0];
 
   const requestDismiss = (item: ComposerBannerStackItem) => {
-    if (!item.onDismiss || exitingItemId) {
+    if (!item.onDismiss) return;
+    if (item.dismissImmediately) {
+      item.onDismiss();
+      return;
+    }
+    if (exitingItemId) {
       return;
     }
     setExitingItemId(item.id);
@@ -98,7 +104,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
   };
 
   return (
-    <div className={cn("group/banner-stack mx-auto mb-2 max-w-3xl", className)}>
+    <div className={cn("group/banner-stack mx-auto mb-2", className)}>
       <div
         className={cn(
           "relative flex flex-col-reverse",

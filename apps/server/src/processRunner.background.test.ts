@@ -1,17 +1,30 @@
 import { expect, it } from "@effect/vitest";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - The mock checks Node-specific spawn options.
 import type * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Exercise native Windows background process fixtures.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Fixtures use paths passed to native child processes.
+import * as NodePath from "node:path";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
-import { HostProcessExecutablePath, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessExecutablePath,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as ProcessRunner from "./processRunner.ts";
 const decodeBackgroundOutput = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({ argument: Schema.String, body: Schema.String, flag: Schema.String }),
   ),
+);
+const decodeStringArray = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(Schema.String)),
 );
 const background = ProcessRunner.layer.pipe(
   Layer.provide(
@@ -80,6 +93,37 @@ it.effect(
     }).pipe(Effect.provide(background)),
 );
 
+it.effect("preserves literal arguments through a hidden custom Windows batch wrapper", () =>
+  Effect.gen(function* () {
+    if ((yield* HostProcessPlatform) !== "win32") return;
+    const executable = yield* HostProcessExecutablePath;
+    const tempRoot = NodeFS.realpathSync(NodeOS.tmpdir());
+    const temporary = yield* Effect.acquireRelease(
+      Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(tempRoot, "t3-hidden-batch-"))),
+      (directory) =>
+        Effect.sync(() => {
+          const resolved = NodeFS.realpathSync(directory);
+          if (
+            NodePath.dirname(resolved).toLowerCase() !== tempRoot.toLowerCase() ||
+            !NodePath.basename(resolved).startsWith("t3-hidden-batch-")
+          )
+            throw new Error("Refusing to remove an unexpected test directory");
+          NodeFS.rmSync(resolved, { recursive: true, force: true });
+        }),
+    );
+    const shim = NodePath.join(temporary, "wrapper with spaces.cmd");
+    const script = NodePath.join(temporary, "arguments.js");
+    NodeFS.writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)))\n");
+    NodeFS.writeFileSync(shim, `@echo off\r\n"${executable}" "%~dp0arguments.js" %*\r\n`);
+    const expected = ["with spaces", "alpha&beta", "한글", "plain"];
+    const resolved = yield* resolveSpawnCommand(shim, expected);
+    expect(resolved.shell).toBe(true);
+    const result = yield* ProcessRunner.runHiddenWindowsProcess(resolved);
+    expect(result.code, result.stderr).toBe(0);
+    expect(yield* decodeStringArray(result.stdout.trim())).toEqual(expected);
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "passes background shell options and the exact environment to Windows process creation",
   () =>
@@ -106,14 +150,19 @@ it.effect(
           maxOutputBytes: Number.POSITIVE_INFINITY,
         },
         execFile,
+      ).pipe(
+        Effect.provideService(HostProcessEnvironment, {
+          ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        }),
       );
       expect(result.code).toBe(0);
       expect(result.stdout).toBe("output");
       expect(execFile).toHaveBeenCalledWith(
-        "^C:\\provider\\opencode.CMD^",
-        ["^models^", "^--verbose^"],
+        "C:\\Windows\\System32\\cmd.exe",
+        ["/d", "/s", "/c", '"^C:\\provider\\opencode.CMD^ ^models^ ^--verbose^"'],
         expect.objectContaining({
-          shell: true,
+          shell: false,
+          windowsVerbatimArguments: true,
           windowsHide: true,
           env: environment,
           maxBuffer: Number.POSITIVE_INFINITY,

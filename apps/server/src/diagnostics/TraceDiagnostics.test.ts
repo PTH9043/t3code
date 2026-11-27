@@ -9,6 +9,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as References from "effect/References";
 
 import * as TraceDiagnostics from "./TraceDiagnostics.ts";
+import { unifiedExecutionLedger } from "../t3x/executionLedger/UnifiedExecutionLedger.ts";
 
 function ns(ms: number): string {
   return String(BigInt(ms) * 1_000_000n);
@@ -20,6 +21,7 @@ function record(input: {
   readonly spanId: string;
   readonly startMs: number;
   readonly durationMs: number;
+  readonly attributes?: Readonly<Record<string, unknown>>;
   readonly exit?: { readonly _tag: "Success" | "Failure" | "Interrupted"; readonly cause?: string };
   readonly events?: ReadonlyArray<unknown>;
 }) {
@@ -33,7 +35,7 @@ function record(input: {
     startTimeUnixNano: ns(input.startMs),
     endTimeUnixNano: ns(input.startMs + input.durationMs),
     durationMs: input.durationMs,
-    attributes: {},
+    attributes: input.attributes ?? {},
     events: input.events ?? [],
     links: [],
     exit: input.exit ?? { _tag: "Success" },
@@ -278,6 +280,185 @@ describe("TraceDiagnostics", () => {
         diagnostics.slowestSpans.map((span) => span.durationMs),
         [24, 23, 22, 21, 20, 19, 18, 17, 16, 15],
       );
+    }),
+  );
+
+  it.effect("separates long-lived subscriptions and AI turns from slow operational spans", () =>
+    Effect.sync(() => {
+      const diagnostics = TraceDiagnostics.aggregateTraceDiagnostics({
+        traceFilePath: "/tmp/server.trace.ndjson",
+        readAt: DateTime.makeUnsafe("2026-05-05T10:00:00.000Z"),
+        slowSpanThresholdMs: 1_000,
+        files: [
+          {
+            path: "/tmp/server.trace.ndjson",
+            text: [
+              record({
+                name: "ws.rpc.orchestration.subscribeThread",
+                traceId: "trace-sub-1",
+                spanId: "span-sub-1",
+                startMs: 1_000,
+                durationMs: 7_722_000,
+                attributes: {
+                  "rpc.kind": "subscription",
+                  "rpc.subscription.ttfb_ms": 42.5,
+                },
+              }),
+              record({
+                name: "ws.rpc.git.subscribeStatus",
+                traceId: "trace-sub-2",
+                spanId: "span-sub-2",
+                startMs: 2_000,
+                durationMs: 4_084_000,
+                exit: { _tag: "Failure", cause: "live buffer overflow" },
+              }),
+              record({
+                name: "CodexAdapter.sendTurn",
+                traceId: "trace-turn-1",
+                spanId: "span-turn-1",
+                startMs: 3_000,
+                durationMs: 180_000,
+              }),
+              record({
+                name: "probeCodexAppServerProvider",
+                traceId: "trace-op-1",
+                spanId: "span-op-1",
+                startMs: 4_000,
+                durationMs: 15_000,
+              }),
+            ].join("\n"),
+          },
+        ],
+      });
+
+      assert.equal(diagnostics.slowSpanCount, 1);
+      assert.deepStrictEqual(
+        diagnostics.slowestSpans.map((span) => span.name),
+        ["probeCodexAppServerProvider"],
+      );
+      assert.equal(diagnostics.longLivedSubscriptionCount, 2);
+      assert.equal(diagnostics.subscriptionBufferOverflowCount, 1);
+      assert.equal(
+        diagnostics.longLivedSubscriptions?.[0]?.name,
+        "ws.rpc.orchestration.subscribeThread",
+      );
+      assert.equal(diagnostics.longLivedSubscriptions?.[0]?.ttfbMs, 42.5);
+      assert.equal(diagnostics.longLivedSubscriptions?.[1]?.bufferOverflow, true);
+      assert.equal(diagnostics.longRunningTurnCount, 1);
+      assert.equal(diagnostics.longRunningTurns?.[0]?.name, "CodexAdapter.sendTurn");
+    }),
+  );
+
+  it.effect(
+    "classifies WorkspaceAgentExecutor and CouncilOrchestrator as long turns and excludes subscriptions from topSpansByCount",
+    () =>
+      Effect.sync(() => {
+        const diagnostics = TraceDiagnostics.aggregateTraceDiagnostics({
+          traceFilePath: "/tmp/server.trace.ndjson",
+          readAt: DateTime.makeUnsafe("2026-11-22T08:00:00.000Z"),
+          slowSpanThresholdMs: 1_000,
+          files: [
+            {
+              path: "/tmp/server.trace.ndjson",
+              text: [
+                record({
+                  name: "direct.rpc.council.subscribe",
+                  traceId: "trace-c-sub",
+                  spanId: "span-c-sub",
+                  startMs: 1_000,
+                  durationMs: 1_199_800,
+                }),
+                record({
+                  name: "WorkspaceAgentExecutor.execute",
+                  traceId: "trace-exec-1",
+                  spanId: "span-exec-1",
+                  startMs: 2_000,
+                  durationMs: 95_000,
+                  attributes: { "t3.thread_id": "thr-1", "t3.execution_id": "exec-1" },
+                }),
+                record({
+                  name: "CouncilOrchestrator.executePinnedSpec",
+                  traceId: "trace-cnc-1",
+                  spanId: "span-cnc-1",
+                  startMs: 3_000,
+                  durationMs: 42_000,
+                  attributes: { "t3.thread_id": "thr-1", "t3.council_id": "cnc-1" },
+                }),
+                record({
+                  name: "git.status",
+                  traceId: "trace-op-fast",
+                  spanId: "span-op-fast",
+                  startMs: 4_000,
+                  durationMs: 1_500,
+                }),
+              ].join("\n"),
+            },
+          ],
+        });
+
+        assert.equal(diagnostics.slowSpanCount, 1);
+        assert.deepStrictEqual(
+          diagnostics.slowestSpans.map((span) => span.name),
+          ["git.status"],
+        );
+        assert.equal(diagnostics.longLivedSubscriptionCount, 1);
+        assert.equal(diagnostics.longRunningTurnCount, 2);
+        assert.deepStrictEqual(
+          diagnostics.longRunningTurns?.map((span) => span.name),
+          ["WorkspaceAgentExecutor.execute", "CouncilOrchestrator.executePinnedSpec"],
+        );
+        assert.equal(
+          diagnostics.topSpansByCount.some((item) => item.name === "direct.rpc.council.subscribe"),
+          false,
+        );
+      }),
+  );
+
+  it.effect("attaches UnifiedExecutionLedger 9-kind summary in TraceDiagnostics.read", () =>
+    Effect.gen(function* () {
+      unifiedExecutionLedger.resetForTests();
+      unifiedExecutionLedger.begin({
+        executionId: "diag-ledger-test-1",
+        executionKind: "council",
+        threadId: "thr-diag-1",
+        summary: "진단 원장 테스트",
+        startedAtMs: 1_700_000_000_000,
+      });
+      try {
+        const result = yield* TraceDiagnostics.readTraceDiagnostics({
+          traceFilePath: "/tmp/non-existent-trace.ndjson",
+          maxFiles: 2,
+          readAt: DateTime.makeUnsafe("2026-05-05T10:00:00.000Z"),
+        }).pipe(
+          Effect.provide(
+            TraceDiagnostics.layer.pipe(
+              Layer.provide(
+                FileSystem.layerNoop({
+                  readFileString: (filePath) =>
+                    Effect.fail(
+                      PlatformError.systemError({
+                        _tag: "NotFound",
+                        module: "FileSystem",
+                        method: "readFileString",
+                        pathOrDescriptor: filePath,
+                      }),
+                    ),
+                }),
+              ),
+            ),
+          ),
+        );
+
+        assert.isDefined(result.executionLedger);
+        assert.equal(result.executionLedger?.activeRuns, 1);
+        assert.equal(result.executionLedger?.byKind.length, 9);
+        assert.equal(
+          result.executionLedger?.recentRuns.some((r) => r.executionId === "diag-ledger-test-1"),
+          true,
+        );
+      } finally {
+        unifiedExecutionLedger.resetForTests();
+      }
     }),
   );
 });

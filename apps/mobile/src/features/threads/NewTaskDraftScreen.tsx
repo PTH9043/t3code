@@ -14,6 +14,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import { ComposerEditor, type ComposerEditorHandle } from "../../components/ComposerEditor";
+import { AppText as Text } from "../../components/AppText";
 import {
   ComposerToolbarButton,
   ComposerToolbarRow,
@@ -39,16 +40,24 @@ import {
   clearComposerDraftContent,
   getComposerDraftSnapshot,
   mergeComposerDraftContent,
+  awaitComposerDraftsLoaded,
+  reserveNewTaskTurnMetadata,
   restoreComposerDraftSnapshot,
   type ComposerDraft,
 } from "../../state/use-composer-drafts";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
-import { buildModelMenuActions, resolveSelectableModelSelection } from "../../lib/modelOptions";
+import {
+  buildModelMenuActions,
+  resolveImportedModelSelection,
+  resolveSelectableModelSelection,
+} from "../../lib/modelOptions";
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage, removeThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
+import { ThreadResponseStyleSettings } from "./ThreadResponseStyleSettings";
+import { ThreadTeamViewer } from "./ThreadTeamViewer";
 import { useCreateProjectThread } from "./use-project-actions";
 import { resolveDraftProjectSelection } from "./new-task-project-selection";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
@@ -103,6 +112,8 @@ export function NewTaskDraftScreen(props: {
   const promptInputRef = useRef<ComposerEditorHandle>(null);
   const loadedBranchesProjectKeyRef = useRef<string | null>(null);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [teamEditorOpen, setTeamEditorOpen] = useState(false);
+  const sending = useRef(false);
   const [importingShareKey, setImportingShareKey] = useState<string | null>(null);
   const [isCancellingShareImport, setIsCancellingShareImport] = useState(false);
   const [cancelledIncomingShareId, setCancelledIncomingShareId] = useState<string | null>(null);
@@ -601,8 +612,9 @@ export function NewTaskDraftScreen(props: {
           };
         }),
       },
+      ...(flow.editingPendingTask ? [] : [{ id: "discard-draft", title: "초안 삭제" }]),
     ],
-    [flow.interactionMode, flow.runtimeMode, providerOptionDescriptors],
+    [flow.editingPendingTask, flow.interactionMode, flow.runtimeMode, providerOptionDescriptors],
   );
 
   const workspaceMenuActions = useMemo(() => {
@@ -706,6 +718,27 @@ export function NewTaskDraftScreen(props: {
     if (isIncomingShareTransferPending) {
       return;
     }
+    if (
+      event === "discard-draft" &&
+      flow.draftKey &&
+      !flow.editingPendingTask &&
+      !sending.current
+    ) {
+      const draftKey = flow.draftKey;
+      Alert.alert("초안을 삭제할까요?", "메시지, 첨부 파일과 이 초안의 팀 설정을 지웁니다.", [
+        { text: "취소", style: "cancel" },
+        {
+          text: "삭제",
+          style: "destructive",
+          onPress: () => {
+            void restoreComposerDraftSnapshot(draftKey, { text: "", attachments: [] }).catch(() =>
+              Alert.alert("초안 삭제를 저장하지 못했습니다."),
+            );
+          },
+        },
+      ]);
+      return;
+    }
     const providerOptions = applyProviderOptionMenuEvent(providerOptionDescriptors, event);
     if (providerOptions) {
       flow.setSelectedModelOptions(providerOptions);
@@ -785,6 +818,24 @@ export function NewTaskDraftScreen(props: {
   );
 
   async function handleStart(): Promise<void> {
+    if (sending.current || flow.submitting) return;
+    sending.current = true;
+    flow.setSubmitting(true);
+    try {
+      if (!(await awaitComposerDraftsLoaded())) throw new Error("기기의 초안을 읽지 못했습니다.");
+      await sendDraft();
+    } catch (error) {
+      Alert.alert(
+        "작업을 시작하지 못했습니다",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      sending.current = false;
+      flow.setSubmitting(false);
+    }
+  }
+
+  async function sendDraft(): Promise<void> {
     const selectedProject = flow.selectedProject;
     const draftKey = flow.draftKey;
     if (!selectedProject || !draftKey) {
@@ -794,11 +845,12 @@ export function NewTaskDraftScreen(props: {
     // Snapshot read keeps just-typed selector state; the availability gate
     // still applies so a stored selection on a disabled provider falls back
     // to the flow's resolved model.
-    const modelSelection =
-      resolveSelectableModelSelection(
-        selectedEnvironmentServerConfig,
-        draft.modelSelection ?? null,
-      ) ?? flow.selectedModel;
+    const modelSelection = draft.requireExactModel
+      ? resolveImportedModelSelection(selectedEnvironmentServerConfig, draft.modelSelection ?? null)
+      : (resolveSelectableModelSelection(
+          selectedEnvironmentServerConfig,
+          draft.modelSelection ?? null,
+        ) ?? flow.selectedModel);
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
     const selectedWorktreePath =
@@ -811,31 +863,23 @@ export function NewTaskDraftScreen(props: {
     if (
       !modelSelection ||
       initialMessageText.length === 0 ||
-      flow.submitting ||
       (workspaceMode === "worktree" && !selectedBranchName)
     ) {
       return;
     }
 
     const editingPendingTask = flow.editingPendingTask;
+    const metadata =
+      editingPendingTask ?? (await reserveNewTaskTurnMetadata(draftKey, makeTurnCommandMetadata));
 
     if (!environmentConnected) {
       // Offline: park the task in the outbox; the drain sends it when the
       // environment reconnects. Editing an existing pending task re-queues it
       // under its original identifiers.
-      const metadata = editingPendingTask
-        ? {
-            threadId: editingPendingTask.threadId,
-            commandId: editingPendingTask.commandId,
-            messageId: editingPendingTask.messageId,
-            createdAt: editingPendingTask.createdAt,
-          }
-        : makeTurnCommandMetadata();
       const message = flow.buildPendingTaskMessage(metadata);
       if (!message) {
         return;
       }
-      flow.setSubmitting(true);
       try {
         await enqueueThreadOutboxMessage(message);
       } catch (error) {
@@ -844,8 +888,6 @@ export function NewTaskDraftScreen(props: {
           error instanceof Error ? error.message : "The task could not be saved to the outbox.",
         );
         return;
-      } finally {
-        flow.setSubmitting(false);
       }
       if (editingPendingTask) {
         flow.finishEditingPendingTask();
@@ -859,7 +901,6 @@ export function NewTaskDraftScreen(props: {
       return;
     }
 
-    flow.setSubmitting(true);
     // Arm the lock-screen card before the async thread creation: backgrounding
     // the app right after tapping submit would otherwise reject the foreground
     // -only Activity start. If creation fails, the token registration's replay
@@ -879,18 +920,11 @@ export function NewTaskDraftScreen(props: {
       interactionMode,
       initialMessageText,
       initialAttachments: draft.attachments,
-      ...(editingPendingTask
-        ? {
-            turnMetadata: {
-              threadId: editingPendingTask.threadId,
-              commandId: editingPendingTask.commandId,
-              messageId: editingPendingTask.messageId,
-              createdAt: editingPendingTask.createdAt,
-            },
-          }
-        : {}),
+      turnMetadata: metadata,
+      modelTeams: draft.modelTeams,
+      responseStyle: draft.responseStyle,
+      attemptedWorktree: editingPendingTask?.deliveryAttemptWorktree,
     });
-    flow.setSubmitting(false);
 
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
@@ -1054,6 +1088,56 @@ export function NewTaskDraftScreen(props: {
     />
   );
 
+  const teamDraftKey = flow.draftKey;
+  const answer = flow.selectedModel;
+  const teamControl = selectedProject ? (
+    <View className="items-start px-4 py-2">
+      <ComposerToolbarButton
+        accessibilityLabel="전역 하위 모델 설정"
+        icon="person.2"
+        label="전역 하위 모델"
+        disabled={isIncomingShareTransferPending || flow.submitting}
+        onPress={() => setTeamEditorOpen(true)}
+      />
+      {teamEditorOpen && (
+        <ThreadTeamViewer
+          key={selectedProject.environmentId}
+          global
+          environmentId={selectedProject.environmentId}
+          connected={environmentConnected}
+          serverConfig={selectedEnvironmentServerConfig}
+          onClose={() => setTeamEditorOpen(false)}
+        />
+      )}
+    </View>
+  ) : null;
+
+  const styleControl =
+    teamDraftKey && selectedProject ? (
+      <View key={teamDraftKey} className="flex-row flex-wrap items-center">
+        <ThreadResponseStyleSettings
+          key={selectedProject.environmentId}
+          environmentId={selectedProject.environmentId}
+        />
+        {flow.requireExactModel && !answer ? (
+          <Text accessibilityRole="alert">
+            복사한 계정 또는 모델을 사용할 수 없습니다. 사용할 모델을 직접 선택하세요.
+          </Text>
+        ) : null}
+      </View>
+    ) : null;
+
+  const pendingFailureNotice = flow.editingPendingTask?.deliveryFailure ? (
+    <View className="px-4 py-2" accessibilityRole="alert">
+      <Text className="text-xs text-foreground">
+        전송 결과를 확인하지 못했습니다. 요청은 보존되어 있으며, 확인 후 다시 보낼 수 있습니다.
+      </Text>
+      <Text className="text-xs text-foreground-muted">
+        {flow.editingPendingTask.deliveryFailure.message}
+      </Text>
+    </View>
+  ) : null;
+
   if (isAndroid) {
     // The draft is a thread that doesn't exist yet, so it mirrors the thread
     // page: in-screen header, empty feed canvas above, and the same floating
@@ -1062,9 +1146,12 @@ export function NewTaskDraftScreen(props: {
       <View className="flex-1 bg-screen">
         <NativeStackScreenOptions options={{ headerShown: false }} />
         <AndroidScreenHeader title="새 대화" onBack={() => navigation.goBack()} />
+        {styleControl}
+        {teamControl}
 
         <KeyboardAvoidingView automaticOffset behavior="padding" className="flex-1">
           <View className="flex-1" />
+          {pendingFailureNotice}
 
           <View
             className="px-4 pt-2"
@@ -1137,8 +1224,11 @@ export function NewTaskDraftScreen(props: {
   return (
     <View className="flex-1 bg-sheet">
       <NativeStackScreenOptions options={{ title: selectedProject.title }} />
+      {styleControl}
+      {teamControl}
 
       <KeyboardAvoidingView automaticOffset behavior="padding" className="flex-1">
+        {pendingFailureNotice}
         <View className="min-h-0 flex-1 px-5 pt-2">{promptEditor}</View>
 
         <View className="border-t border-border" style={{ paddingBottom: controlsBottomPadding }}>

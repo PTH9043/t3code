@@ -14,6 +14,9 @@ export function navigateToTabView(
 ): void {
   const replace = options?.replace ?? false;
   switch (view.kind) {
+    case "upgrade-room":
+      void navigate({ to: "/upgrade-room", replace });
+      return;
     case "thread":
       void navigate({
         to: "/$environmentId/$threadId",

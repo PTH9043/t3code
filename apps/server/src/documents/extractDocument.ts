@@ -1,3 +1,4 @@
+import { acquirePdfDocument } from "./pdfDocumentLock.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
@@ -5,7 +6,7 @@ import { DOMParser, type Document, type Element } from "@xmldom/xmldom";
 import { unzipSync } from "fflate";
 import { createPdfOcr } from "./localOcr.ts";
 
-export const DOCUMENT_PARSER_VERSION = "2";
+export const DOCUMENT_PARSER_VERSION = "3";
 export const DOCUMENT_MAX_CHARS = 500_000;
 export const DOCUMENT_MAX_SECTIONS = 256;
 const MAX_XML_BYTES = 16 * 1024 * 1024;
@@ -103,94 +104,115 @@ export async function extractDocument(input: {
   const extension = NodePath.extname(input.name).toLowerCase();
   const collector = sectionCollector();
   if (extension === ".pdf" || input.mimeType === "application/pdf") {
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    // Bundle the worker with the server too; Node uses PDF.js's main-thread handler.
-    Object.assign(globalThis, {
-      pdfjsWorker: await import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
-    });
-    const loading = pdfjs.getDocument({
-      data: new Uint8Array(input.bytes),
-      isEvalSupported: false,
-      disableFontFace: true,
-      useSystemFonts: false,
-    });
-    const ocr = input.ocr ? createPdfOcr(input.ocr.cacheDirectory, input.ocr.signal) : null;
-    let ocrPages = 0;
-    let ocrIncomplete = false;
-    let lowConfidence = false;
+    const release = await acquirePdfDocument(input.ocr?.signal);
     try {
-      const document = await loading.promise;
-      for (
-        let pageNumber = 1;
-        pageNumber <= Math.min(document.numPages, MAX_PDF_PAGES);
-        pageNumber++
-      ) {
-        const page = await document.getPage(pageNumber);
-        try {
-          const content = await page.getTextContent();
-          const text = content.items
-            .map((item) => ("str" in item ? `${item.str}${item.hasEOL ? "\n" : " "}` : ""))
-            .join("");
-          if (ocr && text.replace(/\s/g, "").length < 12) {
-            if (ocrPages >= 12) {
-              ocrIncomplete = true;
-              collector.add(`페이지 ${pageNumber}`, text);
-            } else {
-              ocrPages++;
-              try {
-                const { createCanvas } = await import("@napi-rs/canvas");
-                const original = page.getViewport({ scale: 1 });
-                const viewport = page.getViewport({
-                  scale: Math.min(2, 2000 / Math.max(original.width, original.height)),
-                });
-                const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-                try {
-                  await page.render({
-                    viewport,
-                    canvas: canvas as unknown as Parameters<typeof page.render>[0]["canvas"],
-                    canvasContext: canvas.getContext("2d") as unknown as Parameters<
-                      typeof page.render
-                    >[0]["canvasContext"],
-                  }).promise;
-                  const result = await ocr.recognize(canvas.toBuffer("image/png"));
-                  lowConfidence ||= result.confidence < 70;
-                  collector.add(`페이지 ${pageNumber} · OCR`, result.text || text);
-                } finally {
-                  canvas.width = 1;
-                  canvas.height = 1;
-                }
-              } catch {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      // Bundle the worker with the server too; Node uses PDF.js's main-thread handler.
+      Object.assign(globalThis, {
+        pdfjsWorker: await import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
+      });
+      const loading = pdfjs.getDocument({
+        data: new Uint8Array(input.bytes),
+        isEvalSupported: false,
+        disableFontFace: true,
+        useSystemFonts: false,
+        verbosity: 0,
+      });
+      const ocr = input.ocr ? createPdfOcr(input.ocr.cacheDirectory, input.ocr.signal) : null;
+      let ocrPages = 0;
+      let ocrIncomplete = false;
+      let lowConfidence = false;
+      const noTextPages: number[] = [];
+      let lastPageProcessed = 0;
+      try {
+        const document = await loading.promise;
+        for (
+          let pageNumber = 1;
+          pageNumber <= Math.min(document.numPages, MAX_PDF_PAGES);
+          pageNumber++
+        ) {
+          const page = await document.getPage(pageNumber);
+          try {
+            const content = await page.getTextContent();
+            const text = content.items
+              .map((item) => ("str" in item ? `${item.str}${item.hasEOL ? "\n" : " "}` : ""))
+              .join("");
+            if (!ocr && !text.trim()) noTextPages.push(pageNumber);
+            if (ocr && text.replace(/\s/g, "").length < 12) {
+              if (ocrPages >= 12) {
                 ocrIncomplete = true;
                 collector.add(`페이지 ${pageNumber}`, text);
+              } else {
+                ocrPages++;
+                try {
+                  const { createCanvas } = await import("@napi-rs/canvas");
+                  const original = page.getViewport({ scale: 1 });
+                  const viewport = page.getViewport({
+                    scale: Math.min(2, 2000 / Math.max(original.width, original.height)),
+                  });
+                  const canvas = createCanvas(
+                    Math.ceil(viewport.width),
+                    Math.ceil(viewport.height),
+                  );
+                  try {
+                    await page.render({
+                      viewport,
+                      canvas: canvas as unknown as Parameters<typeof page.render>[0]["canvas"],
+                      canvasContext: canvas.getContext("2d") as unknown as Parameters<
+                        typeof page.render
+                      >[0]["canvasContext"],
+                    }).promise;
+                    const result = await ocr.recognize(canvas.toBuffer("image/png"));
+                    lowConfidence ||= result.confidence < 70;
+                    collector.add(`페이지 ${pageNumber} · OCR`, result.text || text);
+                  } finally {
+                    canvas.width = 1;
+                    canvas.height = 1;
+                  }
+                } catch {
+                  ocrIncomplete = true;
+                  collector.add(`페이지 ${pageNumber}`, text);
+                }
               }
-            }
-          } else collector.add(`페이지 ${pageNumber}`, text);
-        } finally {
-          page.cleanup();
-        }
-        if (collector.full()) return collector.finish(pageNumber < document.numPages);
-      }
-      const result = collector.finish(document.numPages > MAX_PDF_PAGES || ocrIncomplete);
-      return ocrPages
-        ? {
-            ...result,
-            message: [
-              result.message,
-              ocrIncomplete
-                ? "일부 페이지 OCR을 완료하지 못했습니다. OCR은 문서당 최대 12페이지입니다."
-                : null,
-              lowConfidence
-                ? "일부 OCR의 인식 신뢰도가 낮습니다. 숫자와 표는 원본을 확인하세요."
-                : null,
-              "스캔 페이지를 로컬 OCR로 추출했습니다.",
-            ]
-              .filter(Boolean)
-              .join(" "),
+            } else collector.add(`페이지 ${pageNumber}`, text);
+          } finally {
+            page.cleanup();
           }
-        : result;
+          lastPageProcessed = pageNumber;
+          if (collector.full()) break;
+        }
+        const result = collector.finish(
+          lastPageProcessed < document.numPages || ocrIncomplete || noTextPages.length > 0,
+        );
+        return ocrPages || noTextPages.length
+          ? {
+              ...result,
+              message: [
+                result.message,
+                ocrIncomplete
+                  ? "일부 페이지 OCR을 완료하지 못했습니다. OCR은 문서당 최대 12페이지입니다."
+                  : null,
+                lowConfidence
+                  ? "일부 OCR의 인식 신뢰도가 낮습니다. 숫자와 표는 원본을 확인하세요."
+                  : null,
+                noTextPages.length
+                  ? `텍스트가 없는 ${noTextPages.length}개 페이지는 빈 페이지 또는 이미지일 수 있어 전체 내용을 확인하지 못했습니다. 페이지: ${noTextPages.slice(0, 12).join(", ")}${noTextPages.length > 12 ? " 등" : ""}.`
+                  : null,
+                ocrPages ? "스캔 페이지를 로컬 OCR로 추출했습니다." : null,
+              ]
+                .filter(Boolean)
+                .join(" "),
+            }
+          : result;
+      } finally {
+        try {
+          await ocr?.close();
+        } finally {
+          await loading.destroy();
+        }
+      }
     } finally {
-      await ocr?.close();
-      await loading.destroy();
+      release();
     }
   }
   if (extension === ".docx") {

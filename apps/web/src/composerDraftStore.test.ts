@@ -5,6 +5,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
+import { createJSONStorage } from "zustand/middleware";
 import {
   defaultInstanceIdForDriver,
   EnvironmentId,
@@ -12,10 +13,13 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  findThreadModelTeam,
   type ModelSelection,
+  type ThreadModelTeam,
   type ProviderOptionSelection,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { derivePhysicalProjectKeyFromPath } from "@t3tools/client-runtime/state/project-grouping";
 
 // The composer draft's `modelSelectionByProvider` and
 // `stickyModelSelectionByProvider` maps are keyed by `ProviderInstanceId`
@@ -60,6 +64,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
   clearComposerDraftsEnvironment,
+  selectDraftIdByThreadRef,
+  restoreDraftFolderProjectId,
+  selectDraftModelTeams,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThread,
   markPromotedDraftThreadByRef,
@@ -75,7 +82,7 @@ import {
   insertInlineTerminalContextPlaceholder,
   type TerminalContextDraft,
 } from "./lib/terminalContext";
-import { createDebouncedStorage } from "./lib/storage";
+import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 
 function makeImage(input: {
   id: string;
@@ -679,6 +686,305 @@ describe("composerDraftStore review comments", () => {
   });
 });
 
+describe("composerDraftStore local draft model teams", () => {
+  const draftId = DraftId.make("draft-team-session");
+  const threadId = ThreadId.make("future-server-thread");
+  const projectRef = scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("team-project"));
+  const remoteProject = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, projectRef.projectId);
+  const parent = ProviderInstanceId.make("primary-account");
+  const second = ProviderInstanceId.make("other-account");
+  const team: ThreadModelTeam = {
+    threadId,
+    answeringInstanceId: parent,
+    forModel: "parent-model",
+    members: [
+      {
+        instanceId: second,
+        model: "worker-model",
+        role: "advisor",
+        instructions: "Review the output.",
+      },
+    ],
+  };
+  const read = () => selectDraftModelTeams(useComposerDraftStore.getState(), draftId);
+  beforeEach(resetComposerDraftStore);
+
+  it("retains the server project ID, draft team and prompt when reopening a Windows folder without a remote", () => {
+    const logicalKey = derivePhysicalProjectKeyFromPath(
+      projectRef.environmentId,
+      "C:\\Projects\\Keep",
+    );
+    const store = useComposerDraftStore.getState();
+    store.setLogicalProjectDraftThreadId(logicalKey, projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "first request");
+    store.updateDraftModelTeam(draftId, team);
+    const { partialize, merge } = useComposerDraftStore.persist.getOptions();
+    const snapshot = JSON.parse(JSON.stringify(partialize!(useComposerDraftStore.getState())));
+    useComposerDraftStore.setState(merge!(snapshot, useComposerDraftStore.getInitialState()), true);
+    expect(store.getDraftSession(draftId)).toMatchObject({
+      ...projectRef,
+      threadId,
+      logicalProjectKey: logicalKey,
+      modelTeams: [team],
+    });
+    expect(store.getDraftSessionByLogicalProjectKey(logicalKey)?.draftId).toBe(draftId);
+    expect(store.getComposerDraft(draftId)?.prompt).toBe("first request");
+  });
+
+  it("uses the legacy scoped index to restore missing physical metadata without treating a modern index as a server ID", () => {
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const key = scopedProjectKey(projectRef);
+    const current = useComposerDraftStore.getInitialState();
+    const legacy = merge({ projectDraftThreadKeyByProjectKey: { [key]: draftId } }, current);
+    expect(legacy.draftThreadsByThreadKey[draftId]).toMatchObject(projectRef);
+    const logical = merge(
+      { logicalProjectDraftThreadKeyByLogicalProjectKey: { [key]: draftId } },
+      current,
+    );
+    expect(logical.draftThreadsByThreadKey[draftId]).toBeUndefined();
+  });
+
+  it("recovers an already overwritten ID only from a unique folder in the original environment", () => {
+    const store = useComposerDraftStore.getState();
+    const { environmentId } = projectRef;
+    const workspaceRoot = "C:\\Projects\\Keep";
+    const logicalKey = derivePhysicalProjectKeyFromPath(environmentId, workspaceRoot);
+    const pathId = ProjectId.make(logicalKey.slice(environmentId.length + 1));
+    store.setLogicalProjectDraftThreadId(
+      logicalKey,
+      { environmentId, projectId: pathId },
+      draftId,
+      {
+        threadId,
+        branch: "keep-branch",
+        worktreePath: "C:\\Worktrees\\Keep",
+      },
+    );
+    store.setPrompt(draftId, "unsent message");
+    store.updateDraftModelTeam(draftId, team);
+    const original = store.getDraftSession(draftId)!;
+    const match = { environmentId, id: projectRef.projectId, workspaceRoot };
+    const foreign = { ...match, environmentId: OTHER_TEST_ENVIRONMENT_ID };
+    const emptyWorkspace = { tabs: [], lastChatViewByProjectKey: {} };
+    for (const catalog of [
+      [foreign],
+      [match, { ...match, id: ProjectId.make("duplicate") }],
+      [match, { ...match, id: pathId }],
+    ]) {
+      restoreDraftFolderProjectId(draftId, catalog, emptyWorkspace);
+      expect(store.getDraftSession(draftId)).toBe(original);
+    }
+    restoreDraftFolderProjectId(draftId, [foreign, match], emptyWorkspace);
+    expect(store.getDraftSession(draftId)).toEqual({
+      ...original,
+      projectId: projectRef.projectId,
+    });
+    expect(store.getComposerDraft(draftId)?.prompt).toBe("unsent message");
+  });
+
+  it.each(["draft", "thread"] as const)(
+    "uses an exact remembered %s reference to resolve projects sharing one Windows folder",
+    (kind) => {
+      const store = useComposerDraftStore.getState();
+      const { environmentId } = projectRef;
+      const workspaceRoot = "C:\\Projects\\Keep";
+      const logicalKey = derivePhysicalProjectKeyFromPath(environmentId, workspaceRoot);
+      const pathId = ProjectId.make(logicalKey.slice(environmentId.length + 1));
+      store.setLogicalProjectDraftThreadId(
+        logicalKey,
+        { environmentId, projectId: pathId },
+        draftId,
+        { threadId },
+      );
+      store.updateDraftModelTeam(draftId, team);
+      const folder = { environmentId, workspaceRoot, id: projectRef.projectId };
+      const catalog = [folder, { ...folder, id: ProjectId.make("other-project") }];
+      const key = scopedProjectKey(projectRef);
+      const view = kind === "draft" ? { kind, draftId } : { kind, environmentId, threadId };
+      const otherKey = scopedProjectKey(scopeProjectRef(environmentId, catalog[1]!.id));
+      restoreDraftFolderProjectId(draftId, catalog, {
+        tabs: [],
+        lastChatViewByProjectKey: { [key]: view, [otherKey]: view },
+      });
+      expect(store.getDraftSession(draftId)?.projectId).toBe(pathId);
+      restoreDraftFolderProjectId(draftId, catalog, {
+        tabs: [{ id: "saved-tab", view, projectKey: key, lastActivatedAt: 0 }],
+        lastChatViewByProjectKey: { [otherKey]: { kind: "draft", draftId: "unrelated" } },
+      });
+      expect(store.getDraftSession(draftId)).toMatchObject({
+        ...projectRef,
+        threadId,
+        modelTeams: [team],
+      });
+    },
+  );
+
+  it("rehydrates local teams through persisted JSON independently of prompt, model and account switches", async () => {
+    const memory = createMemoryStorage();
+    const persist = useComposerDraftStore.persist;
+    const originalStorage = persist.getOptions().storage!;
+    persist.setOptions({ storage: createJSONStorage(() => memory)! });
+    try {
+      const store = useComposerDraftStore.getState();
+      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+      store.updateDraftModelTeam(draftId, team);
+      const otherModel = { ...team, forModel: "another-model", members: [] };
+      const otherAccount = { ...team, answeringInstanceId: second, members: [] };
+      for (const scope of [otherModel, otherAccount]) {
+        store.setModelSelection(
+          draftId,
+          createModelSelection(scope.answeringInstanceId, scope.forModel),
+        );
+        store.updateDraftModelTeam(draftId, scope);
+      }
+      store.setModelSelection(draftId, createModelSelection(parent, team.forModel));
+      store.setDraftThreadContext(draftId, { branch: "feature" });
+      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+      store.clearComposerContent(draftId);
+      const json = await memory.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      expect(json).toBeTruthy();
+      resetComposerDraftStore();
+      await memory.setItem(COMPOSER_DRAFT_STORAGE_KEY, json!);
+      await persist.rehydrate();
+      expect(read()).toEqual([team, otherModel, otherAccount]);
+      const scope = { ...team, forModel: "PARENT-MODEL" };
+      expect(findThreadModelTeam(read(), scope)?.members).toEqual(team.members);
+      store.updateDraftModelTeam(draftId, { ...scope, members: [] });
+      expect(read()).toHaveLength(3);
+      expect(findThreadModelTeam(read(), team)?.members).toEqual([]);
+      store.updateDraftModelTeam(draftId, { ...scope, members: null });
+      expect(read()).toEqual([otherModel, otherAccount]);
+    } finally {
+      persist.setOptions({ storage: originalStorage });
+    }
+  });
+
+  it("keeps a copied account and its exact options through draft reload and promotion", async () => {
+    const memory = createMemoryStorage();
+    const persist = useComposerDraftStore.persist;
+    const originalStorage = persist.getOptions().storage!;
+    persist.setOptions({ storage: createJSONStorage(() => memory)! });
+    try {
+      const store = useComposerDraftStore.getState();
+      const ref = scopeThreadRef(projectRef.environmentId, threadId);
+      const style = {
+        preset: "friendly",
+        tone: "",
+        length: "",
+        explanation: "",
+        instructions: "fixture",
+      } as const;
+      const source = { instanceId: parent, model: "exact-alias" };
+      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+      expect(
+        store.setDraftResponseStyle(
+          draftId,
+          scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId),
+          style,
+        ),
+      ).toBe(false);
+      expect(store.setDraftResponseStyle(draftId, ref, style)).toBe(true);
+      store.setStickyModelSelection({
+        ...source,
+        options: [{ id: "reasoningEffort", value: "high" }],
+      });
+      store.applyStickyState(draftId);
+      store.setModelSelection(draftId, source, { replaceOptions: true, exactModel: true });
+      store.applyStickyState(draftId);
+      store.clearComposerContent(draftId);
+      const json = await memory.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      expect(json).toBeTruthy();
+      resetComposerDraftStore();
+      await memory.setItem(COMPOSER_DRAFT_STORAGE_KEY, json!);
+      await persist.rehydrate();
+      expect(store.getDraftSession(draftId)?.responseStyle).toEqual(style);
+      expect(store.getComposerDraft(draftId)?.modelSelectionByProvider[parent]).toEqual(source);
+      store.markDraftThreadPromoting(draftId, ref);
+      expect(store.setDraftResponseStyle(draftId, ref, style)).toBe(false);
+      finalizePromotedDraftThreadByRef(ref);
+      expect(store.getDraftSession(draftId)).toBeNull();
+      expect(store.getComposerDraft(ref)?.exactModel).toBe(true);
+      expect(store.getComposerDraft(ref)?.modelSelectionByProvider[parent]).toEqual(source);
+      store.setModelSelection(ref, { instanceId: second, model: "manual" });
+      expect(store.getComposerDraft(ref)?.exactModel).toBeFalsy();
+    } finally {
+      persist.setOptions({ storage: originalStorage });
+    }
+  });
+
+  it("isolates drafts by environment and removes their teams on discard or completed promotion", () => {
+    const store = useComposerDraftStore.getState();
+    const empty = read();
+    const remoteId = DraftId.make("remote-draft");
+    const remoteTeam = { ...team, members: [] };
+    const localRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    const remoteRef = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId);
+    const resolve = (ref: typeof localRef) =>
+      selectDraftIdByThreadRef(useComposerDraftStore.getState(), ref);
+    expect(selectDraftModelTeams(store, null)).toBe(empty);
+    store.updateDraftModelTeam(draftId, team);
+    expect(read()).toBe(empty);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setProjectDraftThreadId(remoteProject, remoteId, { threadId });
+    expect(resolve(localRef)).toBe(draftId);
+    expect(resolve(remoteRef)).toBe(remoteId);
+    store.updateDraftModelTeam(draftId, { ...team, threadId: ThreadId.make("different-thread") });
+    expect(read()).toBe(empty);
+    store.updateDraftModelTeam(draftId, team);
+    const local = read();
+    store.updateDraftModelTeam(remoteId, remoteTeam);
+    expect(read()).toBe(local);
+    store.markDraftThreadPromoting(draftId, localRef);
+    store.updateDraftModelTeam(draftId, { ...team, members: null });
+    expect(read()).toBe(local);
+    finalizePromotedDraftThreadByRef(localRef);
+    expect(resolve(localRef)).toBeNull();
+    expect(read()).toBe(empty);
+    expect(selectDraftModelTeams(useComposerDraftStore.getState(), remoteId)).toEqual([remoteTeam]);
+    store.clearProjectDraftThreadById(remoteProject, remoteId);
+    expect(resolve(remoteRef)).toBeNull();
+    expect(selectDraftModelTeams(useComposerDraftStore.getState(), remoteId)).toBe(empty);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    expect(read()).toBe(empty);
+  });
+
+  it("drops account-bound overrides when retargeting a draft and keeps old draft metadata intact", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    const empty = read();
+    store.updateDraftModelTeam(draftId, team);
+    store.setDraftThreadContext(draftId, {
+      projectRef: scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("same-environment")),
+    });
+    expect(read()).toEqual([team]);
+    store.setDraftThreadContext(draftId, { projectRef: remoteProject });
+    expect(read()).toBe(empty);
+    store.updateDraftModelTeam(draftId, team);
+    store.setProjectDraftThreadId(remoteProject, draftId, {
+      threadId: ThreadId.make("replacement"),
+    });
+    expect(read()).toBe(empty);
+
+    const { merge } = useComposerDraftStore.persist.getOptions();
+    const oldDraft = { ...store.getDraftSession(draftId)!, threadId, branch: "old-branch" };
+    const hydrate = (metadata: unknown) =>
+      merge!({ draftThreadsByThreadKey: { [draftId]: metadata } }, store);
+    const legacy = hydrate(oldDraft);
+    expect(legacy.draftThreadsByThreadKey[draftId]?.branch).toBe("old-branch");
+    expect(selectDraftModelTeams(legacy, draftId)).toBe(empty);
+    const repaired = hydrate({
+      ...oldDraft,
+      modelTeams: [
+        { ...team, threadId: "foreign-thread" },
+        { ...team, members: [{}] },
+        team,
+        { ...team, forModel: "PARENT-MODEL" },
+      ],
+    });
+    expect(selectDraftModelTeams(repaired, draftId)).toEqual([team]);
+  });
+});
+
 describe("composerDraftStore project draft thread mapping", () => {
   const projectId = ProjectId.make("project-a");
   const otherProjectId = ProjectId.make("project-b");
@@ -1180,6 +1486,27 @@ describe("composerDraftStore modelSelection", () => {
     );
   });
 
+  it("keeps a newly selected model in its conversation when draft content is cleared", () => {
+    const store = useComposerDraftStore.getState();
+    const otherThreadId = ThreadId.make("other-model-conversation");
+    const otherThreadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId);
+    const nextModel = modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6");
+    const otherModel = modelSelection(CODEX_DRIVER, "gpt-5.4");
+
+    store.setModelSelection(otherThreadRef, otherModel);
+    store.setModelSelection(threadRef, nextModel);
+    store.setPrompt(threadRef, "다음 요청");
+    store.clearComposerContent(threadRef);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
+    ).toEqual(nextModel);
+    expect(
+      draftFor(otherThreadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE],
+    ).toEqual(otherModel);
+  });
+
   it("keeps default-only model selections on the draft", () => {
     const store = useComposerDraftStore.getState();
     store.setModelSelection(threadRef, modelSelection(CODEX_DRIVER, "gpt-5.4"));
@@ -1647,6 +1974,24 @@ describe("composerDraftStore runtime and interaction settings", () => {
     store.setRuntimeMode(threadRef, null);
     store.setInteractionMode(threadRef, null);
 
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+  });
+
+  it("clears model selection overrides while preserving prompt text", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setPrompt(threadRef, "keep prompt");
+    store.setModelSelection(threadRef, modelSelection(CODEX_DRIVER, "gpt-5.4"));
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.activeProvider).toBe("codex");
+
+    store.clearModelSelection(threadRef);
+
+    const remaining = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(remaining?.prompt).toBe("keep prompt");
+    expect(remaining?.activeProvider).toBeNull();
+    expect(remaining?.modelSelectionByProvider).toEqual({});
+
+    store.setPrompt(threadRef, "");
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });

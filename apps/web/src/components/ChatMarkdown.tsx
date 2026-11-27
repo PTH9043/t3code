@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { resultPathKey } from "@t3tools/shared/generatedResults";
-import { MarkdownResultImage } from "./chat/MarkdownResultImage";
+import { MarkdownImageGalleryContext, MarkdownResultImage } from "./chat/MarkdownResultImage";
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import {
   CheckIcon,
@@ -23,6 +23,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import React, {
   Children,
+  createContext,
   Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -58,7 +59,7 @@ import { ScrollArea } from "./ui/scroll-area";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { recordVisitForThread } from "../browserHistoryStore";
-import { useOpenInPreferredEditor } from "../editorPreferences";
+import { useOpenInFileManager, useOpenInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
@@ -71,6 +72,7 @@ import {
   serializeTableElementToCsv,
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
+import { rehypeFactStatusBadges } from "../markdown-fact-status-badges";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
 import {
   normalizeMarkdownLinkDestination,
@@ -83,7 +85,7 @@ import {
 import { readLocalApi } from "../localApi";
 import { resolveAssetUrl } from "../assets/assetUrls";
 import { downloadFile, isDownloadableDocument } from "../browser/downloadFile";
-import { cn } from "../lib/utils";
+import { cn, isMacPlatform, isWindowsPlatform } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
 import { useActiveEnvironmentId } from "../state/entities";
 import { serverEnvironment } from "../state/server";
@@ -113,9 +115,34 @@ interface ChatMarkdownProps {
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
   lineBreaks?: boolean;
+  /** Show status tags such as `[확인 완료]` as inline badges — executive-style answers. */
+  factStatusBadges?: boolean;
+  /** Stable identifier scoping `<details>` open/closed state across virtualization or remounts. */
+  detailsScopeKey?: string | undefined;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_AVAILABLE_EDITORS: ReadonlyArray<never> = [];
+const MAX_DETAILS_OPEN_STATE_ENTRIES = 1000;
+const markdownDetailsOpenStateCache = new Map<string, boolean>();
+export const MarkdownDetailsScopeContext = createContext<string>("global");
+
+function setPersistedMarkdownDetailsOpen(key: string, open: boolean): void {
+  if (markdownDetailsOpenStateCache.has(key)) {
+    markdownDetailsOpenStateCache.delete(key);
+  } else if (markdownDetailsOpenStateCache.size >= MAX_DETAILS_OPEN_STATE_ENTRIES) {
+    const oldestKey = markdownDetailsOpenStateCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      markdownDetailsOpenStateCache.delete(oldestKey);
+    }
+  }
+  markdownDetailsOpenStateCache.set(key, open);
+}
+
+/** Test helper to isolate persisted `<details>` toggle state between cases. */
+export function resetMarkdownDetailsOpenStateCache(): void {
+  markdownDetailsOpenStateCache.clear();
+}
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
@@ -155,6 +182,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     ...defaultSchema.attributes,
     "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
     code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta", "dataInlineCode"],
+    p: [...(defaultSchema.attributes?.p ?? []), "dataImageGallery"],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -169,6 +197,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
+  remarkGroupConsecutiveImages,
 ] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
@@ -178,11 +207,38 @@ const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkBreaks,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
+  remarkGroupConsecutiveImages,
 ] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+
+function rehypeStampDetailsIndices() {
+  return (tree: MarkdownAstNode) => {
+    let detailsIndex = 0;
+    const visit = (node: MarkdownAstNode) => {
+      if (node.type === "element" && node.tagName === "details") {
+        node.properties = {
+          ...node.properties,
+          dataMarkdownDetailsIndex: String(detailsIndex++),
+        };
+      }
+      if (Array.isArray(node.children)) {
+        for (const child of node.children) {
+          visit(child);
+        }
+      }
+    };
+    visit(tree);
+  };
+}
 
 const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypeRaw,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
+  rehypeStampDetailsIndices,
+] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+const CHAT_MARKDOWN_REHYPE_PLUGINS_WITH_FACT_STATUS_BADGES = [
+  ...CHAT_MARKDOWN_REHYPE_PLUGINS,
+  rehypeFactStatusBadges,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
 
 function extractFenceLanguage(className: string | undefined): string {
@@ -224,12 +280,85 @@ function extractPreCodeMeta(node: unknown): string | undefined {
 
 type MarkdownAstNode = {
   type?: string;
+  tagName?: string;
+  value?: unknown;
   meta?: unknown;
+  properties?: Record<string, unknown>;
   data?: {
     hProperties?: Record<string, unknown>;
   };
   children?: MarkdownAstNode[];
 };
+
+function extractImageOnlyParagraphImages(node: MarkdownAstNode): MarkdownAstNode[] | null {
+  if (node.type !== "paragraph" || !Array.isArray(node.children) || node.children.length === 0) {
+    return null;
+  }
+  const images: MarkdownAstNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "image" || child.type === "imageReference") {
+      images.push(child);
+      continue;
+    }
+    if (child.type === "break") continue;
+    if (child.type === "text" && typeof child.value === "string" && child.value.trim() === "") {
+      continue;
+    }
+    return null;
+  }
+  return images.length > 0 ? images : null;
+}
+
+/**
+ * Merges consecutive image-only paragraphs (e.g. `![a](1.png)\n\n![b](2.png)`)
+ * and marks paragraphs containing 2+ images so they render together as a grid.
+ */
+function remarkGroupConsecutiveImages() {
+  return (tree: MarkdownAstNode) => {
+    const visit = (node: MarkdownAstNode) => {
+      if (!Array.isArray(node.children)) return;
+      const nextChildren: MarkdownAstNode[] = [];
+      let index = 0;
+      while (index < node.children.length) {
+        const current = node.children[index]!;
+        const currentImages = extractImageOnlyParagraphImages(current);
+        if (!currentImages) {
+          visit(current);
+          nextChildren.push(current);
+          index += 1;
+          continue;
+        }
+        const mergedImages = [...currentImages];
+        let cursor = index + 1;
+        while (cursor < node.children.length) {
+          const siblingImages = extractImageOnlyParagraphImages(node.children[cursor]!);
+          if (!siblingImages) break;
+          mergedImages.push(...siblingImages);
+          cursor += 1;
+        }
+        if (mergedImages.length >= 2) {
+          nextChildren.push({
+            ...current,
+            children: mergedImages,
+            data: {
+              ...current.data,
+              hProperties: {
+                ...current.data?.hProperties,
+                dataImageGallery: "true",
+              },
+            },
+          });
+        } else {
+          nextChildren.push(current);
+        }
+        index = cursor;
+      }
+      node.children = nextChildren;
+    };
+
+    visit(tree);
+  };
+}
 
 function remarkPreserveCodeMeta() {
   return (tree: MarkdownAstNode) => {
@@ -465,11 +594,21 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   );
 }
 
-function MarkdownDetails({
+function MarkdownTableRenderer({
+  node: _node,
+  ...props
+}: React.ComponentProps<"table"> & { node?: unknown }) {
+  return <MarkdownTable {...props} />;
+}
+
+export function MarkdownDetails({
   children,
   open = false,
-}: Pick<React.ComponentProps<"details">, "children" | "open">) {
-  const [isOpen, setIsOpen] = useState(open);
+  detailsIndex,
+}: Pick<React.ComponentProps<"details">, "children" | "open"> & {
+  detailsIndex?: string | undefined;
+}) {
+  const scopeKey = use(MarkdownDetailsScopeContext);
   const childNodes = Children.toArray(children);
   const summaryIndex = childNodes.findIndex(
     (child) => isValidElement(child) && child.type === "summary",
@@ -480,13 +619,32 @@ function MarkdownDetails({
       ? summaryNode.props.children
       : "세부 정보";
   const content = childNodes.filter((_, index) => index !== summaryIndex);
+  const summaryKey = nodeToPlainText(summary).trim();
+  const persistKey = `${scopeKey}#${detailsIndex ?? "x"}:${summaryKey}`;
+  const defaultOpen = Boolean(open);
+  const [openState, setOpenState] = useState<{ key: string; open: boolean }>(() => ({
+    key: persistKey,
+    open: markdownDetailsOpenStateCache.get(persistKey) ?? defaultOpen,
+  }));
+  const isOpen =
+    openState.key === persistKey
+      ? openState.open
+      : (markdownDetailsOpenStateCache.get(persistKey) ?? defaultOpen);
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      setPersistedMarkdownDetailsOpen(persistKey, nextOpen);
+      setOpenState({ key: persistKey, open: nextOpen });
+    },
+    [persistKey],
+  );
 
   return (
     <Collapsible
-      defaultOpen={open}
-      onOpenChange={setIsOpen}
+      open={isOpen}
+      onOpenChange={handleOpenChange}
       className="chat-markdown-details my-2 border-y border-border/60"
       data-markdown-details=""
+      data-markdown-details-index={detailsIndex}
       data-markdown-details-open={isOpen ? "true" : "false"}
     >
       <CollapsibleTrigger
@@ -505,6 +663,22 @@ function MarkdownDetails({
         </div>
       </CollapsiblePanel>
     </Collapsible>
+  );
+}
+
+function MarkdownDetailsRenderer({
+  node: _node,
+  children,
+  open,
+  "data-markdown-details-index": detailsIndex,
+}: React.ComponentProps<"details"> & {
+  node?: unknown;
+  "data-markdown-details-index"?: string;
+}) {
+  return (
+    <MarkdownDetails open={open} detailsIndex={detailsIndex}>
+      {children}
+    </MarkdownDetails>
   );
 }
 
@@ -751,12 +925,16 @@ interface MarkdownFileLinkProps {
   iconPath: string;
   displayPath: string;
   workspaceRelativePath: string | null;
+  isDirectory?: boolean | undefined;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen: (targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>;
+  onOpenInFileManager?:
+    | ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>)
+    | undefined;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   onDownload?: (() => Promise<void>) | undefined;
   downloadOnClick?: boolean | undefined;
@@ -1036,18 +1214,26 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   iconPath,
   displayPath,
   workspaceRelativePath,
+  isDirectory = false,
   line,
   label,
   copyMarkdown,
   theme,
   threadRef,
   onOpen,
+  onOpenInFileManager,
   onOpenInBrowser,
   onDownload,
   downloadOnClick = false,
   className,
 }: MarkdownFileLinkProps) {
   const [downloading, setDownloading] = useState(false);
+  const fileManagerOpenLabel =
+    typeof navigator !== "undefined" && isMacPlatform(navigator.platform)
+      ? "Finder에서 열기"
+      : typeof navigator !== "undefined" && isWindowsPlatform(navigator.platform)
+        ? "파일 탐색기에서 열기"
+        : "파일 관리자에서 열기";
   const handleDownload = useCallback(() => {
     if (!onDownload || downloading) return;
     setDownloading(true);
@@ -1098,13 +1284,62 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onOpen, targetPath]);
 
+  const handleOpenInFileManager = useCallback(() => {
+    if (!onOpenInFileManager) {
+      handleOpenInEditor();
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await onOpenInFileManager(targetPath);
+        if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+          return;
+        }
+        reportMarkdownActionFailure(
+          { operation: "open-in-file-manager", target: targetPath },
+          result.cause,
+        );
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `${fileManagerOpenLabel} 실패`,
+            description: "폴더를 열지 못했습니다. 경로가 존재하는지 확인하세요.",
+          }),
+        );
+      } catch (cause) {
+        reportMarkdownActionFailure(
+          { operation: "open-in-file-manager", target: targetPath },
+          cause,
+        );
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `${fileManagerOpenLabel} 실패`,
+            description: "폴더를 열지 못했습니다. 다시 시도하세요.",
+          }),
+        );
+      }
+    })();
+  }, [fileManagerOpenLabel, handleOpenInEditor, onOpenInFileManager, targetPath]);
+
   const handleOpenInFilePreview = useCallback(() => {
+    if (isDirectory) {
+      handleOpenInFileManager();
+      return;
+    }
     if (!threadRef || !workspaceRelativePath) {
       handleOpenInEditor();
       return;
     }
     useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line);
-  }, [handleOpenInEditor, line, threadRef, workspaceRelativePath]);
+  }, [
+    handleOpenInEditor,
+    handleOpenInFileManager,
+    isDirectory,
+    line,
+    threadRef,
+    workspaceRelativePath,
+  ]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -1120,6 +1355,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { operation: "open-file-in-browser", target: targetPath },
           result.cause,
         );
+        // When an HTML/PDF file lives outside registered workspaces, fall back
+        // to revealing/opening it in the OS file manager instead of failing dead.
+        if (onOpenInFileManager) {
+          handleOpenInFileManager();
+          return;
+        }
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1132,6 +1373,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { operation: "open-file-in-browser", target: targetPath },
           cause,
         );
+        if (onOpenInFileManager) {
+          handleOpenInFileManager();
+          return;
+        }
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1141,7 +1386,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         );
       }
     })();
-  }, [onOpenInBrowser, targetPath]);
+  }, [handleOpenInFileManager, onOpenInBrowser, onOpenInFileManager, targetPath]);
 
   const handleCopy = useCallback(
     (value: string, title: string) => {
@@ -1193,6 +1438,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       try {
         const clicked = await api.contextMenu.show(
           [
+            ...(onOpenInFileManager
+              ? ([{ id: "open-in-file-manager", label: fileManagerOpenLabel }] as const)
+              : []),
             ...(onDownload ? ([{ id: "download", label: "파일 다운로드" }] as const) : []),
             { id: "open", label: "편집기에서 열기" },
             ...(onOpenInBrowser
@@ -1204,6 +1452,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           { x: event.clientX, y: event.clientY },
         );
 
+        if (clicked === "open-in-file-manager") {
+          handleOpenInFileManager();
+          return;
+        }
         if (clicked === "download") {
           handleDownload();
           return;
@@ -1232,12 +1484,15 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     },
     [
       displayPath,
+      fileManagerOpenLabel,
       handleCopy,
       handleDownload,
       handleOpenInBrowser,
       handleOpenInEditor,
+      handleOpenInFileManager,
       onDownload,
       onOpenInBrowser,
+      onOpenInFileManager,
       targetPath,
     ],
   );
@@ -1271,7 +1526,13 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               }}
               onContextMenu={handleContextMenu}
             >
-              <FileTagChipContent path={iconPath} label={label} theme={theme} selectable />
+              <FileTagChipContent
+                path={iconPath}
+                label={label}
+                theme={theme}
+                kind={isDirectory ? "directory" : undefined}
+                selectable
+              />
             </a>
           }
         />
@@ -1280,7 +1541,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
         >
           <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
-            {displayPath}
+            {isDirectory ? `${fileManagerOpenLabel} · ${displayPath}` : displayPath}
           </div>
         </TooltipPopup>
       </Tooltip>
@@ -1320,16 +1581,76 @@ function areMarkdownFileLinkPropsEqual(
     previous.iconPath === next.iconPath &&
     previous.displayPath === next.displayPath &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
+    previous.isDirectory === next.isDirectory &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&
     previous.theme === next.theme &&
     previous.threadRef === next.threadRef &&
     previous.onOpen === next.onOpen &&
+    previous.onOpenInFileManager === next.onOpenInFileManager &&
     previous.onOpenInBrowser === next.onOpenInBrowser &&
     previous.onDownload === next.onDownload &&
     previous.downloadOnClick === next.downloadOnClick &&
     previous.className === next.className
+  );
+}
+
+function MarkdownInlineImage({
+  src,
+  alt,
+  onImageExpand,
+  ...props
+}: React.ComponentProps<"img"> & {
+  onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
+}) {
+  const inGallery = use(MarkdownImageGalleryContext);
+  const image = (
+    <img
+      {...props}
+      src={src}
+      alt={alt}
+      loading="lazy"
+      decoding="async"
+      className={
+        inGallery
+          ? "mx-auto block h-44 w-full object-contain sm:h-48"
+          : "my-2 h-auto max-h-[520px] max-w-full object-contain"
+      }
+    />
+  );
+  if (!inGallery) {
+    return image;
+  }
+  const wrapped =
+    onImageExpand && typeof src === "string" && src.length > 0 ? (
+      <button
+        type="button"
+        className="block w-full cursor-zoom-in"
+        aria-label={"이미지 확대 " + (alt || "이미지")}
+        onClick={() => onImageExpand({ images: [{ src, name: alt || src }], index: 0 })}
+      >
+        {image}
+      </button>
+    ) : (
+      image
+    );
+  return (
+    <span
+      className="block overflow-hidden rounded-lg border border-border bg-card"
+      style={{
+        backgroundImage:
+          "conic-gradient(from 90deg,#80808018 25%,transparent 0 50%,#80808018 0 75%,transparent 0)",
+        backgroundSize: "20px 20px",
+      }}
+    >
+      {wrapped}
+      {alt ? (
+        <span className="block truncate border-t border-border/70 bg-card px-2 py-1 text-[11px] text-muted-foreground">
+          {alt}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -1344,10 +1665,20 @@ function ChatMarkdown({
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
   lineBreaks = false,
+  factStatusBadges = false,
+  detailsScopeKey,
 }: ChatMarkdownProps) {
   // Meeting protocol tags (<t3_chair_verdict> etc.) are machine payloads the
   // reactor parses; render their human reading instead of raw JSON.
   const text = useMemo(() => formatMeetingProtocolText(rawText), [rawText]);
+  const effectiveDetailsScopeKey = useMemo(() => {
+    if (detailsScopeKey) return detailsScopeKey;
+    const envScope = threadRef
+      ? `${threadRef.environmentId}:${threadRef.threadId}`
+      : (cwd ?? "global");
+    const prefix = text.slice(0, 160);
+    return `${envScope}:${fnv1a32(prefix).toString(36)}`;
+  }, [cwd, detailsScopeKey, text, threadRef]);
   const { resolvedTheme } = useTheme();
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -1356,12 +1687,20 @@ function ChatMarkdown({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(threadRef?.environmentId ?? null);
-  const environmentId = useActiveEnvironmentId();
+  const activeEnvironmentId = useActiveEnvironmentId();
+  const environmentId = threadRef?.environmentId ?? activeEnvironmentId;
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
-  const openInPreferredEditor = useOpenInPreferredEditor(
-    environmentId,
-    serverConfig?.availableEditors ?? [],
+  const rawAvailableEditors = serverConfig?.availableEditors;
+  const availableEditorsKey = rawAvailableEditors?.join("\0") ?? "";
+  const availableEditors = useMemo(
+    () => rawAvailableEditors ?? EMPTY_AVAILABLE_EDITORS,
+    // Keep reference identity stable across periodic background serverConfig refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [availableEditorsKey],
   );
+  const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
+  const openInFileManager = useOpenInFileManager(environmentId, availableEditors);
+  const canOpenInFileManager = serverConfig === null || availableEditors.includes("file-manager");
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
   // File-link metadata costs two full-text scans plus per-link resolution.
   // Running that on every streamed chunk taxes the main thread exactly when
@@ -1516,20 +1855,23 @@ function ChatMarkdown({
           iconPath={fileLinkMeta.filePath}
           displayPath={fileLinkMeta.displayPath}
           workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
+          isDirectory={fileLinkMeta.isDirectory}
           line={fileLinkMeta.line}
           label={labelParts.join(" · ")}
           copyMarkdown={copyMarkdown}
           theme={resolvedTheme}
           threadRef={threadRef}
           onOpen={openInPreferredEditor}
+          onOpenInFileManager={canOpenInFileManager ? openInFileManager : undefined}
           onDownload={
-            threadRef
+            threadRef && !fileLinkMeta.isDirectory
               ? () => downloadMarkdownFile(fileLinkMeta.filePath, fileLinkMeta.basename)
               : undefined
           }
-          downloadOnClick={downloadOnClick}
+          downloadOnClick={!fileLinkMeta.isDirectory && downloadOnClick}
           onOpenInBrowser={
             threadRef &&
+            !fileLinkMeta.isDirectory &&
             isPreviewSupportedInRuntime() &&
             isBrowserPreviewFile(fileLinkMeta.filePath)
               ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
@@ -1562,18 +1904,35 @@ function ChatMarkdown({
               onImageExpand={onImageExpand}
             />
           );
-        return (
-          <img
-            {...props}
-            src={src}
-            alt={alt}
-            loading="lazy"
-            decoding="async"
-            className="my-2 h-auto max-h-[520px] max-w-full object-contain"
-          />
-        );
+        return <MarkdownInlineImage {...props} src={src} alt={alt} onImageExpand={onImageExpand} />;
       },
-      p({ node: _node, children, ...props }) {
+      p({ node, children, ...props }) {
+        if (node?.properties?.dataImageGallery != null) {
+          const visibleChildren = Children.toArray(children).filter((child) => {
+            if (typeof child === "string") return child.trim().length > 0;
+            if (isValidElement(child) && child.type === "br") return false;
+            return true;
+          });
+          const count = visibleChildren.length;
+          if (count === 0) return null;
+          if (count >= 2) {
+            return (
+              <MarkdownImageGalleryContext.Provider value={true}>
+                <div
+                  data-markdown-image-gallery="true"
+                  data-markdown-image-count={count}
+                  className={cn(
+                    "my-2 grid gap-2",
+                    count === 2 || count === 4 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3",
+                  )}
+                >
+                  {visibleChildren}
+                </div>
+              </MarkdownImageGalleryContext.Provider>
+            );
+          }
+          return <p {...props}>{visibleChildren}</p>;
+        }
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
       li({ node, children, ...props }) {
@@ -1713,12 +2072,8 @@ function ChatMarkdown({
           </code>
         );
       },
-      table({ node: _node, ...props }) {
-        return <MarkdownTable {...props} />;
-      },
-      details({ node: _node, children, open: detailsOpen }) {
-        return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
-      },
+      table: MarkdownTableRenderer,
+      details: MarkdownDetailsRenderer,
       pre({ node, children, ...props }) {
         const codeBlock = extractCodeBlock(children);
         if (!codeBlock) {
@@ -1760,6 +2115,8 @@ function ChatMarkdown({
     resultAttachments,
     onImageExpand,
     openInPreferredEditor,
+    openInFileManager,
+    canOpenInFileManager,
     openExternalLinkInPreview,
     openMarkdownFileInPreview,
     resolvedTheme,
@@ -1770,24 +2127,30 @@ function ChatMarkdown({
   /* eslint-enable react/no-unstable-nested-components */
 
   return (
-    <div
-      className={cn(
-        "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80",
-        className,
-      )}
-      onCopy={handleCopy}
-    >
-      <ReactMarkdown
-        remarkPlugins={
-          lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS
-        }
-        rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
+    <MarkdownDetailsScopeContext.Provider value={effectiveDetailsScopeKey}>
+      <div
+        className={cn(
+          "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80",
+          className,
+        )}
+        onCopy={handleCopy}
       >
-        {text}
-      </ReactMarkdown>
-    </div>
+        <ReactMarkdown
+          remarkPlugins={
+            lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS
+          }
+          rehypePlugins={
+            factStatusBadges
+              ? CHAT_MARKDOWN_REHYPE_PLUGINS_WITH_FACT_STATUS_BADGES
+              : CHAT_MARKDOWN_REHYPE_PLUGINS
+          }
+          components={markdownComponents}
+          urlTransform={markdownUrlTransform}
+        >
+          {text}
+        </ReactMarkdown>
+      </div>
+    </MarkdownDetailsScopeContext.Provider>
   );
 }
 

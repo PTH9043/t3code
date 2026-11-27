@@ -131,9 +131,9 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 
 const makeGeminiConfig = (overrides: Partial<GeminiSettings>): GeminiSettings => ({
   enabled: false,
-  binaryPath: "gemini",
+  binaryPath: "agy",
   homePath: "",
-  googleCloudProject: "",
+  autoOptimizeThoughtLevel: true,
   customModels: [],
   ...overrides,
 });

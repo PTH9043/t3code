@@ -62,6 +62,22 @@ describe("evidence handoff", () => {
     const failed = report + "\nThe final check failed; peer disagrees.";
     expect(compactEvidenceHandoff(failed, source)).toBe(failed);
   });
+  it("formats clean Windows paths without JSON double-backslash escaping", () => {
+    const winSource = {
+      path: "E:\\NewAutoUsage\\userdata\\workspace-context\\abc\\123.txt",
+      sha256: "123",
+      chars: 42,
+    };
+    const preview = boundedEvidencePreview(
+      "a".repeat(2500),
+      { ...winSource, sha256: contextArtifactHash("a".repeat(2500)), chars: 2500 },
+      2000,
+    );
+    expect(preview).toContain(
+      "원문 파일: E:\\NewAutoUsage\\userdata\\workspace-context\\abc\\123.txt;",
+    );
+    expect(preview).not.toContain("E:\\\\NewAutoUsage");
+  });
 });
 
 effectIt.effect("source is isolated by project/run, immutable and readable before use", () =>

@@ -1,5 +1,9 @@
 import { pipe } from "effect/Function";
 import { importedConversationMessages, importedConversationActivity } from "@t3tools/contracts";
+import {
+  projectToolActivityOperation,
+  toolActivityCallIdentity,
+} from "@t3tools/shared/toolActivity";
 import * as Arr from "effect/Array";
 import * as O from "effect/Order";
 import type {
@@ -119,8 +123,13 @@ function compactActivityPayload(
 ): OrchestrationThreadActivity {
   if (
     activity.kind === "context-window.updated" ||
+    // A plan is a few short steps and stays the answer to "which step is it on" for as
+    // long as the step runs, which can be hundreds of tool rows.
+    activity.kind === "turn.plan.updated" ||
     activity.kind === "orchestra.block" ||
     activity.kind === "conversation.handoff.prepared" ||
+    activity.kind === "conversation.handoff.delivered" ||
+    activity.kind === "conversation.turn-assigned" ||
     activity.kind === "conversation.imported"
   )
     return activity;
@@ -140,10 +149,34 @@ function compactActivityPayload(
     "requestId",
     "requestKind",
     "requestType",
+    "outcome",
     "itemType",
     "title",
     "role",
     "summary",
+    // Orchestra/council execution & tool-group attribution keys: dropping these
+    // detaches compacted tool rows from their orchestra block and turns them
+    // into unattributed "작업 모델 확인 안 됨" timeline rows.
+    "executionId",
+    "messageId",
+    "attempt",
+    "attemptId",
+    "attemptNumber",
+    "provider",
+    "providerInstanceId",
+    "providerSessionId",
+    "providerTurnId",
+    "parentToolUseId",
+    "reportedModel",
+    "toolCallId",
+    "toolCallIdAmbiguous",
+    "itemId",
+    "providerItemId",
+    "toolUseId",
+    "toolName",
+    "exitCode",
+    "toolActivityTurnState",
+    "toolActivityOperation",
     // A `user-input.requested` row IS the pending question: deriveOpenUserInputRequests
     // drops the request outright when `questions` is missing, so compacting it away
     // takes the answer UI with it and leaves the agent blocked on a prompt the user can
@@ -157,6 +190,38 @@ function compactActivityPayload(
       next[key] = source[key];
       preservedAny = true;
     }
+  }
+  if (next.toolCallId === undefined && next.toolCallIdAmbiguous === undefined) {
+    const callIdentity = toolActivityCallIdentity(source);
+    if (callIdentity.toolCallId !== undefined) {
+      next.toolCallId = callIdentity.toolCallId;
+      preservedAny = true;
+    } else if (callIdentity.toolCallIdAmbiguous === true) {
+      next.toolCallIdAmbiguous = true;
+      preservedAny = true;
+    }
+  }
+  if (
+    next.toolActivityOperation === undefined &&
+    (source.data !== undefined || source.detail !== undefined) &&
+    (activity.kind === "tool.started" ||
+      activity.kind === "tool.progress" ||
+      activity.kind === "tool.updated" ||
+      activity.kind === "tool.completed")
+  ) {
+    const stamped = projectToolActivityOperation(activity);
+    if (stamped !== undefined) {
+      next.toolActivityOperation = stamped;
+      preservedAny = true;
+    }
+  }
+  if (
+    typeof source.detail === "string" &&
+    (activity.kind === "provider.user-input.respond.failed" ||
+      activity.kind === "provider.approval.respond.failed")
+  ) {
+    next.detail = source.detail.slice(0, 500);
+    preservedAny = true;
   }
   // Pool: rows with nothing to preserve all share one frozen placeholder.
   return { ...activity, payload: preservedAny ? next : EMPTY_COMPACTED_PAYLOAD };
@@ -179,7 +244,13 @@ export function capActivityRows(
   for (let i = cut - 1; i >= 0; i--) {
     const evicted = activities[i];
     if (evicted === undefined) continue;
-    if (evicted.kind === "orchestra.block" && blockCount < MESSAGE_ROW_CAP) {
+    if (
+      evicted.kind === "user-input.resolved" ||
+      evicted.kind === "approval.resolved" ||
+      evicted.kind === "provider.user-input.delivery.finished"
+    ) {
+      preserved.push(evicted);
+    } else if (evicted.kind === "orchestra.block" && blockCount < MESSAGE_ROW_CAP) {
       preserved.push(evicted);
       blockCount++;
     } else if (!hasContextWindow && isResolvableContextWindowActivity(evicted)) {

@@ -1,4 +1,6 @@
+import * as Schema from "effect/Schema";
 import {
+  OrchestrationRpcSchemas,
   ProjectId,
   WorkspaceKnowledgeItemId,
   type SharedLibraryMatch,
@@ -10,6 +12,38 @@ import { expect, it } from "vite-plus/test";
 import { composeWorkspacePrompt } from "./workspacePrompt.ts";
 
 const projectId = ProjectId.make("workspace-a");
+
+it.each(["standard", "relevant"] as const)(
+  "labels the published PDF passage and pending edition in %s mode",
+  (contextMode) => {
+    const body = "The coolant reading is 30.";
+    const match: WorkspaceRagMatch = {
+      projectId,
+      itemId: WorkspaceKnowledgeItemId.make("pdf-batch"),
+      kind: "rag-source",
+      title: "Coolant",
+      snippet: "coolant reading",
+      content: body,
+      score: 1,
+      updatedAt: "2026-11-01T00:00:00Z",
+      pdfRevision: { publishedVersion: 2, pending: { version: 3, status: "indexing" } },
+    };
+    const wire = Schema.fromJsonString(OrchestrationRpcSchemas.searchWorkspaceRag.output);
+    const encoded = Schema.encodeSync(wire)({ matches: [match] });
+    const decoded = Schema.decodeUnknownSync(wire)(encoded);
+    expect(decoded.matches[0]?.pdfRevision).toEqual(match.pdfRevision);
+    const result = composeWorkspacePrompt({
+      now: Date.parse(match.updatedAt),
+      request: { projectId, task: "coolant reading", contextMode },
+      items: [],
+      ragMatches: decoded.matches,
+    });
+    expect(result.prompt).toContain("2판 공개 · 3판 색인 중");
+    expect(result.sourcePassages).toHaveLength(1);
+    const passage = result.sourcePassages![0]!;
+    expect(result.prompt.slice(passage.start, passage.end)).toBe(body);
+  },
+);
 
 it("preserves mandatory user rules even in the standard rollback path", () => {
   const rule = "사용자 원문 ".repeat(500) + "끝의 필수 제약";

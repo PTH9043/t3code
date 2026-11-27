@@ -201,6 +201,7 @@ export function getAppModelOptionsForInstance(
   entry: ProviderInstanceEntry,
 ): AppModelOption[] {
   const options: AppModelOption[] = entry.models.map(toAppModelOption);
+  if (entry.individualAccount) return options;
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
     Arr.filterMap(entry.models, (model) =>

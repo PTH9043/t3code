@@ -34,7 +34,12 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import { ProviderService } from "./provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
+import { createMemoryWatchdogController } from "./diagnostics/MemoryWatchdog.ts";
 import { forkParked } from "./serverActivation.ts";
+import { startUpgradeRoomDelivery } from "./orchestration/upgradeRoomDelivery.ts";
+import { TelegramChannels } from "./telegram/service.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import {
   formatHeadlessServeOutput,
@@ -302,6 +307,8 @@ export const make = (options?: StartupOptions) =>
     const keybindings = yield* Keybindings.Keybindings;
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+    const providerServiceOpt = yield* Effect.serviceOption(ProviderService);
+    const providerSessionDirectoryOpt = yield* Effect.serviceOption(ProviderSessionDirectory);
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -351,6 +358,28 @@ export const make = (options?: StartupOptions) =>
         Effect.gen(function* () {
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+          const memoryWatchdog = createMemoryWatchdogController({
+            stateDir: serverConfig.stateDir,
+            logsDir: serverConfig.logsDir,
+            dbPath: serverConfig.dbPath,
+            ...(Option.isSome(providerServiceOpt)
+              ? {
+                  getProviderSessionCount: () =>
+                    providerServiceOpt.value
+                      .listSessions()
+                      .pipe(Effect.map((sessions) => sessions.length)),
+                }
+              : {}),
+            ...(Option.isSome(providerSessionDirectoryOpt)
+              ? {
+                  getDirectoryBindingCount: () =>
+                    providerSessionDirectoryOpt.value
+                      .listBindings()
+                      .pipe(Effect.map((bindings) => bindings.length)),
+                }
+              : {}),
+          });
+          yield* memoryWatchdog.start.pipe(Scope.provide(reactorScope));
         }),
       );
 
@@ -358,7 +387,7 @@ export const make = (options?: StartupOptions) =>
       const environment = yield* serverEnvironment.getDescriptor;
       yield* Effect.logDebug("startup phase: preparing welcome payload");
 
-      if (serverConfig.autoBootstrapProjectFromCwd) {
+      if (!serverConfig.upgradeRoom && serverConfig.autoBootstrapProjectFromCwd) {
         yield* forkParked(
           runStartupPhase(
             "welcome.autobootstrap",
@@ -445,6 +474,24 @@ export const make = (options?: StartupOptions) =>
 
       yield* Effect.logDebug("Accepting commands");
       yield* commandGate.signalCommandReady;
+      const telegram = yield* Effect.serviceOption(TelegramChannels);
+      if (Option.isSome(telegram)) yield* telegram.value.start;
+      const primaryEngine = yield* Effect.serviceOption(
+        OrchestrationEngine.OrchestrationEngineService,
+      );
+      if (!serverConfig.upgradeRoom && Option.isSome(primaryEngine)) {
+        yield* Effect.acquireRelease(
+          Effect.tryPromise(() =>
+            startUpgradeRoomDelivery(serverConfig, primaryEngine.value.dispatch),
+          ),
+          (stop) => (stop ? Effect.promise(stop) : Effect.void),
+        ).pipe(
+          Scope.provide(reactorScope),
+          Effect.catch(() =>
+            Effect.logWarning("AutoUsage 업그레이드 기록 연결을 시작할 수 없습니다."),
+          ),
+        );
+      }
       yield* runStartupPhase(
         "ready.publish",
         lifecycleEvents.publish({

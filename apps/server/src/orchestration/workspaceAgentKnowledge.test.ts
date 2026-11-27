@@ -1,6 +1,8 @@
 import {
   DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
   ProjectId,
+  ProviderInstanceId,
+  ThreadId,
   WorkspaceCollaborationRunId,
   WorkspaceTaskNodeId,
   type IsoDateTime,
@@ -112,6 +114,10 @@ describe("Workspace agent knowledge capture", () => {
     });
 
     expect(captures.map((capture) => capture.nodeId)).toEqual(["research", "build"]);
+    expect(captures.map((capture) => capture.item.provenance)).toEqual([
+      { runId, nodeId: "research", actor: "grok", confidence: "high" },
+      { runId, nodeId: "build", actor: "codex", confidence: "high" },
+    ]);
     expect(captures.every((capture) => isAutomaticAgentKnowledgeItem(capture.item))).toBe(true);
     // rag-source is the only kind the isolated RAG index searches.
     expect(captures.every((capture) => capture.item.kind === "rag-source")).toBe(true);
@@ -123,6 +129,43 @@ describe("Workspace agent knowledge capture", () => {
     expect(captures[0]!.item.content).toContain("OUTPUT:\n현재 자료를 조사한 결과다.");
     expect(captures[1]!.item.tags).toContain("agent-codex");
     expect(captures[1]!.item.tags).toContain("node-kind-implementation");
+  });
+
+  it("records the producing model independently of the legacy slot and leaves unknowns absent", () => {
+    const threadId = ThreadId.make("producing-thread");
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("team-account"),
+      model: "model-42",
+    };
+    const task = { ...node({ id: "slot", output: "recorded output" }), threadId, confidence: null };
+    const attempt = {
+      number: 1,
+      agent: task.agent,
+      role: task.role,
+      modelSelection,
+      threadId,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      strategy: "primary",
+      status: "completed",
+      output: task.output,
+      error: null,
+      failureClassification: null,
+      confidence: null,
+      startedAt: at,
+      completedAt: at,
+    } satisfies WorkspaceTaskNode["attempts"][number];
+    const provenance = (attempts: WorkspaceTaskNode["attempts"]) =>
+      toAgentKnowledgeCaptures({
+        run: runWith([{ ...task, attempts }]),
+        settings: DEFAULT_WORKSPACE_AGENT_KNOWLEDGE_SETTINGS,
+        capturedAt: at,
+      })[0]!.item.provenance;
+    const slot = { runId, nodeId: task.id, threadId, actor: "grok" };
+    expect(provenance([attempt])).toEqual({ ...slot, modelSelection });
+    expect(provenance([{ ...attempt, status: "failed" }])).toEqual(slot);
+    expect(provenance([{ ...attempt, threadId: ThreadId.make("other-thread") }])).toEqual(slot);
+    expect(provenance([])).toEqual(slot);
   });
 
   it("keeps one stable item per node so a re-run updates instead of duplicating", () => {

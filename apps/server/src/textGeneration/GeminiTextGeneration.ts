@@ -37,6 +37,7 @@ const isTextGenerationError = Schema.is(TextGenerationError);
 export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(function* (
   geminiSettings: GeminiSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  launch?: import("../provider/Drivers/AntigravityLaunch.ts").AntigravityLaunch,
 ) {
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -63,6 +64,7 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeGeminiAcpRuntime({
         geminiSettings,
+        launch,
         environment,
         childProcessSpawner: commandSpawner,
         cwd,
@@ -87,10 +89,11 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
           runtime,
           currentModelId: currentGeminiModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
+          options: modelSelection.options,
           mapError: (cause) =>
             new TextGenerationError({
               operation,
-              detail: "Failed to set Gemini ACP base model for text generation.",
+              detail: "Failed to set Antigravity ACP base model for text generation.",
               cause,
             }),
         });
@@ -104,7 +107,10 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
           Option.match({
             onNone: () =>
               Effect.fail(
-                new TextGenerationError({ operation, detail: "Gemini ACP request timed out." }),
+                new TextGenerationError({
+                  operation,
+                  detail: "Antigravity ACP request timed out.",
+                }),
               ),
             onSome: (value) => Effect.succeed(value),
           }),
@@ -114,7 +120,7 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
             ? cause
             : new TextGenerationError({
                 operation,
-                detail: "Gemini ACP request failed.",
+                detail: "Antigravity ACP request failed.",
                 cause,
               }),
         ),
@@ -126,8 +132,8 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
           operation,
           detail:
             promptResult.stopReason === "cancelled"
-              ? "Gemini ACP request was cancelled."
-              : "Gemini CLI returned empty output.",
+              ? "Antigravity ACP request was cancelled."
+              : "Antigravity CLI returned empty output.",
         });
       }
 
@@ -138,7 +144,7 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
             Effect.fail(
               new TextGenerationError({
                 operation,
-                detail: "Gemini CLI returned invalid structured output.",
+                detail: "Antigravity CLI returned invalid structured output.",
                 cause,
               }),
             ),
@@ -150,7 +156,7 @@ export const makeGeminiTextGeneration = Effect.fn("makeGeminiTextGeneration")(fu
           ? cause
           : new TextGenerationError({
               operation,
-              detail: "Gemini ACP text generation failed.",
+              detail: "Antigravity ACP text generation failed.",
               cause,
             }),
       ),

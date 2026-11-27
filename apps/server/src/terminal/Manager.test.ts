@@ -27,6 +27,10 @@ import * as TestClock from "effect/testing/TestClock";
 import { expect } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  createWindowsTerminalProcessGroup,
+  type WindowsTerminalProcessGroup,
+} from "../process/windowsJobObject.ts";
 import * as TerminalManager from "./Manager.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 
@@ -213,6 +217,7 @@ interface CreateManagerOptions {
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
   ptyAdapter?: FakePtyAdapter;
+  windowsProcessGroup?: WindowsTerminalProcessGroup;
 }
 
 interface ManagerFixture {
@@ -253,6 +258,9 @@ const createManager = (
         processKillGraceMs: options.processKillGraceMs ?? 1,
         ...(options.maxRetainedInactiveSessions !== undefined
           ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
+          : {}),
+        ...(options.windowsProcessGroup !== undefined
+          ? { windowsProcessGroup: options.windowsProcessGroup }
           : {}),
       });
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
@@ -1885,5 +1893,45 @@ it.layer(
       assert.equal(process.killSignals[0], "SIGTERM");
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("terminates registered Windows process trees on close and scoped shutdown", () =>
+    Effect.gen(function* () {
+      const terminatedPids: number[] = [];
+      const windowsProcessGroup = createWindowsTerminalProcessGroup({
+        platform: "win32",
+        currentPid: 1,
+        autoInstallExitHook: false,
+        execFile: (_file, args, _options, callback) => {
+          terminatedPids.push(Number(args[1]));
+          callback(null);
+        },
+      });
+
+      const scope = yield* Scope.make("sequential");
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processKillGraceMs: 1,
+        windowsProcessGroup,
+      }).pipe(Effect.provideService(Scope.Scope, scope));
+
+      yield* manager.open(openInput({ threadId: "win-thread-1" }));
+      yield* manager.open(openInput({ threadId: "win-thread-2" }));
+      const firstPid = ptyAdapter.processes[0]!.pid;
+      const secondPid = ptyAdapter.processes[1]!.pid;
+      expect(windowsProcessGroup.listPids()).toEqual([firstPid, secondPid]);
+
+      yield* manager.close({ threadId: "win-thread-1", terminalId: DEFAULT_TERMINAL_ID });
+      yield* waitFor(
+        Effect.sync(() => terminatedPids.includes(firstPid)),
+        "1200 millis",
+      );
+      expect(windowsProcessGroup.has(firstPid)).toBe(false);
+      expect(windowsProcessGroup.has(secondPid)).toBe(true);
+
+      yield* Scope.close(scope, Exit.void);
+      expect(terminatedPids).toContain(secondPid);
+      expect(windowsProcessGroup.size()).toBe(0);
+      windowsProcessGroup.dispose();
+    }).pipe(Effect.provide(withHostPlatform("win32"))),
   );
 });

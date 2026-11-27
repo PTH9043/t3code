@@ -107,4 +107,78 @@ describe("desktop direct RPC connection", () => {
     expect(bridge.close).toHaveBeenCalledWith(9);
     expect(connection.readyState).toBe(3);
   });
+
+  it("does not send queued frames after the backend closes the connection", async () => {
+    let listener: (frame: DesktopDirectRpcOutput) => void = () => {};
+    const firstSend = deferred<void>();
+    const firstStarted = deferred<void>();
+    const bridge: DesktopDirectRpcBridge = {
+      open: async () => 1,
+      send: vi.fn(() => {
+        firstStarted.resolve();
+        return firstSend.promise;
+      }),
+      close: vi.fn(async () => {}),
+      onFrame: (next) => {
+        listener = next;
+        return () => {};
+      },
+    };
+    const connection = new DirectRpcConnection(bridge);
+    const opened = new Promise<void>((done) =>
+      connection.addEventListener("open", () => done(), { once: true }),
+    );
+    listener({ type: "opened", clientId: 1 });
+    await opened;
+    connection.send("first");
+    connection.send("second");
+    await firstStarted.promise;
+    listener({ type: "closed", clientId: 1 });
+    firstSend.resolve();
+    await firstSend.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bridge.send).toHaveBeenCalledTimes(1);
+    expect(connection.readyState).toBe(3);
+  });
+  it("tolerates a slow local backend but closes when it remains unresponsive", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: (frame: DesktopDirectRpcOutput) => void = () => {};
+      const bridge: DesktopDirectRpcBridge = {
+        open: async () => 1,
+        send: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+        onFrame: (next) => {
+          listener = next;
+          return () => {};
+        },
+      };
+      const connection = new DirectRpcConnection(bridge);
+      const opened = new Promise<void>((done) =>
+        connection.addEventListener("open", () => done(), { once: true }),
+      );
+      listener({ type: "opened", clientId: 1 });
+      await opened;
+      const received = vi.fn();
+      connection.addEventListener("message", received);
+      connection.send('{"_tag":"Ping"}');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(received).toHaveBeenCalled();
+      expect(connection.readyState).toBe(1);
+      listener({ type: "data", clientId: 1, data: '{"_tag":"Pong"}' });
+      connection.send('{"_tag":"Ping"}');
+      await vi.advanceTimersByTimeAsync(5_000);
+      connection.send('{"_tag":"Ping"}');
+      await vi.advanceTimersByTimeAsync(5_000);
+      connection.send('{"_tag":"Ping"}');
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(connection.readyState).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connection.readyState).toBe(3);
+      expect(bridge.close).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

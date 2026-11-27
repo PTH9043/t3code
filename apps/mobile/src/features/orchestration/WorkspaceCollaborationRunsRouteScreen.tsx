@@ -861,6 +861,15 @@ export function WorkspaceCollaborationRunsRouteScreen(props: RouteProps) {
         ListHeaderComponent={
           <View className="mb-1 gap-3">
             {environmentId && projectId && (
+              <Pressable
+                accessibilityRole="button"
+                className="rounded-xl border border-border bg-card p-3"
+                onPress={() => navigation.navigate("KnowledgeWiki", { environmentId, projectId })}
+              >
+                <Text className="font-t3-semibold text-primary">지식 위키 열기</Text>
+              </Pressable>
+            )}
+            {environmentId && projectId && (
               <AttentionInbox
                 threads={attentionThreads}
                 environmentId={environmentId}

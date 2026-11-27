@@ -1,5 +1,13 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+const clicks = vi.hoisted(() => new Map<string, () => void>());
+vi.mock("../ui/button", () => ({
+  Button: (props: { "aria-label": string; onClick: () => void }) => {
+    clicks.set(props["aria-label"], props.onClick);
+    return <button aria-label={props["aria-label"]} />;
+  },
+}));
 
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./ComposerBannerStack";
 
@@ -14,6 +22,28 @@ const banner = (
 });
 
 describe("ComposerBannerStack", () => {
+  it("closes the restart notice on click while leaving the actionable banner alone", () => {
+    const dismiss = vi.fn();
+    const dismissError = vi.fn();
+    const markup = renderToStaticMarkup(
+      <ComposerBannerStack
+        items={[
+          {
+            ...banner("restart"),
+            onDismiss: dismiss,
+            dismissImmediately: true,
+            dismissLabel: "중단 알림 닫기",
+          },
+          { ...banner("recovery", "error"), onDismiss: dismissError, dismissLabel: "오류 닫기" },
+        ]}
+      />,
+    );
+    expect(markup).toContain("중단 알림 닫기");
+    clicks.get("중단 알림 닫기")!();
+    expect(dismiss).toHaveBeenCalledOnce();
+    expect(dismissError).not.toHaveBeenCalled();
+  });
+
   it("keeps expanded banners in layout flow so surrounding content moves out of their way", () => {
     const markup = renderToStaticMarkup(
       <ComposerBannerStack items={[banner("front"), banner("stacked")]} />,
@@ -43,6 +73,12 @@ describe("ComposerBannerStack", () => {
       <ComposerBannerStack items={[banner("front", "default"), banner("stacked", "warning")]} />,
     );
     expect(warningBehind).toContain("border-warning/24");
+  });
+
+  it("spans the composer column instead of a fixed width", () => {
+    const markup = renderToStaticMarkup(<ComposerBannerStack items={[banner("front")]} />);
+    expect(markup.startsWith('<div class="group/banner-stack mx-auto mb-2">')).toBe(true);
+    expect(markup).not.toContain("max-w-3xl");
   });
 
   it("does not render an expandable region for a single banner", () => {

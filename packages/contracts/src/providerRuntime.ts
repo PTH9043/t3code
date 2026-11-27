@@ -28,6 +28,7 @@ const RuntimeEventRawSource = Schema.Union([
   Schema.Literal("claude.sdk.permission"),
   Schema.Literal("codex.sdk.thread-event"),
   Schema.Literal("opencode.sdk.event"),
+  Schema.Literal("muse.cli"),
   Schema.Literal("acp.jsonrpc"),
   Schema.TemplateLiteral(["acp.", Schema.String, ".extension"]),
 ]);
@@ -409,6 +410,8 @@ const TurnDiffUpdatedPayload = Schema.Struct({
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
 export const ItemLifecyclePayload = Schema.Struct({
+  /** Model identified by the provider message that issued this exact tool call. */
+  reportedModel: Schema.optionalKey(TrimmedNonEmptyStringSchema),
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -1197,24 +1200,6 @@ export type ProviderRuntimeEventV2 = typeof ProviderRuntimeEventV2.Type;
 
 export const ProviderRuntimeEvent = ProviderRuntimeEventV2;
 export type ProviderRuntimeEvent = ProviderRuntimeEventV2;
-
-// Compatibility aliases for call sites still importing legacy names.
-const ProviderRuntimeMessageDeltaEvent = ProviderRuntimeContentDeltaEvent;
-export type ProviderRuntimeMessageDeltaEvent = ProviderRuntimeContentDeltaEvent;
-const ProviderRuntimeMessageCompletedEvent = ProviderRuntimeItemCompletedEvent;
-export type ProviderRuntimeMessageCompletedEvent = ProviderRuntimeItemCompletedEvent;
-const ProviderRuntimeToolStartedEvent = ProviderRuntimeItemStartedEvent;
-export type ProviderRuntimeToolStartedEvent = ProviderRuntimeItemStartedEvent;
-const ProviderRuntimeToolCompletedEvent = ProviderRuntimeItemCompletedEvent;
-export type ProviderRuntimeToolCompletedEvent = ProviderRuntimeItemCompletedEvent;
-const ProviderRuntimeApprovalRequestedEvent = ProviderRuntimeRequestOpenedEvent;
-export type ProviderRuntimeApprovalRequestedEvent = ProviderRuntimeRequestOpenedEvent;
-const ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent;
-export type ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent;
-
-// Legacy helper aliases retained for adapters/tests.
-const ProviderRuntimeToolKind = Schema.Literals(["command", "file-read", "file-change", "other"]);
-export type ProviderRuntimeToolKind = typeof ProviderRuntimeToolKind.Type;
 
 export const ProviderRuntimeTurnStatus = RuntimeTurnState;
 export type ProviderRuntimeTurnStatus = RuntimeTurnState;

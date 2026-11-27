@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  formatPdfSearchEditionLabel,
   CommandId,
   EventId,
   WorkspaceKnowledgeItemId,
@@ -13,13 +14,16 @@ import {
   type WorkspaceRagMatch,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { CacheComputationError, ReadOnlyResultCache } from "./ReadOnlyResultCache.ts";
+import { indexPdfJob } from "./pdfIndexJob.ts";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -27,6 +31,7 @@ import {
   documentKnowledgeContent,
   extractDocument,
 } from "./extractDocument.ts";
+import { compressRagText, isNearDuplicateRagText } from "../orchestration/ragContextCompression.ts";
 
 const hash = (text: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(text).digest("hex");
@@ -42,6 +47,17 @@ const Cache = Schema.Struct({
 const encodeCache = Schema.encodeSync(Schema.fromJsonString(Cache));
 const decodeCache = Schema.decodeUnknownOption(Schema.fromJsonString(Cache));
 const encodeCacheKey = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+const encodeIncompleteReports = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Array(
+      Schema.Struct({
+        file: Schema.String,
+        status: Schema.String,
+        detail: Schema.NullOr(Schema.String),
+      }),
+    ),
+  ),
+);
 class DocumentExtractionError extends Schema.TaggedErrorClass<DocumentExtractionError>()(
   "DocumentExtractionError",
   {
@@ -56,18 +72,37 @@ export function formatAttachmentDocumentMatches(
 ) {
   const selected: string[] = [];
   const seen = new Set<string>();
+  const acceptedTokenSets: Set<string>[] = [];
   let chars = 0;
   for (const match of matches) {
     const source = match.research?.attachment;
     if (!source) continue;
-    const content = match.content ?? match.snippet;
-    const key = `${source.contentHash}:${content}`;
+    const rawContent = match.content ?? match.snippet;
+    const content = compressRagText(rawContent, { maxChars: 1_200 });
+    // Identical bytes can belong to documents with different pending editions.
+    const keyContent = `${source.contentHash}:${content}`;
+    const key = match.pdfRevision
+      ? JSON.stringify([
+          match.projectId,
+          source.threadId,
+          source.messageId,
+          source.attachmentId,
+          keyContent,
+        ])
+      : keyContent;
     if (seen.has(key)) continue;
+    if (!match.pdfRevision) {
+      const dedup = isNearDuplicateRagText(content, acceptedTokenSets);
+      if (dedup.duplicate) continue;
+      acceptedTokenSets.push(dedup.tokenSet);
+    }
+    const sources = match.research?.sources;
     const reference = JSON.stringify({
       file: source.name,
       location: source.location ?? content.split("\n")[0],
       version: source.contentHash.slice(0, 12),
-      sources: match.research?.sources,
+      ...(match.pdfRevision ? { edition: formatPdfSearchEditionLabel(match.pdfRevision) } : {}),
+      ...(sources && sources.length > 0 ? { sources } : {}),
       excerpt: content,
     });
     if (chars + reference.length > maxChars) continue;
@@ -95,6 +130,9 @@ export const prepareAttachmentDocumentRag = Effect.fn("prepareAttachmentDocument
     readonly queries: Pick<ProjectionSnapshotQueryShape, "searchWorkspaceRag">;
   }) {
     const fs = yield* FileSystem.FileSystem;
+    const runPromise = Effect.runPromiseWith(
+      yield* Effect.context<FileSystem.FileSystem | Path.Path>(),
+    );
     const settings = yield* Effect.serviceOption(ServerSettingsService);
     const searchSettings = Option.isSome(settings)
       ? (yield* settings.value.getSettings.pipe(Effect.orElseSucceed(() => null)))?.aiSearch
@@ -141,6 +179,50 @@ export const prepareAttachmentDocumentRag = Effect.fn("prepareAttachmentDocument
           });
         const bytes = yield* fs.readFile(original);
         const contentHash = hash(bytes);
+        if (
+          NodePath.extname(attachment.name).toLowerCase() === ".pdf" ||
+          attachment.mimeType === "application/pdf"
+        ) {
+          yield* archive(attachment.id);
+          const result = yield* Effect.tryPromise({
+            try: (signal) =>
+              indexPdfJob({
+                projectId: input.projectId,
+                threadId: input.threadId,
+                messageId: input.messageId,
+                createdAt: input.createdAt,
+                attachment,
+                bytes,
+                stateDir: input.stateDir,
+                attachmentsDir: input.attachmentsDir,
+                ocrEnabled,
+                signal,
+                dispatch: (command) => runPromise(input.engine.dispatch(command)),
+                writeAtomic: (filePath, contents) =>
+                  runPromise(writeFileStringAtomically({ filePath, contents })),
+              }),
+            catch: (cause) =>
+              new DocumentExtractionError({
+                message: cause instanceof Error ? cause.message : "PDF 색인에 실패했습니다.",
+                cause,
+              }),
+          });
+          const status =
+            result.job.chars === 0 ? "empty" : result.job.issues.length ? "partial" : "indexed";
+          if (result.job.chars > 0)
+            extracted.set(attachment.id, { path: result.textPath, partial: status !== "indexed" });
+          return {
+            attachmentId: attachment.id,
+            name: attachment.name,
+            status,
+            chars: result.job.chars,
+            contentHash: result.job.contentHash,
+            message: result.job.issues.length
+              ? `원본 확인이 필요한 페이지: ${result.job.issues.slice(0, 12).join(", ")}${result.job.issues.length > 12 ? " 등" : ""}.`
+              : null,
+            reused: result.resumed,
+          };
+        }
         const key = hash(
           encodeCacheKey([
             input.projectId,
@@ -207,6 +289,7 @@ export const prepareAttachmentDocumentRag = Effect.fn("prepareAttachmentDocument
             ),
             projectId: input.projectId,
             itemId: attachmentDocumentItemId(attachment.id),
+            provenance: { threadId: input.threadId },
             kind: "rag-source",
             title: attachment.name,
             content: knowledge.content,
@@ -282,7 +365,7 @@ export const prepareAttachmentDocumentRag = Effect.fn("prepareAttachmentDocument
           createdAt: input.createdAt,
         },
       });
-    const results =
+    const results: Option.Option<{ readonly matches: readonly WorkspaceRagMatch[] }> =
       input.queries.searchWorkspaceRag && input.query.trim()
         ? yield* input.queries
             .searchWorkspaceRag({
@@ -294,8 +377,66 @@ export const prepareAttachmentDocumentRag = Effect.fn("prepareAttachmentDocument
               limit: 12,
               maxChunksPerItem: 3,
             })
-            .pipe(Effect.catch(() => Effect.succeed({ matches: [] })))
-        : { matches: [] };
-    return { prompt: formatAttachmentDocumentMatches(results.matches), extracted, reports };
+            .pipe(
+              Effect.map(Option.some),
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.logWarning("Could not search attachment documents", { cause }).pipe(
+                      Effect.as(Option.none()),
+                    ),
+              ),
+            )
+        : Option.some({ matches: [] });
+    if (Option.isNone(results)) {
+      yield* input.engine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`document-rag-search-failed:${input.messageId}`),
+          threadId: input.threadId,
+          createdAt: input.createdAt,
+          activity: {
+            id: EventId.make(`document-rag-search-failed:${input.messageId}`),
+            kind: "document-rag.search-failed",
+            tone: "error",
+            summary: "첨부 문서 검색에 실패했습니다. 원본이나 추출된 문서를 확인하세요.",
+            payload: {},
+            turnId: null,
+            createdAt: input.createdAt,
+          },
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("Could not record attachment document search failure", { cause }),
+          ),
+        );
+      return {
+        prompt:
+          "<t3_document_search_unavailable>첨부 문서 검색에 실패했습니다. 검색 결과가 없다고 단정하지 말고 사용자에게 알리세요. 가능한 경우 첨부 원본이나 추출된 문서에서 필요한 근거를 확인하세요.</t3_document_search_unavailable>",
+        extracted,
+        reports,
+        searchUnavailable: true,
+      };
+    }
+    const incomplete = reports.filter((report) => report.status !== "indexed");
+    const incompleteNotice = incomplete.length
+      ? `<t3_document_incomplete>다음 첨부 문서는 전체 내용을 확인하지 못했습니다. 검색 결과만으로 전체 문서를 읽었다고 말하지 마세요. 가능한 경우 원본의 누락 범위를 확인하고, 확인하지 못한 범위는 사용자에게 알리세요.\n${encodeIncompleteReports(
+          incomplete.map((report) => ({
+            file: report.name,
+            status: report.status,
+            detail: report.message,
+          })),
+        )}</t3_document_incomplete>`
+      : "";
+    return {
+      prompt: [incompleteNotice, formatAttachmentDocumentMatches(results.value.matches)]
+        .filter(Boolean)
+        .join("\n\n"),
+      extracted,
+      reports,
+      searchUnavailable: false,
+    };
   },
 );

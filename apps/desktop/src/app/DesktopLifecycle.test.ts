@@ -80,6 +80,12 @@ describe("DesktopLifecycle", () => {
         dispatchMenuAction: () => Effect.void,
         zoomMain: () => Effect.void,
         syncAppearance: Effect.void,
+        getAssistantSettings: Effect.die("unexpected assistant settings"),
+        setAssistantSettings: () => Effect.die("unexpected assistant settings"),
+        openAssistant: Effect.die("unexpected assistant window"),
+        closeAssistant: Effect.die("unexpected assistant window"),
+        getAssistantModel: () => Effect.die("unexpected assistant model"),
+        setAssistantModel: () => Effect.die("unexpected assistant model"),
       });
 
       const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {

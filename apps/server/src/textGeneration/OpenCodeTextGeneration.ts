@@ -30,6 +30,7 @@ import {
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
+import { LOCAL_OLLAMA_PROVIDER, localOllamaSelectionError } from "../provider/localOllama.ts";
 import * as OpenCodeRuntime from "../provider/opencodeRuntime.ts";
 
 const OPENCODE_TEXT_GENERATION_IDLE_TTL = "30 seconds";
@@ -372,6 +373,14 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         operation: input.operation,
         detail: "OpenCode model selection must use the 'provider/model' format.",
       });
+    }
+
+    const connection = openCodeSettings.apiConnection;
+    if (connection?.providerId === LOCAL_OLLAMA_PROVIDER) {
+      const detail = yield* Effect.promise(() =>
+        localOllamaSelectionError(connection, parsedModel),
+      );
+      if (detail) return yield* new TextGenerationError({ operation: input.operation, detail });
     }
 
     const fileParts = OpenCodeRuntime.toOpenCodeFileParts({

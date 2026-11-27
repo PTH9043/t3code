@@ -24,8 +24,20 @@ const makeFixture = Effect.fn(function* (
   options: {
     failFormat?: boolean;
     failVerification?: boolean;
+    timeoutVerification?: boolean;
     noVerification?: boolean;
     stale?: boolean;
+    maxAutoFixAttempts?: number;
+    commandTimeoutSeconds?: number;
+    priorActivities?: Array<{
+      readonly id: string;
+      readonly kind: string;
+      readonly summary: string;
+      readonly payload: Record<string, unknown>;
+      readonly tone: "info" | "error" | "tool" | "approval";
+      readonly turnId: TurnId;
+      readonly createdAt: string;
+    }>;
   } = {},
 ) {
   let thread = yield* decodeThread({
@@ -68,7 +80,7 @@ const makeFixture = Effect.fn(function* (
         streaming: false,
       },
     ],
-    activities: [],
+    activities: options.priorActivities ?? [],
     checkpoints: [],
   });
   const project = yield* decodeProject({
@@ -87,11 +99,18 @@ const makeFixture = Effect.fn(function* (
         verificationCommands: options.noVerification ? [] : ["test-one", "test-two"],
         saveResult: true,
         followUpTask: "Write docs",
+        ...(options.maxAutoFixAttempts !== undefined
+          ? { maxAutoFixAttempts: options.maxAutoFixAttempts }
+          : {}),
+        ...(options.commandTimeoutSeconds !== undefined
+          ? { commandTimeoutSeconds: options.commandTimeoutSeconds }
+          : {}),
       },
     },
   });
   const commands: OrchestrationCommand[] = [];
   const executions: string[] = [];
+  const timeouts: Array<{ command: string; timeout: unknown }> = [];
   const runner = yield* makeWorkspaceAutomationRunner({
     query: {
       getThreadRuntimeContext: () => Effect.succeed(Option.some(thread)),
@@ -111,16 +130,20 @@ const makeFixture = Effect.fn(function* (
         Effect.sync(() => {
           const command = input.args.at(-1)!;
           executions.push(command);
+          timeouts.push({ command, timeout: input.timeout });
           if (options.stale && command === "test-one") thread = { ...thread, latestTurn: null };
+          const timedOut = command === "test-one" && options.timeoutVerification === true;
           return {
-            code: ChildProcessSpawner.ExitCode(
-              (command === "formatter" && options.failFormat) ||
-                (command === "test-one" && options.failVerification)
-                ? 1
-                : 0,
-            ),
-            timedOut: false,
-            stdout: `actual ${command}`,
+            code: timedOut
+              ? null
+              : ChildProcessSpawner.ExitCode(
+                  (command === "formatter" && options.failFormat) ||
+                    (command === "test-one" && options.failVerification)
+                    ? 1
+                    : 0,
+                ),
+            timedOut,
+            stdout: timedOut ? "" : `actual ${command}`,
             stderr: "",
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -132,6 +155,7 @@ const makeFixture = Effect.fn(function* (
     runner,
     commands,
     executions,
+    timeouts,
     getThread: () => thread,
     setFollowup: () => {
       thread = {
@@ -210,3 +234,122 @@ for (const options of [
     }).pipe(Effect.scoped),
   );
 }
+
+it.effect("applies persisted commandTimeoutSeconds and reports timeout failures", () =>
+  Effect.gen(function* () {
+    const fixture = yield* makeFixture({
+      commandTimeoutSeconds: 45,
+      timeoutVerification: true,
+    });
+    const plan = yield* fixture.runner.prepare({
+      threadId,
+      projectId,
+      turnId,
+      cwd: process.cwd(),
+    });
+    expect(plan).not.toBeNull();
+    yield* fixture.runner.enqueue(plan!);
+    yield* fixture.runner.drain;
+
+    expect(fixture.timeouts).toEqual([
+      { command: "formatter", timeout: "20 seconds" },
+      { command: "test-one", timeout: "45 seconds" },
+    ]);
+    const verificationCheck = fixture
+      .getThread()
+      .activities.find(
+        (item) =>
+          item.kind === "automation.check" &&
+          (item.payload as { phase?: string }).phase === "verification",
+      );
+    expect(verificationCheck?.payload).toMatchObject({
+      passed: false,
+      exitCode: null,
+      output: "명령 실행 시간 초과 (45초)",
+    });
+    expect(fixture.getThread().activities.at(-1)?.kind).toBe("automation.failed");
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "enforces maxAutoFixAttempts upper bound across consecutive failures and resets after pass",
+  () =>
+    Effect.gen(function* () {
+      const priorTurn1 = TurnId.make("prior-turn-1");
+      const priorTurn2 = TurnId.make("prior-turn-2");
+      const blockedFixture = yield* makeFixture({
+        maxAutoFixAttempts: 2,
+        priorActivities: [
+          {
+            id: "prev-fail-1",
+            kind: "automation.failed",
+            summary: "자동 검증 실패",
+            payload: {},
+            tone: "error",
+            turnId: priorTurn1,
+            createdAt: at,
+          },
+          {
+            id: "prev-fail-2",
+            kind: "automation.failed",
+            summary: "자동 검증 실패",
+            payload: {},
+            tone: "error",
+            turnId: priorTurn2,
+            createdAt: at,
+          },
+        ],
+      });
+
+      const blockedPlan = yield* blockedFixture.runner.prepare({
+        threadId,
+        projectId,
+        turnId,
+        cwd: process.cwd(),
+      });
+      expect(blockedPlan).toBeNull();
+      expect(blockedFixture.executions).toEqual([]);
+      expect(blockedFixture.getThread().activities.at(-1)).toMatchObject({
+        kind: "automation.limit_reached",
+        tone: "error",
+        payload: {
+          attempts: 2,
+          maxAutoFixAttempts: 2,
+          limitReached: true,
+        },
+      });
+
+      // A verified pass resets the consecutive failure streak.
+      const resetFixture = yield* makeFixture({
+        maxAutoFixAttempts: 2,
+        priorActivities: [
+          {
+            id: "prev-fail-a",
+            kind: "automation.failed",
+            summary: "자동 검증 실패",
+            payload: {},
+            tone: "error",
+            turnId: priorTurn1,
+            createdAt: at,
+          },
+          {
+            id: "prev-pass",
+            kind: "automation.verified",
+            summary: "실제 명령 검증 통과",
+            payload: {},
+            tone: "info",
+            turnId: priorTurn2,
+            createdAt: at,
+          },
+        ],
+      });
+      const allowedPlan = yield* resetFixture.runner.prepare({
+        threadId,
+        projectId,
+        turnId,
+        cwd: process.cwd(),
+      });
+      expect(allowedPlan).not.toBeNull();
+      expect(resetFixture.executions).toEqual(["formatter"]);
+    }).pipe(Effect.scoped),
+);

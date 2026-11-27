@@ -32,6 +32,11 @@ export function reviewWorkspaceOrchestraPlan(
   )
     return null;
   const edits = new Map(input.edits.map((edit) => [edit.nodeId, edit]));
+  const assignment = graph.workflowAssignment;
+  const originallyPending = new Set(assignment?.pendingNodeIds ?? []);
+  const pending = new Set(
+    [...originallyPending].filter((nodeId) => edits.get(nodeId)?.participantId == null),
+  );
   const reject = (message: string): never => {
     throw new WorkspaceTaskGraphError(message);
   };
@@ -43,6 +48,7 @@ export function reviewWorkspaceOrchestraPlan(
       reject("역할 기반 작업에는 참가자를 임의로 추가할 수 없습니다.");
     if (
       run.meeting !== null &&
+      !(edit.participantId === null && originallyPending.has(edit.nodeId)) &&
       !run.meeting.participants.some((seat) => seat.id === edit.participantId)
     )
       reject("선택한 참가자에게만 작업을 배정할 수 있습니다.");
@@ -64,10 +70,16 @@ export function reviewWorkspaceOrchestraPlan(
     return {
       ...node,
       title: edit.title,
-      participantId: edit.participantId,
+      participantId: edit.participantId ?? node.participantId,
       handoff: { ...node.handoff, task: edit.task },
-      dependsOn:
-        edit.dependsOn.length === 0 ? [anchor.id] : edit.dependsOn.map((id) => gate.get(id) ?? id),
+      dependsOn: [
+        ...(edit.dependsOn.length === 0
+          ? assignment
+            ? []
+            : [anchor.id]
+          : edit.dependsOn.map((id) => gate.get(id) ?? id)),
+        ...(assignment && pending.has(node.id) ? [assignment.gateNodeId] : []),
+      ],
     };
   });
   for (let index = 0; index < nodes.length; index++) {
@@ -92,13 +104,55 @@ export function reviewWorkspaceOrchestraPlan(
     done.add(id);
   };
   nodes.forEach((node) => visit(node.id));
+  const { workflowAssignment: _originalAssignment, ...withoutAssignment } = graph;
+  const pendingAssignment =
+    assignment && pending.size > 0 ? { ...assignment, pendingNodeIds: [...pending] } : undefined;
+  const reviewedNodes =
+    assignment && !pendingAssignment
+      ? nodes.map((node) =>
+          node.id === assignment.gateNodeId
+            ? {
+                ...node,
+                status: "completed" as const,
+                output: [
+                  "사용자가 계획 검토에서 모든 담당자를 직접 지정했습니다.",
+                  ...(node.error ? [`이전 배정 거절: ${node.error}`] : []),
+                ].join("\n"),
+                error: null,
+                completedAt: input.reviewedAt,
+              }
+            : node,
+        )
+      : nodes;
   return refreshWorkspaceTaskGraphQueue({
-    ...graph,
-    nodes,
+    ...withoutAssignment,
+    ...(pendingAssignment ? { workflowAssignment: pendingAssignment } : {}),
+    nodes: reviewedNodes,
     planReview: {
       revision: graph.planReview.revision + 1,
       status: input.approve ? "approved" : "pending",
       updatedAt: input.reviewedAt,
     },
   });
+}
+
+export function reviewWorkspaceOrchestraRun(
+  run: WorkspaceCollaborationRun,
+  input: Review,
+): WorkspaceCollaborationRun | null {
+  const graph = reviewWorkspaceOrchestraPlan(run, input);
+  if (graph === null) return null;
+  const gateNodeId = run.graph?.workflowAssignment?.gateNodeId;
+  const resolvedByReview =
+    gateNodeId !== undefined &&
+    graph.workflowAssignment === undefined &&
+    run.meeting?.pendingQuestion?.nodeId === gateNodeId;
+  return {
+    ...run,
+    graph,
+    ...(resolvedByReview && run.meeting
+      ? { meeting: { ...run.meeting, pendingQuestion: null } }
+      : {}),
+    updatedAt: input.reviewedAt,
+  };
 }

@@ -49,7 +49,7 @@ describe("Antseed account connection", () => {
           config: {
             apiConnection: {
               providerId: "t3_antseed",
-              baseUrl: "http://127.0.0.1:8379",
+              baseUrl: "http://127.0.0.1:8379/v1",
               models: result.models,
             },
           },
@@ -70,6 +70,72 @@ describe("Antseed account connection", () => {
           }),
         ),
       ),
+  );
+
+  for (const baseUrl of ["http://127.0.0.1:8379", "http://127.0.0.1:8379/v1/"]) {
+    it.effect(`accepts ${baseUrl} as the same API endpoint`, () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const result = yield* connectAntseedAccount({ ...input, baseUrl }, async (url) => {
+          expect(url).toBe("http://127.0.0.1:8379/v1/models");
+          return Response.json({ data: [{ id: "model-one" }] });
+        }).pipe(Effect.provideService(ServerSettingsService, service));
+        expect(result.models).toEqual(["model-one"]);
+        expect(
+          (yield* service.getSettings).providerInstances[input.instanceId]?.config,
+        ).toMatchObject({
+          apiConnection: { baseUrl: "http://127.0.0.1:8379/v1" },
+        });
+      }).pipe(Effect.provide(layerTest())),
+    );
+  }
+
+  it.effect("connects the local Antseed proxy without asking for a gateway key", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsService;
+      const result = yield* connectAntseedAccount(
+        {
+          instanceId: input.instanceId,
+          displayName: input.displayName,
+          baseUrl: "http://localhost:8377/v1",
+          connectionKind: "local-proxy",
+        },
+        async (url, options) => {
+          expect(url).toBe("http://localhost:8377/v1/models");
+          expect(options.headers).toEqual({ Authorization: "Bearer antseed" });
+          return Response.json({ data: [{ id: "local-model" }] });
+        },
+      ).pipe(Effect.provideService(ServerSettingsService, service));
+      expect(result.models).toEqual(["local-model"]);
+      expect(
+        (yield* service.getSettings).providerInstances[input.instanceId]?.config,
+      ).toMatchObject({
+        apiConnection: { baseUrl: "http://localhost:8377/v1" },
+      });
+    }).pipe(Effect.provide(layerTest())),
+  );
+
+  it.effect("rejects missing gateway keys and remote addresses in local-proxy mode", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsService;
+      const request = () => Promise.reject(new Error("must not make a request"));
+      for (const connection of [
+        { instanceId: input.instanceId, displayName: input.displayName, baseUrl: input.baseUrl },
+        {
+          instanceId: input.instanceId,
+          displayName: input.displayName,
+          baseUrl: "https://remote.example/v1",
+          connectionKind: "local-proxy" as const,
+        },
+      ]) {
+        const result = yield* connectAntseedAccount(connection, request).pipe(
+          Effect.provideService(ServerSettingsService, service),
+          Effect.result,
+        );
+        expect(result._tag).toBe("Failure");
+      }
+      expect((yield* service.getSettings).providerInstances).not.toHaveProperty(input.instanceId);
+    }).pipe(Effect.provide(layerTest())),
   );
 
   it.effect(

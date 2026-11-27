@@ -156,6 +156,23 @@ function isCliRemoteRefinementSpec(
   return spec.type === "cli" && spec.refineUnknownRemote !== undefined;
 }
 
+export const SOURCE_CONTROL_CLI_PROBE_TIMEOUT_MS = 8_000;
+export const SOURCE_CONTROL_AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+function isTimeoutCause(cause: unknown): boolean {
+  const detail = Option.getOrUndefined(detailFromCause(cause));
+  if (detail && /timed out|timeout/iu.test(detail)) {
+    return true;
+  }
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "_tag" in cause &&
+    typeof cause._tag === "string" &&
+    /timeout/iu.test(cause._tag)
+  );
+}
+
 function probeCli(input: {
   readonly spec: SourceControlCliDiscoverySpec;
   readonly process: VcsProcess.VcsProcess["Service"];
@@ -172,7 +189,7 @@ function probeCli(input: {
       command: input.spec.executable,
       args: input.spec.versionArgs,
       cwd: input.cwd,
-      timeoutMs: 5_000,
+      timeoutMs: SOURCE_CONTROL_CLI_PROBE_TIMEOUT_MS,
       maxOutputBytes: 8_000,
       appendTruncationMarker: true,
     })
@@ -250,11 +267,12 @@ export function probeSourceControlProvider(input: {
           args: spec.authArgs,
           cwd: input.cwd,
           allowNonZeroExit: true,
-          timeoutMs: 5_000,
+          timeoutMs: SOURCE_CONTROL_AUTH_PROBE_TIMEOUT_MS,
           maxOutputBytes: 8_000,
           appendTruncationMarker: true,
         })
         .pipe(
+          Effect.withTracerEnabled(false),
           Effect.map(
             (result) =>
               ({
@@ -265,7 +283,11 @@ export function probeSourceControlProvider(input: {
           Effect.catch((cause) =>
             Effect.succeed({
               ...item,
-              auth: unknownAuth(Option.getOrUndefined(detailFromCause(cause))),
+              auth: unknownAuth(
+                isTimeoutCause(cause)
+                  ? `${spec.label} 인증 확인 시간이 초과되었습니다(${Math.round(SOURCE_CONTROL_AUTH_PROBE_TIMEOUT_MS / 1000)}초). 잠시 후 다시 확인합니다.`
+                  : Option.getOrUndefined(detailFromCause(cause)),
+              ),
             } satisfies SourceControlProviderDiscoveryItem),
           ),
         );
@@ -293,11 +315,12 @@ export const refineUnknownRemoteProvider = Effect.fn("refineUnknownRemoteProvide
           args: spec.authArgs,
           cwd: input.cwd,
           allowNonZeroExit: true,
-          timeoutMs: 5_000,
+          timeoutMs: SOURCE_CONTROL_AUTH_PROBE_TIMEOUT_MS,
           maxOutputBytes: 8_000,
           appendTruncationMarker: true,
         })
         .pipe(
+          Effect.withTracerEnabled(false),
           Effect.map((auth) =>
             spec.refineUnknownRemote({
               cwd: input.cwd,

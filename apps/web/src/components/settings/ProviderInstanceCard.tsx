@@ -13,6 +13,7 @@ import * as Result from "effect/Result";
 import type { ReactNode } from "react";
 import {
   isProviderDriverKind,
+  type EnvironmentId,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
@@ -41,6 +42,7 @@ import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { ProviderAccountUsage } from "./ProviderAccountUsage";
 import { ProviderEnvironmentSection } from "./ProviderEnvironmentSection";
 import { OpenCodeApiSettings } from "./OpenCodeApiSettings";
+import { ProviderSubordinatesSection } from "./ProviderSubordinatesSection";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -134,6 +136,7 @@ interface ProviderInstanceCardProps {
   readonly isExpanded: boolean;
   readonly onExpandedChange: (open: boolean) => void;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
+  readonly environmentId: EnvironmentId;
   /**
    * Pass `undefined` to hide the delete button entirely. Built-in default
    * instance slots use `undefined` — they can't be deleted without losing
@@ -192,6 +195,7 @@ export function ProviderInstanceCard({
   isExpanded,
   onExpandedChange,
   onUpdate,
+  environmentId,
   onDelete,
   headerAction,
   authAction,
@@ -315,6 +319,8 @@ export function ProviderInstanceCard({
     <ProviderInstanceIcon
       driverKind={driverKind}
       displayName={displayName}
+      config={instance.config}
+      instanceId={String(instanceId)}
       accentColor={accentColor}
       showBadge={Boolean(accentColor)}
       statusDotClassName={statusStyle.dot}
@@ -579,15 +585,34 @@ export function ProviderInstanceCard({
               />
             </div>
 
-            {instance.driver === "opencode" &&
-            (instance.config as Record<string, unknown> | undefined)?.apiConnection !==
-              undefined ? (
+            {instance.driver === "opencode" ? (
               <OpenCodeApiSettings
                 key={JSON.stringify(
                   (instance.config as Record<string, unknown> | undefined)?.apiConnection ?? null,
                 )}
+                instanceId={instanceId}
                 instance={instance}
+                environmentId={environmentId}
                 onUpdate={onUpdate}
+              />
+            ) : null}
+
+            {instance.driver === "claudeAgent" ||
+            instance.driver === "codex" ||
+            instance.driver === "gemini" ? (
+              <ProviderSubordinatesSection
+                instanceId={instanceId}
+                driver={
+                  instance.driver === "codex"
+                    ? "codex"
+                    : instance.driver === "gemini"
+                      ? "gemini"
+                      : "claudeAgent"
+                }
+                config={instance.config}
+                models={modelsForDisplay}
+                environmentId={environmentId}
+                onConfigChange={updateConfig}
               />
             ) : null}
 

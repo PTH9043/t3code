@@ -2,15 +2,23 @@ import type { OrchestrationEvent, ProjectId, WorkspaceKnowledgeItemId } from "@t
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../../serverActivation.ts";
+import { ServerConfig } from "../../config.ts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { resumePdfRevisions } from "../../documents/pdfRevision.ts";
+import { resumePdfIndexJobs } from "../../documents/resumePdfIndexJobs.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceKnowledgeFileStore } from "../Services/WorkspaceKnowledgeFileStore.ts";
+import { activeWorkRegistry } from "../ActiveWorkTracker.ts";
 import { WorkspaceMemory } from "../WorkspaceMemory.ts";
+import { syncMissingKnowledgeToRoutingGraph } from "../workspaceRoutingGraph.ts";
 import {
   WorkspaceKnowledgeReactor,
   type WorkspaceKnowledgeReactorShape,
@@ -27,13 +35,30 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const fileStore = yield* WorkspaceKnowledgeFileStore;
   const memory = yield* Effect.serviceOption(WorkspaceMemory);
+  const config = yield* Effect.serviceOption(ServerConfig);
+  const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const path = yield* Effect.serviceOption(Path.Path);
+  const revisionSql = yield* Effect.serviceOption(SqlClient.SqlClient);
 
   const reconcile = Effect.fn("WorkspaceKnowledgeReactor.reconcile")(function* (
     input: ReactorInput,
   ) {
+    // Yield background memory/graph reconciliation while live turns or workers are running.
+    if (input.reason === "turn-settled" || input.reason === "startup") {
+      for (let waitAttempt = 0; waitAttempt < 3; waitAttempt += 1) {
+        if (activeWorkRegistry.snapshot().totalActive === 0) break;
+        yield* Effect.sleep("15 seconds");
+      }
+    }
     const project = yield* projectionSnapshotQuery.getProjectShellById(input.projectId);
     if (Option.isNone(project)) return;
     if (Option.isSome(memory)) yield* memory.value.reconcile(input.projectId);
+    if (Option.isSome(revisionSql)) {
+      yield* syncMissingKnowledgeToRoutingGraph(revisionSql.value, {
+        projectId: input.projectId,
+        maxItems: 40,
+      }).pipe(Effect.ignore);
+    }
     const root = project.value.workspaceControl?.longTermMemoryRoot ?? null;
     if (root === null) return;
 
@@ -140,6 +165,35 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
       startImmediately: true,
     });
     yield* enqueueStartupReconciliation;
+    if (Option.isSome(config) && Option.isSome(fileSystem) && Option.isSome(path)) {
+      if (Option.isSome(revisionSql)) {
+        yield* forkParked(
+          resumePdfRevisions({
+            stateDir: config.value.stateDir,
+            attachmentsDir: config.value.attachmentsDir,
+            engine: orchestrationEngine,
+          }).pipe(
+            Effect.provideService(SqlClient.SqlClient, revisionSql.value),
+            Effect.provideService(FileSystem.FileSystem, fileSystem.value),
+            Effect.provideService(Path.Path, path.value),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not resume pending PDF revisions", { cause }),
+            ),
+          ),
+        );
+      }
+      yield* forkParked(
+        resumePdfIndexJobs({
+          stateDir: config.value.stateDir,
+          attachmentsDir: config.value.attachmentsDir,
+          engine: orchestrationEngine,
+          queries: projectionSnapshotQuery,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem.value),
+          Effect.provideService(Path.Path, path.value),
+        ),
+      );
+    }
   });
 
   return {

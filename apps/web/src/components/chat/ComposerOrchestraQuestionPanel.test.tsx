@@ -36,7 +36,7 @@ describe("ComposerOrchestraQuestionPanel", () => {
     );
 
     expect(markup).toContain("자유롭게 방향을 알려주세요.");
-    expect(markup).toContain("아래 입력창에 답을 적어 보내면 오케스트라가 이어집니다.");
+    expect(markup).toContain("아래 입력창에 답을 쓰거나 이미지를 첨부해 보내세요.");
     expect(markup).not.toContain("</kbd>");
   });
 });

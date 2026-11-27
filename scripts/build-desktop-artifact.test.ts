@@ -364,6 +364,29 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
+  it.effect("requires native signing for signed Windows builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.0.0",
+        true,
+        false,
+        undefined,
+        undefined,
+        "Publisher",
+      );
+      const win = config.win as {
+        signtoolOptions: { sign: string; publisherName: string; signingHashAlgorithms: string[] };
+      };
+      assert.equal(config.forceCodeSigning, true);
+      assert.notProperty(win, "azureSignOptions");
+      assert.match(win.signtoolOptions.sign, /windows-signing\.ts$/);
+      assert.deepEqual(win.signtoolOptions.signingHashAlgorithms, ["sha256"]);
+      assert.equal(win.signtoolOptions.publisherName, "Publisher");
+    }),
+  );
+
   it.effect("preserves both Linux icon resize failures with structural context", () => {
     const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
 
@@ -561,6 +584,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("stages the resource monitor as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
+      {
+        from: "apps/desktop/resources/assistant-voice",
+        to: "assistant-voice",
+      },
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",

@@ -1,4 +1,5 @@
 import type {
+  ProjectId,
   SharedLibraryMatch,
   WorkspaceKnowledgeItem,
   WorkspaceKnowledgeItemId,
@@ -6,6 +7,7 @@ import type {
   WorkspacePromptComposeResult,
   WorkspaceRagMatch,
 } from "@t3tools/contracts";
+import { formatPdfSearchEditionLabel } from "@t3tools/contracts";
 import { knowledgeAppliesToContext } from "./workspaceKnowledgeScope.ts";
 import { composeRelevantWorkspacePrompt } from "./workspacePromptRelevant.ts";
 import {
@@ -17,6 +19,11 @@ import {
   type WorkspacePromptParts,
   type WorkspaceTokenCounter,
 } from "./workspacePromptTokens.ts";
+import {
+  compressRagText,
+  formatRagIndexPointer,
+  isNearDuplicateRagText,
+} from "./ragContextCompression.ts";
 
 const DEFAULT_CONTEXT_BUDGET = 60_000;
 /**
@@ -90,6 +97,12 @@ function composeStandardWorkspacePrompt(
     [];
   const seenSourceIds = new Set<string>();
   const contextParts: string[] = [];
+  const sourceOffsets: Array<{
+    projectId: ProjectId;
+    itemId: WorkspaceKnowledgeItemId;
+    start: number;
+    end: number;
+  }> = [];
   const instructionParts: string[] = [];
   const memoryParts: string[] = [];
   let used = 0;
@@ -121,6 +134,12 @@ function composeStandardWorkspacePrompt(
     }
     const truncatedBody = !mandatory && content.length > available;
     const body = truncatedBody ? content.slice(0, available) : content;
+    sourceOffsets.push({
+      projectId,
+      itemId,
+      start: used + separator.length + prefix.length,
+      end: used + separator.length + prefix.length + body.length,
+    });
     contextParts.push(`${separator}${prefix}${body}`);
     (mandatory ? instructionParts : memoryParts).push(`${prefix}${body}`);
     used += separator.length + prefix.length + body.length;
@@ -165,6 +184,8 @@ function composeStandardWorkspacePrompt(
   }
 
   if (input.request.includeRag !== false) {
+    let ragFullExcerptCount = 0;
+    const acceptedRagTokenSets: Set<string>[] = [];
     for (const match of input.ragMatches.filter(
       (candidate) =>
         knowledgeAppliesToContext(candidate, input.request) &&
@@ -177,12 +198,29 @@ function composeStandardWorkspacePrompt(
         ),
     )) {
       if (seenSourceIds.has(`${match.projectId}:${match.itemId}`)) continue;
-      // The whole chunk: a 32-token highlight was all an agent used to get,
-      // which left it guessing at the rest of the note it had retrieved.
+      const rawBody = match.content ?? match.snippet;
+      const compressed = compressRagText(rawBody, { maxChars: 1_800 });
+      const dedup = isNearDuplicateRagText(compressed, acceptedRagTokenSets);
+      if (dedup.duplicate) continue;
+      acceptedRagTokenSets.push(dedup.tokenSet);
+      const editionLabel = formatPdfSearchEditionLabel(match.pdfRevision);
+      // Top-2 RAG matches carry compressed verbatim evidence; #3..N become 1-line index pointers
+      // so the model reads the index first and fetches raw text on demand.
+      const useIndexPointer = ragFullExcerptCount >= 2 && compressed.length > 260;
+      const effectiveBody = useIndexPointer
+        ? formatRagIndexPointer({
+            itemId: match.itemId,
+            chunkId: match.chunkId,
+            title: match.title,
+            text: compressed,
+            ...(editionLabel ? { pdfEdition: editionLabel } : {}),
+          })
+        : compressed;
+      if (!useIndexPointer) ragFullExcerptCount += 1;
       appendSource(
-        `검색 문맥: ${match.title}`,
+        [`검색 문맥: ${match.title}`, editionLabel].filter(Boolean).join(" · "),
         match.itemId,
-        match.content ?? match.snippet,
+        effectiveBody,
         match.projectId,
       );
     }
@@ -214,7 +252,7 @@ function composeStandardWorkspacePrompt(
   }
 
   const context = contextParts.length === 0 ? "(활성 프로젝트 문맥 없음.)" : contextParts.join("");
-  const prompt = [
+  const promptLines = [
     "# 프로젝트 제어 문맥",
     `프로젝트 ID: ${input.request.projectId}`,
     "격리 모드: 엄격. 이 프로젝트의 기억, 현재 작업 경로에 적용되는 폴더 기억, 명시적으로 공용으로 지정된 기억만 사용하세요. 다른 프로젝트의 비공개 기억을 추론하거나 가져오지 마세요.",
@@ -235,13 +273,20 @@ function composeStandardWorkspacePrompt(
     "",
     "## 현재 사용자 작업",
     input.request.task,
-  ].join("\n");
+  ];
+  const prompt = promptLines.join("\n");
+  const contextStart = promptLines.slice(0, 8).join("\n").length + 1;
 
   return {
     result: {
       prompt,
       sourceItemIds,
       sourceReferences,
+      sourcePassages: sourceOffsets.map((source) => ({
+        ...source,
+        start: source.start + contextStart,
+        end: source.end + contextStart,
+      })),
       ragMatches: input.ragMatches.filter((match) =>
         knowledgeAppliesToContext(match, input.request),
       ),

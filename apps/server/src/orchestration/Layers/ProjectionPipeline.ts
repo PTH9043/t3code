@@ -1,13 +1,13 @@
 import {
   ApprovalRequestId,
   DEFAULT_WORKSPACE_CONTROL_SETTINGS,
+  WorkspaceConversationRagSettings,
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   type ProjectId,
   ThreadId,
   type TurnId,
-  type WorkspaceConversationRagSettings,
 } from "@t3tools/contracts";
 import { importedConversationMessages, importedConversationActivity } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -19,7 +19,9 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeTokenUsageProjection } from "./TokenUsageProjection.ts";
+import { rebuildWorkspaceWikiLinks } from "../../persistence/workspaceWikiLinks.ts";
 
+import { WorkspaceKnowledgeDashboardFilters } from "@t3tools/contracts";
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
@@ -81,11 +83,24 @@ import {
 
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
+const CONVERSATION_SOURCE_EVENT_TYPES = [
+  "project.created",
+  "project.meta-updated",
+  "project.workspace-control-updated",
+  "project.deleted",
+  "thread.created",
+  "thread.meta-updated",
+  "thread.deleted",
+  "thread.message-sent",
+  "thread.user-input-response-requested",
+] as const satisfies ReadonlyArray<OrchestrationEvent["type"]>;
+
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   tokenUsage: "projection.token-usage-v1",
   projects: "projection.projects",
   workspaceKnowledge: "projection.workspace-knowledge-v2",
   workspaceRag: "projection.workspace-rag-v2",
+  conversationRagSources: "projection.conversation-rag-sources-v1",
   workspaceAgentRoles: "projection.workspace-agent-roles-v1",
   workspaceCollaborationRuns: "projection.workspace-collaboration-runs-v1",
   workspaceSchedules: "projection.workspace-schedules-v1",
@@ -568,6 +583,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           readonly projectId: ProjectId;
           readonly title: string;
           readonly worktreePath: string | null;
+          readonly modelSelection: import("@t3tools/contracts").ModelSelection | null;
         }
       >(),
     });
@@ -605,19 +621,25 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             title: event.payload.title,
             worktreePath: event.payload.worktreePath,
+            modelSelection: event.payload.modelSelection ?? null,
           });
           return;
         case "thread.meta-updated": {
           const existing = state.threads.get(event.payload.threadId);
           if (
             existing &&
-            (event.payload.title !== undefined || event.payload.worktreePath !== undefined)
+            (event.payload.title !== undefined ||
+              event.payload.worktreePath !== undefined ||
+              event.payload.modelSelection !== undefined)
           ) {
             state.threads.set(event.payload.threadId, {
               ...existing,
               ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
               ...(event.payload.worktreePath !== undefined
                 ? { worktreePath: event.payload.worktreePath }
+                : {}),
+              ...(event.payload.modelSelection !== undefined
+                ? { modelSelection: event.payload.modelSelection }
                 : {}),
             });
           }
@@ -640,17 +662,43 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         projectId: row.value.projectId,
         title: row.value.title,
         worktreePath: row.value.worktreePath,
+        modelSelection: row.value.modelSelection ?? null,
       } as const;
       state.threads.set(threadId, resolved);
       return resolved;
     });
 
+    const decodeConversationSettings = Schema.decodeUnknownOption(
+      Schema.fromJsonString(WorkspaceConversationRagSettings),
+    );
     const resolveConversationSettings = Effect.fn("resolveConversationSettings")(function* (
       state: ConversationProjectionState,
       projectId: ProjectId,
+      sequence: number,
     ) {
       const cached = state.projectSettings.get(projectId);
       if (cached !== undefined) return cached;
+      // A restarted projector may resume before the current project settings.
+      const [historical] = yield* sql<{ settings: string | null }>`SELECT
+        json_extract(payload_json, '$.workspaceControl.conversationRag') AS settings
+        FROM orchestration_events
+        WHERE aggregate_kind = 'project' AND stream_id = ${projectId}
+          AND sequence < ${sequence}
+          AND event_type IN ('project.created', 'project.workspace-control-updated')
+        ORDER BY sequence DESC LIMIT 1`.pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionPipeline.conversationRagSourceSettings")),
+      );
+      if (historical) {
+        const decoded = historical.settings
+          ? decodeConversationSettings(historical.settings)
+          : Option.none();
+        const settings = Option.getOrElse(
+          decoded,
+          () => DEFAULT_WORKSPACE_CONTROL_SETTINGS.conversationRag,
+        );
+        state.projectSettings.set(projectId, settings);
+        return settings;
+      }
       const row = yield* projectionProjectRepository.getById({ projectId });
       if (Option.isNone(row)) return null;
       const settings = row.value.workspaceControl.conversationRag;
@@ -671,7 +719,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
       const thread = yield* resolveConversationThread(state, event.payload.threadId);
       if (thread === null) return null;
-      const settings = yield* resolveConversationSettings(state, thread.projectId);
+      const settings = yield* resolveConversationSettings(state, thread.projectId, event.sequence);
       if (settings === null || !settings.enabled) return null;
       const projectRoot = state.projectRoots.get(thread.projectId);
       const relativeFolder =
@@ -688,6 +736,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         createdAt: event.payload.createdAt,
         settings,
         relativeFolder,
+        actor: "user",
+        confidence: "medium",
+        modelSelection: thread.modelSelection,
       });
     });
 
@@ -698,7 +749,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       ) {
         const thread = yield* resolveConversationThread(state, event.payload.threadId);
         if (thread === null) return null;
-        const settings = yield* resolveConversationSettings(state, thread.projectId);
+        const settings = yield* resolveConversationSettings(
+          state,
+          thread.projectId,
+          event.sequence,
+        );
         if (settings === null || !settings.enabled) return null;
         const sortedAnswers = Object.fromEntries(
           Object.entries(event.payload.answers).sort(([left], [right]) =>
@@ -720,9 +775,25 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           createdAt: event.payload.createdAt,
           settings,
           relativeFolder,
+          actor: "user",
+          confidence: "high",
+          modelSelection: thread.modelSelection,
         });
       },
     );
+
+    const recordConversationRagSource = (
+      item: NonNullable<ReturnType<typeof toConversationRagKnowledgeItem>>,
+      threadId: ThreadId,
+      sourceKind: "message" | "answer",
+      sourceId: string,
+    ) =>
+      sql`INSERT OR IGNORE INTO workspace_conversation_rag_sources
+        (project_id, thread_id, item_id, source_kind, source_id)
+        VALUES (${item.projectId}, ${threadId}, ${item.id}, ${sourceKind}, ${sourceId})`.pipe(
+        Effect.asVoid,
+        Effect.mapError(toPersistenceSqlError("ProjectionPipeline.recordConversationRagSource")),
+      );
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -840,30 +911,55 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       trackConversationProjectionEvent(workspaceKnowledgeConversationState, event);
       switch (event.type) {
+        case "project.knowledge-search-saved": {
+          const { projectId, id, name, filters, updatedAt } = event.payload;
+          const json = yield* Schema.encodeEffect(
+            Schema.fromJsonString(WorkspaceKnowledgeDashboardFilters),
+          )(filters).pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.encodeSavedSearch")),
+          );
+          yield* sql`INSERT INTO workspace_knowledge_saved_searches(project_id,id,name,filters_json,updated_at)
+            VALUES (${projectId},${id},${name},${json},${updatedAt}) ON CONFLICT(project_id,id) DO UPDATE SET
+              name=excluded.name, filters_json=excluded.filters_json, updated_at=excluded.updated_at`.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.saveSearch")),
+          );
+          return;
+        }
+        case "project.knowledge-search-removed":
+          yield* sql`DELETE FROM workspace_knowledge_saved_searches WHERE project_id=${event.payload.projectId} AND id=${event.payload.id}`.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.removeSearch")),
+          );
+          return;
         case "project.knowledge-item-upserted":
-          yield* projectionWorkspaceKnowledgeRepository.upsert({
-            id: event.payload.itemId,
-            projectId: event.payload.projectId,
-            kind: event.payload.kind,
-            title: event.payload.title,
-            content: event.payload.content,
-            status: event.payload.status,
-            origin: event.payload.origin,
-            relativeFolder: event.payload.relativeFolder,
-            scope: event.payload.scope ?? "project",
-            appliesToFolder: event.payload.appliesToFolder ?? null,
-            research: event.payload.research ?? null,
-            tags: event.payload.tags,
-            originalChars: event.payload.originalChars,
-            storedChars: event.payload.storedChars,
-            // An upsert must not disturb the usage counters: re-registering an
-            // item the agents keep producing would otherwise reset the very
-            // measure of whether it is worth keeping.
-            promptUses: 0,
-            lastUsedAt: null,
-            createdAt: event.payload.updatedAt,
-            updatedAt: event.payload.updatedAt,
-          });
+          yield* projectionWorkspaceKnowledgeRepository.upsert(
+            {
+              ...(event.payload.supersededBy ? { supersededBy: event.payload.supersededBy } : {}),
+              id: event.payload.itemId,
+              projectId: event.payload.projectId,
+              kind: event.payload.kind,
+              title: event.payload.title,
+              content: event.payload.content,
+              status: event.payload.status,
+              origin: event.payload.origin,
+              relativeFolder: event.payload.relativeFolder,
+              scope: event.payload.scope ?? "project",
+              appliesToFolder: event.payload.appliesToFolder ?? null,
+              research: event.payload.research ?? null,
+              tags: event.payload.tags,
+              ...(event.payload.provenance ? { provenance: event.payload.provenance } : {}),
+              ...(event.payload.sourceItemId ? { sourceItemId: event.payload.sourceItemId } : {}),
+              originalChars: event.payload.originalChars,
+              storedChars: event.payload.storedChars,
+              // An upsert must not disturb the usage counters: re-registering an
+              // item the agents keep producing would otherwise reset the very
+              // measure of whether it is worth keeping.
+              promptUses: 0,
+              lastUsedAt: null,
+              createdAt: event.payload.updatedAt,
+              updatedAt: event.payload.updatedAt,
+            },
+            event.payload.wikiLinkBindings,
+          );
           return;
 
         case "project.knowledge-item-archived":
@@ -887,7 +983,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             workspaceKnowledgeConversationState,
             event,
           );
-          if (item !== null) yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          if (item !== null) {
+            yield* recordConversationRagSource(
+              item,
+              event.payload.threadId,
+              "message",
+              event.payload.messageId,
+            );
+            yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          }
           return;
         }
 
@@ -896,7 +1000,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             workspaceKnowledgeConversationState,
             event,
           );
-          if (item !== null) yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          if (item !== null) {
+            yield* recordConversationRagSource(
+              item,
+              event.payload.threadId,
+              "answer",
+              event.payload.requestId,
+            );
+            yield* projectionWorkspaceKnowledgeRepository.upsert(item);
+          }
           return;
         }
 
@@ -1029,6 +1141,57 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         default:
           return;
+      }
+    });
+
+    // A separate cursor reconstructs provenance for installations whose existing
+    // knowledge and RAG projectors have already passed the historical events.
+    const conversationRagSourcesState = makeConversationProjectionState();
+    const applyConversationRagSourcesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyConversationRagSourcesProjection",
+    )(function* (event) {
+      trackConversationProjectionEvent(conversationRagSourcesState, event);
+      if (
+        event.type === "thread.message-sent" ||
+        event.type === "thread.user-input-response-requested"
+      ) {
+        if (event.type === "thread.message-sent") {
+          const item = yield* conversationItemForMessage(conversationRagSourcesState, event);
+          if (item !== null)
+            yield* recordConversationRagSource(
+              item,
+              event.payload.threadId,
+              "message",
+              event.payload.messageId,
+            );
+        } else {
+          const item = yield* conversationItemForUserInputResponse(
+            conversationRagSourcesState,
+            event,
+          );
+          if (item !== null)
+            yield* recordConversationRagSource(
+              item,
+              event.payload.threadId,
+              "answer",
+              event.payload.requestId,
+            );
+        }
+      } else if (event.type === "thread.deleted") {
+        yield* sql`DELETE FROM workspace_conversation_rag_sources WHERE thread_id=${event.payload.threadId}`.pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionPipeline.deleteConversationRagSources")),
+        );
+        conversationRagSourcesState.threads.delete(event.payload.threadId);
+      } else if (
+        event.type === "project.deleted" ||
+        (event.type === "project.workspace-control-updated" &&
+          !event.payload.workspaceControl.conversationRag.enabled)
+      ) {
+        yield* sql`DELETE FROM workspace_conversation_rag_sources WHERE project_id=${event.payload.projectId}`.pipe(
+          Effect.mapError(
+            toPersistenceSqlError("ProjectionPipeline.deleteProjectConversationRagSources"),
+          ),
+        );
       }
     });
 
@@ -1858,9 +2021,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               event.payload.session.status === "stopped" ||
               event.payload.session.status === "interrupted"
             ) {
-              yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
-                threadId: event.payload.threadId,
-              });
+              if (event.payload.preservePendingTurnStart !== true) {
+                yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+                  threadId: event.payload.threadId,
+                });
+              }
             }
             // Leaving the "running" session status is the turn-end signal:
             // settle still-running turns so their duration reflects the whole
@@ -1920,6 +2085,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
+          const explicit = event.payload.turnRequest;
+          const pending = Option.getOrUndefined(pendingTurnStart);
+          const matchingPending =
+            !explicit || pending?.messageId === explicit.messageId ? pending : undefined;
+          const userMessageId = explicit?.messageId ?? matchingPending?.messageId ?? null;
+          const requestedAt =
+            explicit?.requestedAt ?? matchingPending?.requestedAt ?? event.occurredAt;
+          const startedAt = explicit ? event.occurredAt : requestedAt;
           if (Option.isSome(existingTurn)) {
             const nextState =
               existingTurn.value.state === "completed" || existingTurn.value.state === "error"
@@ -1928,51 +2101,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               state: nextState,
-              pendingMessageId:
-                existingTurn.value.pendingMessageId ??
-                (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
+              pendingMessageId: existingTurn.value.pendingMessageId ?? userMessageId,
               sourceProposedPlanThreadId:
                 existingTurn.value.sourceProposedPlanThreadId ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.sourceProposedPlanThreadId
-                  : null),
+                matchingPending?.sourceProposedPlanThreadId ??
+                null,
               sourceProposedPlanId:
                 existingTurn.value.sourceProposedPlanId ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.sourceProposedPlanId
-                  : null),
-              startedAt:
-                existingTurn.value.startedAt ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.requestedAt
-                  : event.occurredAt),
-              requestedAt:
-                existingTurn.value.requestedAt ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.requestedAt
-                  : event.occurredAt),
+                matchingPending?.sourceProposedPlanId ??
+                null,
+              startedAt: existingTurn.value.startedAt ?? startedAt,
+              requestedAt: existingTurn.value.requestedAt ?? requestedAt,
             });
           } else {
             yield* projectionTurnRepository.upsertByTurnId({
               turnId,
               threadId: event.payload.threadId,
-              pendingMessageId: Option.isSome(pendingTurnStart)
-                ? pendingTurnStart.value.messageId
-                : null,
-              sourceProposedPlanThreadId: Option.isSome(pendingTurnStart)
-                ? pendingTurnStart.value.sourceProposedPlanThreadId
-                : null,
-              sourceProposedPlanId: Option.isSome(pendingTurnStart)
-                ? pendingTurnStart.value.sourceProposedPlanId
-                : null,
+              pendingMessageId: userMessageId,
+              sourceProposedPlanThreadId: matchingPending?.sourceProposedPlanThreadId ?? null,
+              sourceProposedPlanId: matchingPending?.sourceProposedPlanId ?? null,
               assistantMessageId: null,
               state: "running",
-              requestedAt: Option.isSome(pendingTurnStart)
-                ? pendingTurnStart.value.requestedAt
-                : event.occurredAt,
-              startedAt: Option.isSome(pendingTurnStart)
-                ? pendingTurnStart.value.requestedAt
-                : event.occurredAt,
+              requestedAt,
+              startedAt,
               completedAt: null,
               checkpointTurnCount: null,
               checkpointRef: null,
@@ -1981,9 +2132,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             });
           }
 
-          yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
-            threadId: event.payload.threadId,
-          });
+          if (!explicit || matchingPending)
+            yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+              threadId: event.payload.threadId,
+            });
           return;
         }
 
@@ -2311,6 +2463,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyWorkspaceRagProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.conversationRagSources,
+        apply: applyConversationRagSourcesProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.workspaceAgentRoles,
         apply: applyWorkspaceAgentRolesProjection,
       },
@@ -2394,20 +2550,59 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     });
 
     const bootstrapProjector = (projector: ProjectorDefinition) =>
-      projectionStateRepository
-        .getByProjector({
+      Effect.gen(function* () {
+        const stateRow = yield* projectionStateRepository.getByProjector({
           projector: projector.name,
-        })
-        .pipe(
-          Effect.flatMap((stateRow) =>
-            Stream.runForEach(
-              eventStore.readFromSequence(
-                Option.isSome(stateRow) ? stateRow.value.lastAppliedSequence : 0,
-              ),
-              (event) => runProjectorForEvent(projector, event),
+        });
+        const cursor = Option.isSome(stateRow) ? stateRow.value.lastAppliedSequence : 0;
+        if (
+          projector.name === ORCHESTRATION_PROJECTOR_NAMES.conversationRagSources &&
+          eventStore.readTypesThroughSequence
+        ) {
+          const [head] = yield* sql<{ sequence: number; occurred_at: string }>`
+            SELECT sequence, occurred_at FROM orchestration_events ORDER BY sequence DESC LIMIT 1
+          `.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.conversationSourceHead")),
+          );
+          if (!head || head.sequence <= cursor) return;
+          yield* Stream.runForEach(
+            eventStore.readTypesThroughSequence(
+              cursor,
+              head.sequence,
+              CONVERSATION_SOURCE_EVENT_TYPES,
             ),
-          ),
+            (event) => runProjectorForEvent(projector, event),
+          );
+          yield* projectionStateRepository.upsert({
+            projector: projector.name,
+            lastAppliedSequence: head.sequence,
+            updatedAt: head.occurred_at,
+          });
+          return;
+        }
+        const [wikiBackfill] =
+          projector.name === ORCHESTRATION_PROJECTOR_NAMES.workspaceKnowledge
+            ? yield* sql<{
+                sequence: number;
+              }>`SELECT sequence FROM workspace_wiki_backfill_cursor WHERE sequence > ${cursor}`
+            : [];
+        yield* Stream.runForEach(
+          eventStore.readFromSequence(cursor, Number.MAX_SAFE_INTEGER),
+          (event) => {
+            const apply = runProjectorForEvent(projector, event);
+            if (event.sequence !== wikiBackfill?.sequence) return apply;
+            // Historical events predate wiki IDs. Reproduce migration 092 at its original cursor
+            // so the arrival order of pre-upgrade namesakes cannot create a spurious binding.
+            return sql.withTransaction(
+              Effect.gen(function* () {
+                yield* apply;
+                yield* sql`DELETE FROM workspace_wiki_bindings`;
+                yield* rebuildWorkspaceWikiLinks(sql);
+              }),
+            );
+          },
         );
+      });
 
     const projectEvent: OrchestrationProjectionPipelineShape["projectEvent"] = (event) =>
       Effect.forEach(projectors, (projector) => runProjectorForEvent(projector, event), {

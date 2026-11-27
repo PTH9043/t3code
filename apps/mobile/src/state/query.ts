@@ -2,6 +2,7 @@ import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { useCallback } from "react";
 
 const EMPTY_ASYNC_RESULT_ATOM = Atom.make(AsyncResult.initial<never, never>(false)).pipe(
   Atom.withLabel("mobile-environment-query:empty"),
@@ -33,4 +34,17 @@ export function useEnvironmentQuery<A, E>(
     isPending: atom !== null && result.waiting,
     refresh,
   };
+}
+
+export function useEnvironmentQuerySelector<A, E, B>(
+  atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
+  select: (data: A) => B,
+): B | null {
+  const selectedAtom = atom ?? EMPTY_ASYNC_RESULT_ATOM;
+  const selector = useCallback(
+    (result: AsyncResult.AsyncResult<A, E>): B | null =>
+      Option.match(AsyncResult.value(result), { onNone: () => null, onSome: select }),
+    [select],
+  );
+  return useAtomValue(selectedAtom, selector);
 }

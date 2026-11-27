@@ -11,6 +11,7 @@ import {
   type OrchestraTaskView,
 } from "@t3tools/client-runtime/state/presentation";
 import { cn } from "~/lib/utils";
+import { getModelOrProviderIcon } from "./providerIconUtils";
 
 export interface OrchestraListState {
   readonly filter: OrchestraTaskFilter;
@@ -57,10 +58,15 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
 }) {
   const prefix = useId();
   const visible = list.tasks.filter((task) => orchestraTaskMatchesFilter(task, state.filter));
+  const providerWarnings =
+    list.run?.workflow?.providerWarnings ?? list.run?.runContext?.providerWarnings ?? [];
   const count = (filter: OrchestraTaskFilter) =>
     list.tasks.filter((task) => orchestraTaskMatchesFilter(task, filter)).length;
   const waiting = list.tasks.filter(
     (task) => task.status === "queued" || task.status === "blocked",
+  ).length;
+  const cancelled = list.tasks.filter(
+    (task) => task.status === "cancelled" || task.status === "skipped",
   ).length;
   const setAll = (expanded: boolean) =>
     onChange({
@@ -69,7 +75,7 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
     });
   return (
     <section
-      className="my-2 min-w-0 overflow-hidden rounded-xl border border-border bg-card"
+      className="my-2 min-w-0 overflow-hidden rounded-xl border border-border bg-card [overflow-wrap:anywhere]"
       aria-labelledby={`${prefix}-title`}
       data-orchestra-run={list.id}
     >
@@ -88,11 +94,31 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
                   : RUN_STATUS[list.status]}
           </p>
         )}
-        <p className="line-clamp-2 break-words text-xs text-muted-foreground" title={list.title}>
+        <p
+          className="whitespace-pre-wrap break-words text-xs text-muted-foreground"
+          title={list.title}
+        >
           {list.title}
         </p>
         {list.conductor && <p className="break-words text-xs">지휘: {list.conductor}</p>}
         {controls}
+        {providerWarnings.length > 0 && (
+          <details className="rounded-md border border-border bg-background p-2 text-xs">
+            <summary className="cursor-pointer font-medium">
+              시작 전 확인한 연결 경고 · {providerWarnings.length}
+            </summary>
+            <p className="mt-1 text-muted-foreground">
+              시작 시점의 상태입니다. 각 단계 실행 전 현재 연결을 다시 확인합니다.
+            </p>
+            <ul className="mt-2 space-y-2">
+              {providerWarnings.map((warning) => (
+                <li key={warning.role} className="whitespace-pre-wrap">
+                  {warning.message}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {list.question && (
           <div
             className="rounded-md border border-border bg-background px-3 py-2 text-sm"
@@ -106,7 +132,7 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
         )}
         <p className="text-xs tabular-nums text-muted-foreground">
           전체 {list.tasks.length} · 완료 {count("completed")} · 실행/검증 {count("running")} · 대기{" "}
-          {waiting} · 확인 필요 {count("attention")}
+          {waiting} · 확인 필요 {count("attention")} · 취소 {cancelled}
         </p>
         <div className="flex flex-wrap items-center gap-1">
           <div className="flex flex-wrap gap-1" role="group" aria-label="작업 상태 필터">
@@ -151,6 +177,12 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
             const previous = task.attempts.slice(0, -1);
             const retryCount = Math.max(0, (latest?.number ?? 1) - 1);
             const Icon = expanded ? ChevronDownIcon : ChevronRightIcon;
+            const TaskModelIcon = task.modelSelection
+              ? getModelOrProviderIcon({
+                  instanceId: String(task.modelSelection.instanceId),
+                  model: task.modelSelection.model,
+                })
+              : null;
             return (
               <li key={task.id} data-orchestra-task={task.id}>
                 <button
@@ -164,12 +196,19 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
                 >
                   <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
                   <span className="min-w-0 flex-1">
-                    <span className="block break-words text-sm font-medium">
-                      {orchestraKindLabels[task.kind]} · {task.title}
+                    <span className="flex items-center gap-1.5 break-words text-sm font-medium">
+                      {TaskModelIcon ? (
+                        <TaskModelIcon className="size-3.5 shrink-0" aria-hidden />
+                      ) : null}
+                      <span>
+                        {orchestraKindLabels[task.kind]} · {task.title}
+                      </span>
                     </span>
                     <span className="mt-1 block break-words text-xs text-muted-foreground">
                       {task.displayName}
-                      {task.modelSelection ? ` · ${task.modelSelection.model}` : ""}
+                      {task.modelSelection
+                        ? ` · 배정 모델 · ${task.modelSelection.instanceId} · ${task.modelSelection.model}`
+                        : ""}
                       {retryCount > 0 ? ` · 재시도 ${retryCount}회` : ""}
                     </span>
                     {task.progress && (
@@ -183,6 +222,11 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
                             hour12: false,
                           })}
                         </time>
+                      </span>
+                    )}
+                    {task.diagnostic && (
+                      <span className="mt-1 block text-xs text-destructive">
+                        {task.diagnostic.label} · {task.diagnostic.phase}
                       </span>
                     )}
                     {task.waitReason && (
@@ -225,6 +269,29 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
                     )}
                     {task.question && (
                       <p className="whitespace-pre-wrap text-sm">답변 필요: {task.question}</p>
+                    )}
+                    {task.diagnostic && (
+                      <div
+                        className="space-y-1 rounded-md border border-border bg-muted/30 p-2 text-xs"
+                        data-orchestra-failure
+                      >
+                        <p className="font-medium">{task.diagnostic.label}</p>
+                        <p>실패 단계: {task.diagnostic.phase}</p>
+                        <p>복구: {task.diagnostic.recovery}</p>
+                        <p>확인할 일: {task.diagnostic.action}</p>
+                        {task.diagnostic.evidence && task.diagnostic.evidence.length > 0 && (
+                          <details>
+                            <summary className="cursor-pointer">검증 근거</summary>
+                            <ul className="mt-1 list-disc space-y-1 pl-4">
+                              {task.diagnostic.evidence.map((item, index) => (
+                                <li key={index} className="whitespace-pre-wrap">
+                                  {item}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </div>
                     )}
                     {task.error && (
                       <p className="whitespace-pre-wrap text-xs text-destructive">{task.error}</p>
@@ -271,25 +338,40 @@ export const OrchestraTaskListPanel = memo(function OrchestraTaskListPanel({
                         </button>
                         {state.history[task.id] && (
                           <ol className="mt-2 space-y-3">
-                            {previous.map((attempt) => (
-                              <li
-                                key={attempt.key}
-                                className="min-w-0 rounded-md border border-border p-3"
-                              >
-                                <p className="mb-2 break-words text-xs text-muted-foreground">
-                                  시도 {attempt.number} · {attempt.displayName} ·{" "}
-                                  {attempt.modelSelection?.model} ·{" "}
-                                  {orchestraTaskStatusLabels[attempt.status]}
-                                </p>
-                                {attempt.instruction !== task.instruction &&
-                                  attempt.instruction && (
-                                    <p className="mb-2 whitespace-pre-wrap text-xs text-muted-foreground">
-                                      {attempt.instruction}
-                                    </p>
-                                  )}
-                                {renderAttempt(attempt)}
-                              </li>
-                            ))}
+                            {previous.map((attempt) => {
+                              const AttemptModelIcon = attempt.modelSelection
+                                ? getModelOrProviderIcon({
+                                    instanceId: String(attempt.modelSelection.instanceId),
+                                    model: attempt.modelSelection.model,
+                                  })
+                                : null;
+                              return (
+                                <li
+                                  key={attempt.key}
+                                  className="min-w-0 rounded-md border border-border p-3"
+                                >
+                                  <p className="mb-2 flex items-center gap-1.5 break-words text-xs text-muted-foreground">
+                                    {AttemptModelIcon ? (
+                                      <AttemptModelIcon className="size-3.5 shrink-0" aria-hidden />
+                                    ) : null}
+                                    <span>
+                                      시도 {attempt.number} · {attempt.displayName}
+                                      {attempt.modelSelection
+                                        ? ` · 배정 모델 · ${attempt.modelSelection.instanceId} · ${attempt.modelSelection.model}`
+                                        : ""}{" "}
+                                      · {orchestraTaskStatusLabels[attempt.status]}
+                                    </span>
+                                  </p>
+                                  {attempt.instruction !== task.instruction &&
+                                    attempt.instruction && (
+                                      <p className="mb-2 whitespace-pre-wrap text-xs text-muted-foreground">
+                                        {attempt.instruction}
+                                      </p>
+                                    )}
+                                  {renderAttempt(attempt)}
+                                </li>
+                              );
+                            })}
                           </ol>
                         )}
                       </div>

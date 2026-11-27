@@ -33,6 +33,17 @@ CLAUDE_CONFIG_DIR path: empty
 이 항목을 지정하면 T3 Code는 `CLAUDE_CONFIG_DIR` 환경 변수로 Claude Code가 해당 디렉터리를 바라보도록
 지정합니다. `HOME`은 바꾸지 않으므로 시스템 키체인과 나머지 환경은 그대로 유지됩니다.
 
+## Claude API 키 보관
+
+Claude Console API 연결의 키는 서버의 로컬 비밀 저장소에 보관합니다. Windows 서버에서는
+해당 Windows 사용자 계정으로 암호화하며 기존 저장 키도 읽을 때 같은 방식으로 전환합니다.
+다른 Windows 계정이나 다른 컴퓨터로 데이터만 옮긴 경우에는 연결 설정에서 키를 다시 입력해야
+할 수 있습니다. Windows가 아닌 서버의 로컬 비밀 저장소에는 이 Windows 암호화가 적용되지 않습니다.
+
+## 안전 필터와 모델 전환
+
+Claude의 안전 필터가 요청을 차단하면 선택한 모델을 유지하고 차단 결과를 표시합니다. T3는 이때 다른 Claude 모델로 자동 전환해 요청을 이어가지 않습니다.
+
 ## 업무용과 개인용 Claude 계정을 함께 사용하고 싶습니다
 
 계정마다 서로 다른 Claude 설정 디렉터리를 사용하세요.
@@ -189,6 +200,24 @@ CLAUDE_CONFIG_DIR path: ~/.claude_router_home
 
 라우터 자체의 설치·시작·설정 절차는 원본 프로젝트의 README를 따르세요:
 <https://github.com/musistudio/claude-code-router>.
+
+## 지휘자 모드
+
+대화에서 어떤 Claude 모델을 고르든 그 모델이 지휘자가 됩니다. 지휘자는 계획·설계·검토를
+맡고, 여러 파일에 걸친 구현이나 테스트 묶음 같은 큰 작업은 `worker` 하위 에이전트에게
+나눠 맡깁니다. 짧은 답변이나 몇 줄 수정은 지휘자가 바로 처리합니다.
+
+일꾼 모델은 **설정 → 제공자 → Claude → 지휘자 모드 · 일꾼 모델**에서 고릅니다. 기본값은
+Opus이며 Sonnet, Haiku, Fable, 지휘자와 같은 모델 중에서 바꾸거나 끌 수 있습니다.
+변경은 새 세션부터 적용됩니다. 일꾼이 쓴 토큰은 [작업 토큰 사용량](./token-usage.md)에
+모델별로 따로 표시되고, **이번 실행** 계정 사용량에도 더해집니다.
+
+## 프로젝트의 AGENTS.md
+
+Claude Code는 `CLAUDE.md`만 읽고 `AGENTS.md`는 읽지 않습니다. T3 Code는 프로젝트 폴더에
+`AGENTS.md`가 있으면 Claude 세션을 시작할 때 그 내용을 함께 전달합니다. `CLAUDE.md`,
+`CLAUDE.local.md`, `.claude/CLAUDE.md` 중 하나가 같은 내용이거나 `@AGENTS.md`로 불러오고
+있으면 중복해서 전달하지 않습니다. 변경은 새 세션부터 적용됩니다.
 
 ## 계정이 아니라 Claude 설정만 다르게 쓰고 싶습니다
 

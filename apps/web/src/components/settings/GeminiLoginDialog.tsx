@@ -118,8 +118,8 @@ export function GeminiLoginDialog({
       type: "success",
       title: "Google 계정을 연결했습니다",
       description: result.value.email
-        ? `${result.value.email} 계정으로 Gemini를 사용할 수 있습니다.`
-        : `${displayName} 계정으로 Gemini를 사용할 수 있습니다.`,
+        ? `${result.value.email} 계정으로 Antigravity CLI를 사용할 수 있습니다.`
+        : `${displayName} 계정으로 Antigravity CLI를 사용할 수 있습니다.`,
     });
     onAuthenticated();
     onOpenChange(false);
@@ -136,11 +136,11 @@ export function GeminiLoginDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Gemini className="size-4" aria-hidden />
-            Google로 Gemini 연결
+            Antigravity CLI에 Google 계정 연결
           </DialogTitle>
           <DialogDescription>
-            {displayName} 전용 Google 로그인을 시작합니다. Gmail이나 Drive 데이터 연동이 아니라,
-            Gemini CLI가 요청하는 Google 계정 및 Google Cloud 권한으로 인증합니다.
+            {displayName}에서 사용할 Google 계정으로 로그인하세요. Antigravity CLI가 발급한 링크를
+            열고 인증 코드를 입력하세요.
           </DialogDescription>
         </DialogHeader>
 
@@ -148,8 +148,7 @@ export function GeminiLoginDialog({
           {authorizationUrl === null ? (
             <div className="space-y-3">
               <p className="text-sm leading-relaxed text-muted-foreground">
-                계정별 인증 정보는 이 실행 환경 안의 분리된 Gemini 홈에 저장됩니다. 다른 Gemini
-                계정의 로그인과 세션에는 영향을 주지 않습니다.
+                이 로그인은 선택한 T3 실행 환경의 Antigravity CLI에 적용됩니다.
               </p>
               <Button type="button" className="w-full" disabled={isStarting} onClick={start}>
                 {isStarting ? <LoaderIcon className="animate-spin" /> : <Gemini />}

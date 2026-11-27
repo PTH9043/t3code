@@ -32,6 +32,7 @@ vi.mock("../../hooks/useSettings", () => ({
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
 import { AntseedConnectionDialog } from "./AntseedConnectionDialog";
+import { GrokAccountDialog } from "./GrokAccountDialog";
 
 const remoteEnvironmentId = EnvironmentId.make("remote-device");
 
@@ -98,5 +99,32 @@ describe("AddProviderInstanceDialog environment routing", () => {
     (result.props.onBack as () => void)();
     hooks.beginRender();
     expect(AddProviderInstanceDialog(props).type).not.toBe(AntseedConnectionDialog);
+  });
+
+  it("opens GrokAccountDialog in api-key tab from account addition and allows manual wizard fallback", () => {
+    const props = {
+      open: true,
+      environmentId: remoteEnvironmentId,
+      environmentLabel: "Remote device",
+      onOpenChange: vi.fn(),
+    };
+    hooks.beginRender();
+    const choice = visitElements(
+      AddProviderInstanceDialog(props),
+      (element) => element.props.children === "Grok (xAI) API 계정 연결",
+    );
+    expect(choice).toBeDefined();
+    (choice!.props.onClick as () => void)();
+    hooks.beginRender();
+    const result = AddProviderInstanceDialog(props);
+    expect(result.type).toBe(GrokAccountDialog);
+    expect(result.props.environmentId).toBe(remoteEnvironmentId);
+    expect(result.props.mode).toBe("add");
+    expect(result.props.initialTab).toBe("api-key");
+
+    // Manual wizard entry moves to step 1 instead of staying in GrokAccountDialog.
+    (result.props.onOpenManualWizard as () => void)();
+    hooks.beginRender();
+    expect(AddProviderInstanceDialog(props).type).not.toBe(GrokAccountDialog);
   });
 });

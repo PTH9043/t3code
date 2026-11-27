@@ -1,5 +1,8 @@
 import importlib.util
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -44,6 +47,24 @@ class AutomaticRestartGuardTest(unittest.TestCase):
     def test_idle_and_provider_process(self):
         self.assertEqual(self.run_inspection(), {'safe': True, 'reason': 'idle'})
         self.assertEqual(self.run_inspection(True), {'safe': False, 'reason': 'provider-running'})
+
+    def test_real_local_voice_worker_delays_automatic_restart(self):
+        with tempfile.TemporaryDirectory(prefix='t3-assistant-voice-') as scratch:
+            child = subprocess.Popen(
+                [sys.executable, '-c', 'import time; time.sleep(30)'],
+                cwd=scratch,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            try:
+                with patch.object(guard, 'REPLACEMENT_HOLD', self.replacement_hold):
+                    self.assertEqual(guard.inspect(self.database, os.getpid()),
+                                     {'safe': False, 'reason': 'provider-running'})
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
 
     def test_active_sessions_and_workspace_work_delay_restart(self):
         for table, values in (

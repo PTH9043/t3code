@@ -103,6 +103,55 @@ export function resultTextExcerpt(text: string, limit = GENERATED_TEXT_VISIBLE_C
   return text.slice(0, end < text.length && last >= 0xd800 && last <= 0xdbff ? end - 1 : end);
 }
 
+export type GeneratedResultAttachmentLike = {
+  readonly id: string;
+  readonly type: string;
+  readonly result?: { readonly kind?: string } | undefined;
+};
+
+export type GeneratedResultDisplayGroup<T extends GeneratedResultAttachmentLike> =
+  | { readonly kind: "image"; readonly attachment: T }
+  | { readonly kind: "image-gallery"; readonly id: string; readonly attachments: ReadonlyArray<T> }
+  | { readonly kind: "text"; readonly attachment: T }
+  | { readonly kind: "file"; readonly attachment: T };
+
+/**
+ * Group generated result attachments so multiple AI-created images render
+ * together in a single gallery block while keeping text reports and files
+ * in their original relative order.
+ */
+export function groupGeneratedResultAttachments<T extends GeneratedResultAttachmentLike>(
+  attachments: ReadonlyArray<T>,
+): ReadonlyArray<GeneratedResultDisplayGroup<T>> {
+  const images = attachments.filter((attachment) => attachment.type === "image");
+  const groups: GeneratedResultDisplayGroup<T>[] = [];
+  let emittedImages = false;
+
+  for (const attachment of attachments) {
+    if (attachment.type === "image") {
+      if (emittedImages) continue;
+      emittedImages = true;
+      if (images.length > 1) {
+        groups.push({
+          kind: "image-gallery",
+          id: images.map((item) => item.id).join(":"),
+          attachments: images,
+        });
+      } else {
+        groups.push({ kind: "image", attachment });
+      }
+      continue;
+    }
+    if (attachment.result?.kind === "text") {
+      groups.push({ kind: "text", attachment });
+      continue;
+    }
+    groups.push({ kind: "file", attachment });
+  }
+
+  return groups;
+}
+
 export async function readResultText(url: string, signal?: AbortSignal) {
   const response = await fetch(url, { signal: signal ?? null });
   if (!response.ok) throw new Error("텍스트를 읽을 수 없습니다. (" + response.status + ")");

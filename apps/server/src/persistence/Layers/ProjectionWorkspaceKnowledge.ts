@@ -1,9 +1,13 @@
+import { visibleKnowledge } from "../knowledgeVisibility.ts";
+import { updateWorkspaceWikiIndex } from "../workspaceWikiLinks.ts";
+import { knowledgeContentHash } from "../knowledgeContentHash.ts";
 import {
   WorkspaceKnowledgeItem,
   WorkspaceKnowledgeOrigin,
   WorkspaceKnowledgeStatus,
   WorkspaceKnowledgeKind,
   WorkspaceResearchRecord,
+  WorkspaceKnowledgeProvenance,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -24,13 +28,14 @@ import {
 
 const encodeMessageIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
 
-const ProjectionWorkspaceKnowledgeDbRow = WorkspaceKnowledgeItem.mapFields(
+export const ProjectionWorkspaceKnowledgeDbRow = WorkspaceKnowledgeItem.mapFields(
   Struct.assign({
     kind: WorkspaceKnowledgeKind,
     status: WorkspaceKnowledgeStatus,
     origin: WorkspaceKnowledgeOrigin,
     tags: Schema.fromJsonString(Schema.Array(Schema.String)),
     research: Schema.NullOr(Schema.fromJsonString(WorkspaceResearchRecord)),
+    provenance: Schema.NullOr(Schema.fromJsonString(WorkspaceKnowledgeProvenance)),
   }),
 );
 
@@ -46,6 +51,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         kind,
         title,
         content,
+        content_hash,
+        superseded_by,
         status,
         origin,
         relative_folder,
@@ -53,6 +60,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         applies_to_folder,
         research_json,
         tags_json,
+        provenance_json,
+        source_item_id,
         original_chars,
         stored_chars,
         created_at,
@@ -63,6 +72,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         ${item.kind},
         ${item.title},
         ${item.content},
+        ${knowledgeContentHash(item.content)},
+        ${item.supersededBy ?? null},
         ${item.status},
         ${item.origin},
         ${item.relativeFolder},
@@ -70,6 +81,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         ${item.appliesToFolder ?? null},
         ${item.research == null ? null : JSON.stringify(item.research)},
         ${JSON.stringify(item.tags)},
+        ${item.provenance ? JSON.stringify(item.provenance) : null},
+        ${item.sourceItemId ?? null},
         ${item.originalChars},
         ${item.storedChars},
         ${item.createdAt},
@@ -80,13 +93,18 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         kind = excluded.kind,
         title = excluded.title,
         content = excluded.content,
-        status = excluded.status,
+        content_hash = excluded.content_hash,
+        superseded_by = COALESCE(excluded.superseded_by, projection_workspace_knowledge_items.superseded_by),
+        status = CASE WHEN projection_workspace_knowledge_items.superseded_by IS NOT NULL
+          AND excluded.status IN ('candidate','active') THEN 'superseded' ELSE excluded.status END,
         origin = excluded.origin,
         relative_folder = excluded.relative_folder,
         scope = excluded.scope,
         applies_to_folder = excluded.applies_to_folder,
         research_json = excluded.research_json,
         tags_json = excluded.tags_json,
+        provenance_json = coalesce(excluded.provenance_json, provenance_json),
+        source_item_id = coalesce(excluded.source_item_id, source_item_id),
         original_chars = excluded.original_chars,
         stored_chars = excluded.stored_chars,
         updated_at = excluded.updated_at
@@ -126,6 +144,7 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
     execute: ({ projectId }) => sql`
       SELECT
         item_id AS "id",
+        superseded_by AS "supersededBy",
         project_id AS "projectId",
         kind,
         title,
@@ -137,6 +156,8 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         applies_to_folder AS "appliesToFolder",
         research_json AS "research",
         tags_json AS "tags",
+        provenance_json AS "provenance",
+        source_item_id AS "sourceItemId",
         original_chars AS "originalChars",
         stored_chars AS "storedChars",
         prompt_uses AS "promptUses",
@@ -145,20 +166,31 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
         updated_at AS "updatedAt"
       FROM projection_workspace_knowledge_items
       WHERE project_id = ${projectId}
+        AND ${visibleKnowledge(sql)}
       ORDER BY updated_at DESC, item_id ASC
     `,
   });
 
-  const upsert: ProjectionWorkspaceKnowledgeRepositoryShape["upsert"] = (item) =>
-    upsertRow(item).pipe(
-      Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.upsert:query")),
-    );
-  const recordUsage: ProjectionWorkspaceKnowledgeRepositoryShape["recordUsage"] = (input) =>
-    input.itemIds.length === 0
+  const upsert: ProjectionWorkspaceKnowledgeRepositoryShape["upsert"] = (item, bindings) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [previous] = yield* sql<{ title: string; content: string; status: string }>`
+        SELECT title, content, status FROM projection_workspace_knowledge_items
+        WHERE project_id = ${item.projectId} AND item_id = ${item.id}`;
+          yield* upsertRow(item);
+          yield* updateWorkspaceWikiIndex(sql, item, previous, bindings);
+        }),
+      )
+      .pipe(Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.upsert:query")));
+  const recordUsage: ProjectionWorkspaceKnowledgeRepositoryShape["recordUsage"] = (input) => {
+    const uniqueItemIds = Array.from(new Set(input.itemIds));
+    return uniqueItemIds.length === 0
       ? Effect.void
-      : recordUsageRows(input).pipe(
+      : recordUsageRows({ ...input, itemIds: uniqueItemIds }).pipe(
           Effect.mapError(toPersistenceSqlError("ProjectionWorkspaceKnowledge.recordUsage:query")),
         );
+  };
 
   const archive: ProjectionWorkspaceKnowledgeRepositoryShape["archive"] = (input) =>
     archiveRow(input).pipe(
@@ -200,6 +232,9 @@ const makeProjectionWorkspaceKnowledgeRepository = Effect.gen(function* () {
     (input) =>
       Effect.gen(function* () {
         const retainedIdsJson = yield* encodeMessageIds(input.retainedMessageIds ?? []);
+        yield* sql`DELETE FROM pdf_revision_documents WHERE project_id = ${input.projectId}
+          AND (${input.threadId ?? null} IS NULL OR thread_id = ${input.threadId ?? null})
+          AND (${input.retainedMessageIds ? 1 : 0} = 0 OR message_id NOT IN (SELECT value FROM json_each(${retainedIdsJson})))`;
         yield* sql`DELETE FROM projection_workspace_rag_chunks WHERE project_id = ${input.projectId}
         AND item_id IN (SELECT item_id FROM projection_workspace_knowledge_items
           WHERE project_id = ${input.projectId} AND json_extract(research_json, '$.attachment.attachmentId') IS NOT NULL

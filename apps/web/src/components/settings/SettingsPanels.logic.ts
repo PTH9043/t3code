@@ -174,6 +174,20 @@ export function buildProviderInstanceUpdatePatch(input: {
     LegacyProviderSettings | undefined
   >;
   const legacyProviderDefault = input.isDefault ? legacyProviderDefaults[input.driver] : undefined;
+  const normalizedInstance: ProviderInstanceConfig =
+    input.instance.enabled !== undefined &&
+    input.instance.config !== null &&
+    typeof input.instance.config === "object" &&
+    !Array.isArray(input.instance.config) &&
+    "enabled" in input.instance.config
+      ? {
+          ...input.instance,
+          config: {
+            ...(input.instance.config as Record<string, unknown>),
+            enabled: input.instance.enabled,
+          },
+        }
+      : input.instance;
   return {
     ...(legacyProviderDefault !== undefined
       ? {
@@ -185,7 +199,7 @@ export function buildProviderInstanceUpdatePatch(input: {
       : {}),
     providerInstances: {
       ...input.settings.providerInstances,
-      [input.instanceId]: input.instance,
+      [input.instanceId]: normalizedInstance,
     },
     ...(input.textGenerationModelSelection !== undefined
       ? { textGenerationModelSelection: input.textGenerationModelSelection }

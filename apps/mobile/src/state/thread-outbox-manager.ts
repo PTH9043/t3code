@@ -152,6 +152,30 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
       return true;
     });
 
+  // A delayed delivery result must not overwrite edits made after dispatch.
+  const updateIfCurrent = (
+    expected: QueuedThreadMessage,
+    replacement: QueuedThreadMessage,
+  ): Promise<boolean> =>
+    serialize(async () => {
+      if (!currentMessages().some((candidate) => candidate === expected)) return false;
+      try {
+        await options.storage.write(replacement);
+      } catch (cause) {
+        throw new ThreadOutboxManagerError({
+          operation: "update",
+          environmentId: expected.environmentId,
+          threadId: expected.threadId,
+          messageId: expected.messageId,
+          cause,
+        });
+      }
+      setMessages(
+        currentMessages().map((candidate) => (candidate === expected ? replacement : candidate)),
+      );
+      return true;
+    });
+
   const remove = (message: QueuedThreadMessage): Promise<void> =>
     serialize(async () => {
       try {
@@ -168,6 +192,24 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
       setMessages(
         currentMessages().filter((candidate) => candidate.messageId !== message.messageId),
       );
+    });
+
+  const removeIfCurrent = (expected: QueuedThreadMessage): Promise<boolean> =>
+    serialize(async () => {
+      if (!currentMessages().some((candidate) => candidate === expected)) return false;
+      try {
+        await options.storage.remove(expected);
+      } catch (cause) {
+        throw new ThreadOutboxManagerError({
+          operation: "remove",
+          environmentId: expected.environmentId,
+          threadId: expected.threadId,
+          messageId: expected.messageId,
+          cause,
+        });
+      }
+      setMessages(currentMessages().filter((candidate) => candidate !== expected));
+      return true;
     });
 
   const clearEnvironment = (environmentId: EnvironmentId): Promise<void> =>
@@ -222,7 +264,9 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
     enqueue,
     confirmQueued,
     update,
+    updateIfCurrent,
     remove,
+    removeIfCurrent,
     clearEnvironment,
   };
 }

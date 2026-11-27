@@ -24,6 +24,7 @@ import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
 import {
+  ChevronDownIcon,
   CloudIcon,
   LaptopIcon,
   LoaderIcon,
@@ -76,10 +77,16 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { GeminiLoginDialog } from "./GeminiLoginDialog";
+import { GrokAccountDialog } from "./GrokAccountDialog";
+import { MuseAccountDialog, type MuseAccountAuthTab } from "./MuseAccountDialog";
 import { DeepSeekConnectionDialog } from "./DeepSeekConnectionDialog";
 import { GlmConnectionDialog } from "./GlmConnectionDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
+import {
+  API_CONNECTION_LABEL_BY_PROVIDER_ID,
+  readApiConnectionProviderId,
+} from "../chat/providerIconUtils";
 import { searchableSetting } from "./settingsSearch";
 import {
   backgroundActivityOverrideSettings,
@@ -105,6 +112,31 @@ import {
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
 } from "./ProviderSettingsPanel.logic";
+
+export type ProviderStatusFilter = "all" | "active" | "unconfigured";
+
+export function classifyProviderRowFilterStatus(input: {
+  readonly enabled: boolean;
+  readonly isDefault: boolean;
+  readonly isDirty?: boolean | undefined;
+  readonly liveStatus?: string | undefined;
+  readonly liveInstalled?: boolean | undefined;
+  readonly liveAuthStatus?: string | undefined;
+}): "active" | "unconfigured" {
+  if (!input.enabled) return "unconfigured";
+  if (input.liveStatus !== undefined) {
+    if (
+      input.liveStatus === "ready" ||
+      input.liveAuthStatus === "authenticated" ||
+      (input.liveInstalled === true && input.liveStatus === "warning")
+    ) {
+      return "active";
+    }
+    return "unconfigured";
+  }
+  if (input.isDefault && !input.isDirty) return "unconfigured";
+  return "active";
+}
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -410,10 +442,31 @@ export function EnvironmentProviderSettings({
     readonly instanceId: ProviderInstanceId;
     readonly displayName: string;
   } | null>(null);
+  const [grokAccountDialog, setGrokAccountDialog] = useState<
+    | { readonly mode: "add" }
+    | {
+        readonly mode: "reauth";
+        readonly instanceId: ProviderInstanceId;
+        readonly displayName: string;
+      }
+    | null
+  >(null);
+  const [museAccountDialog, setMuseAccountDialog] = useState<
+    | { readonly mode: "add"; readonly initialTab?: MuseAccountAuthTab }
+    | {
+        readonly mode: "reauth";
+        readonly instanceId: ProviderInstanceId;
+        readonly displayName: string;
+        readonly initialTab?: MuseAccountAuthTab;
+      }
+    | null
+  >(null);
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
+  const [statusFilter, setStatusFilter] = useState<ProviderStatusFilter>("all");
+  const [groupExpandedOverrides, setGroupExpandedOverrides] = useState<Record<string, boolean>>({});
   const refreshingRef = useRef(false);
   const updatingDriversRef = useRef<Set<ProviderDriverKind>>(new Set());
 
@@ -595,11 +648,27 @@ export function EnvironmentProviderSettings({
     }
   }
 
-  const rowGroups = new Map<ProviderDriverKind, InstanceRow[]>();
+  // Split OpenCode-compatible API connections and Muse Cloud accounts into their
+  // own groups so each branded gateway (Antseed, DeepSeek, Muse Cloud, …) reads
+  // as its own section instead of being folded into one bucket.
+  const rowGroups = new Map<string, { driver: ProviderDriverKind; rows: InstanceRow[] }>();
   for (const row of rows) {
-    const list = rowGroups.get(row.driver) ?? [];
-    list.push(row);
-    rowGroups.set(row.driver, list);
+    const connectionProviderId = readApiConnectionProviderId(row.instance.config);
+    const isMuseCloudRow =
+      row.driver === ProviderDriverKind.make("muse") &&
+      typeof row.instance.config === "object" &&
+      row.instance.config !== null &&
+      "backendMode" in row.instance.config &&
+      (row.instance.config as { backendMode?: unknown }).backendMode === "cloud";
+    const groupKey =
+      row.driver === ProviderDriverKind.make("opencode") && connectionProviderId !== undefined
+        ? `opencode:${connectionProviderId}`
+        : isMuseCloudRow
+          ? "muse:cloud"
+          : String(row.driver);
+    const group = rowGroups.get(groupKey) ?? { driver: row.driver, rows: [] };
+    group.rows.push(row);
+    rowGroups.set(groupKey, group);
   }
 
   const updateProviderInstance = (
@@ -854,155 +923,459 @@ export function EnvironmentProviderSettings({
             }
           />
 
-          {[...rowGroups.entries()].map(([driver, groupRows]) => {
-            const driverOption = getDriverOption(driver);
-            const groupLabel = driverOption?.label ?? formatProviderDriverKindLabel(driver);
-            const enabledCount = groupRows.filter((row) => row.instance.enabled ?? true).length;
-            return (
-              <section
-                key={driver}
-                className="grid gap-3 rounded-xl border border-border/60 bg-muted/10 p-3"
-              >
-                <div className="flex min-w-0 items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-sm font-semibold">{groupLabel}</h3>
-                    <p className="text-[11px] text-muted-foreground">
-                      계정 {groupRows.length}개
-                      {groupRows.length > 1 ? ` · 사용 ${enabledCount}개` : ""}
-                    </p>
-                  </div>
-                  {groupRows.length > 1 ? <Badge variant="outline">계정 그룹</Badge> : null}
-                </div>
-                <div className="grid gap-3">
-                  {groupRows.map((row) => {
-                    const liveProvider = serverProviders.find(
-                      (candidate) => candidate.instanceId === row.instanceId,
-                    );
-                    const updateCandidate = liveProvider
-                      ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
-                      : undefined;
-                    const isDriverUpdateRunning =
-                      updateCandidate !== undefined &&
-                      (updatingProviderDrivers.has(updateCandidate.driver) ||
-                        serverProviders.some(
-                          (provider) =>
-                            provider.driver === updateCandidate.driver &&
-                            isProviderUpdateActive(provider),
-                        ));
-                    const showInlineUpdateButton =
-                      updateCandidate !== undefined &&
-                      hasOneClickUpdateProviderCandidate(updateCandidate, serverProviders);
-                    const canRunInlineUpdate =
-                      updateCandidate !== undefined &&
-                      canOneClickUpdateProviderCandidate(updateCandidate, serverProviders) &&
-                      !updatingProviderDrivers.has(updateCandidate.driver);
-                    const modelPreferences = settings.providerModelPreferences?.[
-                      row.instanceId
-                    ] ?? {
-                      hiddenModels: [],
-                      modelOrder: [],
-                    };
-                    const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
-                      favorite.provider === row.instanceId
-                        ? Result.succeed(favorite.model)
-                        : Result.failVoid,
-                    );
-                    const resetLabel = driverOption?.label ?? String(row.driver);
-                    const headerAction =
-                      row.isDefault && row.isDirty ? (
-                        <SettingResetButton
-                          label={`${resetLabel} CLI 설정`}
-                          onClick={() => resetDefaultInstance(row.driver)}
-                        />
-                      ) : null;
-                    const displayName =
-                      row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
-                    const authAction =
-                      row.driver === ProviderDriverKind.make("gemini") ? (
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant={
-                            liveProvider?.auth.status === "authenticated" ? "ghost" : "outline"
-                          }
-                          onClick={() =>
-                            setGeminiLoginTarget({ instanceId: row.instanceId, displayName })
-                          }
-                        >
-                          {liveProvider?.auth.status === "authenticated"
-                            ? "Google 계정 변경"
-                            : "Google로 로그인"}
-                        </Button>
-                      ) : null;
-                    return (
-                      <ProviderInstanceCard
-                        key={row.instanceId}
-                        instanceId={row.instanceId}
-                        instance={row.instance}
-                        driverOption={driverOption}
-                        liveProvider={liveProvider}
-                        isExpanded={openInstanceDetails[row.instanceId] ?? false}
-                        onExpandedChange={(open) =>
-                          setOpenInstanceDetails((existing) => ({
-                            ...existing,
-                            [row.instanceId]: open,
-                          }))
-                        }
-                        onUpdate={(next) => {
-                          const wasEnabled = row.instance.enabled ?? true;
-                          const isDisabling = next.enabled === false && wasEnabled;
-                          const shouldClearTextGen =
-                            isDisabling && textGenInstanceId === row.instanceId;
-                          if (shouldClearTextGen) {
-                            updateProviderInstance(row, next, {
-                              textGenerationModelSelection:
-                                DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-                            });
-                          } else {
-                            updateProviderInstance(row, next);
-                          }
-                        }}
-                        onDelete={
-                          row.isDefault ? undefined : () => deleteProviderInstance(row.instanceId)
-                        }
-                        headerAction={headerAction}
-                        authAction={authAction}
-                        hiddenModels={modelPreferences.hiddenModels}
-                        favoriteModels={favoriteModels}
-                        modelOrder={modelPreferences.modelOrder}
-                        onHiddenModelsChange={(hiddenModels) =>
-                          updateProviderModelPreferences(row.instanceId, {
-                            ...modelPreferences,
-                            hiddenModels,
-                          })
-                        }
-                        onFavoriteModelsChange={(favoriteModels) =>
-                          updateProviderFavoriteModels(row.instanceId, favoriteModels)
-                        }
-                        onModelOrderChange={(modelOrder) =>
-                          updateProviderModelPreferences(row.instanceId, {
-                            ...modelPreferences,
-                            modelOrder,
-                          })
-                        }
-                        onRunUpdate={
-                          showInlineUpdateButton && updateCandidate
-                            ? () => {
-                                if (!canRunInlineUpdate) {
-                                  return;
-                                }
-                                void runProviderUpdate(updateCandidate);
-                              }
-                            : undefined
-                        }
-                        isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
-                      />
-                    );
-                  })}
-                </div>
-              </section>
+          {(() => {
+            const liveByInstanceId = new Map(
+              serverProviders.map((candidate) => [candidate.instanceId, candidate] as const),
             );
-          })}
+            const classifiedEntries = [...rowGroups.entries()].map(([groupKey, group]) => {
+              const rowsWithState = group.rows.map((row) => {
+                const liveProvider = liveByInstanceId.get(row.instanceId);
+                const filterStatus = classifyProviderRowFilterStatus({
+                  enabled: row.instance.enabled ?? true,
+                  isDefault: row.isDefault,
+                  isDirty: row.isDirty,
+                  liveStatus: liveProvider?.status,
+                  liveInstalled: liveProvider?.installed,
+                  liveAuthStatus: liveProvider?.auth.status,
+                });
+                return { row, liveProvider, filterStatus };
+              });
+              const activeCount = rowsWithState.filter(
+                (item) => item.filterStatus === "active",
+              ).length;
+              const unconfiguredCount = rowsWithState.length - activeCount;
+              const filteredRows =
+                statusFilter === "all"
+                  ? rowsWithState
+                  : rowsWithState.filter((item) => item.filterStatus === statusFilter);
+              return {
+                groupKey,
+                driver: group.driver,
+                allRows: rowsWithState,
+                filteredRows,
+                activeCount,
+                unconfiguredCount,
+              };
+            });
+            const totalRowsCount = classifiedEntries.reduce(
+              (sum, entry) => sum + entry.allRows.length,
+              0,
+            );
+            const totalActiveCount = classifiedEntries.reduce(
+              (sum, entry) => sum + entry.activeCount,
+              0,
+            );
+            const totalUnconfiguredCount = totalRowsCount - totalActiveCount;
+            const visibleEntries = classifiedEntries.filter(
+              (entry) => entry.filteredRows.length > 0,
+            );
+
+            return (
+              <div className="space-y-3 pt-1">
+                <div
+                  className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-2 border-b border-border/50 bg-background/95 px-3 py-2 backdrop-blur-xs sm:px-4"
+                  data-provider-filter-bar
+                >
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    role="group"
+                    aria-label="공급자 상태 필터"
+                  >
+                    {(
+                      [
+                        { id: "all", label: "전체", count: totalRowsCount },
+                        { id: "active", label: "활성", count: totalActiveCount },
+                        { id: "unconfigured", label: "미설정", count: totalUnconfiguredCount },
+                      ] as const
+                    ).map((filterItem) => (
+                      <Button
+                        key={filterItem.id}
+                        type="button"
+                        size="xs"
+                        variant={statusFilter === filterItem.id ? "default" : "outline"}
+                        aria-pressed={statusFilter === filterItem.id}
+                        onClick={() => setStatusFilter(filterItem.id)}
+                      >
+                        {filterItem.label} ({filterItem.count})
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      onClick={() =>
+                        setGroupExpandedOverrides(
+                          Object.fromEntries(
+                            classifiedEntries.map((entry) => [entry.groupKey, true]),
+                          ),
+                        )
+                      }
+                    >
+                      모두 펼치기
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      onClick={() =>
+                        setGroupExpandedOverrides(
+                          Object.fromEntries(
+                            classifiedEntries.map((entry) => [entry.groupKey, false]),
+                          ),
+                        )
+                      }
+                    >
+                      모두 접기
+                    </Button>
+                  </div>
+                </div>
+
+                {visibleEntries.length === 0 ? (
+                  <p className="px-4 py-6 text-center text-xs text-muted-foreground">
+                    선택한 상태 필터에 해당하는 공급자가 없습니다.
+                  </p>
+                ) : null}
+
+                <div className="grid items-start gap-3 xl:grid-cols-2">
+                  {visibleEntries.map(
+                    ({ groupKey, driver, filteredRows, activeCount, unconfiguredCount }) => {
+                      const driverOption = getDriverOption(driver);
+                      const connectionProviderId = groupKey.startsWith("opencode:")
+                        ? groupKey.slice("opencode:".length)
+                        : undefined;
+                      const isMuseCloudGroup = groupKey === "muse:cloud";
+                      const isMuseCodeGroup = groupKey === "muse";
+                      const groupLabel =
+                        connectionProviderId !== undefined
+                          ? (API_CONNECTION_LABEL_BY_PROVIDER_ID[connectionProviderId] ??
+                            readApiConnectionProviderId(filteredRows[0]?.row.instance.config) ??
+                            connectionProviderId)
+                          : isMuseCloudGroup
+                            ? "Muse Cloud"
+                            : isMuseCodeGroup
+                              ? "Muse Code"
+                              : (driverOption?.label ?? formatProviderDriverKindLabel(driver));
+                      const enabledCount = filteredRows.filter(
+                        ({ row }) => row.instance.enabled ?? true,
+                      ).length;
+                      const defaultExpanded = statusFilter !== "all" || activeCount > 0;
+                      const isGroupExpanded = groupExpandedOverrides[groupKey] ?? defaultExpanded;
+                      return (
+                        <section
+                          key={groupKey}
+                          className="grid gap-3 rounded-xl border border-border/60 bg-muted/10 p-3"
+                        >
+                          <div className="flex w-full min-w-0 items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              aria-expanded={isGroupExpanded}
+                              onClick={() =>
+                                setGroupExpandedOverrides((existing) => ({
+                                  ...existing,
+                                  [groupKey]: !isGroupExpanded,
+                                }))
+                              }
+                              className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <h3 className="truncate text-sm font-semibold">{groupLabel}</h3>
+                                  {activeCount > 0 ? (
+                                    <Badge variant="success" size="sm">
+                                      활성 {activeCount}
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="outline" size="sm">
+                                      미설정 {unconfiguredCount}
+                                    </Badge>
+                                  )}
+                                  {filteredRows.length > 1 ? (
+                                    <Badge variant="outline" size="sm">
+                                      계정 그룹
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                                <p className="text-[11px] text-muted-foreground">
+                                  계정 {filteredRows.length}개
+                                  {filteredRows.length > 1 ? ` · 사용 ${enabledCount}개` : ""}
+                                </p>
+                              </div>
+                              <ChevronDownIcon
+                                aria-hidden
+                                className={cn(
+                                  "size-4 shrink-0 text-muted-foreground transition-transform",
+                                  isGroupExpanded && "rotate-180",
+                                )}
+                              />
+                            </button>
+                            {!readOnly && driver === ProviderDriverKind.make("grok") ? (
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="outline"
+                                aria-label="Grok 계정 추가"
+                                onClick={() => setGrokAccountDialog({ mode: "add" })}
+                              >
+                                <PlusIcon className="size-3" aria-hidden />
+                                계정 추가
+                              </Button>
+                            ) : !readOnly && driver === ProviderDriverKind.make("muse") ? (
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="outline"
+                                aria-label={
+                                  isMuseCloudGroup ? "Muse Cloud 계정 추가" : "Muse Code 계정 추가"
+                                }
+                                onClick={() =>
+                                  setMuseAccountDialog({
+                                    mode: "add",
+                                    initialTab: isMuseCloudGroup ? "cloud" : "browser",
+                                  })
+                                }
+                              >
+                                <PlusIcon className="size-3" aria-hidden />
+                                계정 추가
+                              </Button>
+                            ) : null}
+                          </div>
+                          {isGroupExpanded ? (
+                            <div className="grid gap-3">
+                              {filteredRows.map(({ row, liveProvider }) => {
+                                const updateCandidate = liveProvider
+                                  ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
+                                  : undefined;
+                                const isDriverUpdateRunning =
+                                  updateCandidate !== undefined &&
+                                  (updatingProviderDrivers.has(updateCandidate.driver) ||
+                                    serverProviders.some(
+                                      (provider) =>
+                                        provider.driver === updateCandidate.driver &&
+                                        isProviderUpdateActive(provider),
+                                    ));
+                                const showInlineUpdateButton =
+                                  updateCandidate !== undefined &&
+                                  hasOneClickUpdateProviderCandidate(
+                                    updateCandidate,
+                                    serverProviders,
+                                  );
+                                const canRunInlineUpdate =
+                                  updateCandidate !== undefined &&
+                                  canOneClickUpdateProviderCandidate(
+                                    updateCandidate,
+                                    serverProviders,
+                                  ) &&
+                                  !updatingProviderDrivers.has(updateCandidate.driver);
+                                const modelPreferences = settings.providerModelPreferences?.[
+                                  row.instanceId
+                                ] ?? {
+                                  hiddenModels: [],
+                                  modelOrder: [],
+                                };
+                                const favoriteModels = Arr.filterMap(
+                                  settings.favorites ?? [],
+                                  (favorite) =>
+                                    favorite.provider === row.instanceId
+                                      ? Result.succeed(favorite.model)
+                                      : Result.failVoid,
+                                );
+                                const resetLabel = driverOption?.label ?? String(row.driver);
+                                const headerAction =
+                                  row.isDefault && row.isDirty ? (
+                                    <SettingResetButton
+                                      label={`${resetLabel} CLI 설정`}
+                                      onClick={() => resetDefaultInstance(row.driver)}
+                                    />
+                                  ) : null;
+                                const displayName =
+                                  row.instance.displayName?.trim() ||
+                                  driverOption?.label ||
+                                  String(row.driver);
+                                const isGrokApiKeyAccount =
+                                  row.driver === ProviderDriverKind.make("grok") &&
+                                  (liveProvider?.auth.type === "apiKey" ||
+                                    Boolean(
+                                      row.instance.environment?.some(
+                                        (entry) => entry.name.trim() === "XAI_API_KEY",
+                                      ),
+                                    ));
+                                const isMuseCloudAccount =
+                                  row.driver === ProviderDriverKind.make("muse") &&
+                                  typeof row.instance.config === "object" &&
+                                  row.instance.config !== null &&
+                                  "backendMode" in row.instance.config &&
+                                  (row.instance.config as { backendMode?: unknown }).backendMode ===
+                                    "cloud";
+                                const isMuseApiKeyAccount =
+                                  row.driver === ProviderDriverKind.make("muse") &&
+                                  !isMuseCloudAccount &&
+                                  (liveProvider?.auth.type === "apiKey" ||
+                                    Boolean(
+                                      row.instance.environment?.some(
+                                        (entry) => entry.name.trim() === "META_API_KEY",
+                                      ),
+                                    ));
+                                const authAction =
+                                  row.driver === ProviderDriverKind.make("gemini") ? (
+                                    <Button
+                                      type="button"
+                                      size="xs"
+                                      variant={
+                                        liveProvider?.auth.status === "authenticated"
+                                          ? "ghost"
+                                          : "outline"
+                                      }
+                                      onClick={() =>
+                                        setGeminiLoginTarget({
+                                          instanceId: row.instanceId,
+                                          displayName,
+                                        })
+                                      }
+                                    >
+                                      {liveProvider?.auth.status === "authenticated"
+                                        ? "Google 계정 변경"
+                                        : liveProvider?.auth.status === "unauthenticated"
+                                          ? "Google로 로그인"
+                                          : "Google 계정 연결·변경"}
+                                    </Button>
+                                  ) : row.driver === ProviderDriverKind.make("grok") &&
+                                    !isGrokApiKeyAccount ? (
+                                    <Button
+                                      type="button"
+                                      size="xs"
+                                      variant={
+                                        liveProvider?.auth.status === "authenticated"
+                                          ? "ghost"
+                                          : "outline"
+                                      }
+                                      onClick={() =>
+                                        setGrokAccountDialog({
+                                          mode: "reauth",
+                                          instanceId: row.instanceId,
+                                          displayName,
+                                        })
+                                      }
+                                    >
+                                      {liveProvider?.auth.status === "authenticated"
+                                        ? "Grok 계정 변경"
+                                        : liveProvider?.auth.status === "unauthenticated"
+                                          ? "Grok 로그인"
+                                          : "Grok 로그인 · 변경"}
+                                    </Button>
+                                  ) : row.driver === ProviderDriverKind.make("muse") &&
+                                    !isMuseApiKeyAccount ? (
+                                    <Button
+                                      type="button"
+                                      size="xs"
+                                      variant={
+                                        liveProvider?.auth.status === "authenticated"
+                                          ? "ghost"
+                                          : "outline"
+                                      }
+                                      onClick={() =>
+                                        setMuseAccountDialog({
+                                          mode: "reauth",
+                                          instanceId: row.instanceId,
+                                          displayName,
+                                          initialTab: isMuseCloudAccount ? "cloud" : "browser",
+                                        })
+                                      }
+                                    >
+                                      {isMuseCloudAccount
+                                        ? liveProvider?.auth.status === "authenticated"
+                                          ? "muse.ai 계정 변경"
+                                          : liveProvider?.auth.status === "unauthenticated"
+                                            ? "muse.ai (Google 로그인)"
+                                            : "muse.ai (Google) · 변경"
+                                        : liveProvider?.auth.status === "authenticated"
+                                          ? "Muse 계정 변경"
+                                          : liveProvider?.auth.status === "unauthenticated"
+                                            ? "Meta · Google 로그인"
+                                            : "Meta · Google 로그인 · 변경"}
+                                    </Button>
+                                  ) : null;
+                                return (
+                                  <ProviderInstanceCard
+                                    key={row.instanceId}
+                                    instanceId={row.instanceId}
+                                    instance={row.instance}
+                                    driverOption={driverOption}
+                                    liveProvider={liveProvider}
+                                    isExpanded={openInstanceDetails[row.instanceId] ?? false}
+                                    onExpandedChange={(open) =>
+                                      setOpenInstanceDetails((existing) => ({
+                                        ...existing,
+                                        [row.instanceId]: open,
+                                      }))
+                                    }
+                                    onUpdate={(next) => {
+                                      const wasEnabled = row.instance.enabled ?? true;
+                                      const isDisabling = next.enabled === false && wasEnabled;
+                                      const shouldClearTextGen =
+                                        isDisabling && textGenInstanceId === row.instanceId;
+                                      if (shouldClearTextGen) {
+                                        updateProviderInstance(row, next, {
+                                          textGenerationModelSelection:
+                                            DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+                                        });
+                                      } else {
+                                        updateProviderInstance(row, next);
+                                      }
+                                    }}
+                                    environmentId={environmentId}
+                                    onDelete={
+                                      row.isDefault
+                                        ? undefined
+                                        : () => deleteProviderInstance(row.instanceId)
+                                    }
+                                    headerAction={headerAction}
+                                    authAction={authAction}
+                                    hiddenModels={modelPreferences.hiddenModels}
+                                    favoriteModels={favoriteModels}
+                                    modelOrder={modelPreferences.modelOrder}
+                                    onHiddenModelsChange={(hiddenModels) =>
+                                      updateProviderModelPreferences(row.instanceId, {
+                                        ...modelPreferences,
+                                        hiddenModels,
+                                      })
+                                    }
+                                    onFavoriteModelsChange={(favoriteModels) =>
+                                      updateProviderFavoriteModels(row.instanceId, favoriteModels)
+                                    }
+                                    onModelOrderChange={(modelOrder) =>
+                                      updateProviderModelPreferences(row.instanceId, {
+                                        ...modelPreferences,
+                                        modelOrder,
+                                      })
+                                    }
+                                    onRunUpdate={
+                                      showInlineUpdateButton && updateCandidate
+                                        ? () => {
+                                            if (!canRunInlineUpdate) {
+                                              return;
+                                            }
+                                            void runProviderUpdate(updateCandidate);
+                                          }
+                                        : undefined
+                                    }
+                                    isUpdating={
+                                      showInlineUpdateButton ? isDriverUpdateRunning : undefined
+                                    }
+                                  />
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                        </section>
+                      );
+                    },
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </SettingsSection>
 
@@ -1042,6 +1415,61 @@ export function EnvironmentProviderSettings({
           }}
           onOpenChange={(open) => {
             if (!open) setGeminiLoginTarget(null);
+          }}
+        />
+      ) : null}
+      {grokAccountDialog ? (
+        <GrokAccountDialog
+          open
+          environmentId={environmentId}
+          mode={grokAccountDialog.mode}
+          {...(grokAccountDialog.mode === "reauth"
+            ? {
+                instanceId: grokAccountDialog.instanceId,
+                instanceDisplayName: grokAccountDialog.displayName,
+              }
+            : {})}
+          defaultBinaryPath={settings.providers?.grok?.binaryPath}
+          onAuthenticated={(result) => {
+            const targetId =
+              result?.instanceId ??
+              (grokAccountDialog.mode === "reauth" ? grokAccountDialog.instanceId : undefined);
+            if (!targetId) return;
+            const row = rows.find((candidate) => candidate.instanceId === targetId);
+            if (row && !(row.instance.enabled ?? true)) {
+              updateProviderInstance(row, { ...row.instance, enabled: true });
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) setGrokAccountDialog(null);
+          }}
+        />
+      ) : null}
+      {museAccountDialog ? (
+        <MuseAccountDialog
+          open
+          environmentId={environmentId}
+          mode={museAccountDialog.mode}
+          {...(museAccountDialog.initialTab ? { initialTab: museAccountDialog.initialTab } : {})}
+          {...(museAccountDialog.mode === "reauth"
+            ? {
+                instanceId: museAccountDialog.instanceId,
+                instanceDisplayName: museAccountDialog.displayName,
+              }
+            : {})}
+          defaultBinaryPath={settings.providers?.muse?.binaryPath}
+          onAuthenticated={(result) => {
+            const targetId =
+              result?.instanceId ??
+              (museAccountDialog.mode === "reauth" ? museAccountDialog.instanceId : undefined);
+            if (!targetId) return;
+            const row = rows.find((candidate) => candidate.instanceId === targetId);
+            if (row && !(row.instance.enabled ?? true)) {
+              updateProviderInstance(row, { ...row.instance, enabled: true });
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) setMuseAccountDialog(null);
           }}
         />
       ) : null}

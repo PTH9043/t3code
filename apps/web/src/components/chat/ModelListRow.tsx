@@ -3,9 +3,10 @@ import { memo } from "react";
 import { StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
+  getModelBrandIcon,
+  getProviderInstanceIcon,
   getTriggerDisplayModelLabel,
   type ModelEsque,
-  PROVIDER_ICON_BY_PROVIDER,
 } from "./providerIconUtils";
 import { ComboboxItem } from "../ui/combobox";
 import { Button } from "../ui/button";
@@ -38,7 +39,12 @@ export const ModelListRow = memo(function ModelListRow(props: {
   disabledReason?: string | null;
   onToggleFavorite: () => void;
 }) {
-  const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
+  const ProviderIcon = getProviderInstanceIcon(
+    props.driverKind,
+    undefined,
+    String(props.instanceId),
+  );
+  const ModelIcon = getModelBrandIcon(props.model.slug) ?? getModelBrandIcon(props.model.name);
   const providerLabel = props.model.subProvider
     ? `${props.providerDisplayName} · ${props.model.subProvider}`
     : props.providerDisplayName;
@@ -58,7 +64,8 @@ export const ModelListRow = memo(function ModelListRow(props: {
       )}
     >
       <div className="min-w-0 flex-1 text-left">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {ModelIcon ? <ModelIcon className="size-3.5 shrink-0" aria-hidden /> : null}
           <div className="min-w-0 truncate text-xs font-medium leading-snug">
             {props.useTriggerLabel
               ? getTriggerDisplayModelLabel(props.model)

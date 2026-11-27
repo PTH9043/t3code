@@ -14,6 +14,7 @@ interface PendingUserInputPanelProps {
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
 }
 
 export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserInputPanel({
@@ -22,6 +23,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
@@ -35,6 +37,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
+      onChangeCustomAnswer={onChangeCustomAnswer}
     />
   );
 });
@@ -45,12 +48,14 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
 }: {
   prompt: PendingUserInput;
   isResponding: boolean;
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
 }) {
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
@@ -195,6 +200,18 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           );
         })}
       </div>
+      <label className="mt-3 block text-xs text-secondary-label">
+        {activeQuestion.options.length ? "직접 답변" : "답변"}
+        <textarea
+          aria-label={activeQuestion.options.length ? "직접 답변" : "질문 답변"}
+          className="mt-1 w-full resize-y rounded-lg border border-border/55 bg-background/70 px-3 py-2 text-sm text-foreground placeholder:text-placeholder"
+          value={progress.customAnswer}
+          disabled={isResponding}
+          rows={2}
+          placeholder="답변을 입력하세요"
+          onChange={(event) => onChangeCustomAnswer(activeQuestion.id, event.target.value)}
+        />
+      </label>
     </div>
   );
 });

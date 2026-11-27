@@ -2,10 +2,11 @@ import { EditorId, type EnvironmentId, type ResolvedKeybindingsConfig } from "@t
 import { memo, useCallback, useEffect, useMemo } from "react";
 import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../keybindings";
 import { usePreferredEditor } from "../../editorPreferences";
-import { ChevronDownIcon, FolderClosedIcon } from "lucide-react";
+import { ChevronDownIcon, FolderClosedIcon, FolderOpenIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "../ui/menu";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   AntigravityIcon,
   CursorIcon,
@@ -205,6 +206,18 @@ export const OpenInPicker = memo(function OpenInPicker({
     [availableEditors],
   );
   const primaryOption = options.find(({ value }) => value === preferredEditor) ?? null;
+  const fileManagerOption = options.find(({ value }) => value === "file-manager") ?? null;
+
+  const openInFileManager = useCallback(() => {
+    if (!openInCwd || !fileManagerOption) return;
+    return openInEditorMutation({
+      environmentId,
+      input: {
+        cwd: openInCwd,
+        editor: "file-manager",
+      },
+    });
+  }, [environmentId, fileManagerOption, openInCwd, openInEditorMutation]);
 
   const openInEditor = useCallback(
     (editorId: EditorId | null) => {
@@ -283,6 +296,28 @@ export const OpenInPicker = memo(function OpenInPicker({
         </span>
       </Button>
       <GroupSeparator {...(!compact ? { className: "hidden @3xl/header-actions:block" } : {})} />
+      {fileManagerOption && preferredEditor !== "file-manager" && (
+        <>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  aria-label={`${fileManagerOption.label}에서 열기`}
+                  size="icon-xs"
+                  variant="outline"
+                  disabled={!openInCwd}
+                  onClick={openInFileManager}
+                />
+              }
+            >
+              <FolderOpenIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">{fileManagerOption.label}에서 현재 폴더 열기</TooltipPopup>
+          </Tooltip>
+          <GroupSeparator />
+        </>
+      )}
       <Menu>
         <MenuTrigger render={<Button aria-label="편집기 선택" size="icon-xs" variant="outline" />}>
           <ChevronDownIcon aria-hidden="true" className="size-4" />

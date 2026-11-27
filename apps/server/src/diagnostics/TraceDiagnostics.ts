@@ -1,4 +1,5 @@
 import type {
+  ExecutionLedgerSummary,
   ServerTraceDiagnosticsErrorKind,
   ServerTraceDiagnosticsFailureSummary,
   ServerTraceDiagnosticsLogEvent,
@@ -6,6 +7,7 @@ import type {
   ServerTraceDiagnosticsResult,
   ServerTraceDiagnosticsSpanOccurrence,
   ServerTraceDiagnosticsSpanSummary,
+  ServerTraceDiagnosticsSubscriptionOccurrence,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -16,6 +18,38 @@ import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { unifiedExecutionLedger } from "../t3x/executionLedger/UnifiedExecutionLedger.ts";
+
+export type SpanDiagnosticsCategory = "operation" | "subscription" | "long_turn";
+
+const LEGACY_SUBSCRIPTION_SPAN_PATTERN =
+  /^(?:ws|direct)\.rpc\.(?:[a-z0-9_.-]*\.)?subscribe[A-Za-z0-9_.-]*$/iu;
+const LONG_TURN_SPAN_PATTERN =
+  /(?:Adapter\.sendTurn$|^provider\.turn\.|^workspace_delegate(?:\b|\.)|^WorkspaceDelegate\.|^WorkspaceAgentExecutor\.(?:execute|consume)$|^CouncilOrchestrator\.(?:startAutoSeat|executePinnedSpec|awaitCouncil)$|^OrchestraRunner\.|^OrchestrationEngine\.turn)/iu;
+const LIVE_BUFFER_OVERFLOW_CAUSE_PATTERN = /live buffer|buffer[_\s-]?overflow/iu;
+
+function readObjectRecord(value: unknown): Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null
+    ? (value as Readonly<Record<string, unknown>>)
+    : {};
+}
+
+export function classifySpanCategory(name: string, attributes?: unknown): SpanDiagnosticsCategory {
+  const attrs = readObjectRecord(attributes);
+  if (attrs["rpc.kind"] === "subscription" || attrs["t3.span.category"] === "subscription") {
+    return "subscription";
+  }
+  if (attrs["t3.span.category"] === "long_turn") {
+    return "long_turn";
+  }
+  if (LEGACY_SUBSCRIPTION_SPAN_PATTERN.test(name)) {
+    return "subscription";
+  }
+  if (LONG_TURN_SPAN_PATTERN.test(name)) {
+    return "long_turn";
+  }
+  return "operation";
+}
 
 interface TraceRecordLike {
   readonly name?: unknown;
@@ -24,6 +58,7 @@ interface TraceRecordLike {
   readonly startTimeUnixNano?: unknown;
   readonly endTimeUnixNano?: unknown;
   readonly durationMs?: unknown;
+  readonly attributes?: unknown;
   readonly exit?: unknown;
   readonly events?: unknown;
 }
@@ -156,6 +191,11 @@ function makeEmptyDiagnostics(input: {
     logLevelCounts: {},
     topSpansByCount: [],
     slowestSpans: [],
+    longLivedSubscriptionCount: 0,
+    longLivedSubscriptions: [],
+    longRunningTurnCount: 0,
+    longRunningTurns: [],
+    subscriptionBufferOverflowCount: 0,
     commonFailures: [],
     latestFailures: [],
     latestWarningAndErrorLogs: [],
@@ -168,21 +208,18 @@ function isNotFoundError(error: PlatformError.PlatformError): boolean {
   return error.reason._tag === "NotFound";
 }
 
-function insertBoundedSlowestSpan(
-  slowestSpans: ServerTraceDiagnosticsSpanOccurrence[],
-  span: ServerTraceDiagnosticsSpanOccurrence,
+function insertBoundedByDuration<T extends { readonly durationMs: number }>(
+  items: T[],
+  item: T,
 ): void {
-  if (
-    slowestSpans.length >= TOP_LIMIT &&
-    span.durationMs <= slowestSpans[slowestSpans.length - 1]!.durationMs
-  ) {
+  if (items.length >= TOP_LIMIT && item.durationMs <= items[items.length - 1]!.durationMs) {
     return;
   }
 
-  slowestSpans.push(span);
-  slowestSpans.sort((left, right) => right.durationMs - left.durationMs);
-  if (slowestSpans.length > TOP_LIMIT) {
-    slowestSpans.length = TOP_LIMIT;
+  items.push(item);
+  items.sort((left, right) => right.durationMs - left.durationMs);
+  if (items.length > TOP_LIMIT) {
+    items.length = TOP_LIMIT;
   }
 }
 
@@ -211,6 +248,9 @@ export function aggregateTraceDiagnostics(
   let failureCount = 0;
   let interruptionCount = 0;
   let slowSpanCount = 0;
+  let longLivedSubscriptionCount = 0;
+  let longRunningTurnCount = 0;
+  let subscriptionBufferOverflowCount = 0;
   let firstSpanAt: DateTime.Utc | null = null;
   let lastSpanAt: DateTime.Utc | null = null;
 
@@ -221,6 +261,8 @@ export function aggregateTraceDiagnostics(
   const failuresByKey = new Map<string, ServerTraceDiagnosticsFailureSummary>();
   const latestFailures: ServerTraceDiagnosticsRecentFailure[] = [];
   const slowestSpans: ServerTraceDiagnosticsSpanOccurrence[] = [];
+  const longLivedSubscriptions: ServerTraceDiagnosticsSubscriptionOccurrence[] = [];
+  const longRunningTurns: ServerTraceDiagnosticsSpanOccurrence[] = [];
   const latestWarningAndErrorLogs: ServerTraceDiagnosticsLogEvent[] = [];
   const logLevelCounts: Record<string, number> = {};
 
@@ -268,26 +310,57 @@ export function aggregateTraceDiagnostics(
       if (isFailure) failureCount += 1;
       if (isInterrupted) interruptionCount += 1;
 
-      const spanSummary = spansByName.get(name) ?? {
-        count: 0,
-        failureCount: 0,
-        totalDurationMs: 0,
-        maxDurationMs: 0,
-      };
-      spanSummary.count += 1;
-      spanSummary.totalDurationMs += durationMs;
-      spanSummary.maxDurationMs = Math.max(spanSummary.maxDurationMs, durationMs);
-      if (isFailure) spanSummary.failureCount += 1;
-      spansByName.set(name, spanSummary);
-
       const spanItem = { name, durationMs, endedAt, traceId, spanId };
-      if (durationMs >= slowSpanThresholdMs) {
-        slowSpanCount += 1;
+      const spanAttributes = readObjectRecord(parsed.attributes);
+      const spanCategory = classifySpanCategory(name, spanAttributes);
+      const failureCause = isFailure ? readExitCause(parsed.exit) : null;
+
+      if (spanCategory !== "subscription") {
+        const spanSummary = spansByName.get(name) ?? {
+          count: 0,
+          failureCount: 0,
+          totalDurationMs: 0,
+          maxDurationMs: 0,
+        };
+        spanSummary.count += 1;
+        spanSummary.totalDurationMs += durationMs;
+        spanSummary.maxDurationMs = Math.max(spanSummary.maxDurationMs, durationMs);
+        if (isFailure) spanSummary.failureCount += 1;
+        spansByName.set(name, spanSummary);
       }
-      insertBoundedSlowestSpan(slowestSpans, spanItem);
+
+      if (spanCategory === "subscription") {
+        const ttfbMs = toNumberValue(spanAttributes["rpc.subscription.ttfb_ms"]);
+        const bufferOverflow =
+          spanAttributes["rpc.subscription.buffer_overflow"] === true ||
+          (failureCause !== null && LIVE_BUFFER_OVERFLOW_CAUSE_PATTERN.test(failureCause));
+        if (bufferOverflow) {
+          subscriptionBufferOverflowCount += 1;
+        }
+        if (durationMs >= slowSpanThresholdMs) {
+          longLivedSubscriptionCount += 1;
+        }
+        if (durationMs >= slowSpanThresholdMs || bufferOverflow) {
+          insertBoundedByDuration(longLivedSubscriptions, {
+            ...spanItem,
+            ...(ttfbMs !== null ? { ttfbMs } : {}),
+            ...(bufferOverflow ? { bufferOverflow: true } : {}),
+          });
+        }
+      } else if (spanCategory === "long_turn") {
+        if (durationMs >= slowSpanThresholdMs) {
+          longRunningTurnCount += 1;
+          insertBoundedByDuration(longRunningTurns, spanItem);
+        }
+      } else {
+        if (durationMs >= slowSpanThresholdMs) {
+          slowSpanCount += 1;
+        }
+        insertBoundedByDuration(slowestSpans, spanItem);
+      }
 
       if (isFailure) {
-        const cause = readExitCause(parsed.exit);
+        const cause = failureCause ?? "Failure";
         latestFailures.push({ ...spanItem, cause });
 
         const failureKey = `${name}\0${cause}`;
@@ -363,6 +436,11 @@ export function aggregateTraceDiagnostics(
     logLevelCounts,
     topSpansByCount,
     slowestSpans,
+    longLivedSubscriptionCount,
+    longLivedSubscriptions,
+    longRunningTurnCount,
+    longRunningTurns,
+    subscriptionBufferOverflowCount,
     commonFailures: [...failuresByKey.values()]
       .toSorted(
         (left, right) =>
@@ -451,8 +529,12 @@ export const make = Effect.gen(function* () {
           } satisfies TraceDiagnosticsErrorSummary)
         : undefined;
 
+      const executionLedgerSummary: ExecutionLedgerSummary | undefined = Option.getOrUndefined(
+        yield* unifiedExecutionLedger.querySummary({ limit: 30 }).pipe(Effect.option),
+      );
+
       if (files.length === 0) {
-        return makeEmptyDiagnostics({
+        const empty = makeEmptyDiagnostics({
           traceFilePath: options.traceFilePath,
           scannedFilePaths: paths,
           readAt,
@@ -464,9 +546,12 @@ export const make = Effect.gen(function* () {
               message: "No local trace files were found.",
             } satisfies TraceDiagnosticsErrorSummary),
         });
+        return executionLedgerSummary
+          ? { ...empty, executionLedger: executionLedgerSummary }
+          : empty;
       }
 
-      return aggregateTraceDiagnostics({
+      const aggregated = aggregateTraceDiagnostics({
         traceFilePath: options.traceFilePath,
         files,
         scannedFilePaths: paths,
@@ -474,6 +559,9 @@ export const make = Effect.gen(function* () {
         slowSpanThresholdMs,
         ...(readFailureError ? { partialFailure: true, error: readFailureError } : {}),
       });
+      return executionLedgerSummary
+        ? { ...aggregated, executionLedger: executionLedgerSummary }
+        : aggregated;
     },
   );
 

@@ -218,6 +218,17 @@ export type PreviewAutomationHostError = typeof PreviewAutomationHostError.Type;
 
 export const isPreviewAutomationHostError = Schema.is(PreviewAutomationHostError);
 
+function previewAutomationCauseTag(cause: unknown): string | undefined {
+  if (typeof cause !== "object" || cause === null) return undefined;
+  const tag =
+    "_tag" in cause && typeof cause._tag === "string"
+      ? cause._tag
+      : "name" in cause && typeof cause.name === "string"
+        ? cause.name
+        : undefined;
+  return tag !== undefined && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(tag) ? tag : undefined;
+}
+
 export function serializePreviewAutomationHostError(
   error: PreviewAutomationHostError,
 ): NonNullable<PreviewAutomationResponse["error"]> {
@@ -227,6 +238,10 @@ export function serializePreviewAutomationHostError(
         key !== "_tag" && key !== "cause" && key !== "name" && key !== "message" && key !== "stack",
     ),
   );
+  // The cause's text can carry page content, so only its class name is sent:
+  // enough for the server log and the agent to tell failures apart.
+  const causeTag = "cause" in error ? previewAutomationCauseTag(error.cause) : undefined;
+  if (causeTag !== undefined) detail.causeTag = causeTag;
   return {
     _tag: error.responseTag,
     message: error.message,

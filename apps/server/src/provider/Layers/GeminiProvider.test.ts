@@ -1,94 +1,204 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { describe, expect, it } from "@effect/vitest";
+import { expect, it } from "@effect/vitest";
 import { GeminiSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as Cause from "effect/Cause";
-
+import { writeMockLauncher } from "../acp/mockLauncher.test-support.ts";
 import {
   buildInitialGeminiProviderSnapshot,
   checkGeminiProviderStatus,
-  geminiAcpStartupFailureMessage,
+  clearGeminiAuthCooldown,
+  clearGeminiModelCatalogCacheForTest,
 } from "./GeminiProvider.ts";
 
-const decodeGeminiSettings = Schema.decodeSync(GeminiSettings);
+const settings = Schema.decodeSync(GeminiSettings);
 
-describe("Gemini service eligibility", () => {
-  it("explains Google's consumer CLI retirement for defects and typed failures", () => {
-    const error = new Error(
-      "This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products.",
+it.effect(
+  "keeps enabled and disabled Antigravity instances visible with an empty pending catalog",
+  () =>
+    Effect.gen(function* () {
+      for (const enabled of [false, true]) {
+        const snapshot = yield* buildInitialGeminiProviderSnapshot(settings({ enabled }));
+        expect(snapshot.displayName).toBe("Antigravity CLI");
+        expect(snapshot.enabled).toBe(enabled);
+        expect(snapshot.status).toBe(enabled ? "warning" : "disabled");
+        expect(snapshot.models).toEqual([]);
+      }
+    }),
+);
+
+it.layer(NodeServices.layer)("noninteractive Antigravity discovery", (it) => {
+  for (const scenario of ["login", "failure", "empty", "catalog"] as const) {
+    it.effect(scenario, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-status-" });
+        const binaryPath = yield* writeMockLauncher(
+          path.join(directory, "agy.mjs"),
+          `
+        import fs from "node:fs";
+        import readline from "node:readline";
+        const log = new URL("./methods", import.meta.url);
+        if (process.argv.includes("--version")) { console.log("1.5.12"); process.exit(0); }
+        if (!process.argv.includes("acp") || process.argv.includes("--login")) process.exit(2);
+        for await (const line of readline.createInterface({input:process.stdin})) {
+          const {id,method} = JSON.parse(line);
+          fs.appendFileSync(log,method+"\\n");
+          const reply = {jsonrpc:"2.0",id};
+          if (method === "initialize") reply.result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{close:{}}}};
+          else if (method === "session/new" && ["login","failure"].includes("${scenario}"))
+            reply.error = {code: "${scenario}" === "login" ? -32000 : -32603, message:"sensitive mock error"};
+          else if (method === "session/new") reply.result = {sessionId:"test",configOptions:"${scenario}" === "empty" ? [] : [
+            {id:"model",type:"select",name:"Model",currentValue:"offered",options:[{name:"Offered",value:"offered"}]}]};
+          else if (method === "session/close") reply.result = {};
+          else process.exit(3);
+          console.log(JSON.stringify(reply));
+        }
+      `,
+        );
+        const snapshot = yield* checkGeminiProviderStatus(settings({ enabled: true, binaryPath }));
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.version).toBe("1.5.12");
+        expect(snapshot.auth.status).toBe(
+          scenario === "login"
+            ? "unauthenticated"
+            : scenario === "catalog"
+              ? "authenticated"
+              : "unknown",
+        );
+        expect(snapshot.status).toBe(
+          scenario === "catalog" ? "ready" : scenario === "empty" ? "warning" : "error",
+        );
+        expect(snapshot.models.map((model) => model.slug)).toEqual(
+          scenario === "catalog" ? ["offered"] : [],
+        );
+        if (scenario === "login") expect(snapshot.message).toContain("sign in");
+        expect(snapshot.message ?? "").not.toContain("sensitive");
+        const methods = (yield* fs.readFileString(path.join(directory, "methods")))
+          .trim()
+          .split(/\r?\n/);
+        expect(methods).toEqual([
+          "initialize",
+          "session/new",
+          ...(["catalog", "empty"].includes(scenario) ? ["session/close"] : []),
+        ]);
+      }),
     );
-    for (const cause of [Cause.die(error), Cause.fail(error)]) {
-      expect(geminiAcpStartupFailureMessage(cause)).toContain("개인 계정");
-      expect(geminiAcpStartupFailureMessage(cause)).toContain("지원을 종료");
-    }
-  });
-  it("does not expose unknown startup error contents in the client status", () => {
-    const message = geminiAcpStartupFailureMessage(Cause.die(new Error("secret-key")));
-    expect(message).toContain("ACP startup failed");
-    expect(message).not.toContain("secret-key");
-  });
-});
+  }
 
-describe("buildInitialGeminiProviderSnapshot", () => {
-  it.effect("returns a disabled snapshot when Gemini is disabled", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* buildInitialGeminiProviderSnapshot(
-        decodeGeminiSettings({ enabled: false }),
-      );
-
-      expect(snapshot.enabled).toBe(false);
-      expect(snapshot.status).toBe("disabled");
-      expect(snapshot.models.map((model) => model.slug)).toEqual(["auto"]);
-    }),
+  it.effect(
+    "reads 5-hour and weekly quota windows from agy -p /usage after authenticated discovery",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-usage-" });
+        const binaryPath = yield* writeMockLauncher(
+          path.join(directory, "agy.mjs"),
+          `
+        import readline from "node:readline";
+        if (process.argv.includes("--version")) { console.log("1.5.12"); process.exit(0); }
+        if (process.argv.includes("-p") && process.argv.includes("/usage")) {
+          console.log("Gemini Models\\tWeekly Limit Remaining\\t94%\\t2026-11-27T09:36:45Z");
+          console.log("Gemini Models\\tFive Hour Limit Remaining\\t82%\\t2026-11-20T14:36:45Z");
+          console.log("Claude and GPT models\\tWeekly Limit Remaining\\t50%\\t2026-11-27T09:39:04Z");
+          console.log("Claude and GPT models\\tFive Hour Limit Remaining\\t0%\\t2026-11-20T14:39:04Z");
+          process.exit(0);
+        }
+        if (!process.argv.includes("acp")) process.exit(2);
+        for await (const line of readline.createInterface({input:process.stdin})) {
+          const {id,method} = JSON.parse(line);
+          const reply = {jsonrpc:"2.0",id};
+          if (method === "initialize") reply.result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{close:{}}}};
+          else if (method === "session/new") reply.result = {sessionId:"test",configOptions:[
+            {id:"model",type:"select",name:"Model",currentValue:"gemini-4-neon",options:[{name:"Gemini 4 Neon",value:"gemini-4-neon"}]}]};
+          else if (method === "session/close") reply.result = {};
+          console.log(JSON.stringify(reply));
+        }
+      `,
+        );
+        const snapshot = yield* checkGeminiProviderStatus(settings({ enabled: true, binaryPath }));
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.usage).toMatchObject({
+          source: "provider",
+          primary: {
+            label: "Gemini 5시간",
+            bucket: "gemini",
+            usedPercent: 18,
+            windowDurationMinutes: 300,
+          },
+          secondary: {
+            label: "Gemini 7일",
+            bucket: "gemini",
+            usedPercent: 6,
+            windowDurationMinutes: 10_080,
+          },
+          extraWindows: [
+            {
+              label: "Claude·GPT 5시간",
+              bucket: "claude-gpt",
+              usedPercent: 100,
+              windowDurationMinutes: 300,
+            },
+            {
+              label: "Claude·GPT 7일",
+              bucket: "claude-gpt",
+              usedPercent: 50,
+              windowDurationMinutes: 10_080,
+            },
+          ],
+        });
+      }),
   );
 
-  it.effect("returns a pending snapshot with model switching semantics", () =>
+  it.effect("applies auth cooldown after -32000 so repeated checks do not re-spawn agy acp", () =>
     Effect.gen(function* () {
-      const snapshot = yield* buildInitialGeminiProviderSnapshot(
-        decodeGeminiSettings({ enabled: true }),
+      clearGeminiModelCatalogCacheForTest();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-cooldown-" });
+      const binaryPath = yield* writeMockLauncher(
+        path.join(directory, "agy.mjs"),
+        `
+        import fs from "node:fs";
+        import readline from "node:readline";
+        const log = new URL("./acp-count", import.meta.url);
+        if (process.argv.includes("--version")) { console.log("1.5.12"); process.exit(0); }
+        if (!process.argv.includes("acp")) process.exit(2);
+        fs.appendFileSync(log, "spawn\\n");
+        for await (const line of readline.createInterface({input:process.stdin})) {
+          const {id,method} = JSON.parse(line);
+          const reply = {jsonrpc:"2.0",id};
+          if (method === "initialize") reply.result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{close:{}}}};
+          else if (method === "session/new") reply.error = {code:-32000, message:"Authentication required"};
+          console.log(JSON.stringify(reply));
+        }
+      `,
       );
+      const geminiSettings = settings({ enabled: true, binaryPath });
 
-      expect(snapshot.enabled).toBe(true);
-      expect(snapshot.requiresNewThreadForModelChange).toBe(true);
-      expect(snapshot.message).toContain("Checking Gemini");
-    }),
-  );
-});
+      const first = yield* checkGeminiProviderStatus(geminiSettings);
+      const second = yield* checkGeminiProviderStatus(geminiSettings);
 
-it.layer(NodeServices.layer)("checkGeminiProviderStatus", (it) => {
-  it.effect("reports a missing configured binary", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkGeminiProviderStatus(
-        decodeGeminiSettings({
-          enabled: true,
-          binaryPath: "/definitely/not/installed/gemini-binary",
-        }),
-      );
+      expect(first.auth.status).toBe("unauthenticated");
+      expect(second.auth.status).toBe("unauthenticated");
+      expect(first.message).toContain("Antigravity 로그인");
+      expect(first.message).toContain("sign in");
 
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toMatch(/not installed|not on PATH|Failed to execute/);
-    }),
-  );
+      const spawnsBeforeClear = (yield* fs.readFileString(path.join(directory, "acp-count")))
+        .trim()
+        .split(/\r?\n/);
+      expect(spawnsBeforeClear).toHaveLength(1);
 
-  it.effect("does not start ACP before a Google account is connected", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkGeminiProviderStatus(
-        decodeGeminiSettings({
-          enabled: true,
-          binaryPath: process.execPath,
-        }),
-      );
-
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.auth).toMatchObject({
-        status: "unauthenticated",
-        type: "oauth-personal",
-        label: "Google",
-      });
-      expect(snapshot.message).toContain("Google account");
+      clearGeminiAuthCooldown(geminiSettings);
+      yield* checkGeminiProviderStatus(geminiSettings);
+      const spawnsAfterClear = (yield* fs.readFileString(path.join(directory, "acp-count")))
+        .trim()
+        .split(/\r?\n/);
+      expect(spawnsAfterClear).toHaveLength(2);
     }),
   );
 });

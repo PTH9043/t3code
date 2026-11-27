@@ -70,6 +70,7 @@ export class ServerConfig extends Context.Service<
     readonly host: string | undefined;
     readonly cwd: string;
     readonly baseDir: string;
+    readonly upgradeRoom?: { readonly projectRoot: string; readonly primaryHome: string };
     readonly staticDir: string | undefined;
     readonly devUrl: URL | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;

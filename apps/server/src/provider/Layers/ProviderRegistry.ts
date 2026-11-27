@@ -32,6 +32,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -41,6 +42,7 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
+import { readUpgradeProviders, watchUpgradeCatalog } from "../upgradeCatalog.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
@@ -78,21 +80,53 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
+const isPendingInitialProbe = (provider: ServerProvider): boolean => {
+  if (
+    !provider.enabled ||
+    provider.status !== "warning" ||
+    provider.version !== null ||
+    provider.auth.status !== "unknown"
+  ) {
+    return false;
+  }
+  if (!provider.installed) {
+    return true;
+  }
+  const message = provider.message?.trim() ?? "";
+  return (
+    /^Checking\b/i.test(message) || /has not been checked in this session yet\.?$/i.test(message)
+  );
+};
+
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  if (provider.driver !== ProviderDriverKind.make("opencode")) {
+  if (provider.driver === ProviderDriverKind.make("codex")) {
+    // Codex publishes an authoritative live `model/list` catalog once a probe
+    // reaches `ready` with models. Retain cached models only while pending or
+    // during transient failures/warnings (e.g. network timeout or incomplete
+    // metadata), and drop removed/legacy-account models once a live catalog
+    // succeeds or the account becomes disabled/uninstalled/unauthenticated.
+    if (!provider.enabled || !provider.installed || provider.auth.status === "unauthenticated") {
+      return false;
+    }
+    return (
+      isPendingInitialProbe(provider) || provider.status !== "ready" || provider.models.length === 0
+    );
+  }
+
+  if (
+    provider.driver !== ProviderDriverKind.make("opencode") &&
+    provider.driver !== ProviderDriverKind.make("gemini")
+  ) {
     return true;
   }
 
-  // OpenCode's initial snapshot is deliberately non-authoritative while its
-  // first probe is still running. A probe error from an installed CLI/server
-  // is likewise partial: it could not establish the current inventory.
-  // Conversely, disabled and missing-CLI snapshots are authoritative removals,
-  // as are successful ready/warning inventories (including an empty one after
-  // logout or plugin removal).
-  const isPendingInitialProbe =
-    provider.enabled && !provider.installed && provider.status === "warning";
+  // OpenCode and Antigravity (gemini) both publish authoritative live model
+  // inventories. Their initial snapshot is non-authoritative while the first
+  // probe is still running, and a probe error from an installed CLI is partial.
+  // Conversely, disabled/missing-CLI snapshots and successful ready/warning
+  // inventories drop removed models instead of keeping stale slugs forever.
   const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
-  return isPendingInitialProbe || didInstalledProviderProbeFail;
+  return isPendingInitialProbe(provider) || didInstalledProviderProbeFail;
 };
 
 const mergeProviderModels = (
@@ -123,16 +157,68 @@ const mergeProviderModels = (
     : mergedModels;
 };
 
+const isTransientGeminiTimeout = (
+  previousProvider: ServerProvider,
+  nextProvider: ServerProvider,
+): boolean =>
+  nextProvider.driver === ProviderDriverKind.make("gemini") &&
+  nextProvider.enabled &&
+  nextProvider.installed &&
+  nextProvider.status === "error" &&
+  nextProvider.auth.status === "unknown" &&
+  /timed out/i.test(nextProvider.message ?? "") &&
+  previousProvider.status === "ready" &&
+  previousProvider.auth.status === "authenticated" &&
+  previousProvider.models.length > 0;
+
 export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
-): ServerProvider =>
-  !previousProvider
-    ? nextProvider
-    : {
-        ...nextProvider,
-        models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
-      };
+): ServerProvider => {
+  if (!previousProvider) return nextProvider;
+  if (
+    isPendingInitialProbe(nextProvider) &&
+    previousProvider.enabled &&
+    !isPendingInitialProbe(previousProvider) &&
+    (previousProvider.status === "ready" ||
+      (previousProvider.installed && previousProvider.models.length > 0))
+  ) {
+    const { message: _pendingMessage, ...nextWithoutMessage } = nextProvider;
+    return {
+      ...nextWithoutMessage,
+      models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
+      installed: previousProvider.installed,
+      version: previousProvider.version,
+      status: previousProvider.status,
+      auth: previousProvider.auth,
+      checkedAt: previousProvider.checkedAt,
+      slashCommands: previousProvider.slashCommands,
+      skills: previousProvider.skills,
+      ...(previousProvider.usage !== undefined ? { usage: previousProvider.usage } : {}),
+      ...(previousProvider.message !== undefined ? { message: previousProvider.message } : {}),
+      ...(previousProvider.versionAdvisory !== undefined
+        ? { versionAdvisory: previousProvider.versionAdvisory }
+        : {}),
+    };
+  }
+  if (isTransientGeminiTimeout(previousProvider, nextProvider)) {
+    return {
+      ...previousProvider,
+      checkedAt: nextProvider.checkedAt,
+      ...(nextProvider.version ? { version: nextProvider.version } : {}),
+      ...(nextProvider.usage ? { usage: nextProvider.usage } : {}),
+    };
+  }
+  return {
+    ...nextProvider,
+    models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
+    ...(nextProvider.driver === "codex" &&
+    nextProvider.status === "warning" &&
+    nextProvider.skills.length === 0
+      ? { skills: previousProvider.skills }
+      : {}),
+  };
+};
 
 export const mergeProviderSnapshots = (
   previousProviders: ReadonlyArray<ServerProvider>,
@@ -213,6 +299,43 @@ export const ProviderRegistryLive = Layer.effect(
     const config = yield* ServerConfig;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    if (config.upgradeRoom) {
+      const home = config.upgradeRoom.primaryHome;
+      const last = yield* Ref.make<readonly ServerProvider[]>([]);
+      const changes = yield* Effect.acquireRelease(
+        PubSub.unbounded<readonly ServerProvider[]>(),
+        PubSub.shutdown,
+      );
+      const lock = yield* Semaphore.make(1);
+      const current = lock.withPermits(1)(
+        Effect.gen(function* () {
+          const previous = yield* Ref.get(last);
+          const providers = yield* readUpgradeProviders(home).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.orElseSucceed(() => previous),
+          );
+          if (haveProvidersChanged(previous, providers)) {
+            yield* Ref.set(last, providers);
+            yield* PubSub.publish(changes, providers);
+          }
+          return providers;
+        }),
+      );
+      yield* watchUpgradeCatalog(home, true).pipe(
+        Stream.runForEach(() => current),
+        Effect.forkScoped,
+      );
+      return {
+        getProviders: current,
+        refresh: () => current,
+        refreshInstance: () => current,
+        streamChanges: Stream.fromPubSub(changes),
+        setProviderMaintenanceActionState: () => current,
+        getProviderMaintenanceCapabilitiesForInstance: (_instance, driver) =>
+          Effect.succeed(makeManualProviderMaintenanceCapabilities(driver)),
+      } satisfies ProviderRegistryShape;
+    }
 
     // Aggregator PubSub — consumers (WS gateway, etc.) subscribe here for
     // coalesced updates across every instance.
@@ -300,6 +423,11 @@ export const ProviderRegistryLive = Layer.effect(
     const liveSubsRef = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ProviderInstance>>(
       new Map(),
     );
+    // Explicitly track per-instance subscription fibers so removed or rebuilt
+    // instances always interrupt their previous stream consumer instead of leaking fibers.
+    const liveSubFibersRef = yield* Ref.make<
+      ReadonlyMap<ProviderInstanceId, Fiber.Fiber<void, unknown>>
+    >(new Map());
     // Serialize `syncLiveSources` so a rapid burst of reconciles doesn't
     // interleave two passes clobbering each other's fiber bookkeeping.
     const syncSemaphore = yield* Semaphore.make(1);
@@ -391,8 +519,9 @@ export const ProviderRegistryLive = Layer.effect(
           }
 
           const providers = orderProviderSnapshots([...mergedProviders.values()]);
-          const providersToPersist = providers.filter((provider) =>
-            updatedKeys.has(snapshotInstanceKey(provider)),
+          const providersToPersist = providers.filter(
+            (provider) =>
+              updatedKeys.has(snapshotInstanceKey(provider)) && !isPendingInitialProbe(provider),
           );
           return [[previousProviders, providers, providersToPersist] as const, providers];
         },
@@ -586,12 +715,24 @@ export const ProviderRegistryLive = Layer.effect(
         // A plain fork only *schedules* the consumer, and a snapshot the
         // instance published before the consumer got to run was dropped
         // (an unbounded PubSub does not buffer for future subscribers).
-        for (const [, instance] of newlyAdded) {
+        const previousSubFibers = yield* Ref.get(liveSubFibersRef);
+        const nextSubFibers = new Map<ProviderInstanceId, Fiber.Fiber<void, unknown>>();
+        for (const [instanceId, prevFiber] of previousSubFibers) {
+          if (carriedOver.has(instanceId)) {
+            nextSubFibers.set(instanceId, prevFiber);
+          } else {
+            yield* Fiber.interrupt(prevFiber).pipe(Effect.ignore);
+          }
+        }
+
+        for (const [instanceId, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
-          yield* Stream.runForEach(source.streamChanges, (provider) =>
+          const subFiber = yield* Stream.runForEach(source.streamChanges, (provider) =>
             correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
           ).pipe(Effect.forkScoped({ startImmediately: true }));
+          nextSubFibers.set(instanceId, subFiber);
         }
+        yield* Ref.set(liveSubFibersRef, nextSubFibers);
 
         // Snapshot current state without starting a probe. Managed providers
         // launch their startup refresh independently, so this closes the
@@ -667,7 +808,7 @@ export const ProviderRegistryLive = Layer.effect(
     // resolves. Cached snapshots (already in `providersRef`) merge with
     // these via `upsertProviders` so on-disk state wins where present
     // and pending fallbacks fill the gaps.
-    yield* upsertProviders(fallbackProviders, { publish: false });
+    yield* upsertProviders(fallbackProviders, { publish: false, persist: false });
     // Subscribe to registry mutations BEFORE running the initial sync.
     // `subscribeChanges` acquires the dequeue synchronously in this
     // fibre; the subscription is active the instant this `yield*`

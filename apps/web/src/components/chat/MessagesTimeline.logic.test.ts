@@ -5,6 +5,7 @@ import {
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  sliceMessagesTimelineRowsForTailFirst,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -1169,5 +1170,133 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(reordered).not.toBe(initial);
     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
+  });
+});
+
+describe("sliceMessagesTimelineRowsForTailFirst & settled turn-plan folding", () => {
+  it("folds mid-turn turn-plan entries behind Worked-for once the turn settles and restores them on expand", () => {
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-1" as never,
+          role: "user" as const,
+          text: "Implement feature",
+          turnId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "plan-entry",
+        kind: "turn-plan" as const,
+        createdAt: "2026-01-01T00:00:03Z",
+        turnPlan: {
+          id: "tp-1",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:03Z",
+          plan: {
+            turnId: "turn-1" as never,
+            createdAt: "2026-01-01T00:00:03Z",
+            steps: [{ step: "Inspect timeline", status: "completed" as const }],
+          },
+        },
+      },
+      {
+        id: "assistant-final-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:15Z",
+        message: {
+          id: "assistant-final" as never,
+          role: "assistant" as const,
+          text: "Result ready.",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:15Z",
+          updatedAt: "2026-01-01T00:00:15Z",
+          streaming: false,
+        },
+      },
+    ];
+
+    const collapsed = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(collapsed.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-final-entry",
+    ]);
+
+    const expanded = deriveMessagesTimelineRows({
+      timelineEntries,
+      expandedTurnIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(expanded.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "plan-entry",
+      "assistant-final-entry",
+    ]);
+  });
+
+  it("slices long timelines down to the latest two user turns while preserving row object references", () => {
+    const timelineEntries = Array.from({ length: 6 }, (_, idx) => [
+      {
+        id: `entry-user-${idx}`,
+        kind: "message" as const,
+        createdAt: `2026-01-01T00:0${idx}:00Z`,
+        message: {
+          id: `user-${idx}` as never,
+          role: "user" as const,
+          text: `Prompt ${idx}`,
+          turnId: null,
+          createdAt: `2026-01-01T00:0${idx}:00Z`,
+          updatedAt: `2026-01-01T00:0${idx}:00Z`,
+          streaming: false,
+        },
+      },
+      {
+        id: `entry-assistant-${idx}`,
+        kind: "message" as const,
+        createdAt: `2026-01-01T00:0${idx}:10Z`,
+        message: {
+          id: `assistant-${idx}` as never,
+          role: "assistant" as const,
+          text: `Answer ${idx}`,
+          turnId: `turn-${idx}` as never,
+          createdAt: `2026-01-01T00:0${idx}:10Z`,
+          updatedAt: `2026-01-01T00:0${idx}:10Z`,
+          streaming: false,
+        },
+      },
+    ]).flat();
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const tail = sliceMessagesTimelineRowsForTailFirst(rows, 2);
+    expect(tail.map((row) => row.id)).toEqual([
+      "entry-user-4",
+      "entry-assistant-4",
+      "entry-user-5",
+      "entry-assistant-5",
+    ]);
+    expect(tail[3]).toBe(rows.at(-1));
   });
 });

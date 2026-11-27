@@ -600,9 +600,12 @@ it.effect.each(["schedule", "automation"] as const)(
         expect(dispatchedTypes[0]).toBe("project.collaboration.run.cancel");
         expect(yield* Ref.get(capturedMemoryRef)).toEqual(["제어 센터 검증 절차"]);
         const prompts = yield* Ref.get(promptsRef);
-        expect((yield* Ref.get(composedTasksRef))[0]).toContain("진행 중인 지속 목표");
+        expect((yield* Ref.get(composedTasksRef))[0]).toBe(initialRun.task);
         expect(prompts).toHaveLength(13);
-        expect(prompts[0]).toContain("current user goal is the absolute priority");
+        expect(prompts[0]).toContain(
+          "The user's current request and subsequent direct instructions take precedence",
+        );
+        expect(prompts[0]).toContain("CURRENT USER REQUEST: Build the requested control center");
         expect(prompts[1]).toContain("TASK:\n현재 자료를 조사한다.");
         expect(prompts.find((prompt) => prompt.includes("Node: build\n"))).toContain(
           "TASK:\n제어 센터를 구현한다.",

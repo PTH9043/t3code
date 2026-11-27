@@ -1,4 +1,6 @@
 import type { ToolLifecycleItemType } from "@t3tools/contracts";
+export * from "./toolActivityGroups.ts";
+export * from "./toolActivityRedaction.ts";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -60,6 +62,7 @@ function extractToolCommand(data: Record<string, unknown> | undefined, title: st
     normalizeCommandValue(itemInput?.command),
     normalizeCommandValue(itemResult?.command),
     normalizeCommandValue(data?.command),
+    normalizeCommandValue(rawInput?.CommandLine),
     normalizeCommandValue(rawInput?.command),
   ];
   const direct = candidates.find((candidate) => candidate !== undefined);

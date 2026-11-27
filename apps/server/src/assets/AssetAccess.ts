@@ -48,6 +48,57 @@ const SIGNING_SECRET_NAME = "asset-access-signing-key";
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
 const PROJECT_FAVICON_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const PROJECT_FAVICON_VERSION_PREFIX = "v";
+const ISSUED_ASSET_URL_CACHE_MAX = 1_024;
+const ISSUED_ASSET_URL_MIN_REMAINING_MS = 15 * 60 * 1000;
+
+interface CachedIssuedAssetUrl {
+  readonly relativeUrl: string;
+  readonly expiresAt: number;
+  readonly secretFingerprint: string;
+}
+
+const issuedAssetUrlCache = new Map<string, CachedIssuedAssetUrl>();
+
+function secretFingerprint(secret: Uint8Array): string {
+  // Fast non-reversible prefix+length tag to invalidate cached URLs if the signing secret rotates.
+  return `${secret.length}:${secret[0] ?? 0}:${secret[1] ?? 0}:${secret[secret.length - 1] ?? 0}`;
+}
+
+function readIssuedAssetUrlCache(
+  key: string,
+  nowMs: number,
+  fingerprint: string,
+): { readonly relativeUrl: string; readonly expiresAt: number } | null {
+  const entry = issuedAssetUrlCache.get(key);
+  if (!entry) return null;
+  if (
+    entry.secretFingerprint !== fingerprint ||
+    entry.expiresAt - nowMs < ISSUED_ASSET_URL_MIN_REMAINING_MS
+  ) {
+    issuedAssetUrlCache.delete(key);
+    return null;
+  }
+  // Refresh LRU recency
+  issuedAssetUrlCache.delete(key);
+  issuedAssetUrlCache.set(key, entry);
+  return { relativeUrl: entry.relativeUrl, expiresAt: entry.expiresAt };
+}
+
+function writeIssuedAssetUrlCache(key: string, entry: CachedIssuedAssetUrl): void {
+  if (issuedAssetUrlCache.has(key)) {
+    issuedAssetUrlCache.delete(key);
+  } else if (issuedAssetUrlCache.size >= ISSUED_ASSET_URL_CACHE_MAX) {
+    const oldestKey = issuedAssetUrlCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      issuedAssetUrlCache.delete(oldestKey);
+    }
+  }
+  issuedAssetUrlCache.set(key, entry);
+}
+
+export function clearIssuedAssetUrlCacheForTest(): void {
+  issuedAssetUrlCache.clear();
+}
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
   ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
@@ -174,6 +225,60 @@ const resolveCanonicalWorkspaceFileForRequest = (input: {
     Effect.orElseSucceed(() => null),
   );
 
+function normalizePathForRootComparison(value: string): string {
+  const isWindowsDrive = /^[A-Za-z]:[\\/]/.test(value);
+  const isWindowsUnc = value.startsWith("\\\\");
+  const normalized = value.replaceAll("\\", "/");
+  const stripped =
+    normalized.length > 1 && !/^[A-Za-z]:\/$/.test(normalized)
+      ? normalized.replace(/\/+$/, "")
+      : normalized;
+  return isWindowsDrive || isWindowsUnc ? stripped.toLowerCase() : stripped;
+}
+
+function isPathInsideRoot(candidatePath: string, rootPath: string): boolean {
+  const normalizedCandidate = normalizePathForRootComparison(candidatePath);
+  const normalizedRoot = normalizePathForRootComparison(rootPath);
+  if (!normalizedRoot) return false;
+  if (normalizedCandidate === normalizedRoot) return true;
+  const prefix = normalizedRoot.endsWith("/") ? normalizedRoot : `${normalizedRoot}/`;
+  return normalizedCandidate.startsWith(prefix);
+}
+
+/**
+ * Resolves which registered T3 workspace root should authorize an asset request.
+ * Relative paths are strictly scoped to the thread's primary workspace root.
+ * Absolute paths outside the current thread's root may match another active
+ * registered T3 project root (longest matching root wins) so cross-project
+ * preview links (e.g., an HTML gallery inside another registered workspace) work
+ * without opening access to arbitrary OS paths.
+ */
+export function resolveRegisteredWorkspaceRootForAssetPath(input: {
+  readonly primaryWorkspaceRoot: string;
+  readonly requestedPath: string;
+  readonly registeredWorkspaceRoots: ReadonlyArray<string>;
+}): string {
+  const raw = input.requestedPath.trim();
+  const isAbsolute = raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\");
+  if (!isAbsolute) {
+    return input.primaryWorkspaceRoot;
+  }
+  if (isPathInsideRoot(raw, input.primaryWorkspaceRoot)) {
+    return input.primaryWorkspaceRoot;
+  }
+  let bestRoot: string | null = null;
+  let bestLen = -1;
+  for (const root of input.registeredWorkspaceRoots) {
+    if (!root || !isPathInsideRoot(raw, root)) continue;
+    const compareLen = normalizePathForRootComparison(root).length;
+    if (compareLen > bestLen) {
+      bestLen = compareLen;
+      bestRoot = root;
+    }
+  }
+  return bestRoot ?? input.primaryWorkspaceRoot;
+}
+
 export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (input: {
   readonly resource: AssetResource;
   readonly workspaceRoot?: string;
@@ -289,15 +394,31 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       break;
     }
     case "project-favicon": {
-      const workspaceRoot = yield* workspacePaths.normalizeWorkspaceRoot(input.resource.cwd).pipe(
-        Effect.mapError(
-          (cause) =>
-            new AssetWorkspaceRootNormalizationError({
-              resource: input.resource,
-              cause,
-            }),
-        ),
-      );
+      const normalizedWorkspaceRoot = yield* workspacePaths
+        .normalizeWorkspaceRoot(input.resource.cwd)
+        .pipe(
+          Effect.map(Option.some),
+          Effect.catchTag("WorkspaceRootNotExistsError", () => Effect.succeed(Option.none())),
+          Effect.mapError(
+            (cause) =>
+              new AssetWorkspaceRootNormalizationError({
+                resource: input.resource,
+                cause,
+              }),
+          ),
+        );
+      if (Option.isNone(normalizedWorkspaceRoot)) {
+        claims = {
+          version: 1,
+          kind: "project-favicon",
+          workspaceRoot: input.resource.cwd,
+          relativePath: null,
+          expiresAt,
+        };
+        fileName = PROJECT_FAVICON_FALLBACK_MARKER;
+        break;
+      }
+      const workspaceRoot = normalizedWorkspaceRoot.value;
       const faviconResolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;
       const faviconPath = yield* faviconResolver.resolvePath(workspaceRoot).pipe(
         Effect.mapError(
@@ -379,19 +500,38 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         }),
     ),
   );
+  const issuedAt = yield* Clock.currentTimeMillis;
   if (claims.kind === "project-favicon") {
-    const issuedAt = yield* Clock.currentTimeMillis;
     expiresAt =
       (Math.floor(issuedAt / PROJECT_FAVICON_TOKEN_BUCKET_MS) + 2) *
       PROJECT_FAVICON_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
+  const cacheKey = `${claims.kind}:${fileName}:${
+    claims.kind === "attachment"
+      ? `${claims.attachmentId}:${claims.preview ? "1" : "0"}:${claims.downloadName ?? ""}`
+      : claims.kind === "project-favicon"
+        ? `${claims.workspaceRoot}:${claims.relativePath ?? ""}`
+        : claims.kind === "workspace-file-exact"
+          ? `${claims.workspaceRoot}:${claims.relativePath}:${claims.download ? "1" : "0"}`
+          : `${claims.workspaceRoot}:${claims.baseRelativePath}`
+  }`;
+  const fp = secretFingerprint(signingSecret);
+  const cachedUrl = readIssuedAssetUrlCache(cacheKey, issuedAt, fp);
+  if (cachedUrl) {
+    return cachedUrl;
+  }
   const encodedPayload = base64UrlEncode(encodeAssetClaims(claims));
   const token = `${encodedPayload}.${signPayload(encodedPayload, signingSecret)}`;
-  return {
+  const issued = {
     relativeUrl: `${ASSET_ROUTE_PREFIX}/${token}/${encodeURIComponent(fileName)}`,
     expiresAt,
   };
+  writeIssuedAssetUrlCache(cacheKey, {
+    ...issued,
+    secretFingerprint: fp,
+  });
+  return issued;
 });
 
 export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (

@@ -10,7 +10,8 @@ export const AntseedConnectInput = Schema.Struct({
   instanceId: ProviderInstanceId,
   displayName: TrimmedNonEmptyString,
   baseUrl: TrimmedNonEmptyString.check(Schema.isPattern(/^https?:\/\//)),
-  apiKey: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  apiKey: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(4096))),
+  connectionKind: Schema.optionalKey(Schema.Literals(["gateway", "local-proxy"])),
 });
 export type AntseedConnectInput = typeof AntseedConnectInput.Type;
 

@@ -1,0 +1,62 @@
+.agustina-character {
+  position: relative;
+  display: inline-block;
+  width: 64px;
+  height: 144px;
+  flex: none;
+}
+
+.agustina-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.agustina-eyes_half,
+.agustina-eyes_closeddown {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .agustina-eyes_open {
+    animation: agustina-open 4.5s steps(1, end) infinite;
+  }
+  .agustina-eyes_half {
+    animation: agustina-half 4.5s steps(1, end) infinite;
+  }
+  .agustina-eyes_closeddown {
+    animation: agustina-closed 4.5s steps(1, end) infinite;
+  }
+}
+
+@keyframes agustina-open {
+  0%,
+  98% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 0;
+  }
+}
+@keyframes agustina-half {
+  0%,
+  94%,
+  98% {
+    opacity: 0;
+  }
+  92%,
+  96% {
+    opacity: 1;
+  }
+}
+@keyframes agustina-closed {
+  0%,
+  96% {
+    opacity: 0;
+  }
+  94% {
+    opacity: 1;
+  }
+}

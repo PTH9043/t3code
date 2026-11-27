@@ -17,6 +17,7 @@ import {
 } from "../../workspaceTabStore";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { navigateToTabView } from "./navigateToTabView";
+import { openUpgradeRoomWorkspaceTab } from "./openUpgradeRoomWorkspaceTab";
 import { cn } from "~/lib/utils";
 import { useSidebarVisibility } from "../ui/sidebar";
 
@@ -86,6 +87,10 @@ function TabItemShell(props: {
   const moveTab = useWorkspaceTabStore((state) => state.moveTab);
 
   const open = useCallback(() => {
+    if (tab.view.kind === "upgrade-room") {
+      openUpgradeRoomWorkspaceTab(navigate);
+      return;
+    }
     activateTab(tab.id);
     navigateToTabView(navigate, tab.view);
   }, [activateTab, navigate, tab.id, tab.view]);
@@ -299,32 +304,50 @@ export function WorkspaceTabBar() {
 
   // Ctrl+Tab / Ctrl+Shift+Tab cycle, Ctrl+W closes — the browser vocabulary.
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || event.altKey || event.metaKey) return;
-      if (event.key === "Tab") {
-        if (tabs.length < 2) return;
-        event.preventDefault();
+    const perform = (action: string) => {
+      if (action === "workspace-tab-next" || action === "workspace-tab-previous") {
+        if (tabs.length < 2) return false;
         const index = tabs.findIndex((tab) => tab.id === activeTabId);
-        const nextIndex = (index + (event.shiftKey ? -1 : 1) + tabs.length) % tabs.length;
+        const nextIndex =
+          (index + (action === "workspace-tab-previous" ? -1 : 1) + tabs.length) % tabs.length;
         const next = tabs[nextIndex];
-        if (!next) return;
-        useWorkspaceTabStore.getState().activateTab(next.id);
-        navigateToTabView(navigate, next.view);
-        return;
+        if (!next) return false;
+        if (next.view.kind === "upgrade-room") openUpgradeRoomWorkspaceTab(navigate);
+        else {
+          useWorkspaceTabStore.getState().activateTab(next.id);
+          navigateToTabView(navigate, next.view);
+        }
+        return true;
       }
-      if ((event.key === "w" || event.key === "W") && !event.shiftKey) {
-        if (activeTabId === null) return;
-        event.preventDefault();
+      if (action === "workspace-tab-close" && activeTabId !== null) {
         const next = useWorkspaceTabStore.getState().closeTab(activeTabId);
         if (next) {
           navigateToTabView(navigate, next.view);
         } else {
           void navigate({ to: "/" });
         }
+        return true;
       }
+      return false;
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.altKey || event.metaKey) return;
+      const action =
+        event.key === "Tab"
+          ? event.shiftKey
+            ? "workspace-tab-previous"
+            : "workspace-tab-next"
+          : !event.shiftKey && event.key.toLowerCase() === "w"
+            ? "workspace-tab-close"
+            : null;
+      if (action && perform(action)) event.preventDefault();
+    };
+    const unsubscribe = window.desktopBridge?.onMenuAction(perform);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      unsubscribe?.();
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [activeTabId, navigate, tabs]);
 
   if (tabs.length === 0) {
@@ -341,7 +364,16 @@ export function WorkspaceTabBar() {
       )}
     >
       {tabs.map((tab, index) =>
-        tab.view.kind === "thread" ? (
+        tab.view.kind === "upgrade-room" ? (
+          <TabItemShell
+            key={tab.id}
+            tab={tab}
+            index={index}
+            active={tab.id === activeTabId}
+            title="AutoUsage 업그레이드"
+            badge={null}
+          />
+        ) : tab.view.kind === "thread" ? (
           <ThreadTabItem key={tab.id} tab={tab} index={index} />
         ) : tab.view.kind === "draft" ? (
           <DraftTabItem key={tab.id} tab={tab} index={index} />

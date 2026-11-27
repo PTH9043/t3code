@@ -38,9 +38,9 @@ import * as ResourceMonitorBinary from "./ResourceMonitorBinary.ts";
 import { ServerConfig } from "../config.ts";
 import { subscribeBeforeSnapshotWithoutMutex } from "../utils/subscribeBeforeSnapshot.ts";
 
-const SAMPLE_INTERVAL_MS = 1_000;
-const UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS = 5_000;
-const BATTERY_SAMPLE_INTERVAL_MS = 5_000;
+const LIVE_SAMPLE_INTERVAL_MS = 2_000;
+const BACKGROUND_SAMPLE_INTERVAL_MS = 10_000;
+const BATTERY_LIVE_SAMPLE_INTERVAL_MS = 5_000;
 const CONSTRAINED_SAMPLE_INTERVAL_MS = 15_000;
 const HANDSHAKE_TIMEOUT = Duration.seconds(5);
 const SAMPLE_REQUEST_TIMEOUT = Duration.seconds(5);
@@ -256,8 +256,9 @@ export function resolveNativeSampleIntervalMs(
   snapshot: HostPowerSnapshot,
   liveSubscriberCount: number,
 ): number {
+  const hasLiveSubscribers = liveSubscriberCount > 0;
   if (snapshot.stale || snapshot.source === "unknown") {
-    return liveSubscriberCount > 0 ? SAMPLE_INTERVAL_MS : UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS;
+    return hasLiveSubscribers ? LIVE_SAMPLE_INTERVAL_MS : BACKGROUND_SAMPLE_INTERVAL_MS;
   }
   if (
     snapshot.suspended ||
@@ -267,8 +268,10 @@ export function resolveNativeSampleIntervalMs(
   ) {
     return CONSTRAINED_SAMPLE_INTERVAL_MS;
   }
-  if (snapshot.onBattery === "true") return BATTERY_SAMPLE_INTERVAL_MS;
-  return SAMPLE_INTERVAL_MS;
+  if (snapshot.onBattery === "true") {
+    return hasLiveSubscribers ? BATTERY_LIVE_SAMPLE_INTERVAL_MS : BACKGROUND_SAMPLE_INTERVAL_MS;
+  }
+  return hasLiveSubscribers ? LIVE_SAMPLE_INTERVAL_MS : BACKGROUND_SAMPLE_INTERVAL_MS;
 }
 
 export function commitCollectionControlUpdate<E, R>(
@@ -379,7 +382,7 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
       updatedAt: initializedAt,
     },
     liveSubscriberCount: 0,
-    sampleIntervalMs: UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS,
+    sampleIntervalMs: BACKGROUND_SAMPLE_INTERVAL_MS,
   });
   const appliedCollectionControl = yield* Ref.make(yield* Ref.get(collectionControl));
   const externalProcesses = yield* Ref.make<ReadonlyArray<ResourceMonitorExternalProcess>>([]);
@@ -980,7 +983,7 @@ export const layerTest = (
       lastSampleAt: Option.none<DateTime.Utc>(),
       lastError: Option.some("Resource monitor test implementation is unavailable."),
       restartCount: 0,
-      sampleIntervalMs: UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS,
+      sampleIntervalMs: BACKGROUND_SAMPLE_INTERVAL_MS,
     });
   return Layer.succeed(
     NativeTelemetryClient,

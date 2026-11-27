@@ -6,6 +6,7 @@ import {
   IsoDateTime,
   MessageId,
   ModelSelection,
+  ThreadResponseStyle,
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -19,13 +20,17 @@ import * as Schema from "effect/Schema";
 
 import { DraftComposerImageAttachmentSchema } from "../lib/composer-image-schema";
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
+import { NewTaskModelTeam } from "../lib/newTaskModelTeam";
 import { scopedThreadKey } from "../lib/scopedEntities";
 
-const THREAD_OUTBOX_SCHEMA_VERSION = 3;
+const THREAD_OUTBOX_SCHEMA_VERSION = 4;
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 
 const QueuedThreadCreationSchema = Schema.Struct({
   projectId: ProjectId,
+  modelTeams: Schema.optional(Schema.Array(NewTaskModelTeam)),
+  responseStyle: Schema.optional(ThreadResponseStyle),
+  requireExactModel: Schema.optional(Schema.Boolean),
   // Snapshot of the project's display metadata so a pending task stays
   // presentable in the thread list even when the project shell is not loaded.
   projectTitle: Schema.optional(Schema.String),
@@ -37,7 +42,7 @@ const QueuedThreadCreationSchema = Schema.Struct({
 });
 
 export const QueuedThreadMessageSchema = Schema.Struct({
-  schemaVersion: Schema.Literals([1, 2, THREAD_OUTBOX_SCHEMA_VERSION]),
+  schemaVersion: Schema.Literals([1, 2, 3, THREAD_OUTBOX_SCHEMA_VERSION]),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   messageId: MessageId,
@@ -50,6 +55,19 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   // Present when the queued item creates a brand-new thread (pending task)
   // instead of appending a turn to an existing one.
   creation: Schema.optional(QueuedThreadCreationSchema),
+  deliveryAttemptFingerprint: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  ),
+  deliveryAttemptWorktree: Schema.optional(
+    Schema.Struct({ projectCwd: Schema.String, worktreeBranchName: Schema.String }),
+  ),
+  deliveryReceiptChecked: Schema.optional(Schema.Boolean),
+  deliveryFailure: Schema.optional(
+    Schema.Struct({
+      stage: Schema.Literals(["settings-sync", "start-turn"]),
+      message: Schema.String,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -58,6 +76,9 @@ const encodeStoredQueuedThreadMessage = Schema.encodeUnknownSync(QueuedThreadMes
 
 export interface QueuedThreadCreation {
   readonly projectId: ProjectIdType;
+  readonly requireExactModel?: boolean;
+  readonly responseStyle?: ThreadResponseStyle;
+  readonly modelTeams?: readonly NewTaskModelTeam[];
   readonly projectTitle?: string;
   readonly projectCwd?: string;
   readonly workspaceMode: "local" | "worktree";
@@ -77,6 +98,16 @@ export interface QueuedThreadMessage {
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
   readonly creation?: QueuedThreadCreation;
+  readonly deliveryAttemptFingerprint?: string;
+  readonly deliveryAttemptWorktree?: {
+    readonly projectCwd: string;
+    readonly worktreeBranchName: string;
+  };
+  readonly deliveryReceiptChecked?: boolean;
+  readonly deliveryFailure?: {
+    readonly stage: "settings-sync" | "start-turn";
+    readonly message: string;
+  };
   readonly createdAt: string;
 }
 
@@ -146,7 +177,30 @@ export function threadOutboxRetryDelayMs(attempt: number): number {
   return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
 }
 
-export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send";
+export type ThreadOutboxDeliveryAction = "wait" | "hold" | "send" | "verify";
+
+export function shouldHoldUnconfirmedFailedAttempt(message: QueuedThreadMessage): boolean {
+  return message.deliveryFailure !== undefined && message.deliveryReceiptChecked === undefined;
+}
+
+/** Local bootstrap has no worktree or setup script side effects to repeat. */
+export function canRetryUnconfirmedCreation(input: {
+  readonly creation: QueuedThreadCreation;
+  readonly threadExists: boolean;
+  readonly projectCwd: string | null;
+  readonly safeBootstrapReplay: boolean;
+  readonly safeBootstrapResume?: boolean;
+  readonly safeWorktreeBootstrapResume?: boolean;
+  readonly attemptWorktree?: QueuedThreadMessage["deliveryAttemptWorktree"];
+}): boolean {
+  if (!input.safeBootstrapReplay) return false;
+  if (input.creation.workspaceMode === "local")
+    return (!input.threadExists || input.safeBootstrapResume === true) && input.projectCwd !== null;
+  return (
+    input.safeWorktreeBootstrapResume === true &&
+    Boolean(input.attemptWorktree?.projectCwd && input.attemptWorktree.worktreeBranchName)
+  );
+}
 
 export function resolveThreadOutboxDeliveryAction(input: {
   readonly isCreation: boolean;
@@ -154,20 +208,26 @@ export function resolveThreadOutboxDeliveryAction(input: {
   readonly shellStatus: EnvironmentShellStatus;
   readonly environmentConnected: boolean;
   readonly threadBusy: boolean;
+  readonly hasDeliveryFailure?: boolean;
+  readonly hasAttemptFingerprint?: boolean;
+  readonly receiptChecked?: boolean;
 }): ThreadOutboxDeliveryAction {
+  if (input.isCreation && input.hasAttemptFingerprint && !input.receiptChecked)
+    return input.environmentConnected && input.shellStatus === "live" ? "verify" : "wait";
+  if (input.hasDeliveryFailure) return "wait";
+  if (input.isCreation && input.threadExists)
+    return input.environmentConnected && input.shellStatus === "live" ? "hold" : "wait";
   if (input.isCreation) {
-    // A pending task creates its thread on delivery. If the thread already
-    // exists the creation command went through and only cleanup remains.
-    if (input.threadExists) {
-      return "remove";
-    }
+    // A pending task creates its thread before its first message is accepted.
     // Wait for the shell to be live before sending: until the thread list has
     // synchronized, a previously delivered creation whose cleanup failed would
     // look missing and get re-issued, duplicating the thread.
     return input.environmentConnected && input.shellStatus === "live" ? "send" : "wait";
   }
   if (!input.threadExists) {
-    return input.shellStatus === "live" ? "remove" : "wait";
+    // A live shell may still omit a temporarily unavailable thread. The
+    // absence alone does not prove that a queued message can be discarded.
+    return "wait";
   }
   return input.environmentConnected && !input.threadBusy ? "send" : "wait";
 }
@@ -201,6 +261,15 @@ export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
     typeof error === "object" &&
     error !== null &&
     "_tag" in error &&
+    error._tag === "OrchestrationDispatchCommandError" &&
+    "reason" in error &&
+    error.reason === "active-turn-settings"
+  )
+    return true;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
     error._tag === "ConnectionTransientError"
   ) {
     return true;
@@ -209,19 +278,15 @@ export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
 }
 
 export type ThreadOutboxCommandStage = "settings-sync" | "start-turn";
-export type ThreadOutboxFailureAction = "retry" | "discard";
+export type ThreadOutboxFailureAction = "retry" | "hold";
 
 export function resolveThreadOutboxFailureAction(input: {
   readonly stage: ThreadOutboxCommandStage;
   readonly error: unknown;
   readonly interrupted: boolean;
 }): ThreadOutboxFailureAction {
-  if (
-    input.stage === "settings-sync" ||
-    input.interrupted ||
-    shouldRetryThreadOutboxDelivery(input.error)
-  ) {
+  if (input.interrupted || shouldRetryThreadOutboxDelivery(input.error)) {
     return "retry";
   }
-  return "discard";
+  return "hold";
 }

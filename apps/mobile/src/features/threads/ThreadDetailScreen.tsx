@@ -1,4 +1,9 @@
+import { isRecoverableUserInputRequestId } from "@t3tools/contracts";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import {
+  describeUpgradeRoomProgress,
+  type UpgradeRoomProgress,
+} from "@t3tools/client-runtime/state/thread-tool-activity";
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp/list/keyboard";
 import type { LegendListRef } from "@legendapp/list/react-native";
@@ -14,17 +19,24 @@ import type {
   ServerConfig as T3ServerConfig,
   ThreadId,
   WorkspaceMonitoringPlan,
+  WorkspaceMeetingQuestion,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Platform, View, type GestureResponderEvent } from "react-native";
+import { Alert, Platform, Pressable, View, type GestureResponderEvent } from "react-native";
 import { KeyboardController, KeyboardStickyView } from "react-native-keyboard-controller";
 import Animated, { FadeInDown, FadeOut } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
+import { AppText as Text } from "../../components/AppText";
 import type { StatusTone } from "../../components/StatusPill";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
+import { selectThreadOrchestraOption } from "../../state/thread-orchestra";
+import { awaitComposerDraftsLoaded } from "../../state/use-composer-drafts";
+import type { MobileOrchestraConfig } from "../../state/thread-orchestra-config";
+import { MobileOrchestraSettings } from "./MobileOrchestraSettings";
 import { CHAT_CONTENT_MAX_WIDTH, type LayoutVariant } from "../../lib/layout";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import type {
@@ -43,6 +55,9 @@ import {
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
 import { TokenUsageButton } from "./TokenUsageButton";
+import { ThreadResponseStyleSettings } from "./ThreadResponseStyleSettings";
+import { ThreadTeamViewer } from "./ThreadTeamViewer";
+import { ThreadBackgroundWatch } from "./ThreadBackgroundWatch";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 
 export interface ThreadDetailScreenProps {
@@ -53,11 +68,12 @@ export interface ThreadDetailScreenProps {
   readonly environmentLabel: string | null;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly activeWorkStartedAt: string | null;
+  readonly upgradeRoomProgress?: UpgradeRoomProgress | null;
   readonly activePendingApproval: PendingApproval | null;
   readonly respondingApprovalId: ApprovalRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
   readonly activePendingUserInputDrafts: Record<string, PendingUserInputDraftAnswer>;
-  readonly activePendingUserInputAnswers: Record<string, string> | null;
+  readonly activePendingUserInputAnswers: Record<string, string | string[]> | null;
   readonly respondingUserInputId: ApprovalRequestId | null;
   readonly pickingUserInputId: ApprovalRequestId | null;
   readonly draftMessage: string;
@@ -68,10 +84,25 @@ export interface ThreadDetailScreenProps {
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
   readonly activeThreadBusy: boolean;
+  readonly orchestraActive?: boolean;
+  readonly orchestraQuestion?: WorkspaceMeetingQuestion | null;
+  readonly orchestraError?: string | null;
+  readonly hasOrchestraAttempt?: boolean;
+  readonly hasOrchestraStartAttempt?: boolean;
+  readonly orchestraConfig: MobileOrchestraConfig;
+  readonly onChangeOrchestraConfig: (config: MobileOrchestraConfig) => void;
+  readonly onRetryOrchestraStart: () => Promise<void>;
+  readonly onRestoreOrchestraStart: () => Promise<void>;
+  readonly orchestraAttemptBusy?: boolean;
+  readonly onRetryOrchestraAttempt?: () => Promise<void>;
+  readonly onRestoreOrchestraAttempt?: () => Promise<void>;
   readonly environmentId: EnvironmentId;
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
   readonly selectedThreadQueueCount: number;
+  readonly failedQueuedMessage?: QueuedThreadMessage | undefined;
+  readonly onRetryFailedMessage?: (message: QueuedThreadMessage) => Promise<void>;
+  readonly onRestoreFailedMessage?: (message: QueuedThreadMessage) => Promise<void>;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
@@ -116,6 +147,37 @@ export interface ThreadDetailScreenProps {
     imageId: string,
   ) => void;
   readonly showContent?: boolean;
+}
+
+function UpgradeRoomProgressLine({
+  progress,
+  waiting,
+}: {
+  readonly progress: UpgradeRoomProgress;
+  readonly waiting: string | null;
+}) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <View accessibilityLabel="업그레이드 방 작업 상황" className="border-b border-border px-4 py-2">
+      <Text className="text-xs">
+        {describeUpgradeRoomProgress(progress, now, waiting)}
+        {progress.recordedAt
+          ? ` · ${new Date(progress.recordedAt).toLocaleTimeString("ko-KR", { hour12: false })}`
+          : ""}
+      </Text>
+      {progress.label && (
+        <Text className="text-xs text-muted-foreground">
+          {progress.label}
+          {progress.completedTools > 0 ? ` · 도구 ${progress.completedTools}회 종료` : ""}
+        </Text>
+      )}
+      {progress.plan && <Text className="text-xs">{progress.plan}</Text>}
+    </View>
+  );
 }
 
 function latestStreamingAssistantMessage(
@@ -199,7 +261,21 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const selectedThreadKeyRef = useRef(selectedThreadKey);
   const lastScrolledAnchorMessageIdRef = useRef<MessageId | null>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [teamSettingsEnvironment, setTeamSettingsEnvironment] = useState<EnvironmentId | null>(
+    null,
+  );
+  const [orchestraSettingsOpen, setOrchestraSettingsOpen] = useState(false);
   const [anchorMessageId, setAnchorMessageId] = useState<MessageId | null>(null);
+  const openOrchestraSettings = useCallback(async () => {
+    const threadKey = selectedThreadKey;
+    if (!(await awaitComposerDraftsLoaded())) {
+      Alert.alert("저장된 대화 설정을 읽지 못했습니다.");
+      return;
+    }
+    if (selectedThreadKeyRef.current === threadKey) setOrchestraSettingsOpen(true);
+  }, [selectedThreadKey]);
+
+  useEffect(() => setOrchestraSettingsOpen(false), [selectedThreadKey]);
   const composerBottomInset = composerExpanded ? 0 : Math.max(insets.bottom, 12);
   const contentPresentationKind = props.contentPresentation.kind;
   // The raw sync status enters "synchronizing" on every full fetch, cached or
@@ -244,12 +320,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const contentMaxWidth = isSplitLayout ? CHAT_CONTENT_MAX_WIDTH : undefined;
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
-  const selectedProviderSkills = useMemo(
+  const selectedProvider = useMemo(
     () =>
-      props.serverConfig?.providers.find((provider) => provider.instanceId === selectedInstanceId)
-        ?.skills ?? [],
+      props.serverConfig?.providers.find(
+        (provider) => provider.instanceId === selectedInstanceId,
+      ) ?? null,
     [props.serverConfig, selectedInstanceId],
   );
+  const selectedProviderSkills = useMemo(() => selectedProvider?.skills ?? [], [selectedProvider]);
 
   useLayoutEffect(() => {
     selectedThreadKeyRef.current = selectedThreadKey;
@@ -369,6 +447,18 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {props.upgradeRoomProgress && (
+            <UpgradeRoomProgressLine
+              progress={props.upgradeRoomProgress}
+              waiting={
+                props.activePendingUserInput
+                  ? "질문 답변 대기"
+                  : props.activePendingApproval
+                    ? "승인 대기"
+                    : null
+              }
+            />
+          )}
           <ThreadFeed
             key={props.selectedThread.id}
             environmentId={props.environmentId}
@@ -410,12 +500,137 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
               {props.activePendingApproval ||
               props.activePendingUserInput ||
-              props.proposedMonitoringPlan ? (
+              props.proposedMonitoringPlan ||
+              props.orchestraActive ||
+              props.orchestraError ||
+              props.hasOrchestraAttempt ||
+              props.hasOrchestraStartAttempt ||
+              props.orchestraConfig.enabled ? (
                 <Animated.View
                   className="shrink-0 gap-3 px-4 pb-3"
                   entering={FadeInDown.duration(220)}
                   exiting={FadeOut.duration(140)}
                 >
+                  {props.orchestraActive ||
+                  props.orchestraError ||
+                  props.hasOrchestraAttempt ||
+                  props.hasOrchestraStartAttempt ||
+                  props.orchestraConfig.enabled ? (
+                    <View className="gap-2 rounded-xl border border-border bg-card p-3">
+                      <Text className="font-t3-bold text-foreground">
+                        {props.orchestraQuestion
+                          ? "통합 작업 질문"
+                          : props.orchestraActive
+                            ? "통합 작업 진행 중"
+                            : props.orchestraConfig.enabled && !props.hasOrchestraStartAttempt
+                              ? "다음 메시지로 통합 작업 시작"
+                              : "통합 작업 전송 확인"}
+                      </Text>
+                      <Text className="text-sm text-foreground">
+                        {props.orchestraQuestion?.question ??
+                          (props.orchestraActive
+                            ? "입력한 추가 지시는 감독 AI에게 전달됩니다."
+                            : props.orchestraConfig.enabled && !props.hasOrchestraStartAttempt
+                              ? "작업 목표를 입력하고 보내세요."
+                              : "보존된 내용을 확인하고 다시 보낼 수 있습니다.")}
+                      </Text>
+                      {props.orchestraQuestion?.context ? (
+                        <Text className="text-xs text-foreground-muted">
+                          {props.orchestraQuestion.context}
+                        </Text>
+                      ) : null}
+                      {props.orchestraError ? (
+                        <Text className="text-sm text-red-600">{props.orchestraError}</Text>
+                      ) : null}
+                      {props.hasOrchestraAttempt ? (
+                        <View className="gap-2">
+                          <Text className="text-xs text-foreground-muted">
+                            이전 전송 확인은 원래 내용과 요청 ID를 사용합니다. 초안으로 복원한 뒤
+                            다시 보내면 새 요청이므로 먼저 접수 여부를 확인하세요.
+                          </Text>
+                          <View className="flex-row flex-wrap gap-2">
+                            <Pressable
+                              accessibilityRole="button"
+                              disabled={props.orchestraAttemptBusy}
+                              className="rounded-lg border border-border p-2"
+                              onPress={() => void props.onRetryOrchestraAttempt?.()}
+                            >
+                              <Text className="text-sm text-foreground">이전 전송 확인</Text>
+                            </Pressable>
+                            <Pressable
+                              accessibilityRole="button"
+                              disabled={props.orchestraAttemptBusy}
+                              className="rounded-lg border border-border p-2"
+                              onPress={() => void props.onRestoreOrchestraAttempt?.()}
+                            >
+                              <Text className="text-sm text-foreground">
+                                이전 요청을 초안으로 복원
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ) : null}
+                      {props.hasOrchestraStartAttempt ? (
+                        <View className="gap-2">
+                          <Text className="text-xs text-foreground-muted">
+                            이전 시작 확인은 같은 요청을 사용합니다. 초안으로 복원한 뒤 다시 보내면
+                            새 요청이므로 먼저 접수 여부를 확인하세요.
+                          </Text>
+                          <View className="flex-row flex-wrap gap-2">
+                            <Pressable
+                              accessibilityRole="button"
+                              disabled={props.orchestraAttemptBusy}
+                              className="rounded-lg border border-border p-2"
+                              onPress={() => void props.onRetryOrchestraStart()}
+                            >
+                              <Text className="text-sm text-foreground">이전 시작 확인</Text>
+                            </Pressable>
+                            <Pressable
+                              accessibilityRole="button"
+                              disabled={props.orchestraAttemptBusy}
+                              className="rounded-lg border border-border p-2"
+                              onPress={() => void props.onRestoreOrchestraStart()}
+                            >
+                              <Text className="text-sm text-foreground">
+                                시작 요청을 초안으로 복원
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ) : null}
+                      {props.orchestraConfig.enabled && !props.orchestraActive ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          onPress={() => void openOrchestraSettings()}
+                        >
+                          <Text className="text-sm text-foreground">통합 작업 설정 변경</Text>
+                        </Pressable>
+                      ) : null}
+                      {[...new Set(props.orchestraQuestion?.options ?? [])].map((option) => (
+                        <Pressable
+                          key={option}
+                          accessibilityRole="button"
+                          className="rounded-lg border border-border p-2"
+                          onPress={() =>
+                            props.onChangeDraftMessage(
+                              selectThreadOrchestraOption(
+                                props.draftMessage,
+                                props.orchestraQuestion?.options ?? [],
+                                option,
+                              ),
+                            )
+                          }
+                        >
+                          <Text className="text-sm text-foreground">{option}</Text>
+                        </Pressable>
+                      ))}
+                      {props.orchestraQuestion ? (
+                        <Text className="text-xs text-foreground-muted">
+                          선택하거나 직접 입력한 뒤 답변을 보내세요.
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
                   {props.proposedMonitoringPlan ? (
                     <MonitoringPlanCard
                       plan={props.proposedMonitoringPlan}
@@ -438,7 +653,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       respondingUserInputId={props.respondingUserInputId}
                       pickingUserInputId={props.pickingUserInputId}
                       canStop={
-                        props.activePendingUserInput.requestId.startsWith("async:") ||
+                        isRecoverableUserInputRequestId(props.activePendingUserInput.requestId) ||
                         props.selectedThread.session?.status === "running" ||
                         props.selectedThread.session?.status === "starting"
                       }
@@ -454,12 +669,44 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               ) : null}
             </View>
 
-            <TokenUsageButton
-              key={selectedThreadKey}
-              environmentId={props.environmentId}
-              threadId={props.selectedThread.id}
-              busy={props.activeThreadBusy}
-            />
+            <View className="flex-row flex-wrap items-center justify-between">
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="전역 하위 모델 설정"
+                className="px-4 py-2"
+                onPress={() => setTeamSettingsEnvironment(props.environmentId)}
+              >
+                <Text className="text-xs text-muted-foreground">전역 하위 모델</Text>
+              </Pressable>
+              {teamSettingsEnvironment === props.environmentId && (
+                <ThreadTeamViewer
+                  key={props.environmentId}
+                  global
+                  environmentId={props.environmentId}
+                  serverConfig={props.serverConfig}
+                  connected={props.connectionStateLabel === "connected"}
+                  onClose={() => setTeamSettingsEnvironment(null)}
+                />
+              )}
+              <ThreadResponseStyleSettings
+                key={`response-style:${props.environmentId}`}
+                environmentId={props.environmentId}
+              />
+              <ThreadBackgroundWatch
+                key={`background-watch:${selectedThreadKey}`}
+                environmentId={props.environmentId}
+                threadId={props.selectedThread.id}
+                connected={props.connectionStateLabel === "connected"}
+              />
+              <TokenUsageButton
+                key={`token-usage:${selectedThreadKey}`}
+                environmentId={props.environmentId}
+                threadId={props.selectedThread.id}
+                busy={props.activeThreadBusy}
+                selectedProvider={selectedProvider}
+                providers={props.serverConfig?.providers}
+              />
+            </View>
             <ThreadComposer
               editorRef={composerEditorRef}
               draftMessage={props.draftMessage}
@@ -474,9 +721,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               pendingQuestionRequestId={props.activePendingUserInput?.requestId}
               serverConfig={props.serverConfig}
               queueCount={props.selectedThreadQueueCount}
+              failedQueuedMessage={props.failedQueuedMessage}
+              onRetryFailedMessage={props.onRetryFailedMessage}
+              onRestoreFailedMessage={props.onRestoreFailedMessage}
               activeThreadBusy={props.activeThreadBusy}
+              orchestraActive={props.orchestraActive}
+              orchestraHasQuestion={props.orchestraQuestion != null}
+              orchestraConfigured={props.orchestraConfig.enabled}
+              onOpenOrchestraSettings={() => void openOrchestraSettings()}
               environmentId={props.environmentId}
               projectCwd={props.projectWorkspaceRoot}
+              skillCwd={props.threadCwd}
               bottomInset={composerBottomInset}
               onChangeDraftMessage={props.onChangeDraftMessage}
               onPickDraftImages={props.onPickDraftImages}
@@ -493,6 +748,16 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           </View>
         </KeyboardStickyView>
       ) : null}
+      <MobileOrchestraSettings
+        key={selectedThreadKey}
+        visible={orchestraSettingsOpen}
+        active={props.orchestraActive === true}
+        config={props.orchestraConfig}
+        currentModel={props.selectedThread.modelSelection}
+        serverConfig={props.serverConfig}
+        onChange={props.onChangeOrchestraConfig}
+        onClose={() => setOrchestraSettingsOpen(false)}
+      />
     </View>
   );
 });

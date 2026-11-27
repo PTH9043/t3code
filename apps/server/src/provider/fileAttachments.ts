@@ -19,12 +19,12 @@ export function prepareFileAttachmentsForProvider(input: {
     const path = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
     if (!path) throw new Error(`Invalid file attachment id '${attachment.id}'.`);
     const extracted = input.extractedDocuments?.get(attachment.id);
-    return `- Original filename: ${JSON.stringify(attachment.name)}\n  Server path: ${JSON.stringify(path)}\n  MIME type: ${attachment.mimeType}; size: ${attachment.sizeBytes} bytes${extracted ? `\n  Extracted text: ${JSON.stringify(extracted.path)}${extracted.partial ? " (partial; consult the original for omitted content)" : ""}` : ""}`;
+    return `- Original filename: ${JSON.stringify(attachment.name)}\n  Attachment ID: ${JSON.stringify(attachment.id)}\n  Server path: ${JSON.stringify(path)}\n  MIME type: ${attachment.mimeType}; size: ${attachment.sizeBytes} bytes${extracted ? `\n  Extracted text: ${JSON.stringify(extracted.path)}${extracted.partial ? " (partial; consult the original for omitted content)" : ""}` : ""}`;
   });
   return {
     text: [
       input.text,
-      "[User-attached files]\nThe following original files have been uploaded to this server. Use the retrieved excerpts or extracted text when they contain the evidence needed for the question. Read additional ranges with your file tools when evidence is missing; consult the original for formatting, omitted content, or exact calculations. Cite the original filename and source location. The stored .bin extension does not change the original format; use the original filename and MIME type to choose appropriate readers for text, PDF, Office documents, spreadsheets, and other formats.",
+      "[User-attached files]\nThe following original files have been uploaded to this server. Use the retrieved excerpts or extracted text when they contain the evidence needed for the question. Read additional ranges with your file tools when evidence is missing; consult the original for formatting, omitted content, or exact calculations. Cite the original filename and source location. For full PDF analysis, when workspace_document is available, use start, then read and record each range in sequence with an evidence summary or failure reason. Use status to resume and verify coverage; never claim complete coverage when any range failed or remains unprocessed. The stored .bin extension does not change the original format; use the original filename and MIME type to choose appropriate readers for text, PDF, Office documents, spreadsheets, and other formats.",
       ...references,
     ]
       .filter(Boolean)

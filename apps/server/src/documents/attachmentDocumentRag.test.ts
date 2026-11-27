@@ -1,8 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
-import { MessageId, ProjectId, ThreadId, type ChatAttachment } from "@t3tools/contracts";
+import {
+  MessageId,
+  ProjectId,
+  ThreadId,
+  WorkspaceKnowledgeItemId,
+  type ChatAttachment,
+  type WorkspaceRagMatch,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -15,8 +24,59 @@ import { ProjectionWorkspaceRagRepository } from "../persistence/Services/Projec
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import { attachmentRelativePath } from "../attachmentStore.ts";
 import { docxFixture, pdfFixture, xlsxFixture } from "./documentFixtures.ts";
-import { prepareAttachmentDocumentRag } from "./attachmentDocumentRag.ts";
+import {
+  formatAttachmentDocumentMatches,
+  prepareAttachmentDocumentRag,
+} from "./attachmentDocumentRag.ts";
 import { ReadOnlyResultCache } from "./ReadOnlyResultCache.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
+
+it("keeps the edition status with its attachment when two documents have identical published text", () => {
+  const common = {
+    projectId: ProjectId.make("pdf-project"),
+    kind: "rag-source" as const,
+    title: "report.pdf",
+    snippet: "published passage",
+    score: 1,
+    updatedAt: "2026-11-01T00:00:00Z",
+  };
+  const match = (id: string, revision?: WorkspaceRagMatch["pdfRevision"]): WorkspaceRagMatch => ({
+    ...common,
+    itemId: WorkspaceKnowledgeItemId.make(id),
+    research: {
+      query: "report",
+      sources: [],
+      capturedAt: common.updatedAt,
+      verification: "unverified",
+      attachment: {
+        threadId: ThreadId.make("room"),
+        messageId: MessageId.make(id),
+        attachmentId: id,
+        name: common.title,
+        contentHash: "same-content",
+        parserVersion: "1",
+        partial: false,
+      },
+    },
+    ...(revision ? { pdfRevision: revision } : {}),
+  });
+  const plain = match("original");
+  expect(formatAttachmentDocumentMatches([plain])).not.toContain('"edition"');
+  const pending = match("updated", {
+    publishedVersion: 2,
+    pending: { version: 3, status: "indexing" },
+  });
+  const failed = match("failed", {
+    publishedVersion: 2,
+    pending: { version: 3, status: "failed" },
+  });
+  const published = match("finished", { publishedVersion: 3, pending: null });
+  const citations = formatAttachmentDocumentMatches([plain, pending, failed, published, pending]);
+  expect(citations).toContain('"edition":"2판 공개 · 3판 색인 중"');
+  expect(citations).toContain('"edition":"2판 공개 · 3판 색인 실패"');
+  expect(citations).toContain('"edition":"3판 공개"');
+  expect(citations.match(/"excerpt":"published passage"/g)).toHaveLength(4);
+});
 
 it.layer(
   Layer.mergeAll(
@@ -25,6 +85,76 @@ it.layer(
     ReadOnlyResultCache.layer,
   ).pipe(Layer.provideMerge(SqlitePersistenceMemory), Layer.provideMerge(NodeServices.layer)),
 )("attachment document RAG", (it) => {
+  it.effect("preserves extracted text and reports an attachment search failure", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-document-search-failure-",
+      });
+      const file: ChatAttachment = {
+        type: "file",
+        id: "document-search-failure",
+        name: "evidence.txt",
+        mimeType: "text/plain",
+        sizeBytes: 20,
+      };
+      yield* fs.writeFileString(
+        NodePath.join(directory, attachmentRelativePath(file)),
+        "The original evidence remains available.",
+      );
+      const commands: Parameters<OrchestrationEngineShape["dispatch"]>[0][] = [];
+      const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
+        Effect.sync(() => {
+          commands.push(command);
+          return { sequence: commands.length };
+        });
+      const result = yield* prepareAttachmentDocumentRag({
+        projectId: ProjectId.make("document-search-failure-project"),
+        threadId: ThreadId.make("document-search-failure-thread"),
+        messageId: MessageId.make("document-search-failure-message"),
+        createdAt: "2026-10-12T00:00:00Z",
+        stateDir: directory,
+        attachmentsDir: directory,
+        attachments: [file],
+        query: "evidence",
+        engine: { dispatch },
+        queries: {
+          searchWorkspaceRag: () =>
+            Effect.fail(new PersistenceSqlError({ operation: "injected search failure" })),
+        },
+      });
+      expect(result.extracted.has(file.id)).toBe(true);
+      expect(result.prompt).toContain("<t3_document_search_unavailable>");
+      expect(
+        commands.some(
+          (command) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === "document-rag.search-failed",
+        ),
+      ).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+  it.effect("does not turn cancellation of attachment search into an empty result", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-document-interrupt-" });
+      const result = yield* Effect.exit(
+        prepareAttachmentDocumentRag({
+          projectId: ProjectId.make("document-interrupt-project"),
+          threadId: ThreadId.make("document-interrupt-thread"),
+          messageId: MessageId.make("document-interrupt-message"),
+          createdAt: "2026-10-12T00:00:00Z",
+          stateDir: directory,
+          attachmentsDir: directory,
+          attachments: [],
+          query: "evidence",
+          engine: { dispatch: () => Effect.succeed({ sequence: 1 }) },
+          queries: { searchWorkspaceRag: () => Effect.interrupt },
+        }),
+      );
+      expect(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause)).toBe(true);
+    }).pipe(Effect.scoped),
+  );
   it.effect(
     "extracts, indexes, retrieves positioned evidence, reuses cache and removes obsolete search results",
     () =>

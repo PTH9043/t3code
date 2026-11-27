@@ -8,6 +8,12 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import {
+  BearerConnectionTarget,
+  PrimaryConnectionTarget,
+  RelayConnectionTarget,
+  usesLocalBackend,
+} from "@t3tools/client-runtime/connection";
 
 import type { Thread, ThreadShell } from "../types";
 import {
@@ -20,8 +26,11 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  ACCOUNT_AUTO_SWITCH_RECONNECT_SUPPRESS_MS,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
+  LOCAL_RECONNECT_WARNING_GRACE_MS,
   hasEnvironmentReconnectWarningGraceElapsed,
+  hasRecentAccountAutoSwitch,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
@@ -29,13 +38,99 @@ import {
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   resolveVisibleThreadError,
+  prepareOrchestraMessage,
   scheduleEnvironmentReconnectWarning,
+  suppressEnvironmentReconnectBanner,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
+  shouldWaitForActiveModelBeforeSending,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
 
 const environmentId = EnvironmentId.make("environment-local");
+
+describe("changing the model during a turn", () => {
+  const current = { instanceId: ProviderInstanceId.make("codex"), model: "original" };
+  const other = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "new" };
+
+  it("waits before submitting a different provider, model, account, or options while active", () => {
+    for (const status of ["starting", "running"] as const) {
+      const session = { status, providerInstanceId: current.instanceId };
+      for (const next of [
+        other,
+        { ...current, model: "another-model" },
+        { ...current, instanceId: ProviderInstanceId.make("codex-other-account") },
+        { ...current, options: [{ id: "reasoningEffort", value: "high" }] },
+      ]) {
+        expect(
+          shouldWaitForActiveModelBeforeSending({
+            session,
+            currentModelSelection: current,
+            nextModelSelection: next,
+          }),
+        ).toBe(true);
+      }
+      expect(
+        shouldWaitForActiveModelBeforeSending({
+          session,
+          currentModelSelection: current,
+          nextModelSelection: current,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("allows the next model once the turn settles, and respects the actual session instance", () => {
+    expect(
+      shouldWaitForActiveModelBeforeSending({
+        session: { status: "ready", providerInstanceId: current.instanceId },
+        currentModelSelection: current,
+        nextModelSelection: other,
+      }),
+    ).toBe(false);
+    expect(
+      shouldWaitForActiveModelBeforeSending({
+        session: { status: "running", providerInstanceId: other.instanceId },
+        currentModelSelection: current,
+        nextModelSelection: current,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("orchestra input length", () => {
+  it("preserves complete in-range instructions and rejects oversized input", () => {
+    const limit = `${"a".repeat(7_999)}끝`;
+    expect(prepareOrchestraMessage(`  ${limit}  `)).toEqual({ kind: "ready", text: limit });
+    expect(prepareOrchestraMessage(`${limit}추가 조건`)).toEqual({ kind: "too-long" });
+    expect(prepareOrchestraMessage("   ")).toEqual({ kind: "ready", text: "" });
+  });
+});
+
+describe("reconnect banner with version mismatch", () => {
+  const baseline = {
+    reconnecting: true,
+    localBackend: true,
+    versionSkew: true,
+    recentAccountSwitch: false,
+    updateRunning: false,
+    graceElapsed: false,
+  };
+  it("keeps the local grace but shows a persistent or failed connection", () => {
+    expect(suppressEnvironmentReconnectBanner(baseline)).toBe(true);
+    expect(suppressEnvironmentReconnectBanner({ ...baseline, graceElapsed: true })).toBe(false);
+    expect(suppressEnvironmentReconnectBanner({ ...baseline, reconnecting: false })).toBe(false);
+  });
+  it("preserves remote mismatch and update behavior", () => {
+    expect(suppressEnvironmentReconnectBanner({ ...baseline, localBackend: false })).toBe(false);
+    expect(
+      suppressEnvironmentReconnectBanner({ ...baseline, localBackend: false, versionSkew: false }),
+    ).toBe(true);
+    expect(
+      suppressEnvironmentReconnectBanner({ ...baseline, graceElapsed: true, updateRunning: true }),
+    ).toBe(true);
+  });
+});
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
@@ -53,6 +148,50 @@ describe("environment reconnect warning grace", () => {
 
     vi.advanceTimersByTime(1);
     expect(showWarning).toHaveBeenCalledOnce();
+  });
+
+  it("gives the local direct connection time to recover before showing a warning", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+    scheduleEnvironmentReconnectWarning(showWarning, true);
+    vi.advanceTimersByTime(LOCAL_RECONNECT_WARNING_GRACE_MS - 1);
+    expect(showWarning).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(showWarning).toHaveBeenCalledOnce();
+  });
+
+  it("uses the local grace for loopback web and desktop-local connections but not remote ones", () => {
+    vi.useFakeTimers();
+    const primary = (httpBaseUrl: string, wsBaseUrl: string) =>
+      new PrimaryConnectionTarget({ environmentId, label: "test", httpBaseUrl, wsBaseUrl });
+    const targets = [
+      [primary("http://localhost:8555", "ws://localhost:16595"), true],
+      [primary("t3code-dev://app/", "ws://127.0.0.1:16595"), true],
+      [
+        new BearerConnectionTarget({
+          environmentId,
+          label: "WSL",
+          connectionId: "local:wsl:ubuntu",
+        }),
+        true,
+      ],
+      [primary("https://example.test", "wss://example.test"), false],
+      [new RelayConnectionTarget({ environmentId, label: "relay" }), false],
+    ] as const;
+    for (const [target, local] of targets) {
+      const showWarning = vi.fn();
+      expect(usesLocalBackend(target)).toBe(local);
+      const cancel = scheduleEnvironmentReconnectWarning(showWarning, usesLocalBackend(target));
+      vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+      expect(showWarning).toHaveBeenCalledTimes(local ? 0 : 1);
+      if (local) {
+        vi.advanceTimersByTime(
+          LOCAL_RECONNECT_WARNING_GRACE_MS - ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
+        );
+        expect(showWarning).toHaveBeenCalledOnce();
+      }
+      cancel();
+    }
   });
 
   it("cancels the warning when the connection recovers during the grace period", () => {
@@ -73,6 +212,49 @@ describe("environment reconnect warning grace", () => {
     expect(hasEnvironmentReconnectWarningGraceElapsed(anotherEnvironmentId, environmentId)).toBe(
       false,
     );
+  });
+});
+
+describe("account auto-switch reconnect suppression", () => {
+  const now = Date.now();
+
+  function autoSwitchActivity(at: string) {
+    return {
+      id: "evt-1" as never,
+      tone: "info" as const,
+      kind: "provider.account.auto-switched",
+      summary: "Claude 계정 자동 전환",
+      payload: {},
+      turnId: null,
+      createdAt: at,
+    };
+  }
+
+  it("suppresses the warning while a fresh auto-switch is settling", () => {
+    const activities = [autoSwitchActivity(new Date(now - 5_000).toISOString())];
+    expect(hasRecentAccountAutoSwitch(activities, now)).toBe(true);
+  });
+
+  it("stops suppressing once the switch has had time to settle", () => {
+    const activities = [
+      autoSwitchActivity(
+        new Date(now - (ACCOUNT_AUTO_SWITCH_RECONNECT_SUPPRESS_MS + 1_000)).toISOString(),
+      ),
+    ];
+    expect(hasRecentAccountAutoSwitch(activities, now)).toBe(false);
+  });
+
+  it("ignores other activity kinds", () => {
+    const activities = [
+      { ...autoSwitchActivity(new Date(now - 1_000).toISOString()), kind: "tool.started" },
+    ];
+    expect(hasRecentAccountAutoSwitch(activities, now)).toBe(false);
+  });
+
+  it("handles empty or missing activity lists", () => {
+    expect(hasRecentAccountAutoSwitch([], now)).toBe(false);
+    expect(hasRecentAccountAutoSwitch(undefined, now)).toBe(false);
+    expect(hasRecentAccountAutoSwitch(null, now)).toBe(false);
   });
 });
 

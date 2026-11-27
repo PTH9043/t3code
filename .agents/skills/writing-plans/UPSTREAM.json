@@ -1,0 +1,11 @@
+{
+  "source": "https://github.com/obra/superpowers",
+  "path": "skills/writing-plans",
+  "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
+  "commitDate": "2026-11-03",
+  "license": "MIT",
+  "fetched": "2026-11-15",
+  "modifications": [
+    "frontmatter: added disable-model-invocation: true (runs only when the user picks it)"
+  ]
+}

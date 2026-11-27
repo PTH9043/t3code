@@ -43,9 +43,12 @@ export function RedactedSensitiveText(props: {
         render={
           <button
             type="button"
+            data-redacted-pii={revealed ? "revealed" : "masked"}
             className={cn(
-              "min-w-0 cursor-pointer rounded-sm font-mono text-[11px] leading-none transition hover:text-foreground",
-              revealed ? "text-muted-foreground" : "select-none text-muted-foreground blur-[2px]",
+              "inline-flex max-w-full min-w-0 cursor-pointer items-center truncate rounded-[5px] font-mono text-[11px] leading-tight transition hover:text-foreground",
+              revealed
+                ? "px-1 text-muted-foreground"
+                : "select-none border border-dashed border-[var(--redact-border)] bg-[var(--redact-surface)] px-1.5 py-0.5 text-muted-foreground/80",
               props.className,
             )}
             onClick={() => setRevealed((current) => !current)}

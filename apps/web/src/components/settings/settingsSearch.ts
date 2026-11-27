@@ -6,6 +6,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/connections"
   | "/settings/permissions"
+  | "/settings/diagnostics"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -27,6 +28,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "소스 제어",
   "/settings/connections": "연결",
   "/settings/permissions": "권한",
+  "/settings/diagnostics": "시스템 진단 및 리소스",
   "/settings/archived": "보관함",
 };
 
@@ -37,6 +39,26 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
  * here once instead of separately in the panel and the index.
  */
 export const SETTINGS_SEARCH_ITEMS = [
+  { id: "thread-response-style", title: "전역 답변 스타일", to: "/settings/general" },
+  {
+    id: "global-subordinate-team",
+    title: "전역 하위 모델과 역할",
+    to: "/settings/general",
+    targetId: "thread-response-style",
+  },
+  { id: "search-models", title: "검색용 모델", to: "/settings/general" },
+  {
+    id: "openrouter-search-account",
+    title: "OpenRouter 계정 연결",
+    to: "/settings/general",
+    targetId: "search-models",
+  },
+  {
+    id: "baidu-search-account",
+    title: "바이두(Baidu) Qianfan 계정 연결",
+    to: "/settings/general",
+    targetId: "search-models",
+  },
   {
     id: "ai-document-search",
     title: "AI 문서 검색 · RAG · OCR · Grok 조사",
@@ -64,6 +86,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     // Prefixed because the slider control already owns the `glass-opacity` id.
     id: "setting-glass-opacity",
     title: "유리 효과 투명도",
+    to: "/settings/appearance",
+  },
+  {
+    id: "setting-chat-horizontal-inset",
+    title: "대화방 좌우 여백 · 폭",
     to: "/settings/appearance",
   },
   {
@@ -104,8 +131,28 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/appearance",
   },
   {
+    id: "timeline-minimap",
+    title: "메시지 이동 막대",
+    to: "/settings/appearance",
+  },
+  {
     id: "project-grouping",
     title: "프로젝트 그룹화",
+    to: "/settings/general",
+  },
+  {
+    id: "background-watch-notice",
+    title: "감시 중단 알림 표시 시간",
+    to: "/settings/general",
+  },
+  {
+    id: "upgrade-room-downtime-summary",
+    title: "T3가 꺼진 동안 한 작업 표시",
+    to: "/settings/general",
+  },
+  {
+    id: "upgrade-room-offline-questions",
+    title: "T3가 꺼져 있을 때 모델의 질문",
     to: "/settings/general",
   },
   {
@@ -207,12 +254,12 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "automatic-update-download",
     title: "자동 다운로드",
-    to: "/settings/permissions",
+    to: "/settings/general",
   },
   {
     id: "automatic-update-install",
     title: "자동 설치 및 재시작",
-    to: "/settings/permissions",
+    to: "/settings/general",
   },
   {
     id: "workspace-program-manual-control",
@@ -253,6 +300,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "self-monitoring-project",
     title: "자체 감시 수신 프로젝트",
     to: "/settings/permissions",
+  },
+  {
+    id: "system-diagnostics",
+    title: "시스템 진단 및 리소스",
+    to: "/settings/diagnostics",
+  },
+  {
+    id: "execution-ledger",
+    title: "9종 협업 통합 실행 원장",
+    to: "/settings/diagnostics",
   },
   {
     id: "archive",

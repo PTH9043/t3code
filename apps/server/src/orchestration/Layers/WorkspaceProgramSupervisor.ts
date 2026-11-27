@@ -886,6 +886,7 @@ export const makeWorkspaceProgramSupervisor = Effect.gen(function* () {
     }
     const spawned = yield* Effect.result(
       ptyAdapter.spawn({
+        useConptyDll: platform === "win32",
         shell: shell.shell,
         args: shell.args,
         cwd,

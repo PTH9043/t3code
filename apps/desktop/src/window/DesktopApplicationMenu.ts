@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type * as Electron from "electron";
+import { UPGRADE_ROOM_TAB_MENU_CHANNEL } from "../ipc/channels.ts";
 
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -193,6 +194,20 @@ export const make = Effect.gen(function* () {
       {
         label: "보기",
         submenu: [
+          ...(environment.platform === "win32"
+            ? [
+                {
+                  label: "AutoUsage 업그레이드",
+                  click: (_item: Electron.MenuItem, window: Electron.BaseWindow | undefined) => {
+                    if (window && !window.isDestroyed() && "webContents" in window) {
+                      (window as Electron.BrowserWindow).webContents.send(
+                        UPGRADE_ROOM_TAB_MENU_CHANNEL,
+                      );
+                    }
+                  },
+                },
+              ]
+            : []),
           { role: "reload", label: "새로고침" },
           { role: "forceReload", label: "강제로 새로고침" },
           { role: "toggleDevTools", label: "개발자 도구 전환" },

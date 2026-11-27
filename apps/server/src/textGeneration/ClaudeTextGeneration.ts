@@ -9,6 +9,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -40,10 +41,12 @@ import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
+  probeClaudeCapabilities,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import { isClaudeConsoleApiAccount } from "../provider/Drivers/ClaudeApiEnvironment.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 
@@ -63,6 +66,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   environment?: NodeJS.ProcessEnv,
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const pathService = yield* Path.Path;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
 
   const readStreamAsString = <E>(
@@ -121,6 +125,24 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     outputSchemaJson: S;
     modelSelection: ModelSelection;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
+    if (claudeSettings.authMode === "api-key" && !claudeEnvironment.ANTHROPIC_API_KEY?.trim()) {
+      return yield* new TextGenerationError({
+        operation,
+        detail: "Claude API 키가 없습니다. 이 API 연결의 키를 다시 설정하세요.",
+      });
+    }
+    if (claudeSettings.authMode === "api-key") {
+      const account = yield* probeClaudeCapabilities(claudeSettings, claudeEnvironment, cwd).pipe(
+        Effect.provideService(Path.Path, pathService),
+      );
+      if (!isClaudeConsoleApiAccount(account)) {
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            "Claude Console API 키 인증을 확인하지 못했습니다. 구독 계정으로 전환하지 않습니다.",
+        });
+      }
+    }
     const jsonSchemaStr = yield* encodeJsonForOperation(
       operation,
       toJsonSchemaObject(outputSchemaJson),

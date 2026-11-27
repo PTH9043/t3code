@@ -1,4 +1,57 @@
 import {
+  COUNCIL_WS_METHODS,
+  CouncilAbortInput,
+  CouncilApproveOverrideInput,
+  CouncilError,
+  CouncilExecutePinnedSpecInput,
+  CouncilExecutePinnedSpecResult,
+  CouncilGetSessionInput,
+  CouncilListThreadSessionsInput,
+  CouncilListThreadSessionsResult,
+  CouncilReverifyPinnedSpecInput,
+  CouncilSessionSnapshot,
+  CouncilStartAutoSeatInput,
+  CouncilStreamEvent,
+  CouncilSubscribeInput,
+  CouncilTriageInput,
+  CouncilTriageResult,
+} from "./council.ts";
+import {
+  MISSION_CONTROL_WS_METHODS,
+  MissionCancelInput,
+  MissionDeleteInput,
+  MissionControlError,
+  MissionControlSnapshot,
+  MissionControlStreamEvent,
+  MissionCreateInput,
+  MissionCrewRole,
+  MissionCrewRoleDeleteInput,
+  MissionCrewRoleUpsertInput,
+  MissionDecideApprovalInput,
+  MissionDigestNowInput,
+  MissionGetSnapshotInput,
+  MissionHeartbeatCheckInput,
+  MissionHeartbeatCheckResult,
+  MissionInspectArtifactInput,
+  MissionInspectArtifactResult,
+  MissionKillSwitchInput,
+  MissionMeetingActionInput,
+  MissionMeetingRecord,
+  MissionPromoteMeetingInput,
+  MissionReport,
+  MissionRoundtableStartInput,
+  MissionRun,
+  MissionSubscribeInput,
+  MissionSyncMeetingInput,
+  MissionSynapsePruneInput,
+} from "./missionControl.ts";
+import {
+  WORKSPACE_MEMORY_WS_METHODS,
+  WorkspaceMemoryError,
+  WorkspaceMemoryForgetInput,
+  WorkspaceMemoryRememberInput,
+} from "./workspaceMemory.ts";
+import {
   WORKSPACE_TASK_INBOX_WS_METHODS,
   WorkspaceTaskInboxLookup,
   WorkspaceTaskInboxOverview,
@@ -24,6 +77,8 @@ import {
 import {
   WORKSPACE_WORKFLOW_WS_METHODS,
   WorkflowLookup,
+  WorkflowChatSkillLookup,
+  WorkflowChatSkillCatalog,
   WorkflowSave,
   WorkflowPreview,
   WorkflowPreviewResult,
@@ -72,6 +127,13 @@ import {
   ConversationTransferError,
 } from "./conversationTransfer.ts";
 import { ThreadId } from "./baseSchemas.ts";
+import { ToolActivitySummaryInput, ToolActivitySummaryResult } from "./toolActivitySummary.ts";
+import {
+  TelegramChannelsError,
+  TelegramChannelsManageInput,
+  TelegramChannelsStatusInput,
+  TelegramChannelsStatusResult,
+} from "./telegramChannels.ts";
 import { DesignImageUploadInput, DesignImageUploadError } from "./designReference.ts";
 import {
   DeepSeekConnectInput,
@@ -84,10 +146,38 @@ import {
   AntseedConnectionError,
 } from "./antseedConnection.ts";
 import {
+  GrokDeviceAuthBeginInput,
+  GrokDeviceAuthBeginResult,
+  GrokDeviceAuthCancelInput,
+  GrokDeviceAuthWaitInput,
+  MuseAuthBeginInput,
+  MuseAuthBeginResult,
+  MuseAuthCancelInput,
+  MuseAuthWaitInput,
+  MuseCloudAuthBeginInput,
+  MuseCloudAuthBeginResult,
+  MuseCloudAuthCancelInput,
+  MuseCloudAuthCookieInput,
+  MuseCloudAuthWaitInput,
   ProviderAccountLoginError,
   ProviderAccountLoginInput,
   ProviderAccountLoginResult,
 } from "./providerAccountLogin.ts";
+import {
+  OpenCodeConnectInput,
+  OpenCodeConnectResult,
+  OpenCodeConnectionError,
+} from "./openCodeConnection.ts";
+import {
+  AiSearchListEmbeddingModelsError,
+  AiSearchListEmbeddingModelsInput,
+  AiSearchListEmbeddingModelsResult,
+} from "./aiSearch.ts";
+import {
+  OpenAiApiListModelsError,
+  OpenAiApiListModelsInput,
+  OpenAiApiListModelsResult,
+} from "./openAiApiAccount.ts";
 import {
   WORKSPACE_DEVELOPMENT_WS_METHODS,
   WorkspaceDevelopmentConfigure,
@@ -355,7 +445,20 @@ export const WS_METHODS = {
   geminiAuthBegin: "geminiAuth.begin",
   deepSeekConnect: "deepseek.connect",
   antseedConnect: "antseed.connect",
+  openCodeConnect: "opencode.connect",
+  openAiApiListModels: "openAiApi.listModels",
+  aiSearchListEmbeddingModels: "aiSearch.listEmbeddingModels",
   providerAccountLogin: "providerAccount.login",
+  grokDeviceAuthBegin: "grokDeviceAuth.begin",
+  grokDeviceAuthWait: "grokDeviceAuth.wait",
+  grokDeviceAuthCancel: "grokDeviceAuth.cancel",
+  museAuthBegin: "museAuth.begin",
+  museAuthWait: "museAuth.wait",
+  museAuthCancel: "museAuth.cancel",
+  museCloudAuthBegin: "museCloudAuth.begin",
+  museCloudAuthWait: "museCloudAuth.wait",
+  museCloudAuthCancel: "museCloudAuth.cancel",
+  museCloudAuthImportCookies: "museCloudAuth.importCookies",
   geminiAuthComplete: "geminiAuth.complete",
   geminiAuthCancel: "geminiAuth.cancel",
   serverUpdateServer: "server.updateServer",
@@ -363,7 +466,11 @@ export const WS_METHODS = {
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
+  serverSummarizeToolActivity: "server.summarizeToolActivity",
+  telegramChannelsStatus: "server.telegramChannelsStatus",
+  telegramChannelsManage: "server.telegramChannelsManage",
   serverUpdateSettings: "server.updateSettings",
+  assistantComputerControl: "assistant.computer.control",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -499,8 +606,86 @@ export const WsAntseedConnectRpc = Rpc.make(WS_METHODS.antseedConnect, {
   error: Schema.Union([AntseedConnectionError, EnvironmentAuthorizationError]),
 });
 
+export const WsOpenCodeConnectRpc = Rpc.make(WS_METHODS.openCodeConnect, {
+  payload: OpenCodeConnectInput,
+  success: OpenCodeConnectResult,
+  error: Schema.Union([OpenCodeConnectionError, EnvironmentAuthorizationError]),
+});
+
+export const WsOpenAiApiListModelsRpc = Rpc.make(WS_METHODS.openAiApiListModels, {
+  payload: OpenAiApiListModelsInput,
+  success: OpenAiApiListModelsResult,
+  error: Schema.Union([OpenAiApiListModelsError, EnvironmentAuthorizationError]),
+});
+
+export const WsAiSearchListEmbeddingModelsRpc = Rpc.make(WS_METHODS.aiSearchListEmbeddingModels, {
+  payload: AiSearchListEmbeddingModelsInput,
+  success: AiSearchListEmbeddingModelsResult,
+  error: Schema.Union([AiSearchListEmbeddingModelsError, EnvironmentAuthorizationError]),
+});
+
 export const WsProviderAccountLoginRpc = Rpc.make(WS_METHODS.providerAccountLogin, {
   payload: ProviderAccountLoginInput,
+  success: ProviderAccountLoginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsGrokDeviceAuthBeginRpc = Rpc.make(WS_METHODS.grokDeviceAuthBegin, {
+  payload: GrokDeviceAuthBeginInput,
+  success: GrokDeviceAuthBeginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsGrokDeviceAuthWaitRpc = Rpc.make(WS_METHODS.grokDeviceAuthWait, {
+  payload: GrokDeviceAuthWaitInput,
+  success: ProviderAccountLoginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsGrokDeviceAuthCancelRpc = Rpc.make(WS_METHODS.grokDeviceAuthCancel, {
+  payload: GrokDeviceAuthCancelInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseAuthBeginRpc = Rpc.make(WS_METHODS.museAuthBegin, {
+  payload: MuseAuthBeginInput,
+  success: MuseAuthBeginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseAuthWaitRpc = Rpc.make(WS_METHODS.museAuthWait, {
+  payload: MuseAuthWaitInput,
+  success: ProviderAccountLoginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseAuthCancelRpc = Rpc.make(WS_METHODS.museAuthCancel, {
+  payload: MuseAuthCancelInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseCloudAuthBeginRpc = Rpc.make(WS_METHODS.museCloudAuthBegin, {
+  payload: MuseCloudAuthBeginInput,
+  success: MuseCloudAuthBeginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseCloudAuthWaitRpc = Rpc.make(WS_METHODS.museCloudAuthWait, {
+  payload: MuseCloudAuthWaitInput,
+  success: ProviderAccountLoginResult,
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseCloudAuthCancelRpc = Rpc.make(WS_METHODS.museCloudAuthCancel, {
+  payload: MuseCloudAuthCancelInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
+});
+
+export const WsMuseCloudAuthImportCookiesRpc = Rpc.make(WS_METHODS.museCloudAuthImportCookies, {
+  payload: MuseCloudAuthCookieInput,
   success: ProviderAccountLoginResult,
   error: Schema.Union([ProviderAccountLoginError, EnvironmentAuthorizationError]),
 });
@@ -533,6 +718,24 @@ export const WsServerUpdateServerWithProgressRpc = Rpc.make(
   },
 );
 
+export const WsServerSummarizeToolActivityRpc = Rpc.make(WS_METHODS.serverSummarizeToolActivity, {
+  payload: ToolActivitySummaryInput,
+  success: ToolActivitySummaryResult,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsTelegramChannelsStatusRpc = Rpc.make(WS_METHODS.telegramChannelsStatus, {
+  payload: TelegramChannelsStatusInput,
+  success: TelegramChannelsStatusResult,
+  error: Schema.Union([TelegramChannelsError, EnvironmentAuthorizationError]),
+});
+
+export const WsTelegramChannelsManageRpc = Rpc.make(WS_METHODS.telegramChannelsManage, {
+  payload: TelegramChannelsManageInput,
+  success: TelegramChannelsStatusResult,
+  error: Schema.Union([TelegramChannelsError, EnvironmentAuthorizationError]),
+});
+
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
   success: ServerSettings,
@@ -543,6 +746,48 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   payload: Schema.Struct({ patch: ServerSettingsPatch }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+export class AssistantComputerControlError extends Schema.TaggedErrorClass<AssistantComputerControlError>()(
+  "AssistantComputerControlError",
+  { message: Schema.String },
+) {}
+
+export const AssistantComputerStatus = Schema.Union([
+  Schema.Struct({
+    configured: Schema.Literal(false),
+    timedOut: Schema.optionalKey(Schema.Boolean),
+  }),
+  Schema.Struct({
+    configured: Schema.Literal(true),
+    image: Schema.String,
+    network: Schema.Literals(["none", "bridge"]),
+    status: Schema.String,
+    timedOut: Schema.optionalKey(Schema.Boolean),
+    kind: Schema.optionalKey(Schema.Literals(["container", "vm"])),
+  }),
+]);
+export type AssistantComputerStatus = typeof AssistantComputerStatus.Type;
+
+export const WsAssistantComputerControlRpc = Rpc.make(WS_METHODS.assistantComputerControl, {
+  payload: Schema.Struct({
+    threadId: ThreadId,
+    command: Schema.Union([
+      Schema.Struct({
+        action: Schema.Literal("create"),
+        image: Schema.String,
+        network: Schema.Literals(["none", "bridge"]),
+        kind: Schema.optionalKey(Schema.Literals(["container", "vm"])),
+      }),
+      Schema.Struct({ action: Schema.Literals(["status", "start", "stop", "remove"]) }),
+      Schema.Struct({
+        action: Schema.Literal("wait_ready"),
+        timeoutMs: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 300_000 })),
+      }),
+    ]),
+  }),
+  success: AssistantComputerStatus,
+  error: Schema.Union([AssistantComputerControlError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -909,6 +1154,15 @@ export const WsOrchestrationDispatchCommandRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationCheckTurnReceiptRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.checkTurnReceipt,
+  {
+    payload: OrchestrationRpcSchemas.checkTurnReceipt.input,
+    success: OrchestrationRpcSchemas.checkTurnReceipt.output,
+    error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.getWorkflowScript,
   {
@@ -939,11 +1193,83 @@ export const WsOrchestrationSearchThreadsRpc = Rpc.make(ORCHESTRATION_WS_METHODS
   error: Schema.Union([OrchestrationSearchThreadsError, EnvironmentAuthorizationError]),
 });
 
+export const WsGetPdfRevisionStatusRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getPdfRevisionStatus, {
+  payload: OrchestrationRpcSchemas.getPdfRevisionStatus.input,
+  success: OrchestrationRpcSchemas.getPdfRevisionStatus.output,
+  error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+});
+export const WsStartPdfRevisionRpc = Rpc.make(ORCHESTRATION_WS_METHODS.startPdfRevision, {
+  payload: OrchestrationRpcSchemas.startPdfRevision.input,
+  success: OrchestrationRpcSchemas.startPdfRevision.output,
+  error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+});
+export const WsRetryPdfRevisionRpc = Rpc.make(ORCHESTRATION_WS_METHODS.retryPdfRevision, {
+  payload: OrchestrationRpcSchemas.retryPdfRevision.input,
+  success: OrchestrationRpcSchemas.retryPdfRevision.output,
+  error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+});
+export const WsReadPdfRevisionSourceRpc = Rpc.make(ORCHESTRATION_WS_METHODS.readPdfRevisionSource, {
+  payload: OrchestrationRpcSchemas.readPdfRevisionSource.input,
+  success: OrchestrationRpcSchemas.readPdfRevisionSource.output,
+  error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+});
+
+export const WsOrchestrationEditWorkspaceKnowledgeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.editWorkspaceKnowledge,
+  {
+    payload: OrchestrationRpcSchemas.editWorkspaceKnowledge.input,
+    success: OrchestrationRpcSchemas.editWorkspaceKnowledge.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsOrchestrationRestoreWorkspaceKnowledgeRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.restoreWorkspaceKnowledge,
+  {
+    payload: OrchestrationRpcSchemas.restoreWorkspaceKnowledge.input,
+    success: OrchestrationRpcSchemas.restoreWorkspaceKnowledge.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsOrchestrationListWorkspaceKnowledgeRevisionsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.listWorkspaceKnowledgeRevisions,
+  {
+    payload: OrchestrationRpcSchemas.listWorkspaceKnowledgeRevisions.input,
+    success: OrchestrationRpcSchemas.listWorkspaceKnowledgeRevisions.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsOrchestrationGetWorkspaceKnowledgeRevisionRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getWorkspaceKnowledgeRevision,
+  {
+    payload: OrchestrationRpcSchemas.getWorkspaceKnowledgeRevision.input,
+    success: OrchestrationRpcSchemas.getWorkspaceKnowledgeRevision.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationGetWorkspaceKnowledgeDashboardRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getWorkspaceKnowledgeDashboard,
+  {
+    payload: OrchestrationRpcSchemas.getWorkspaceKnowledgeDashboard.input,
+    success: OrchestrationRpcSchemas.getWorkspaceKnowledgeDashboard.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsOrchestrationListWorkspaceKnowledgeRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.listWorkspaceKnowledge,
   {
     payload: OrchestrationRpcSchemas.listWorkspaceKnowledge.input,
     success: OrchestrationRpcSchemas.listWorkspaceKnowledge.output,
+    error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationGetWorkspaceWikiLinksRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getWorkspaceWikiLinks,
+  {
+    payload: OrchestrationRpcSchemas.getWorkspaceWikiLinks.input,
+    success: OrchestrationRpcSchemas.getWorkspaceWikiLinks.output,
     error: Schema.Union([OrchestrationWorkspaceKnowledgeError, EnvironmentAuthorizationError]),
   },
 );
@@ -1159,6 +1485,17 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
+export const WsMemoryForgetRpc = Rpc.make(WORKSPACE_MEMORY_WS_METHODS.forgetMessage, {
+  payload: WorkspaceMemoryForgetInput,
+  success: Schema.String,
+  error: Schema.Union([WorkspaceMemoryError, EnvironmentAuthorizationError]),
+});
+export const WsMemoryRememberRpc = Rpc.make(WORKSPACE_MEMORY_WS_METHODS.remember, {
+  payload: WorkspaceMemoryRememberInput,
+  success: Schema.String,
+  error: Schema.Union([WorkspaceMemoryError, EnvironmentAuthorizationError]),
+});
+
 export const WsDevelopmentGetRpc = Rpc.make(WORKSPACE_DEVELOPMENT_WS_METHODS.get, {
   payload: WorkspaceDevelopmentLookup,
   success: WorkspaceDevelopmentSnapshot,
@@ -1202,6 +1539,11 @@ export const WsRpcGroup = RpcGroup.make(
   Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.skills, {
     payload: WorkflowLookup,
     success: WorkflowSkillCatalog,
+    error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.chatSkills, {
+    payload: WorkflowChatSkillLookup,
+    success: WorkflowChatSkillCatalog,
     error: Schema.Union([WorkspaceWorkflowError, EnvironmentAuthorizationError]),
   }),
   Rpc.make(WORKSPACE_WORKFLOW_WS_METHODS.save, {
@@ -1331,7 +1673,20 @@ export const WsRpcGroup = RpcGroup.make(
   WsGeminiAuthBeginRpc,
   WsDeepSeekConnectRpc,
   WsAntseedConnectRpc,
+  WsOpenCodeConnectRpc,
+  WsOpenAiApiListModelsRpc,
+  WsAiSearchListEmbeddingModelsRpc,
   WsProviderAccountLoginRpc,
+  WsGrokDeviceAuthBeginRpc,
+  WsGrokDeviceAuthWaitRpc,
+  WsGrokDeviceAuthCancelRpc,
+  WsMuseAuthBeginRpc,
+  WsMuseAuthWaitRpc,
+  WsMuseAuthCancelRpc,
+  WsMuseCloudAuthBeginRpc,
+  WsMuseCloudAuthWaitRpc,
+  WsMuseCloudAuthCancelRpc,
+  WsMuseCloudAuthImportCookiesRpc,
   WsGeminiAuthCompleteRpc,
   WsGeminiAuthCancelRpc,
   WsServerUpdateServerRpc,
@@ -1339,7 +1694,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
+  WsServerSummarizeToolActivityRpc,
+  WsTelegramChannelsStatusRpc,
+  WsTelegramChannelsManageRpc,
   WsServerUpdateSettingsRpc,
+  WsAssistantComputerControlRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
@@ -1405,12 +1764,25 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationDispatchCommandRpc,
+  WsOrchestrationCheckTurnReceiptRpc,
   WsOrchestrationGetWorkflowScriptRpc,
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadsRpc,
   WsOrchestrationGetThreadTokenUsageRpc,
+  WsOrchestrationEditWorkspaceKnowledgeRpc,
+  WsOrchestrationRestoreWorkspaceKnowledgeRpc,
+  WsGetPdfRevisionStatusRpc,
+  WsStartPdfRevisionRpc,
+  WsRetryPdfRevisionRpc,
+  WsReadPdfRevisionSourceRpc,
+  WsOrchestrationListWorkspaceKnowledgeRevisionsRpc,
+  WsOrchestrationGetWorkspaceKnowledgeRevisionRpc,
+  WsOrchestrationGetWorkspaceKnowledgeDashboardRpc,
   WsOrchestrationListWorkspaceKnowledgeRpc,
+  WsOrchestrationGetWorkspaceWikiLinksRpc,
+  WsMemoryForgetRpc,
+  WsMemoryRememberRpc,
   WsOrchestrationSearchWorkspaceRagRpc,
   WsOrchestrationComposeWorkspacePromptRpc,
   WsOrchestrationListWorkspaceAgentRolesRpc,
@@ -1428,4 +1800,141 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationCleanupWorkspaceWorktreeRpc,
   WsOrchestrationGetSharedLibraryStatusRpc,
   WsOrchestrationSyncSharedLibraryRpc,
+  Rpc.make(COUNCIL_WS_METHODS.triage, {
+    payload: CouncilTriageInput,
+    success: CouncilTriageResult,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.startAutoSeat, {
+    payload: CouncilStartAutoSeatInput,
+    success: CouncilSessionSnapshot,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.getSession, {
+    payload: CouncilGetSessionInput,
+    success: CouncilSessionSnapshot,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.listThreadSessions, {
+    payload: CouncilListThreadSessionsInput,
+    success: CouncilListThreadSessionsResult,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.approveOverride, {
+    payload: CouncilApproveOverrideInput,
+    success: CouncilSessionSnapshot,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.executePinnedSpec, {
+    payload: CouncilExecutePinnedSpecInput,
+    success: CouncilExecutePinnedSpecResult,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.reverifyPinnedSpec, {
+    payload: CouncilReverifyPinnedSpecInput,
+    success: CouncilSessionSnapshot,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.abort, {
+    payload: CouncilAbortInput,
+    success: CouncilSessionSnapshot,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(COUNCIL_WS_METHODS.subscribe, {
+    payload: CouncilSubscribeInput,
+    success: CouncilStreamEvent,
+    stream: true,
+    error: Schema.Union([CouncilError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.getSnapshot, {
+    payload: MissionGetSnapshotInput,
+    success: MissionControlSnapshot,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.subscribe, {
+    payload: MissionSubscribeInput,
+    success: MissionControlStreamEvent,
+    stream: true,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.createMission, {
+    payload: MissionCreateInput,
+    success: MissionRun,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.cancelMission, {
+    payload: MissionCancelInput,
+    success: MissionRun,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.deleteMission, {
+    payload: MissionDeleteInput,
+    success: Schema.Struct({ deleted: Schema.Boolean, missionId: Schema.String }),
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.decideApproval, {
+    payload: MissionDecideApprovalInput,
+    success: MissionControlSnapshot,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.upsertCrewRole, {
+    payload: MissionCrewRoleUpsertInput,
+    success: MissionCrewRole,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.deleteCrewRole, {
+    payload: MissionCrewRoleDeleteInput,
+    success: Schema.Struct({ deleted: Schema.Boolean, roleId: Schema.String }),
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.startSyncMeeting, {
+    payload: MissionSyncMeetingInput,
+    success: MissionControlSnapshot,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.startRoundtableMeeting, {
+    payload: MissionRoundtableStartInput,
+    success: MissionMeetingRecord,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.cancelMeeting, {
+    payload: MissionMeetingActionInput,
+    success: MissionMeetingRecord,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.deleteMeeting, {
+    payload: MissionMeetingActionInput,
+    success: Schema.Struct({ deleted: Schema.Boolean, meetingId: Schema.String }),
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.promoteMeetingToMission, {
+    payload: MissionPromoteMeetingInput,
+    success: MissionRun,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.setSynapsePruned, {
+    payload: MissionSynapsePruneInput,
+    success: Schema.Struct({ updated: Schema.Boolean }),
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.killSwitch, {
+    payload: MissionKillSwitchInput,
+    success: MissionControlSnapshot,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.generateDigestNow, {
+    payload: MissionDigestNowInput,
+    success: MissionReport,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.runHeartbeatCheck, {
+    payload: MissionHeartbeatCheckInput,
+    success: MissionHeartbeatCheckResult,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(MISSION_CONTROL_WS_METHODS.inspectArtifact, {
+    payload: MissionInspectArtifactInput,
+    success: MissionInspectArtifactResult,
+    error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
 );

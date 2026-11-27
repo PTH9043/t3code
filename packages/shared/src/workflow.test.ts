@@ -1,7 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { WorkflowDefinition } from "@t3tools/contracts";
+import { describe, expect, it } from "vite-plus/test";
+import {
+  upcastV1ToV2,
+  WorkflowDefinition,
+  WorkflowEdgeId,
+  WorkflowLoopId,
+  WorkflowNodeId,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { previewWorkflow, workflowDefaults } from "./workflow.ts";
+import {
+  lintWorkflowGraphV2,
+  previewWorkflow,
+  validateWorkflowGraphV2Topology,
+  workflowDefaults,
+} from "./workflow.ts";
 const decodeDefinition = Schema.decodeUnknownSync(WorkflowDefinition);
 
 describe("workflow authoring", () => {
@@ -82,5 +93,133 @@ describe("workflow authoring", () => {
         { goal: "yes" },
       ).valid,
     ).toBe(false);
+  });
+
+  it("validates upcasted v2 Forward-DAG topology and permits declared loop_back edges", () => {
+    const baseV2 = upcastV1ToV2(workflowDefaults()[0]!);
+    const valid = validateWorkflowGraphV2Topology(baseV2);
+    expect(valid.valid).toBe(true);
+    expect(valid.topologicalOrder).toEqual(["analyze", "execute"]);
+
+    // Adding a declared loop_back edge keeps the Forward-DAG acyclic.
+    const withLoop = validateWorkflowGraphV2Topology({
+      ...baseV2,
+      edges: [
+        ...baseV2.edges,
+        {
+          id: WorkflowEdgeId.make("e_retry"),
+          from: WorkflowNodeId.make("execute"),
+          to: WorkflowNodeId.make("analyze"),
+          kind: "loop_back",
+          loopId: WorkflowLoopId.make("loop_1"),
+        },
+      ],
+      loops: [
+        {
+          loopId: WorkflowLoopId.make("loop_1"),
+          entryNodeId: WorkflowNodeId.make("analyze"),
+          exitNodeId: WorkflowNodeId.make("execute"),
+          maxIterations: 3,
+          stagnationDetection: { enabled: true, historyWindowSize: 2 },
+          onExhausted: "interrupt_for_human",
+        },
+      ],
+    });
+    expect(withLoop.valid).toBe(true);
+    expect(withLoop.topologicalOrder).toEqual(["analyze", "execute"]);
+
+    // An undeclared unconditional cycle is rejected.
+    const cyclic = validateWorkflowGraphV2Topology({
+      ...baseV2,
+      edges: [
+        ...baseV2.edges,
+        {
+          id: WorkflowEdgeId.make("e_bad_cycle"),
+          from: WorkflowNodeId.make("execute"),
+          to: WorkflowNodeId.make("analyze"),
+          kind: "unconditional",
+        },
+      ],
+    });
+    expect(cyclic.valid).toBe(false);
+    expect(cyclic.issues.some((issue) => issue.message.includes("Forward-DAG"))).toBe(true);
+  });
+
+  it("lints parallel shared_write conflicts, missing worktree reconcile, and loop guards", () => {
+    const parallelRisk = lintWorkflowGraphV2({
+      schemaVersion: 2,
+      inputs: [],
+      nodes: [
+        {
+          id: WorkflowNodeId.make("a"),
+          kind: "agent",
+          title: "작업 A",
+          joinPolicy: "all_succeeded",
+          promptTemplate: "a",
+          capability: "code-surgeon",
+          isolation: "shared_write",
+          sideEffectPolicy: "workspace_mutation",
+          inputBindings: {},
+          advisoryCriteria: ["기준 A"],
+          cleanContext: true,
+          cacheable: false,
+        },
+        {
+          id: WorkflowNodeId.make("b"),
+          kind: "agent",
+          title: "작업 B",
+          joinPolicy: "all_succeeded",
+          promptTemplate: "b",
+          capability: "code-surgeon",
+          isolation: "shared_write",
+          sideEffectPolicy: "workspace_mutation",
+          inputBindings: {},
+          advisoryCriteria: [],
+          cleanContext: true,
+          cacheable: false,
+        },
+        {
+          id: WorkflowNodeId.make("c"),
+          kind: "agent",
+          title: "격리 작업 C",
+          joinPolicy: "all_succeeded",
+          promptTemplate: "c",
+          capability: "code-surgeon",
+          isolation: "git_worktree",
+          sideEffectPolicy: "workspace_mutation",
+          inputBindings: {},
+          advisoryCriteria: [],
+          cleanContext: true,
+          cacheable: false,
+        },
+      ],
+      edges: [],
+      loops: [
+        {
+          loopId: WorkflowLoopId.make("l1"),
+          entryNodeId: WorkflowNodeId.make("a"),
+          exitNodeId: WorkflowNodeId.make("a"),
+          maxIterations: 3,
+          stagnationDetection: { enabled: false, historyWindowSize: 2 },
+          onExhausted: "fail_run",
+        },
+      ],
+    });
+    expect(parallelRisk.valid).toBe(true);
+    expect(parallelRisk.diagnostics.some((d) => d.code === "parallel-shared-write-risk")).toBe(
+      true,
+    );
+    expect(parallelRisk.diagnostics.some((d) => d.code === "worktree-missing-reconcile")).toBe(
+      true,
+    );
+    expect(parallelRisk.diagnostics.some((d) => d.code === "unverified-advisory-criteria")).toBe(
+      true,
+    );
+    expect(parallelRisk.diagnostics.some((d) => d.code === "loop-missing-stagnation-guard")).toBe(
+      true,
+    );
+    expect(parallelRisk.diagnostics.some((d) => d.code === "loop-missing-exit-condition")).toBe(
+      true,
+    );
   });
 });

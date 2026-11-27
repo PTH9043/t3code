@@ -354,4 +354,30 @@ describe("buildResourceTelemetryHistory", () => {
       "electron-main",
     );
   });
+
+  it("populates 15-minute window buckets cleanly for sparse 10-second background samples", () => {
+    const readAtMs = STARTED_AT_MS + 15 * 60_000;
+    const history = buildResourceTelemetryHistory({
+      readAt: DateTime.makeUnsafe(readAtMs),
+      windowMs: 15 * 60_000,
+      bucketMs: 30_000,
+      sampleIntervalMs: 10_000,
+      serverPid: SERVER_PID,
+      sidecarPid: Option.none(),
+      desktopSnapshot: Option.none(),
+      snapshots: [
+        snapshot(1, readAtMs - 40_000, 1_000, 10_000),
+        snapshot(2, readAtMs - 20_000, 3_000, 30_000),
+        snapshot(3, readAtMs, 5_000, 50_000),
+      ],
+      health,
+    });
+
+    expect(history.buckets).toHaveLength(30);
+    expect(history.retainedSampleCount).toBeGreaterThan(0);
+    expect(
+      history.buckets.filter((bucket) => bucket.maxProcessCount > 0).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(history.buckets.reduce((total, bucket) => total + bucket.ioWriteBytes, 0)).toBe(40_000);
+  });
 });

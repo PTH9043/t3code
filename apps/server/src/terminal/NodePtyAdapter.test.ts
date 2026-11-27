@@ -114,6 +114,7 @@ it.effect("preserves CMD arguments and Unicode working directories for native qu
     const adapter = yield* PtyAdapter.PtyAdapter;
     const args = ["/d", "/s", "/c", 'node.exe "C:\\작업 폴더\\worker.mjs" "a b" ""'];
     yield* adapter.spawn({
+      useConptyDll: true,
       shell: "cmd.exe",
       args,
       cwd: "C:\\작업 폴더",
@@ -130,6 +131,7 @@ it.effect("preserves CMD arguments and Unicode working directories for native qu
         rows: 24,
         env: { T3_TEST_VALUE: "한글 value" },
         name: "xterm-color",
+        useConptyDll: true,
       },
     ]);
   }).pipe(Effect.provide(testLayer)),

@@ -24,8 +24,8 @@ export interface ResolvedBackgroundActivitySettings {
 const PRESET_SETTINGS: Record<BackgroundActivityProfile, ResolvedBackgroundActivitySettings> = {
   performance: {
     profile: "performance",
-    automaticGitFetchInterval: Duration.seconds(15),
-    providerHealthRefreshInterval: Duration.minutes(1),
+    automaticGitFetchInterval: Duration.seconds(45),
+    providerHealthRefreshInterval: Duration.minutes(3),
     hostPowerMonitorActiveInterval: Duration.seconds(30),
     hostPowerMonitorIdleInterval: Duration.minutes(2),
     idleClientTtl: Duration.seconds(45),
@@ -37,7 +37,7 @@ const PRESET_SETTINGS: Record<BackgroundActivityProfile, ResolvedBackgroundActiv
   balanced: {
     profile: "balanced",
     automaticGitFetchInterval: DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
-    providerHealthRefreshInterval: DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
+    providerHealthRefreshInterval: Duration.minutes(10),
     hostPowerMonitorActiveInterval: Duration.seconds(30),
     hostPowerMonitorIdleInterval: Duration.minutes(5),
     idleClientTtl: Duration.seconds(45),

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   EnvironmentId,
   ModelSelection,
+  ThreadResponseStyle,
   ProviderInteractionMode,
   ProviderOptionSelection,
   RuntimeMode,
@@ -19,6 +20,7 @@ import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
 import { useEnvironmentServerConfig, useProjects, useThreadShells } from "../../state/entities";
+import type { NewTaskModelTeam } from "../../lib/newTaskModelTeam";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import type { ModelOption, ProviderGroup } from "../../lib/modelOptions";
@@ -26,6 +28,7 @@ import {
   buildModelOptions,
   groupByProvider,
   resolveSelectableModelSelection,
+  resolveImportedModelSelection,
 } from "../../lib/modelOptions";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -52,6 +55,7 @@ import {
   releaseEditingQueuedMessage,
   useThreadOutboxMessages,
 } from "../../state/use-thread-outbox";
+import { dispatchingQueuedMessageIdAtom } from "../../state/use-thread-outbox-drain";
 import {
   setPendingConnectionError,
   useSavedRemoteConnections,
@@ -123,6 +127,9 @@ type NewTaskFlowContextValue = {
   readonly selectedWorktreePath: string | null;
   readonly startFromOrigin: boolean;
   readonly draftKey: string | null;
+  readonly responseStyle: ThreadResponseStyle | undefined;
+  readonly requireExactModel: boolean;
+  readonly modelTeams: readonly NewTaskModelTeam[] | undefined;
   readonly editingPendingTask: QueuedThreadMessage | null;
   readonly prompt: string;
   readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
@@ -362,10 +369,11 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // Stored selections (draft and project default) only count while their
   // provider is usable on the server; otherwise the server's default model
   // wins instead of silently targeting a disabled provider.
-  const draftModelSelection = resolveSelectableModelSelection(
-    selectedEnvironmentServerConfig,
-    selectedProjectDraft.modelSelection ?? null,
-  );
+  const draftModelSelection = (
+    selectedProjectDraft.requireExactModel
+      ? resolveImportedModelSelection
+      : resolveSelectableModelSelection
+  )(selectedEnvironmentServerConfig, selectedProjectDraft.modelSelection ?? null);
   const projectDefaultModelSelection = resolveSelectableModelSelection(
     selectedEnvironmentServerConfig,
     selectedProject?.defaultModelSelection ?? null,
@@ -379,12 +387,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [selectedEnvironmentServerConfig, draftModelSelection, projectDefaultModelSelection],
   );
 
-  const selectedModel =
-    draftModelSelection ??
-    projectDefaultModelSelection ??
-    modelOptions.find((option) => option.isDefault)?.selection ??
-    modelOptions[0]?.selection ??
-    null;
+  const selectedModel = selectedProjectDraft.requireExactModel
+    ? draftModelSelection
+    : (draftModelSelection ??
+      projectDefaultModelSelection ??
+      modelOptions.find((option) => option.isDefault)?.selection ??
+      modelOptions[0]?.selection ??
+      null);
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
@@ -646,6 +655,12 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     if (!message?.creation) {
       return false;
     }
+    if (appAtomRegistry.get(dispatchingQueuedMessageIdAtom) === message.messageId) {
+      setPendingConnectionError(
+        "작업의 전송 상태를 확인하고 있습니다. 확인이 끝난 뒤 다시 열어주세요.",
+      );
+      return false;
+    }
     const draftKey = pendingTaskDraftKey(message.messageId);
     // Only hydrate a fresh editing draft; reopening mid-edit keeps newer edits.
     if (isComposerDraftEmpty(getComposerDraftSnapshot(draftKey))) {
@@ -653,6 +668,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       replaceComposerDraftAttachments(draftKey, message.attachments);
       updateComposerDraftSettings(draftKey, {
         modelSelection: message.modelSelection,
+        modelTeams: message.creation.modelTeams,
+        responseStyle: message.creation.responseStyle,
+        requireExactModel: message.creation.requireExactModel,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
         workspaceSelection: {
@@ -682,11 +700,15 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       const text = draft.text.trim();
       // Same availability gate the composer display applies: a stored
       // selection targeting a disabled provider must not ride into the queue.
-      const draftModelSelection =
-        resolveSelectableModelSelection(
-          selectedEnvironmentServerConfig,
-          draft.modelSelection ?? null,
-        ) ?? selectedModel;
+      const draftModelSelection = draft.requireExactModel
+        ? resolveImportedModelSelection(
+            selectedEnvironmentServerConfig,
+            draft.modelSelection ?? null,
+          )
+        : (resolveSelectableModelSelection(
+            selectedEnvironmentServerConfig,
+            draft.modelSelection ?? null,
+          ) ?? selectedModel);
       if (text.length === 0 || !draftModelSelection) {
         return null;
       }
@@ -717,6 +739,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         interactionMode: draft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
         creation: {
           projectId: selectedProject.id,
+          ...(draft.responseStyle ? { responseStyle: draft.responseStyle } : {}),
+          ...(draft.requireExactModel ? { requireExactModel: true } : {}),
+          ...(draft.modelTeams?.length ? { modelTeams: draft.modelTeams } : {}),
           ...(projectTitle !== undefined ? { projectTitle } : {}),
           ...(projectCwd !== undefined ? { projectCwd } : {}),
           workspaceMode: mode,
@@ -807,7 +832,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
 
       // update() rewrites the task only if it is still queued — a concurrent
       // delete or delivery wins, so the flush cannot resurrect it.
-      void updateThreadOutboxMessage(message)
+      void updateThreadOutboxMessage({
+        ...message,
+        ...(editing.deliveryFailure ? { deliveryFailure: editing.deliveryFailure } : {}),
+      })
         .then(() => {
           // If this task was reopened (possibly in a fresh provider) while
           // the save was in flight, that session owns the draft and the lock.
@@ -845,6 +873,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedWorktreePath,
       startFromOrigin,
       draftKey: selectedProjectDraftKey,
+      modelTeams: selectedProjectDraft.modelTeams,
+      requireExactModel: selectedProjectDraft.requireExactModel === true,
+      responseStyle: selectedProjectDraft.responseStyle,
       editingPendingTask,
       prompt,
       attachments,
@@ -915,6 +946,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedModelKey,
       selectedModelOption,
       selectedProjectDraftKey,
+      selectedProjectDraft.modelTeams,
+      selectedProjectDraft.requireExactModel,
+      selectedProjectDraft.responseStyle,
       selectedProviderSkills,
       setSelectedModelOptions,
       selectedProject,

@@ -11,6 +11,13 @@ import {
   resolveQuickAction,
 } from "@t3tools/client-runtime/state/vcs";
 import { useNavigation } from "@react-navigation/native";
+import type {
+  NativeStackHeaderItemButton,
+  NativeStackHeaderItemMenu,
+  NativeStackHeaderItemMenuAction,
+  NativeStackHeaderItemMenuSubmenu,
+} from "@react-navigation/native-stack";
+import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import { NativeHeaderToolbar } from "../../native/StackHeader";
 import { useCallback, useMemo } from "react";
 import { Alert } from "react-native";
@@ -64,12 +71,10 @@ function compactMenuStatus(gitStatus: VcsStatusResult | null): string {
   return parts.join(" · ");
 }
 
-type HeaderItem = Record<string, unknown>;
-type HeaderItems = HeaderItem[];
 type ThreadGitHeaderActionItems = {
-  readonly terminal: HeaderItem;
-  readonly files: HeaderItem;
-  readonly git: HeaderItem;
+  readonly terminal: NativeStackHeaderItemMenu;
+  readonly files: NativeStackHeaderItemButton;
+  readonly git: NativeStackHeaderItemMenu;
 };
 type QuickActionIcon =
   | "arrow.down.circle"
@@ -99,8 +104,6 @@ type ThreadGitControlsProps = ThreadGitMenuProps & {
   readonly canOpenFiles: boolean;
   readonly projectScripts: ReadonlyArray<ProjectScript>;
   readonly terminalSessions: ReadonlyArray<TerminalMenuSession>;
-  readonly showActionControls?: boolean;
-  readonly showDirectFileControl?: boolean;
   readonly onOpenTerminal: (terminalId?: string | null) => void;
   readonly onOpenNewTerminal: () => void;
   readonly onRunProjectScript: (script: ProjectScript) => Promise<void>;
@@ -249,7 +252,7 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
 function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGitHeaderActionItems {
   const model = useThreadGitControlModel(props);
 
-  return useMemo(
+  return useMemo<ThreadGitHeaderActionItems>(
     () => ({
       terminal: {
         accessibilityLabel: "터미널 열기",
@@ -259,7 +262,7 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
         label: "터미널",
         menu: {
           items: [
-            ...props.projectScripts.map((script) => ({
+            ...props.projectScripts.map<NativeStackHeaderItemMenuAction>((script) => ({
               description: script.command,
               icon: { name: projectScriptMenuIcon(script.icon), type: "sfSymbol" as const },
               label: projectScriptMenuLabel(script),
@@ -271,14 +274,14 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
                   {
                     description: "이 프로젝트에 저장된 실행 작업이 없습니다",
                     disabled: true,
-                    icon: { name: "play", type: "sfSymbol" as const },
+                    icon: { name: "play", type: "sfSymbol" } as const,
                     label: "프로젝트 실행 작업 없음",
                     onPress: () => {},
                     type: "action" as const,
                   },
                 ]
               : []),
-            ...props.terminalSessions.map((session) => ({
+            ...props.terminalSessions.map<NativeStackHeaderItemMenuAction>((session) => ({
               description: [
                 getTerminalStatusLabel({
                   status: session.status,
@@ -390,115 +393,61 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
   );
 }
 
-export function useThreadGitRightHeaderItems(props: ThreadGitControlsProps): HeaderItems {
-  const actionItems = useThreadGitHeaderActionItems(props);
-  return useMemo(
-    () => [actionItems.git, actionItems.files, actionItems.terminal] as HeaderItems,
-    [actionItems],
-  );
+function submenu(item: NativeStackHeaderItemMenu): NativeStackHeaderItemMenuSubmenu {
+  return { type: "submenu", label: item.label, icon: item.icon, items: item.menu.items };
 }
 
-export function useThreadGitCenterHeaderItems(props: ThreadGitControlsProps): HeaderItems {
-  const actionItems = useThreadGitHeaderActionItems(props);
-  return useMemo(
-    () => [actionItems.files, actionItems.git, actionItems.terminal] as HeaderItems,
-    [actionItems],
-  );
-}
-
-export function ThreadGitControls(props: ThreadGitControlsProps) {
-  const model = useThreadGitControlModel(props);
-  const showActionControls = props.showActionControls ?? true;
-
-  if (!showActionControls) {
-    return null;
-  }
-
-  return (
-    <NativeHeaderToolbar placement="right">
-      {showActionControls && props.auxiliaryPaneControl ? (
-        <NativeHeaderToolbar.Button
-          accessibilityLabel={props.auxiliaryPaneControl.accessibilityLabel}
-          icon="sidebar.right"
-          onPress={props.auxiliaryPaneControl.onPress}
-          separateBackground
-        />
-      ) : null}
-      {showActionControls ? (
-        <NativeHeaderToolbar.Menu
-          icon="terminal"
-          disabled={!props.canOpenTerminal}
-          separateBackground
-        >
-          {props.projectScripts.length > 0 ? (
-            props.projectScripts.map((script) => (
-              <NativeHeaderToolbar.MenuAction
-                key={script.id}
-                icon={projectScriptMenuIcon(script.icon)}
-                onPress={() => void props.onRunProjectScript(script)}
-                subtitle={script.command}
-              >
-                <NativeHeaderToolbar.Label>
-                  {projectScriptMenuLabel(script)}
-                </NativeHeaderToolbar.Label>
-              </NativeHeaderToolbar.MenuAction>
-            ))
-          ) : (
-            <NativeHeaderToolbar.MenuAction
-              icon="play"
-              disabled
-              onPress={() => {}}
-              subtitle="이 프로젝트에 저장된 실행 작업이 없습니다"
-            >
-              <NativeHeaderToolbar.Label>프로젝트 실행 작업 없음</NativeHeaderToolbar.Label>
-            </NativeHeaderToolbar.MenuAction>
-          )}
-          {props.terminalSessions.map((session) => (
-            <NativeHeaderToolbar.MenuAction
-              key={session.terminalId}
-              icon="terminal"
-              onPress={() => props.onOpenTerminal(session.terminalId)}
-              subtitle={[
-                getTerminalStatusLabel({
-                  status: session.status,
-                  hasRunningSubprocess: session.hasRunningSubprocess,
-                }),
-                basename(session.cwd),
+export function useThreadHeaderRightItems(
+  props: ThreadGitControlsProps,
+  showDirectTools: boolean,
+  onOpenViewer: () => void,
+) {
+  const { files, git, terminal } = useThreadGitHeaderActionItems(props);
+  const inspector = props.auxiliaryPaneControl;
+  return useMemo(() => {
+    const viewer = withNativeGlassHeaderItem({
+      type: "button" as const,
+      identifier: "thread-viewer",
+      label: "대화 뷰어",
+      accessibilityLabel: "대화 뷰어",
+      onPress: onOpenViewer,
+    });
+    if (showDirectTools) return [viewer, files, git, terminal];
+    const overflow: NativeStackHeaderItemMenu = {
+      type: "menu",
+      label: "대화 작업",
+      accessibilityLabel: "대화 작업 더 보기",
+      icon: { type: "sfSymbol", name: "ellipsis" },
+      menu: {
+        title: "대화 작업",
+        items: [
+          submenu(git),
+          {
+            type: "action",
+            label: files.label,
+            icon: files.icon,
+            disabled: files.disabled,
+            onPress: files.onPress,
+          },
+          ...(terminal.disabled ? [] : [submenu(terminal)]),
+          ...(inspector
+            ? [
+                {
+                  type: "action" as const,
+                  label: inspector.accessibilityLabel,
+                  onPress: inspector.onPress,
+                  icon: { type: "sfSymbol" as const, name: "sidebar.right" as const },
+                },
               ]
-                .filter(Boolean)
-                .join(" · ")}
-            >
-              <NativeHeaderToolbar.Label>{session.displayLabel}</NativeHeaderToolbar.Label>
-            </NativeHeaderToolbar.MenuAction>
-          ))}
-          <NativeHeaderToolbar.MenuAction
-            icon="plus"
-            onPress={props.onOpenNewTerminal}
-            subtitle="이 대화에서 다른 셸 시작"
-          >
-            <NativeHeaderToolbar.Label>새 터미널 열기</NativeHeaderToolbar.Label>
-          </NativeHeaderToolbar.MenuAction>
-        </NativeHeaderToolbar.Menu>
-      ) : null}
-      {showActionControls && props.showDirectFileControl ? (
-        <NativeHeaderToolbar.Button
-          accessibilityLabel="파일 열기"
-          disabled={!props.canOpenFiles}
-          icon="folder"
-          onPress={model.openFiles}
-          separateBackground
-        />
-      ) : null}
-      {showActionControls ? <ThreadGitMenu {...props} /> : null}
-    </NativeHeaderToolbar>
-  );
+            : []),
+        ],
+      },
+    };
+    return [viewer, withNativeGlassHeaderItem(overflow)];
+  }, [showDirectTools, onOpenViewer, files, git, terminal, inspector]);
 }
 
-/**
- * The standalone git actions menu (branch status, quick commit/push action,
- * review, more). Rendered inside a NativeHeaderToolbar by both the thread
- * chat header and the review screen's toolbar.
- */
+/** Standalone git actions in the review screen's toolbar. */
 export function ThreadGitMenu(props: ThreadGitMenuProps) {
   const model = useThreadGitControlModel(props);
 

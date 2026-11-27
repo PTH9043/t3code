@@ -160,6 +160,8 @@ describe("projectActivityPayload", () => {
     const projected = projectActivityPayload(fixtures[0]!);
     expect(projected.payload).toEqual({
       itemType: "command_execution",
+      toolCallId: "tool-command",
+      toolActivityOperation: { action: "command", phase: "completed", targetPaths: [] },
       title: "command_execution",
       detail: "command_execution detail",
       status: "completed",
@@ -186,6 +188,7 @@ describe("projectActivityPayload", () => {
 
   it("slims MCP tool data to the fields the expanded row renders", () => {
     expect(projectActivityPayload(fixtures[4]!).payload).toEqual({
+      toolActivityOperation: { action: "search", phase: "completed", targetPaths: [] },
       itemType: "mcp_tool_call",
       title: "mcp_tool_call",
       detail: "mcp_tool_call detail",
@@ -289,19 +292,28 @@ describe("superseded tool.updated snapshot dedup", () => {
     };
   }
 
-  function projectedIds(activities: ReadonlyArray<OrchestrationThreadActivity>) {
-    return projectThreadDetailSnapshot({
-      snapshotSequence: 7,
-      thread: makeThread(activities),
-    }).thread.activities.map((activity) => activity.id);
+  function isCompact(activity: OrchestrationThreadActivity) {
+    return (
+      (activity.payload as { toolActivityReceiptOnly?: boolean } | null)
+        ?.toolActivityReceiptOnly === true
+    );
   }
 
-  it("drops updates a later completion supersedes in the same turn", () => {
+  function detailedIds(activities: ReadonlyArray<OrchestrationThreadActivity>) {
+    const projected = projectThreadDetailSnapshot({
+      snapshotSequence: 7,
+      thread: makeThread(activities),
+    }).thread.activities;
+    expect(projected.map((row) => row.id)).toEqual(activities.map((row) => row.id));
+    return projected.filter((row) => !isCompact(row)).map((row) => row.id);
+  }
+
+  it("compacts updates a later completion supersedes in the same turn", () => {
     const update1 = makeToolLifecycleActivity("upd-1", "tool.updated");
     const update2 = makeToolLifecycleActivity("upd-2", "tool.updated");
     const completed = makeToolLifecycleActivity("done-1", "tool.completed");
 
-    expect(projectedIds([update1, update2, completed])).toEqual([completed.id]);
+    expect(detailedIds([update1, update2, completed])).toEqual([completed.id]);
   });
 
   it("matches on toolCallId when the adapter emits one", () => {
@@ -314,7 +326,7 @@ describe("superseded tool.updated snapshot dedup", () => {
     });
 
     // Same itemType/title, different call: only call-a's update is superseded.
-    expect(projectedIds([otherCall, update, completed])).toEqual([otherCall.id, completed.id]);
+    expect(detailedIds([otherCall, update, completed])).toEqual([otherCall.id, completed.id]);
   });
 
   it("keeps updates with no matching completion", () => {
@@ -324,16 +336,10 @@ describe("superseded tool.updated snapshot dedup", () => {
       title: "Reading",
     });
 
-    expect(projectedIds([inFlight, other, completed])).toEqual([inFlight.id, completed.id]);
+    expect(detailedIds([inFlight, other, completed])).toEqual([inFlight.id, completed.id]);
   });
 
-  it("drops interleaved superseded updates even when a parallel call separates them", () => {
-    // Deliberate divergence from the clients' adjacency-based collapse: a
-    // superseded update separated from its completion by an interleaved
-    // parallel call renders as its own in-flight row on full history, and the
-    // snapshot omits it. Its final state still shows via the retained
-    // completion (1.5% of dropped rows on real data; see the projection's doc
-    // comment).
+  it("compacts interleaved superseded updates even when a parallel call separates them", () => {
     const updateA = makeToolLifecycleActivity("upd-a", "tool.updated", { toolCallId: "call-a" });
     const updateB = makeToolLifecycleActivity("upd-b", "tool.updated", { toolCallId: "call-b" });
     const completedA = makeToolLifecycleActivity("done-a", "tool.completed", {
@@ -343,7 +349,7 @@ describe("superseded tool.updated snapshot dedup", () => {
       toolCallId: "call-b",
     });
 
-    expect(projectedIds([updateA, updateB, completedA, completedB])).toEqual([
+    expect(detailedIds([updateA, updateB, completedA, completedB])).toEqual([
       completedA.id,
       completedB.id,
     ]);
@@ -357,7 +363,7 @@ describe("superseded tool.updated snapshot dedup", () => {
       turn: "turn-reverted",
     });
 
-    expect(projectedIds([update, completed])).toEqual([update.id, completed.id]);
+    expect(detailedIds([update, completed])).toEqual([update.id, completed.id]);
   });
 
   it("keeps an update that follows its completion", () => {
@@ -365,7 +371,7 @@ describe("superseded tool.updated snapshot dedup", () => {
     const completed = makeToolLifecycleActivity("done-first", "tool.completed");
     const nextCall = makeToolLifecycleActivity("upd-next", "tool.updated");
 
-    expect(projectedIds([completed, nextCall])).toEqual([completed.id, nextCall.id]);
+    expect(detailedIds([completed, nextCall])).toEqual([completed.id, nextCall.id]);
   });
 
   it("keeps identity-less rows the clients never collapse", () => {
@@ -384,7 +390,7 @@ describe("superseded tool.updated snapshot dedup", () => {
       kind: "tool.completed",
     };
 
-    expect(projectedIds([anonymous, completed])).toEqual([anonymous.id, completed.id]);
+    expect(detailedIds([anonymous, completed])).toEqual([anonymous.id, completed.id]);
   });
 
   it("does not filter live activity-appended events", () => {
@@ -412,7 +418,7 @@ describe("superseded tool.updated snapshot dedup", () => {
     ).toEqual(update.id);
   });
 
-  it("leaves the collapsed work log identical to the full history", () => {
+  it("preserves the existing full-detail log alongside compact receipts", () => {
     const activities = [
       makeToolLifecycleActivity("upd-1", "tool.updated", { detail: "writing" }),
       makeToolLifecycleActivity("upd-2", "tool.updated", { detail: "writing" }),
@@ -424,7 +430,10 @@ describe("superseded tool.updated snapshot dedup", () => {
     });
 
     const before = deriveWorkLogEntries(activities);
-    const after = deriveWorkLogEntries(projected.thread.activities);
+    expect(projected.thread.activities.filter(isCompact)).toHaveLength(2);
+    const after = deriveWorkLogEntries(
+      projected.thread.activities.filter((row) => !isCompact(row)),
+    );
     expect(after).toHaveLength(before.length);
     expect(after.map((entry) => entry.label)).toEqual(before.map((entry) => entry.label));
   });

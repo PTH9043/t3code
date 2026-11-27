@@ -9,7 +9,7 @@ import type { PendingUserInput, PendingUserInputDraftAnswer } from "../../lib/th
 export interface PendingUserInputCardProps {
   readonly pendingUserInput: PendingUserInput;
   readonly drafts: Record<string, PendingUserInputDraftAnswer>;
-  readonly answers: Record<string, string> | null;
+  readonly answers: Record<string, string | string[]> | null;
   readonly respondingUserInputId: ApprovalRequestId | null;
   readonly pickingUserInputId: ApprovalRequestId | null;
   readonly canStop: boolean;
@@ -65,13 +65,25 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
             <Text className="font-sans text-base leading-snug text-neutral-950 dark:text-neutral-50">
               {question.question}
             </Text>
+            {question.multiSelect ? (
+              <Text className="font-sans text-xs text-neutral-500">
+                하나 이상의 옵션을 선택하세요.
+              </Text>
+            ) : null}
             <View className="flex-row flex-wrap gap-2.5">
               {question.options.map((option) => {
                 const selected =
-                  draft?.selectedOptionLabel === option.label && !draft.customAnswer?.trim().length;
+                  !draft?.customAnswer?.trim().length &&
+                  (question.multiSelect
+                    ? (draft?.selectedOptionLabels?.includes(option.label) ??
+                      draft?.selectedOptionLabel === option.label)
+                    : draft?.selectedOptionLabel === option.label);
                 return (
                   <Pressable
                     key={option.label}
+                    accessibilityRole={question.multiSelect ? "checkbox" : "radio"}
+                    accessibilityLabel={option.label}
+                    accessibilityState={{ checked: selected }}
                     className={cn(
                       "rounded-full border px-3 py-2.5 ",
                       selected

@@ -5,6 +5,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -195,16 +197,18 @@ describe("DesktopObservability", () => {
       assert.equal(end.annotations.phase, "END");
       assert.equal(end.annotations.details, "code=1");
 
-      const traceRecords = (yield* fileSystem.readFileString(tracePath))
-        .trim()
-        .split("\n")
-        .filter((line) => line.length > 0)
-        .map((line) => decodeTraceRecordLine(line));
-      assert.isFalse(
-        traceRecords.some(
-          (record) => record.name === "desktop.observability.backendOutput.writeOutputChunk",
-        ),
-      );
+      if (yield* fileSystem.exists(tracePath)) {
+        const traceRecords = (yield* fileSystem.readFileString(tracePath))
+          .trim()
+          .split("\n")
+          .filter((line) => line.length > 0)
+          .map((line) => decodeTraceRecordLine(line));
+        assert.isFalse(
+          traceRecords.some(
+            (record) => record.name === "desktop.observability.backendOutput.writeOutputChunk",
+          ),
+        );
+      }
     }).pipe(
       Effect.scoped,
       Effect.provide(Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici)),
@@ -332,5 +336,53 @@ describe("DesktopObservability", () => {
     // persistFailure flushes 258 records through synchronous file writes; on a
     // loaded Windows disk that IO alone can exceed the default 5s.
     30_000,
+  );
+
+  it.effect(
+    "blocks outbound OTLP export to external hosts while keeping local desktop.trace.ndjson",
+    () =>
+      Effect.gen(function* () {
+        let externalHttpCount = 0;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-desktop-otlp-block-test-",
+        });
+        const environmentLayer = DesktopEnvironment.layer(environmentInput(baseDir)).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              DesktopConfig.layerTest({
+                T3CODE_HOME: baseDir,
+                T3CODE_OTLP_TRACES_URL: "https://ingest.t3.codes/v1/traces",
+                VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+              }),
+            ),
+          ),
+        );
+        const mockHttpClientLayer = Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.sync(() => {
+              externalHttpCount += 1;
+              return HttpClientResponse.fromWeb(request, new Response(null, { status: 200 }));
+            }),
+          ),
+        );
+        const tracePath = yield* Effect.gen(function* () {
+          const environment = yield* DesktopEnvironment.DesktopEnvironment;
+          return environment.path.join(environment.logDir, "desktop.trace.ndjson");
+        }).pipe(Effect.provide(environmentLayer));
+
+        yield* Effect.scoped(
+          Effect.logInfo("local desktop trace still persists").pipe(
+            Effect.withSpan("desktop-external-otlp-blocked"),
+            Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(environmentLayer))),
+          ),
+        ).pipe(Effect.provide(mockHttpClientLayer));
+
+        assert.equal(externalHttpCount, 0);
+        const content = yield* fileSystem.readFileString(tracePath);
+        assert.include(content, "desktop-external-otlp-blocked");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

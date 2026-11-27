@@ -32,6 +32,8 @@ export class OrchestrationCommandInvariantError extends Schema.TaggedErrorClass<
   {
     commandType: Schema.String,
     detail: Schema.String,
+    retryable: Schema.optional(Schema.Boolean),
+    reason: Schema.optionalKey(Schema.Literal("active-turn-settings")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -45,11 +47,14 @@ export class OrchestrationCommandPreviouslyRejectedError extends Schema.TaggedEr
   {
     commandId: Schema.String,
     detail: Schema.String,
+    reason: Schema.optionalKey(Schema.Literal("turn-request-id-conflict")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
-    return `Command previously rejected (${this.commandId}): ${this.detail}`;
+    return this.reason === "turn-request-id-conflict"
+      ? `Command ID conflict (${this.commandId}): ${this.detail}`
+      : `Command previously rejected (${this.commandId}): ${this.detail}`;
   }
 }
 
