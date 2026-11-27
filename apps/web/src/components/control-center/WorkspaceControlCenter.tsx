@@ -105,6 +105,7 @@ import {
 } from "./workspaceKnowledgeExport";
 import { ExecutionProfiles, ExecutionProfileSelect } from "./ExecutionProfiles";
 import { AttentionInbox } from "./AttentionInbox";
+import { DriveBackupSection } from "./DriveBackupSection";
 import { MissionControlView } from "./missionControl/MissionControlView";
 import {
   WorkspaceSectionNav,
@@ -2715,6 +2716,8 @@ export function WorkspaceControlCenter({ project }: { project: EnvironmentProjec
         );
       case "project-accounts":
         return <RoleSection project={project} />;
+      case "drive-backup":
+        return <DriveBackupSection project={project} />;
       case "project-programs":
         return (
           <section id="project-programs" className="scroll-mt-24">

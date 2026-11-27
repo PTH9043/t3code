@@ -2,6 +2,7 @@ import {
   ActivityIcon,
   BotIcon,
   CalendarClockIcon,
+  CloudIcon,
   DatabaseIcon,
   FileStackIcon,
   FolderCogIcon,
@@ -37,6 +38,7 @@ export type ControlCenterSectionId =
   | "project-automation"
   | "completion-checks"
   | "project-accounts"
+  | "drive-backup"
   | "project-programs"
   | "project-monitoring"
   | "project-terminals";
@@ -118,6 +120,12 @@ export const CONTROL_CENTER_DOMAINS: ReadonlyArray<ControlCenterDomainDef> = [
     icon: ServerIcon,
     sections: [
       { id: "project-accounts", domain: "infra-accounts", label: "AI 계정", icon: BotIcon },
+      {
+        id: "drive-backup",
+        domain: "infra-accounts",
+        label: "구글 드라이브 백업",
+        icon: CloudIcon,
+      },
       {
         id: "project-programs",
         domain: "infra-accounts",

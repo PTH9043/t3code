@@ -46,6 +46,25 @@ import {
   MissionSynapsePruneInput,
 } from "./missionControl.ts";
 import {
+  DRIVE_BACKUP_WS_METHODS,
+  DriveBackupConfig,
+  DriveBackupDeleteTargetInput,
+  DriveBackupDryRunInput,
+  DriveBackupDryRunResult,
+  DriveBackupError,
+  DriveBackupGetStateInput,
+  DriveBackupRunNowInput,
+  DriveBackupRunRecord,
+  DriveBackupStateSnapshot,
+  DriveBackupSyncMirrorInput,
+  DriveBackupSyncMirrorResult,
+  DriveBackupTarget,
+  DriveBackupUpdateConfigInput,
+  DriveBackupUpsertTargetInput,
+  DriveBackupVerifyRestoreInput,
+  DriveBackupVerifyRestoreResult,
+} from "./driveBackup.ts";
+import {
   WORKSPACE_MEMORY_WS_METHODS,
   WorkspaceMemoryError,
   WorkspaceMemoryForgetInput,
@@ -1936,5 +1955,45 @@ export const WsRpcGroup = RpcGroup.make(
     payload: MissionInspectArtifactInput,
     success: MissionInspectArtifactResult,
     error: Schema.Union([MissionControlError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.getState, {
+    payload: DriveBackupGetStateInput,
+    success: DriveBackupStateSnapshot,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.updateConfig, {
+    payload: DriveBackupUpdateConfigInput,
+    success: DriveBackupConfig,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.upsertTarget, {
+    payload: DriveBackupUpsertTargetInput,
+    success: DriveBackupTarget,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.deleteTarget, {
+    payload: DriveBackupDeleteTargetInput,
+    success: Schema.Struct({ deleted: Schema.Boolean, targetId: Schema.String }),
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.dryRun, {
+    payload: DriveBackupDryRunInput,
+    success: DriveBackupDryRunResult,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.runNow, {
+    payload: DriveBackupRunNowInput,
+    success: DriveBackupRunRecord,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.verifyRestore, {
+    payload: DriveBackupVerifyRestoreInput,
+    success: DriveBackupVerifyRestoreResult,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(DRIVE_BACKUP_WS_METHODS.syncKnowledgeMirror, {
+    payload: DriveBackupSyncMirrorInput,
+    success: DriveBackupSyncMirrorResult,
+    error: Schema.Union([DriveBackupError, EnvironmentAuthorizationError]),
   }),
 );

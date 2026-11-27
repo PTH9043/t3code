@@ -79,7 +79,7 @@ beforeEach(() => {
 });
 
 describe("Control Center 5-domain routing & single-panel mount (ERR-02, ERR-03, ERR-13, ERR-14)", () => {
-  it("groups all 17 sections (16 legacy + mission-control) into exactly 5 top-level domains without loss", () => {
+  it("groups all 18 sections (16 legacy + mission-control + drive-backup) into exactly 5 top-level domains without loss", () => {
     expect(CONTROL_CENTER_DOMAINS.map((domain) => domain.label)).toEqual([
       "운영 홈",
       "에이전트 실행",
@@ -88,12 +88,17 @@ describe("Control Center 5-domain routing & single-panel mount (ERR-02, ERR-03, 
       "인프라 & 계정",
     ]);
     const allSections = CONTROL_CENTER_DOMAINS.flatMap((domain) => domain.sections);
-    expect(allSections).toHaveLength(17);
-    expect(new Set(allSections.map((section) => section.id)).size).toBe(17);
+    expect(allSections).toHaveLength(18);
+    expect(new Set(allSections.map((section) => section.id)).size).toBe(18);
     expect(allSections.some((section) => section.id === "mission-control")).toBe(true);
+    expect(allSections.some((section) => section.id === "drive-backup")).toBe(true);
   });
 
   it("resolves search params, legacy hashes, and knowledgeRun into valid domain/section pairs", () => {
+    expect(resolveControlCenterTabSearch({ section: "drive-backup" })).toEqual({
+      domain: "infra-accounts",
+      section: "drive-backup",
+    });
     expect(resolveControlCenterTabSearch({ section: "project-terminals" })).toEqual({
       domain: "infra-accounts",
       section: "project-terminals",

@@ -125,6 +125,7 @@ import Migration0112 from "./Migrations/112_MissionControlAutonomousOps.ts";
 import Migration0113 from "./Migrations/113_WorkspaceRoutingGraphAndAdaptiveHandoff.ts";
 import Migration0114 from "./Migrations/114_UnifiedOpsAndRoundtable.ts";
 import Migration0115 from "./Migrations/115_WorkspaceDelegationsAllowLimitExceeded.ts";
+import Migration0116 from "./Migrations/116_GoogleDriveSelectiveBackup.ts";
 import Migration0091 from "./Migrations/091_WorkspaceMonitoringActionJournal.ts";
 import Migration0092 from "./Migrations/092_WorkspaceWikiLinks.ts";
 import Migration0093 from "./Migrations/093_WorkspaceKnowledgeProvenance.ts";
@@ -255,6 +256,7 @@ export const migrationEntries = [
   [113, "WorkspaceRoutingGraphAndAdaptiveHandoff", Migration0113],
   [114, "UnifiedOpsAndRoundtable", Migration0114],
   [115, "WorkspaceDelegationsAllowLimitExceeded", Migration0115],
+  [116, "GoogleDriveSelectiveBackup", Migration0116],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

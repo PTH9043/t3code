@@ -81,6 +81,7 @@ import { WorkspaceKnowledgeReactorLive } from "./orchestration/Layers/WorkspaceK
 import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/WorkspaceCollaborationReactor.ts";
 import { WorkspaceAgentExecutorLive } from "./orchestration/Layers/WorkspaceAgentExecutor.ts";
 import { CouncilOrchestratorLive } from "./orchestration/council/CouncilOrchestratorLive.ts";
+import { GoogleDriveBackupServiceLive } from "./t3x/driveBackup/GoogleDriveBackupServiceLive.ts";
 import { MissionOrchestratorLive } from "./t3x/missionControl/MissionOrchestratorLive.ts";
 import { ReadOnlyResultCache } from "./documents/ReadOnlyResultCache.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
@@ -340,6 +341,7 @@ const ReactorLayerLive = Layer.empty
     Layer.provideMerge(CouncilOrchestratorLive),
     Layer.provideMerge(WorkerEngineServiceLive.pipe(Layer.provide(WorkspaceAgentExecutorLive))),
     Layer.provideMerge(MissionOrchestratorLive.pipe(Layer.provide(WorkspaceAgentExecutorLive))),
+    Layer.provideMerge(GoogleDriveBackupServiceLive.pipe(Layer.provide(ServerSecretStore.layer))),
     Layer.provideMerge(WorkspaceAgentExecutorLive),
     Layer.provideMerge(WorkspaceAgentControl.layer),
     Layer.provideMerge(WatchdogRuntime.layer),

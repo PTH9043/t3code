@@ -10,8 +10,14 @@ import { WORKSPACE_TASK_INBOX_WS_METHODS, WorkspaceTaskInboxError } from "@t3too
 import { WorkspaceTaskInbox } from "./orchestration/WorkspaceTaskInbox.ts";
 import { WORKSPACE_AGENT_CONTROL_WS_METHODS, WorkspaceAgentControlError } from "@t3tools/contracts";
 import { WorkspaceAgentControl } from "./orchestration/WorkspaceAgentControl.ts";
-import { COUNCIL_WS_METHODS, CouncilError, MissionControlError } from "@t3tools/contracts";
+import {
+  COUNCIL_WS_METHODS,
+  CouncilError,
+  DriveBackupError,
+  MissionControlError,
+} from "@t3tools/contracts";
 import { CouncilOrchestratorService } from "./orchestration/council/CouncilOrchestrator.ts";
+import { GoogleDriveBackupService } from "./t3x/driveBackup/GoogleDriveBackupService.ts";
 import { MissionOrchestratorService } from "./t3x/missionControl/MissionOrchestratorService.ts";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -378,6 +384,13 @@ export const makeWsRpcLayer = (
         new MissionControlError({
           code: "UNAVAILABLE",
           message: "자율 미션 컨트롤 서비스가 이 서버에 활성화되어 있지 않습니다.",
+        }),
+      );
+      const driveBackup = yield* Effect.serviceOption(GoogleDriveBackupService);
+      const unavailableDriveBackup = Effect.fail(
+        new DriveBackupError({
+          code: "UNAVAILABLE",
+          message: "구글 드라이브 선택형 백업 서비스가 이 서버에 활성화되어 있지 않습니다.",
         }),
       );
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1569,6 +1582,8 @@ export const makeWsRpcLayer = (
           unavailableCouncil,
           missionControl,
           unavailableMissionControl,
+          driveBackup,
+          unavailableDriveBackup,
           workspaceMemory,
           upgradeMemory,
           development,

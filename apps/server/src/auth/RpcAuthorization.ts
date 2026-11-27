@@ -1,5 +1,6 @@
 import {
   COUNCIL_WS_METHODS,
+  DRIVE_BACKUP_WS_METHODS,
   MISSION_CONTROL_WS_METHODS,
   WORKSPACE_WORKFLOW_WS_METHODS,
 } from "@t3tools/contracts";
@@ -233,6 +234,14 @@ export const RPC_REQUIRED_SCOPES = {
   [MISSION_CONTROL_WS_METHODS.generateDigestNow]: AuthOrchestrationOperateScope,
   [MISSION_CONTROL_WS_METHODS.runHeartbeatCheck]: AuthOrchestrationOperateScope,
   [MISSION_CONTROL_WS_METHODS.inspectArtifact]: AuthOrchestrationReadScope,
+  [DRIVE_BACKUP_WS_METHODS.getState]: AuthOrchestrationReadScope,
+  [DRIVE_BACKUP_WS_METHODS.updateConfig]: AuthOrchestrationOperateScope,
+  [DRIVE_BACKUP_WS_METHODS.upsertTarget]: AuthOrchestrationOperateScope,
+  [DRIVE_BACKUP_WS_METHODS.deleteTarget]: AuthOrchestrationOperateScope,
+  [DRIVE_BACKUP_WS_METHODS.dryRun]: AuthOrchestrationReadScope,
+  [DRIVE_BACKUP_WS_METHODS.runNow]: AuthOrchestrationOperateScope,
+  [DRIVE_BACKUP_WS_METHODS.verifyRestore]: AuthOrchestrationOperateScope,
+  [DRIVE_BACKUP_WS_METHODS.syncKnowledgeMirror]: AuthOrchestrationOperateScope,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {

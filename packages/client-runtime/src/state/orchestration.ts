@@ -1,5 +1,6 @@
 import {
   COUNCIL_WS_METHODS,
+  DRIVE_BACKUP_WS_METHODS,
   MISSION_CONTROL_WS_METHODS,
   WORKSPACE_WORKFLOW_WS_METHODS,
 } from "@t3tools/contracts";
@@ -350,6 +351,39 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     syncSharedLibrary: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:orchestration:sync-shared-library",
       tag: ORCHESTRATION_WS_METHODS.syncSharedLibrary,
+    }),
+    driveBackupState: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:drive-backup:state",
+      tag: DRIVE_BACKUP_WS_METHODS.getState,
+      staleTimeMs: 1_000,
+    }),
+    updateDriveBackupConfig: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:update-config",
+      tag: DRIVE_BACKUP_WS_METHODS.updateConfig,
+    }),
+    upsertDriveBackupTarget: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:upsert-target",
+      tag: DRIVE_BACKUP_WS_METHODS.upsertTarget,
+    }),
+    deleteDriveBackupTarget: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:delete-target",
+      tag: DRIVE_BACKUP_WS_METHODS.deleteTarget,
+    }),
+    dryRunDriveBackup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:dry-run",
+      tag: DRIVE_BACKUP_WS_METHODS.dryRun,
+    }),
+    runDriveBackupNow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:run-now",
+      tag: DRIVE_BACKUP_WS_METHODS.runNow,
+    }),
+    verifyDriveBackupRestore: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:verify-restore",
+      tag: DRIVE_BACKUP_WS_METHODS.verifyRestore,
+    }),
+    syncDriveKnowledgeMirror: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:drive-backup:sync-knowledge-mirror",
+      tag: DRIVE_BACKUP_WS_METHODS.syncKnowledgeMirror,
     }),
   };
 }

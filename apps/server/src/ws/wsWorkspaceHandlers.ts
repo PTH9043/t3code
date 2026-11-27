@@ -2,6 +2,8 @@
 import {
   COUNCIL_WS_METHODS,
   CouncilError,
+  DRIVE_BACKUP_WS_METHODS,
+  DriveBackupError,
   EnvironmentAuthorizationError,
   MISSION_CONTROL_WS_METHODS,
   MissionControlError,
@@ -25,6 +27,7 @@ import * as Stream from "effect/Stream";
 
 import type * as ServerConfig from "../config.ts";
 import { CouncilOrchestratorService } from "../orchestration/council/CouncilOrchestrator.ts";
+import { GoogleDriveBackupService } from "../t3x/driveBackup/GoogleDriveBackupService.ts";
 import { MissionOrchestratorService } from "../t3x/missionControl/MissionOrchestratorService.ts";
 import type * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { UpgradeRoomMemory, captureRoomMemory } from "../orchestration/UpgradeRoomMemory.ts";
@@ -46,6 +49,7 @@ export type WorkspaceRpcMethodKeys =
   | (typeof WORKSPACE_RESEARCH_WS_METHODS)[keyof typeof WORKSPACE_RESEARCH_WS_METHODS]
   | (typeof COUNCIL_WS_METHODS)[keyof typeof COUNCIL_WS_METHODS]
   | (typeof MISSION_CONTROL_WS_METHODS)[keyof typeof MISSION_CONTROL_WS_METHODS]
+  | (typeof DRIVE_BACKUP_WS_METHODS)[keyof typeof DRIVE_BACKUP_WS_METHODS]
   | (typeof WORKSPACE_MEMORY_WS_METHODS)[keyof typeof WORKSPACE_MEMORY_WS_METHODS]
   | (typeof WORKSPACE_DEVELOPMENT_WS_METHODS)[keyof typeof WORKSPACE_DEVELOPMENT_WS_METHODS]
   | (typeof WORKSPACE_AGENT_CONTROL_WS_METHODS)[keyof typeof WORKSPACE_AGENT_CONTROL_WS_METHODS]
@@ -69,6 +73,8 @@ export interface WorkspaceRpcHandlersDeps {
   readonly unavailableCouncil: Effect.Effect<never, CouncilError>;
   readonly missionControl: Option.Option<MissionOrchestratorService["Service"]>;
   readonly unavailableMissionControl: Effect.Effect<never, MissionControlError>;
+  readonly driveBackup: Option.Option<GoogleDriveBackupService["Service"]>;
+  readonly unavailableDriveBackup: Effect.Effect<never, DriveBackupError>;
   readonly workspaceMemory: Option.Option<WorkspaceMemory["Service"]>;
   readonly upgradeMemory: (typeof UpgradeRoomMemory)["Service"];
   readonly development: WorkspaceDevelopment["Service"];
@@ -92,6 +98,8 @@ export function makeWorkspaceRpcHandlers(
     unavailableCouncil,
     missionControl,
     unavailableMissionControl,
+    driveBackup,
+    unavailableDriveBackup,
     workspaceMemory,
     upgradeMemory,
     development,
@@ -309,6 +317,50 @@ export function makeWorkspaceRpcHandlers(
         Option.isSome(missionControl)
           ? missionControl.value.inspectArtifact(input)
           : unavailableMissionControl,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.getState]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.getState,
+        Option.isSome(driveBackup) ? driveBackup.value.getState(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.updateConfig]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.updateConfig,
+        Option.isSome(driveBackup) ? driveBackup.value.updateConfig(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.upsertTarget]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.upsertTarget,
+        Option.isSome(driveBackup) ? driveBackup.value.upsertTarget(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.deleteTarget]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.deleteTarget,
+        Option.isSome(driveBackup) ? driveBackup.value.deleteTarget(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.dryRun]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.dryRun,
+        Option.isSome(driveBackup) ? driveBackup.value.dryRun(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.runNow]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.runNow,
+        Option.isSome(driveBackup) ? driveBackup.value.runNow(input) : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.verifyRestore]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.verifyRestore,
+        Option.isSome(driveBackup)
+          ? driveBackup.value.verifyRestore(input)
+          : unavailableDriveBackup,
+      ),
+    [DRIVE_BACKUP_WS_METHODS.syncKnowledgeMirror]: (input) =>
+      observeRpcEffect(
+        DRIVE_BACKUP_WS_METHODS.syncKnowledgeMirror,
+        Option.isSome(driveBackup)
+          ? driveBackup.value.syncKnowledgeMirror(input)
+          : unavailableDriveBackup,
       ),
     [WORKSPACE_MEMORY_WS_METHODS.remember]: (input) =>
       observeRpcEffect(
