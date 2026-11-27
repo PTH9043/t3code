@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { resolveClerkAuthProps, resolveClerkSignInProps } from "../clerk/authRedirect";
-import { tierLabelKr } from "./GoogleAccountSection";
+import { isClerkSingleSessionMode } from "./GoogleAccountSection";
 
 describe("GoogleAccountSection & Clerk auth redirect helpers", () => {
   it("omits redirect override on Electron and preserves href on web for both sign-in and sign-up", () => {
@@ -11,10 +11,17 @@ describe("GoogleAccountSection & Clerk auth redirect helpers", () => {
     });
   });
 
-  it("maps Google account subscription tiers to concise Korean labels", () => {
-    expect(tierLabelKr("ultra")).toBe("Ultra");
-    expect(tierLabelKr("pro")).toBe("Pro");
-    expect(tierLabelKr("free")).toBe("무료");
-    expect(tierLabelKr(undefined)).toBe("");
+  it("detects Clerk singleSessionMode accurately and defaults safely to true", () => {
+    expect(
+      isClerkSingleSessionMode({
+        __unstable__environment: { authConfig: { singleSessionMode: true } },
+      }),
+    ).toBe(true);
+    expect(
+      isClerkSingleSessionMode({
+        __unstable__environment: { authConfig: { singleSessionMode: false } },
+      }),
+    ).toBe(false);
+    expect(isClerkSingleSessionMode({})).toBe(true);
   });
 });

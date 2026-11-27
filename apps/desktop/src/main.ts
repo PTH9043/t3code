@@ -37,6 +37,10 @@ import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
 import * as DesktopIntegrity from "./app/DesktopIntegrity.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
+import {
+  extractAnyDesktopCallbackFromArgv,
+  tryForwardClerkCallbackFromArgv,
+} from "./app/DesktopClerkCallbackRelay.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
 import * as DesktopAssets from "./app/DesktopAssets.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
@@ -69,6 +73,23 @@ import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 if (process.platform === "win32") {
   void DesktopIntegrity.readDesktopIntegrityRid().then((rid) => {
     process.stdout.write(`[desktop-integrity] pid=${process.pid} rid=${rid ?? "unknown"}\n`);
+  });
+}
+
+// Windows UIPI 조기 콜백 포워더: 브라우저(Medium)가 `t3code://app/?...` 딥링크로 띄운
+// 2차 Electron은 T3CODE_HOME 환경변수가 없어도 공용 릴레이 파일(%LOCALAPPDATA%\t3code)을 찾아
+// 주 앱(High)으로 콜백을 전달하고 전체 Effect 런타임 기동 없이 즉시 무창 종료한다.
+const earlyDeepLinkCallback =
+  process.platform === "win32" ? extractAnyDesktopCallbackFromArgv(process.argv) : null;
+if (earlyDeepLinkCallback !== null) {
+  void tryForwardClerkCallbackFromArgv({
+    argv: process.argv,
+    scheme: earlyDeepLinkCallback.scheme,
+    extraRelayFiles: ["E:\\NewAutoUsage\\userdata\\clerk-callback-relay.json"],
+  }).then((forwarded) => {
+    if (forwarded) {
+      Electron.app.exit(0);
+    }
   });
 }
 

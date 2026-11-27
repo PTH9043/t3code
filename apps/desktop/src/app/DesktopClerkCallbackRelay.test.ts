@@ -54,6 +54,7 @@ describe("DesktopClerkCallbackRelay", () => {
     const relay = await startDesktopClerkCallbackRelay({
       stateDir,
       scheme: "t3code",
+      writeSharedCopy: false,
       onCallback: (url) => received.push(url),
     });
 
@@ -95,5 +96,30 @@ describe("DesktopClerkCallbackRelay", () => {
     }
 
     expect(NodeFs.existsSync(relay.relayFilePath)).toBe(false);
+  });
+
+  it("forwards callback via extraRelayFiles even when secondary instance has a different stateDir", async () => {
+    const primaryStateDir = mkTempDir();
+    const secondaryStateDir = mkTempDir();
+    const received: string[] = [];
+    const relay = await startDesktopClerkCallbackRelay({
+      stateDir: primaryStateDir,
+      scheme: "t3code",
+      writeSharedCopy: false,
+      onCallback: (url) => received.push(url),
+    });
+
+    try {
+      const forwarded = await tryForwardClerkCallbackFromArgv({
+        argv: ["electron.exe", "main.cjs", "t3code://app/?__clerk_handshake=cross-home"],
+        stateDir: secondaryStateDir,
+        extraRelayFiles: [relay.relayFilePath],
+        scheme: "t3code",
+      });
+      expect(forwarded).toBe(true);
+      expect(received).toEqual(["t3code://app/?__clerk_handshake=cross-home"]);
+    } finally {
+      await relay.close();
+    }
   });
 });
