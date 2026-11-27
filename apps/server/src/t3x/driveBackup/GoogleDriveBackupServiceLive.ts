@@ -191,17 +191,23 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       Effect.catch(() => Effect.succeed(null)),
     );
 
-  const readOAuthCredentials = (): Effect.Effect<GdriveOAuthCredentials | null, never> =>
+  const readOAuthCredentials = (): Effect.Effect<
+    (GdriveOAuthCredentials & { readonly connectedEmail?: string }) | null,
+    never
+  > =>
     readSecretText(SECRET_GDRIVE_OAUTH_KEY).pipe(
       Effect.map((raw) => {
         if (!raw) return null;
         try {
-          const parsed = JSON.parse(raw) as Partial<GdriveOAuthCredentials>;
+          const parsed = JSON.parse(raw) as Partial<
+            GdriveOAuthCredentials & { readonly connectedEmail?: string }
+          >;
           if (parsed.clientId && parsed.clientSecret && parsed.refreshToken) {
             return {
               clientId: parsed.clientId,
               clientSecret: parsed.clientSecret,
               refreshToken: parsed.refreshToken,
+              ...(parsed.connectedEmail ? { connectedEmail: parsed.connectedEmail } : {}),
             };
           }
           return null;
@@ -274,7 +280,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         localDriveRoot: row.local_drive_root ?? null,
         gdriveFolderName: row.gdrive_folder_name,
         gdriveKnowledgeFolderName: row.gdrive_knowledge_folder_name,
-        gdriveConnectedEmail: row.gdrive_connected_email ?? null,
+        gdriveConnectedEmail: row.gdrive_connected_email ?? oauth?.connectedEmail ?? null,
         gdriveHasCredentials: oauth !== null,
         encryptionEnabled: Boolean(row.encryption_enabled),
         keyFingerprint: row.key_fingerprint ?? null,

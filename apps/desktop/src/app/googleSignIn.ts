@@ -1,22 +1,40 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off -- This controller runs outside Effect and uses a loopback OAuth callback.
 import * as NodeHttp from "node:http";
 
+import type {
+  EnrolledGoogleAccountSummary,
+  GoogleAccountTier,
+  GoogleEnrollmentStatusResult,
+} from "@t3tools/contracts";
 import {
+  GOOGLE_DRIVE_FILE_SCOPE,
   createGoogleOidcRequest,
-  exchangeGoogleOidcCode,
+  exchangeGoogleOidcCodeDetailed,
   readGoogleOidcCallback,
   verifyGoogleOidcIdentity,
   type GoogleIdentity,
+  type GoogleOidcPrompt,
   type GoogleOidcRequest,
 } from "@t3tools/shared/googleOidc";
+
+export interface GoogleServerSignInResult {
+  readonly identity: GoogleIdentity;
+  readonly idToken: string;
+  readonly refreshToken?: string;
+}
 
 /** Opens the system browser and receives one Google login on loopback. */
 async function signInGoogle(input: {
   readonly clientId: string;
+  readonly clientSecret?: string;
   readonly openExternal: (url: string) => Promise<boolean>;
   readonly signal?: AbortSignal;
   readonly nonce?: string;
-}): Promise<{ readonly identity: GoogleIdentity; readonly idToken: string }> {
+  readonly prompt?: GoogleOidcPrompt;
+  readonly loginHint?: string;
+  readonly extraScopes?: ReadonlyArray<string>;
+  readonly accessType?: "online" | "offline";
+}): Promise<GoogleServerSignInResult> {
   if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
 
   let request: GoogleOidcRequest | undefined;
@@ -101,6 +119,10 @@ async function signInGoogle(input: {
       clientId: input.clientId,
       redirectUri: `http://127.0.0.1:${address.port}/oauth2/callback`,
       ...(input.nonce ? { nonce: input.nonce } : {}),
+      ...(input.prompt ? { prompt: input.prompt } : { prompt: "select_account" }),
+      ...(input.loginHint ? { loginHint: input.loginHint } : {}),
+      ...(input.extraScopes ? { extraScopes: input.extraScopes } : {}),
+      ...(input.accessType ? { accessType: input.accessType } : {}),
     });
     if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
     const opened = await Promise.race([
@@ -111,14 +133,19 @@ async function signInGoogle(input: {
       throw new Error("Google 로그인을 위한 브라우저를 열지 못했습니다.");
     }
     const code = await codeReceived;
-    const idToken = await exchangeGoogleOidcCode({
+    const exchanged = await exchangeGoogleOidcCodeDetailed({
       code,
       request,
+      ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
-    const identity = await verifyGoogleOidcIdentity({ idToken, request });
+    const identity = await verifyGoogleOidcIdentity({ idToken: exchanged.idToken, request });
     if (input.signal?.aborted) throw new Error("Google 로그인이 취소되었습니다.");
-    return { identity, idToken };
+    return {
+      identity,
+      idToken: exchanged.idToken,
+      ...(exchanged.refreshToken ? { refreshToken: exchanged.refreshToken } : {}),
+    };
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     if (server.listening) server.close();
@@ -128,6 +155,7 @@ async function signInGoogle(input: {
 
 export async function signInWithGoogle(input: {
   readonly clientId: string;
+  readonly clientSecret?: string;
   readonly openExternal: (url: string) => Promise<boolean>;
   readonly signal?: AbortSignal;
 }): Promise<GoogleIdentity> {
@@ -137,10 +165,15 @@ export async function signInWithGoogle(input: {
 /** Returns a verified token for immediate exchange with the T3 server. */
 export async function signInWithGoogleForServer(input: {
   readonly clientId: string;
+  readonly clientSecret?: string;
   readonly nonce: string;
+  readonly prompt?: GoogleOidcPrompt;
+  readonly loginHint?: string;
+  readonly extraScopes?: ReadonlyArray<string>;
+  readonly accessType?: "online" | "offline";
   readonly openExternal: (url: string) => Promise<boolean>;
   readonly signal?: AbortSignal;
-}): Promise<{ readonly identity: GoogleIdentity; readonly idToken: string }> {
+}): Promise<GoogleServerSignInResult> {
   return signInGoogle(input);
 }
 
@@ -153,6 +186,7 @@ export function createGoogleSignInController(
   return {
     async start(input: {
       readonly clientId: string;
+      readonly clientSecret?: string;
       readonly openExternal: (url: string) => Promise<boolean>;
     }): Promise<GoogleIdentity> {
       if (active) throw new Error("Google 로그인이 이미 진행 중입니다.");
@@ -169,9 +203,14 @@ export function createGoogleSignInController(
     },
     async startForServer(input: {
       readonly clientId: string;
+      readonly clientSecret?: string;
       readonly nonce: string;
+      readonly prompt?: GoogleOidcPrompt;
+      readonly loginHint?: string;
+      readonly extraScopes?: ReadonlyArray<string>;
+      readonly accessType?: "online" | "offline";
       readonly openExternal: (url: string) => Promise<boolean>;
-    }): Promise<{ readonly identity: GoogleIdentity; readonly idToken: string }> {
+    }): Promise<GoogleServerSignInResult> {
       if (active) throw new Error("Google 로그인이 이미 진행 중입니다.");
       const controller = new AbortController();
       active = controller;
@@ -203,35 +242,55 @@ export async function authenticateGoogleToT3(input: {
   readonly mode: "enroll" | "login";
   readonly baseUrl: string;
   readonly clientId?: string;
+  readonly clientSecret?: string;
+  readonly label?: string;
+  readonly tier?: GoogleAccountTier;
+  readonly linkDriveBackup?: boolean;
+  readonly subject?: string;
+  readonly loginHint?: string;
   readonly bearerToken?: string;
   readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
   readonly authenticate: (input: {
     readonly clientId: string;
     readonly nonce: string;
-  }) => Promise<{ readonly identity: GoogleIdentity; readonly idToken: string }>;
+    readonly clientSecret?: string;
+    readonly prompt?: GoogleOidcPrompt;
+    readonly loginHint?: string;
+    readonly extraScopes?: ReadonlyArray<string>;
+    readonly accessType?: "online" | "offline";
+  }) => Promise<GoogleServerSignInResult>;
 }): Promise<{ readonly identity: GoogleIdentity; readonly accessToken?: string }> {
-  if (input.mode === "enroll" && !input.clientId) {
-    throw new Error("Google 계정 등록에 필요한 T3 인증 정보를 확인하지 못했습니다.");
-  }
-  const request = async (path: string, body: Record<string, string>) => {
+  const request = async (path: string, body?: Record<string, unknown>) => {
     const response = await input.fetcher(new URL(path, input.baseUrl).href, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
         ...(input.mode === "enroll" && input.bearerToken
           ? { authorization: `Bearer ${input.bearerToken}` }
           : {}),
       },
-      body: JSON.stringify(body),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       credentials: "include",
       redirect: "error",
     });
     if (!response.ok) throw new Error("T3 Google 인증 요청에 실패했습니다.");
     return (await response.json()) as unknown;
   };
+
+  const challengePath =
+    input.mode === "enroll"
+      ? "/api/auth/google/enroll/challenge"
+      : input.subject
+        ? `/api/auth/google/challenge?subject=${encodeURIComponent(input.subject)}`
+        : "/api/auth/google/challenge";
+
   const start = await request(
-    input.mode === "enroll" ? "/api/auth/google/enroll/challenge" : "/api/auth/google/challenge",
-    input.mode === "enroll" ? { clientId: input.clientId! } : {},
+    challengePath,
+    input.mode === "enroll"
+      ? input.clientId?.trim()
+        ? { clientId: input.clientId.trim() }
+        : {}
+      : undefined,
   );
   if (
     typeof start !== "object" ||
@@ -242,14 +301,39 @@ export async function authenticateGoogleToT3(input: {
     !("clientId" in start) ||
     typeof start.clientId !== "string" ||
     !start.clientId ||
-    (input.mode === "enroll" && start.clientId !== input.clientId)
+    (input.mode === "enroll" && input.clientId?.trim() && start.clientId !== input.clientId.trim())
   ) {
     throw new Error("T3 Google 인증 요청을 확인하지 못했습니다.");
   }
-  const verified = await input.authenticate({ clientId: start.clientId, nonce: start.challenge });
+
+  const linkDrive = input.mode === "enroll" && input.linkDriveBackup === true;
+  const verified = await input.authenticate({
+    clientId: start.clientId,
+    nonce: start.challenge,
+    ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
+    prompt: linkDrive ? "select_account consent" : "select_account",
+    ...(input.loginHint ? { loginHint: input.loginHint } : {}),
+    ...(linkDrive
+      ? { extraScopes: [GOOGLE_DRIVE_FILE_SCOPE], accessType: "offline" as const }
+      : {}),
+  });
+
+  const payload: Record<string, unknown> = {
+    challenge: start.challenge,
+    idToken: verified.idToken,
+    ...(input.mode === "enroll" && input.label?.trim() ? { label: input.label.trim() } : {}),
+    ...(input.mode === "enroll" && input.tier ? { tier: input.tier } : {}),
+    ...(input.mode === "enroll" && input.clientSecret?.trim()
+      ? { clientSecret: input.clientSecret.trim() }
+      : {}),
+    ...(input.mode === "enroll" && verified.refreshToken
+      ? { driveRefreshToken: verified.refreshToken }
+      : {}),
+  };
+
   const result = await request(
     input.mode === "enroll" ? "/api/auth/google/enroll" : "/api/auth/google/token",
-    { challenge: start.challenge, idToken: verified.idToken },
+    payload,
   );
   if (
     typeof result !== "object" ||
@@ -274,12 +358,18 @@ export async function authenticateGoogleToT3(input: {
 
 export async function removeGoogleFromT3(input: {
   readonly baseUrl: string;
+  readonly subject?: string;
   readonly bearerToken?: string;
   readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
 }): Promise<boolean> {
-  const response = await input.fetcher(new URL("/api/auth/google/unenroll", input.baseUrl).href, {
+  const path = input.subject ? "/api/auth/google/accounts/remove" : "/api/auth/google/unenroll";
+  const response = await input.fetcher(new URL(path, input.baseUrl).href, {
     method: "POST",
-    ...(input.bearerToken ? { headers: { authorization: `Bearer ${input.bearerToken}` } } : {}),
+    headers: {
+      ...(input.subject ? { "content-type": "application/json" } : {}),
+      ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+    },
+    ...(input.subject ? { body: JSON.stringify({ subject: input.subject }) } : {}),
     credentials: "include",
     redirect: "error",
   });
@@ -296,26 +386,93 @@ export async function removeGoogleFromT3(input: {
   return result.removed;
 }
 
-export async function googleEnrollmentStatus(input: {
+export async function listGoogleAccountsFromT3(input: {
   readonly baseUrl: string;
   readonly bearerToken?: string;
   readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
-}): Promise<boolean> {
+}): Promise<GoogleEnrollmentStatusResult> {
   const response = await input.fetcher(new URL("/api/auth/google/enrollment", input.baseUrl).href, {
     method: "GET",
     ...(input.bearerToken ? { headers: { authorization: `Bearer ${input.bearerToken}` } } : {}),
     credentials: "include",
     redirect: "error",
   });
-  if (!response.ok) throw new Error("T3 Google 등록 상태를 확인하지 못했습니다.");
-  const result: unknown = await response.json();
-  if (
-    typeof result !== "object" ||
-    result === null ||
-    !("registered" in result) ||
-    typeof result.registered !== "boolean"
-  ) {
+  if (!response.ok) throw new Error("T3 Google 계정 목록을 확인하지 못했습니다.");
+  const result = (await response.json()) as Partial<GoogleEnrollmentStatusResult>;
+  if (typeof result !== "object" || result === null || typeof result.registered !== "boolean") {
     throw new Error("T3 Google 등록 상태를 확인하지 못했습니다.");
   }
-  return result.registered;
+  return {
+    registered: result.registered,
+    accounts: Array.isArray(result.accounts) ? result.accounts : [],
+    defaultSubject: typeof result.defaultSubject === "string" ? result.defaultSubject : null,
+    defaultClientId: typeof result.defaultClientId === "string" ? result.defaultClientId : null,
+    hasClientSecret: Boolean(result.hasClientSecret),
+  };
+}
+
+export async function googleEnrollmentStatus(input: {
+  readonly baseUrl: string;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}): Promise<boolean> {
+  return (await listGoogleAccountsFromT3(input)).registered;
+}
+
+export async function setDefaultGoogleAccountInT3(input: {
+  readonly baseUrl: string;
+  readonly subject: string;
+  readonly label?: string;
+  readonly tier?: GoogleAccountTier;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}): Promise<{
+  readonly account: EnrolledGoogleAccountSummary;
+  readonly accounts: ReadonlyArray<EnrolledGoogleAccountSummary>;
+}> {
+  const response = await input.fetcher(
+    new URL("/api/auth/google/accounts/default", input.baseUrl).href,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+      },
+      body: JSON.stringify({
+        subject: input.subject,
+        ...(input.label !== undefined ? { label: input.label } : {}),
+        ...(input.tier !== undefined ? { tier: input.tier } : {}),
+      }),
+      credentials: "include",
+      redirect: "error",
+    },
+  );
+  if (!response.ok) throw new Error("기본 Google 계정을 변경하지 못했습니다.");
+  return (await response.json()) as {
+    readonly account: EnrolledGoogleAccountSummary;
+    readonly accounts: ReadonlyArray<EnrolledGoogleAccountSummary>;
+  };
+}
+
+export async function bindDriveBackupAccountInT3(input: {
+  readonly baseUrl: string;
+  readonly subject: string;
+  readonly bearerToken?: string;
+  readonly fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}): Promise<{ readonly bound: boolean; readonly email: string | null }> {
+  const response = await input.fetcher(
+    new URL("/api/auth/google/accounts/drive-bind", input.baseUrl).href,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
+      },
+      body: JSON.stringify({ subject: input.subject }),
+      credentials: "include",
+      redirect: "error",
+    },
+  );
+  if (!response.ok) throw new Error("Google Drive 백업 계정을 연결하지 못했습니다.");
+  return (await response.json()) as { readonly bound: boolean; readonly email: string | null };
 }

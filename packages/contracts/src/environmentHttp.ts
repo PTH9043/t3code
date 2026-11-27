@@ -371,6 +371,32 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
+export const GoogleAccountTier = Schema.Literals(["ultra", "pro", "free"]);
+export type GoogleAccountTier = typeof GoogleAccountTier.Type;
+
+export const EnrolledGoogleAccountSummary = Schema.Struct({
+  subject: TrimmedNonEmptyString,
+  clientId: TrimmedNonEmptyString,
+  email: Schema.optionalKey(Schema.String),
+  name: Schema.optionalKey(Schema.String),
+  label: Schema.optionalKey(Schema.String),
+  tier: Schema.optionalKey(GoogleAccountTier),
+  driveBackupLinked: Schema.Boolean,
+  addedAt: Schema.String,
+  lastUsedAt: Schema.optionalKey(Schema.String),
+  isDefault: Schema.Boolean,
+});
+export type EnrolledGoogleAccountSummary = typeof EnrolledGoogleAccountSummary.Type;
+
+export const GoogleEnrollmentStatusResult = Schema.Struct({
+  registered: Schema.Boolean,
+  accounts: Schema.Array(EnrolledGoogleAccountSummary),
+  defaultSubject: Schema.NullOr(Schema.String),
+  defaultClientId: Schema.NullOr(Schema.String),
+  hasClientSecret: Schema.Boolean,
+});
+export type GoogleEnrollmentStatusResult = typeof GoogleEnrollmentStatusResult.Type;
+
 export class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
     success: ExecutionEnvironmentDescriptor,
@@ -381,14 +407,14 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(
     HttpApiEndpoint.get("googleEnrollment", "/api/auth/google/enrollment", {
       headers: OptionalBearerHeaders,
-      success: Schema.Struct({ registered: Schema.Boolean }),
+      success: GoogleEnrollmentStatusResult,
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.post("googleEnrollChallenge", "/api/auth/google/enroll/challenge", {
       headers: OptionalBearerHeaders,
-      payload: Schema.Struct({ clientId: TrimmedNonEmptyString }),
+      payload: Schema.Struct({ clientId: Schema.optionalKey(TrimmedNonEmptyString) }),
       success: Schema.Struct({ challenge: TrimmedNonEmptyString, clientId: TrimmedNonEmptyString }),
       error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
     }).middleware(EnvironmentAuthenticatedAuth),
@@ -396,8 +422,18 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(
     HttpApiEndpoint.post("googleEnroll", "/api/auth/google/enroll", {
       headers: OptionalBearerHeaders,
-      payload: Schema.Struct({ challenge: TrimmedNonEmptyString, idToken: TrimmedNonEmptyString }),
-      success: Schema.Struct({ subject: TrimmedNonEmptyString }),
+      payload: Schema.Struct({
+        challenge: TrimmedNonEmptyString,
+        idToken: TrimmedNonEmptyString,
+        label: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
+        tier: Schema.optionalKey(GoogleAccountTier),
+        clientSecret: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(300))),
+        driveRefreshToken: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1000))),
+      }),
+      success: Schema.Struct({
+        subject: TrimmedNonEmptyString,
+        account: EnrolledGoogleAccountSummary,
+      }),
       error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
@@ -409,7 +445,45 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
+    HttpApiEndpoint.post("googleRemoveAccount", "/api/auth/google/accounts/remove", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ subject: TrimmedNonEmptyString }),
+      success: Schema.Struct({
+        removed: Schema.Boolean,
+        accounts: Schema.Array(EnrolledGoogleAccountSummary),
+      }),
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleSetDefaultAccount", "/api/auth/google/accounts/default", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({
+        subject: TrimmedNonEmptyString,
+        label: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
+        tier: Schema.optionalKey(GoogleAccountTier),
+      }),
+      success: Schema.Struct({
+        account: EnrolledGoogleAccountSummary,
+        accounts: Schema.Array(EnrolledGoogleAccountSummary),
+      }),
+      error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("googleBindDriveBackupAccount", "/api/auth/google/accounts/drive-bind", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ subject: TrimmedNonEmptyString }),
+      success: Schema.Struct({
+        bound: Schema.Boolean,
+        email: Schema.NullOr(Schema.String),
+      }),
+      error: [...EnvironmentScopedOperationErrors, EnvironmentAuthInvalidError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.post("googleChallenge", "/api/auth/google/challenge", {
+      query: Schema.Struct({ subject: Schema.optionalKey(TrimmedNonEmptyString) }),
       success: Schema.Struct({ challenge: TrimmedNonEmptyString, clientId: TrimmedNonEmptyString }),
       error: EnvironmentSessionCreationErrors,
     }),

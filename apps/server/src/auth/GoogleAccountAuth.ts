@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { AuthEnvironmentScope } from "@t3tools/contracts";
+import type { AuthEnvironmentScope, GoogleAccountTier } from "@t3tools/contracts";
 import { verifyGoogleOidcIdentity } from "@t3tools/shared/googleOidc";
 import * as Duration from "effect/Duration";
 
@@ -9,6 +9,14 @@ export interface EnrolledGoogleAccount {
   readonly clientId: string;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly email?: string;
+  readonly name?: string;
+  readonly label?: string;
+  readonly tier?: GoogleAccountTier;
+  readonly driveBackupLinked?: boolean;
+  readonly addedAt?: string;
+  readonly lastUsedAt?: string;
+  readonly isDefault?: boolean;
 }
 
 /** A valid Google token is not sufficient unless it matches the enrolled account. */
@@ -18,6 +26,17 @@ export function matchesEnrolledGoogleAccount(
   subject: string,
 ): account is EnrolledGoogleAccount {
   return account !== null && account.clientId === clientId && account.subject === subject;
+}
+
+/** Looks up a matching enrolled account in a multi-account registry. */
+export function findEnrolledGoogleAccount(
+  accounts: ReadonlyArray<EnrolledGoogleAccount>,
+  clientId: string,
+  subject: string,
+): EnrolledGoogleAccount | null {
+  return (
+    accounts.find((account) => account.clientId === clientId && account.subject === subject) ?? null
+  );
 }
 
 type SignedChallenge = {

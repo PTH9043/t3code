@@ -90,6 +90,13 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("googleToken", () => unexpectedEndpoint("auth.googleToken"))
             .handle("googleEnrollment", () => unexpectedEndpoint("auth.googleEnrollment"))
             .handle("googleUnenroll", () => unexpectedEndpoint("auth.googleUnenroll"))
+            .handle("googleRemoveAccount", () => unexpectedEndpoint("auth.googleRemoveAccount"))
+            .handle("googleSetDefaultAccount", () =>
+              unexpectedEndpoint("auth.googleSetDefaultAccount"),
+            )
+            .handle("googleBindDriveBackupAccount", () =>
+              unexpectedEndpoint("auth.googleBindDriveBackupAccount"),
+            )
             .handle(
               "session",
               Effect.fn("test.environment.auth.session")(function* () {

@@ -1,9 +1,14 @@
+// @effect-diagnostics globalDate:off globalFetch:off
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 
 const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_KEYS_URL = new URL("https://www.googleapis.com/oauth2/v3/certs");
 const googleKeys = createRemoteJWKSet(GOOGLE_KEYS_URL);
+
+export const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+
+export type GoogleOidcPrompt = "select_account" | "consent" | "select_account consent" | "none";
 
 export interface GoogleOidcRequest {
   readonly clientId: string;
@@ -19,6 +24,11 @@ export interface GoogleIdentity {
   readonly expiresAt: string;
   readonly email?: string;
   readonly name?: string;
+}
+
+export interface GoogleOidcTokenExchangeResult {
+  readonly idToken: string;
+  readonly refreshToken?: string;
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -52,6 +62,10 @@ export async function createGoogleOidcRequest(input: {
   readonly clientId: string;
   readonly redirectUri: string;
   readonly nonce?: string;
+  readonly prompt?: GoogleOidcPrompt;
+  readonly loginHint?: string;
+  readonly extraScopes?: ReadonlyArray<string>;
+  readonly accessType?: "online" | "offline";
 }): Promise<GoogleOidcRequest> {
   const clientId = input.clientId.trim();
   if (!clientId) throw new Error("Google OAuth 클라이언트 ID가 필요합니다.");
@@ -63,17 +77,33 @@ export async function createGoogleOidcRequest(input: {
   const challenge = base64url(
     new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
   );
-  const url = new URL(GOOGLE_AUTHORIZE_URL);
-  url.search = new URLSearchParams({
+  const scopes = ["openid", "email", "profile"];
+  if (input.extraScopes) {
+    for (const s of input.extraScopes) {
+      const trimmed = s.trim();
+      if (trimmed && !scopes.includes(trimmed)) scopes.push(trimmed);
+    }
+  }
+  const params: Record<string, string> = {
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: "openid email profile",
+    scope: scopes.join(" "),
     state,
     nonce,
     code_challenge: challenge,
     code_challenge_method: "S256",
-  }).toString();
+    prompt: input.prompt ?? "select_account",
+  };
+  if (input.loginHint?.trim()) {
+    params.login_hint = input.loginHint.trim();
+  }
+  if (input.accessType === "offline") {
+    params.access_type = "offline";
+  }
+
+  const url = new URL(GOOGLE_AUTHORIZE_URL);
+  url.search = new URLSearchParams(params).toString();
   return { clientId, redirectUri, state, nonce, verifier, authorizationUrl: url.href };
 }
 
@@ -95,23 +125,28 @@ export function readGoogleOidcCallback(callbackUrl: string, request: GoogleOidcR
   return codes[0];
 }
 
-/** Exchanges a one-time code without returning Google tokens to the renderer. */
-export async function exchangeGoogleOidcCode(input: {
+/** Exchanges a one-time code and returns the verified ID token plus optional offline refresh token. */
+export async function exchangeGoogleOidcCodeDetailed(input: {
   readonly code: string;
   readonly request: GoogleOidcRequest;
+  readonly clientSecret?: string;
   readonly signal?: AbortSignal;
   readonly fetcher?: typeof fetch;
-}): Promise<string> {
+}): Promise<GoogleOidcTokenExchangeResult> {
+  const form = new URLSearchParams({
+    client_id: input.request.clientId,
+    code: input.code,
+    code_verifier: input.request.verifier,
+    grant_type: "authorization_code",
+    redirect_uri: input.request.redirectUri,
+  });
+  if (input.clientSecret?.trim()) {
+    form.set("client_secret", input.clientSecret.trim());
+  }
   const response = await (input.fetcher ?? fetch)(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: input.request.clientId,
-      code: input.code,
-      code_verifier: input.request.verifier,
-      grant_type: "authorization_code",
-      redirect_uri: input.request.redirectUri,
-    }),
+    body: form,
     ...(input.signal ? { signal: input.signal } : {}),
   });
   if (!response.ok) throw new Error("Google 인증 코드를 교환하지 못했습니다.");
@@ -127,7 +162,26 @@ export async function exchangeGoogleOidcCode(input: {
   ) {
     throw new Error("Google 신원 확인 정보를 받지 못했습니다.");
   }
-  return body.id_token;
+  const refreshToken =
+    "refresh_token" in body && typeof body.refresh_token === "string" && body.refresh_token.trim()
+      ? body.refresh_token.trim()
+      : undefined;
+  return {
+    idToken: body.id_token,
+    ...(refreshToken ? { refreshToken } : {}),
+  };
+}
+
+/** Exchanges a one-time code without returning Google tokens to the renderer. */
+export async function exchangeGoogleOidcCode(input: {
+  readonly code: string;
+  readonly request: GoogleOidcRequest;
+  readonly clientSecret?: string;
+  readonly signal?: AbortSignal;
+  readonly fetcher?: typeof fetch;
+}): Promise<string> {
+  const result = await exchangeGoogleOidcCodeDetailed(input);
+  return result.idToken;
 }
 
 /** Verifies Google's signature and binds the identity to this login request. */

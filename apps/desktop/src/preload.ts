@@ -60,10 +60,15 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 contextBridge.exposeInMainWorld("desktopBridge", {
   googleSignIn: {
     start: (clientId) => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_CHANNEL, clientId),
-    enrollT3: (clientId) => ipcRenderer.invoke(IpcChannels.GOOGLE_ENROLL_T3_CHANNEL, clientId),
-    loginT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGIN_T3_CHANNEL),
-    unenrollT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_UNENROLL_T3_CHANNEL),
+    enrollT3: (input) => ipcRenderer.invoke(IpcChannels.GOOGLE_ENROLL_T3_CHANNEL, input),
+    loginT3: (input) => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGIN_T3_CHANNEL, input),
+    unenrollT3: (subject) => ipcRenderer.invoke(IpcChannels.GOOGLE_UNENROLL_T3_CHANNEL, subject),
     enrollmentStatusT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_ENROLLMENT_STATUS_T3_CHANNEL),
+    listAccountsT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LIST_ACCOUNTS_T3_CHANNEL),
+    setDefaultAccountT3: (input) =>
+      ipcRenderer.invoke(IpcChannels.GOOGLE_SET_DEFAULT_ACCOUNT_T3_CHANNEL, input),
+    bindDriveBackupAccountT3: (subject) =>
+      ipcRenderer.invoke(IpcChannels.GOOGLE_BIND_DRIVE_BACKUP_T3_CHANNEL, subject),
     logoutT3: () => ipcRenderer.invoke(IpcChannels.GOOGLE_LOGOUT_T3_CHANNEL),
     cancel: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_CANCEL_CHANNEL),
     status: () => ipcRenderer.invoke(IpcChannels.GOOGLE_SIGN_IN_STATUS_CHANNEL),

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   DriveBackupDryRunResult,
   DriveBackupRunKind,
@@ -8,6 +8,7 @@ import type {
   DriveBackupTargetKind,
   DriveBackupTransportMode,
   DriveBackupVerifyRestoreResult,
+  EnrolledGoogleAccountSummary,
 } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
@@ -31,6 +32,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
+import { toastManager } from "../ui/toast";
 import { SectionCard, notifyCommandFailure, notifySuccess } from "./controlCenterShared";
 
 export function formatBackupBytes(bytes: number): string {
@@ -160,6 +162,52 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
   const [dryRunResult, setDryRunResult] = useState<DriveBackupDryRunResult | null>(null);
   const [verifyResult, setVerifyResult] = useState<DriveBackupVerifyRestoreResult | null>(null);
   const [mirrorResult, setMirrorResult] = useState<DriveBackupSyncMirrorResult | null>(null);
+  const [linkedGoogleAccounts, setLinkedGoogleAccounts] = useState<
+    ReadonlyArray<EnrolledGoogleAccountSummary>
+  >([]);
+
+  const refreshLinkedAccounts = useCallback(async () => {
+    const listAccounts =
+      typeof window !== "undefined"
+        ? window.desktopBridge?.googleSignIn?.listAccountsT3
+        : undefined;
+    if (!listAccounts) return;
+    try {
+      const res = await listAccounts();
+      setLinkedGoogleAccounts(res.accounts);
+    } catch {
+      // ignore if unavailable
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLinkedAccounts();
+  }, [refreshLinkedAccounts]);
+
+  const handleBindGoogleAccount = async (account: EnrolledGoogleAccountSummary) => {
+    const bindFn =
+      typeof window !== "undefined"
+        ? window.desktopBridge?.googleSignIn?.bindDriveBackupAccountT3
+        : undefined;
+    if (!bindFn) return;
+    setBusyAction(`bind-google:${account.subject}`);
+    try {
+      const res = await bindFn(account.subject);
+      notifySuccess(
+        "Google Drive 백업 계정 연결 완료",
+        `${res.email ?? account.email ?? account.subject} 계정이 드라이브 백업 대상으로 활성화되었습니다.`,
+      );
+      stateQuery.refresh();
+    } catch {
+      toastManager.add({
+        type: "error",
+        title: "Google Drive 계정 연결 실패",
+        description: "설정 → Google 계정에서 Drive 백업 권한 체크 후 계정을 등록해 주세요.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
 
   useEffect(() => {
     if (!config) return;
@@ -585,68 +633,107 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
               )}
             </div>
           ) : (
-            <div className="grid gap-3 rounded-xl border border-border bg-muted/20 p-3.5 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">Google Drive 백업 루트 폴더명</label>
-                <Input
-                  value={gdriveFolderName}
-                  onChange={(e) => setGdriveFolderName(e.target.value)}
-                  placeholder="T3-Backup"
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">
-                  양방향 지식 미러 폴더명 (드라이브 → T3)
-                </label>
-                <Input
-                  value={gdriveKnowledgeFolderName}
-                  onChange={(e) => setGdriveKnowledgeFolderName(e.target.value)}
-                  placeholder="T3-Knowledge"
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">연결 Google 계정 표시 이메일 (선택)</label>
-                <Input
-                  value={gdriveEmail}
-                  onChange={(e) => setGdriveEmail(e.target.value)}
-                  placeholder="user@gmail.com"
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">OAuth2 Client ID (변경 시에만 입력)</label>
-                <Input
-                  value={gdriveClientId}
-                  onChange={(e) => setGdriveClientId(e.target.value)}
-                  placeholder={
-                    config?.gdriveHasCredentials
-                      ? "저장됨 (변경하려면 새 값 입력)"
-                      : "xxxx.apps.googleusercontent.com"
-                  }
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">OAuth2 Client Secret</label>
-                <Input
-                  type="password"
-                  value={gdriveClientSecret}
-                  onChange={(e) => setGdriveClientSecret(e.target.value)}
-                  placeholder={
-                    config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "GOCSPX-..."
-                  }
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-medium">
-                  OAuth2 Refresh Token (`drive.file` 스코프)
-                </label>
-                <Input
-                  type="password"
-                  value={gdriveRefreshToken}
-                  onChange={(e) => setGdriveRefreshToken(e.target.value)}
-                  placeholder={
-                    config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "1//0..."
-                  }
-                />
+            <div className="grid gap-3 rounded-xl border border-border bg-muted/20 p-3.5">
+              {linkedGoogleAccounts.length > 0 ? (
+                <div className="grid gap-2 rounded-lg border border-primary/25 bg-primary/5 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="font-semibold text-foreground">
+                      등록된 T3 로컬 Google 계정에서 1클릭 연결
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">
+                      수동 토큰 입력 없이 DPAPI에 저장된 Drive 권한을 바로 사용합니다.
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {linkedGoogleAccounts.map((acc) => (
+                      <Button
+                        key={acc.subject}
+                        type="button"
+                        size="xs"
+                        variant={
+                          config?.gdriveConnectedEmail && config.gdriveConnectedEmail === acc.email
+                            ? "default"
+                            : "outline"
+                        }
+                        disabled={busyAction !== null || !acc.driveBackupLinked}
+                        onClick={() => void handleBindGoogleAccount(acc)}
+                      >
+                        {acc.label || acc.email || acc.subject}
+                        {acc.tier ? ` (${acc.tier.toUpperCase()})` : ""}
+                        {acc.driveBackupLinked ? "" : " · Drive 미연결"}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">Google Drive 백업 루트 폴더명</label>
+                  <Input
+                    value={gdriveFolderName}
+                    onChange={(e) => setGdriveFolderName(e.target.value)}
+                    placeholder="T3-Backup"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">
+                    양방향 지식 미러 폴더명 (드라이브 → T3)
+                  </label>
+                  <Input
+                    value={gdriveKnowledgeFolderName}
+                    onChange={(e) => setGdriveKnowledgeFolderName(e.target.value)}
+                    placeholder="T3-Knowledge"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">연결 Google 계정 표시 이메일 (선택)</label>
+                  <Input
+                    value={gdriveEmail}
+                    onChange={(e) => setGdriveEmail(e.target.value)}
+                    placeholder="user@gmail.com"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">
+                    OAuth2 Client ID (수동 입력 · 변경 시)
+                  </label>
+                  <Input
+                    value={gdriveClientId}
+                    onChange={(e) => setGdriveClientId(e.target.value)}
+                    placeholder={
+                      config?.gdriveHasCredentials
+                        ? "저장됨 (변경하려면 새 값 입력)"
+                        : "xxxx.apps.googleusercontent.com"
+                    }
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">OAuth2 Client Secret</label>
+                  <Input
+                    type="password"
+                    value={gdriveClientSecret}
+                    onChange={(e) => setGdriveClientSecret(e.target.value)}
+                    placeholder={
+                      config?.gdriveHasCredentials
+                        ? "•••••••• (DPAPI 암호화 보관 중)"
+                        : "GOCSPX-..."
+                    }
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <label className="text-xs font-medium">
+                    OAuth2 Refresh Token (`drive.file` 스코프)
+                  </label>
+                  <Input
+                    type="password"
+                    value={gdriveRefreshToken}
+                    onChange={(e) => setGdriveRefreshToken(e.target.value)}
+                    placeholder={
+                      config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "1//0..."
+                    }
+                  />
+                </div>
               </div>
             </div>
           )}

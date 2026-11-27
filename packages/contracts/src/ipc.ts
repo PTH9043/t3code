@@ -1065,20 +1065,49 @@ export interface DesktopDirectRpcBridge {
 export interface DesktopBridge {
   /** Desktop Google identity verification. It does not grant environment access by itself. */
   googleSignIn?: {
-    readonly enrollT3?: (clientId: string) => Promise<{
+    readonly enrollT3?: (
+      input:
+        | string
+        | {
+            readonly clientId?: string;
+            readonly clientSecret?: string;
+            readonly label?: string;
+            readonly tier?: import("./environmentHttp.ts").GoogleAccountTier;
+            readonly linkDriveBackup?: boolean;
+            readonly loginHint?: string;
+          },
+    ) => Promise<{
       readonly subject: string;
       readonly expiresAt: string;
       readonly email?: string;
       readonly name?: string;
     }>;
-    readonly loginT3?: () => Promise<{
+    readonly loginT3?: (input?: {
+      readonly subject?: string;
+      readonly loginHint?: string;
+    }) => Promise<{
       readonly subject: string;
       readonly expiresAt: string;
       readonly email?: string;
       readonly name?: string;
     }>;
-    readonly unenrollT3?: () => Promise<boolean>;
+    readonly unenrollT3?: (subject?: string) => Promise<boolean>;
     readonly enrollmentStatusT3?: () => Promise<boolean>;
+    readonly listAccountsT3?: () => Promise<
+      import("./environmentHttp.ts").GoogleEnrollmentStatusResult
+    >;
+    readonly setDefaultAccountT3?: (input: {
+      readonly subject: string;
+      readonly label?: string;
+      readonly tier?: import("./environmentHttp.ts").GoogleAccountTier;
+    }) => Promise<{
+      readonly account: import("./environmentHttp.ts").EnrolledGoogleAccountSummary;
+      readonly accounts: ReadonlyArray<import("./environmentHttp.ts").EnrolledGoogleAccountSummary>;
+    }>;
+    readonly bindDriveBackupAccountT3?: (subject: string) => Promise<{
+      readonly bound: boolean;
+      readonly email: string | null;
+    }>;
     readonly logoutT3?: () => Promise<void>;
     readonly start: (clientId: string) => Promise<{
       readonly subject: string;

@@ -231,4 +231,45 @@ describe("DesktopClerk", () => {
     storageMock.mockClear();
     createClerkBridgeMock.mockClear();
   });
+
+  it.effect("re-registers Windows unpacked protocol handler with resolved main entrypoint", () => {
+    const calls: Array<readonly [string, string | undefined, readonly string[] | undefined]> = [];
+    const mockApp = {
+      setAsDefaultProtocolClient: (protocol: string, path?: string, args?: readonly string[]) =>
+        Effect.sync(() => {
+          calls.push([protocol, path, args]);
+          return true;
+        }),
+    };
+
+    return Effect.gen(function* () {
+      const registered = yield* DesktopClerk.registerWindowsUnpackedProtocolIfNeeded(
+        mockApp,
+        "t3code",
+        {
+          platform: "win32",
+          defaultApp: true,
+          execPath: "D:\\__NewAutoUsage\\node_modules\\electron\\dist\\electron.exe",
+          argv: ["electron.exe", "apps/desktop/dist-electron/main.cjs"],
+        },
+      );
+      assert.isTrue(registered);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.[0], "t3code");
+      assert.equal(calls[0]?.[1], "D:\\__NewAutoUsage\\node_modules\\electron\\dist\\electron.exe");
+      assert.isTrue((calls[0]?.[2]?.[0] ?? "").endsWith("main.cjs"));
+
+      const skipped = yield* DesktopClerk.registerWindowsUnpackedProtocolIfNeeded(
+        mockApp,
+        "t3code",
+        {
+          platform: "win32",
+          defaultApp: false,
+          execPath: "t3.exe",
+          argv: ["t3.exe"],
+        },
+      );
+      assert.isFalse(skipped);
+    });
+  });
 });

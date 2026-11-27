@@ -1,5 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFs from "node:fs";
+import * as NodePath from "node:path";
 import { createClerkBridge } from "@clerk/electron";
 import { storage } from "@clerk/electron/storage";
+import * as Electron from "electron";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,6 +16,11 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
+import {
+  extractClerkCallbackUrl,
+  startDesktopClerkCallbackRelay,
+  tryForwardClerkCallbackFromArgv,
+} from "./DesktopClerkCallbackRelay.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
@@ -83,9 +92,57 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   });
 }
 
+export function registerWindowsUnpackedProtocolIfNeeded(
+  electronApp: Pick<ElectronApp.ElectronApp["Service"], "setAsDefaultProtocolClient">,
+  scheme: string,
+  runtime: {
+    readonly platform: NodeJS.Platform;
+    readonly defaultApp: boolean | undefined;
+    readonly execPath: string;
+    readonly argv: ReadonlyArray<string>;
+  } = {
+    platform: process.platform,
+    defaultApp: (process as NodeJS.Process & { readonly defaultApp?: boolean }).defaultApp,
+    execPath: process.execPath,
+    argv: process.argv,
+  },
+): Effect.Effect<boolean> {
+  if (runtime.platform !== "win32" || !runtime.defaultApp || !runtime.argv[1]) {
+    return Effect.succeed(false);
+  }
+  const entryPath = NodePath.resolve(runtime.argv[1]);
+  if (typeof electronApp.setAsDefaultProtocolClient !== "function") {
+    return Effect.succeed(false);
+  }
+  return electronApp.setAsDefaultProtocolClient(scheme, runtime.execPath, [entryPath]);
+}
+
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const electronApp = yield* ElectronApp.ElectronApp;
+  const scheme = ElectronProtocol.getDesktopScheme(environment.isDevelopment);
+
+  // Windows UIPI 관통 조기 포워더: 브라우저(Medium)가 딥링크(`t3code://app/?...`)로 띄운
+  // 2차 Electron이 주 앱(High)의 릴레이 서버로 콜백을 직접 전송한 뒤 즉시 무창 종료한다.
+  if (
+    process.platform === "win32" &&
+    extractClerkCallbackUrl(process.argv, scheme, ElectronProtocol.DESKTOP_HOST) !== null
+  ) {
+    const forwarded = yield* Effect.tryPromise({
+      try: () =>
+        tryForwardClerkCallbackFromArgv({
+          argv: process.argv,
+          stateDir: environment.stateDir,
+          scheme,
+          host: ElectronProtocol.DESKTOP_HOST,
+        }),
+      catch: () => false,
+    }).pipe(Effect.orElseSucceed(() => false));
+    if (forwarded) {
+      yield* electronApp.exit(0);
+      return yield* Effect.interrupt;
+    }
+  }
 
   // Electron scopes the single-instance lock to the userData directory and
   // creates that directory when the lock is acquired. The SDK bridge takes
@@ -117,6 +174,42 @@ export const make = Effect.gen(function* () {
           }),
       }).pipe(Effect.orDie),
   );
+
+  // @clerk/electron@0.0.24가 인자 없이 setAsDefaultProtocolClient(scheme)를 호출해
+  // Windows unpacked 실행 시 레지스트리에서 dist-electron\main.cjs 진입점을 지우는 문제를 교정한다.
+  yield* registerWindowsUnpackedProtocolIfNeeded(electronApp, scheme);
+
+  // 주 인스턴스(High)에서 Windows UIPI 관통 로컬 루프백 콜백 릴레이 서버 가동
+  if (bridge.isPrimaryInstance && NodeFs.existsSync(environment.stateDir)) {
+    yield* Effect.acquireRelease(
+      Effect.tryPromise({
+        try: () =>
+          startDesktopClerkCallbackRelay({
+            stateDir: environment.stateDir,
+            scheme,
+            host: ElectronProtocol.DESKTOP_HOST,
+            onCallback: (url) => {
+              const appEmitter = (
+                Electron as unknown as {
+                  readonly app?: {
+                    readonly emit?: (event: string, ...args: ReadonlyArray<unknown>) => boolean;
+                  };
+                }
+              ).app;
+              appEmitter?.emit?.("second-instance", {}, ["", url], process.cwd());
+            },
+          }),
+        catch: () => null,
+      }).pipe(Effect.orElseSucceed(() => null)),
+      (relay) =>
+        relay
+          ? Effect.tryPromise({
+              try: () => relay.close(),
+              catch: () => undefined,
+            }).pipe(Effect.ignore)
+          : Effect.void,
+    );
+  }
 
   return DesktopClerk.of({
     configure: Effect.gen(function* () {
