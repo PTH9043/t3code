@@ -178,6 +178,32 @@ export function verifyAndUnpackArchive(
   };
 }
 
+export async function createGitBundleFileIfRepo(
+  rootPath: string,
+  outputPath: string,
+): Promise<string | null> {
+  if (!NodeFs.existsSync(NodePath.join(rootPath, ".git"))) return null;
+  NodeFs.mkdirSync(NodePath.dirname(outputPath), { recursive: true });
+  try {
+    await execFileAsync("git", ["bundle", "create", outputPath, "--all"], {
+      cwd: rootPath,
+      timeout: 60_000,
+      windowsHide: true,
+    });
+    if (NodeFs.existsSync(outputPath) && NodeFs.statSync(outputPath).size > 0) {
+      return outputPath;
+    }
+    return null;
+  } catch {
+    try {
+      if (NodeFs.existsSync(outputPath)) NodeFs.rmSync(outputPath, { force: true });
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+}
+
 async function createGitBundleIfRepo(rootPath: string): Promise<Buffer | null> {
   if (!NodeFs.existsSync(NodePath.join(rootPath, ".git"))) return null;
   const tmpFile = NodePath.join(

@@ -51,6 +51,12 @@ export interface GoogleDriveBackupServiceShape {
   readonly syncKnowledgeMirror: (
     input: DriveBackupSyncMirrorInput,
   ) => Effect.Effect<DriveBackupSyncMirrorResult, DriveBackupError>;
+
+  /** 스케줄러 전용: 외부 일시정지 AbortSignal과 연동해 백업을 1회 실행한다. */
+  readonly runWithPauseSignal?: (
+    input: DriveBackupRunNowInput,
+    signal: AbortSignal,
+  ) => Effect.Effect<DriveBackupRunRecord, DriveBackupError>;
 }
 
 export class GoogleDriveBackupService extends Context.Service<

@@ -171,6 +171,9 @@ export class DesktopTelemetryReceiver extends Context.Service<
     readonly setDiagnosticsDemand: (
       enabled: boolean,
     ) => Effect.Effect<void, DesktopTelemetryControlError>;
+    readonly setHostPowerIntervalsOverride: (
+      override: { readonly activeIntervalMs: number; readonly idleIntervalMs: number } | null,
+    ) => Effect.Effect<void, DesktopTelemetryControlError>;
   }
 >()("t3/resourceTelemetry/DesktopTelemetryReceiver") {}
 
@@ -410,6 +413,39 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
       ),
     );
   };
+
+  const setHostPowerIntervalsOverride: DesktopTelemetryReceiver["Service"]["setHostPowerIntervalsOverride"] =
+    (override) =>
+      override !== null
+        ? sendControlMessage({
+            version: 1,
+            type: "setHostPowerIntervals",
+            activeIntervalMs: Math.max(500, Math.floor(override.activeIntervalMs)),
+            idleIntervalMs: Math.max(500, Math.floor(override.idleIntervalMs)),
+          }).pipe(
+            Effect.andThen(
+              Ref.set(
+                snapshotStaleAfterMs,
+                resolveDesktopTelemetrySnapshotStaleAfterMs(
+                  Math.max(500, Math.floor(override.activeIntervalMs)),
+                  Math.max(500, Math.floor(override.idleIntervalMs)),
+                ),
+              ),
+            ),
+          )
+        : serverSettings.getSettings.pipe(
+            Effect.orElseSucceed(() => undefined),
+            Effect.flatMap((settings) =>
+              settings
+                ? sendHostPowerIntervals(settings)
+                : sendControlMessage({
+                    version: 1,
+                    type: "setHostPowerIntervals",
+                    activeIntervalMs: DEFAULT_HOST_POWER_ACTIVE_INTERVAL_MS,
+                    idleIntervalMs: DEFAULT_HOST_POWER_IDLE_INTERVAL_MS,
+                  }),
+            ),
+          );
   if (config.desktopTelemetryControlFd !== undefined) {
     const settingsChanges = yield* serverSettings.subscribeChanges;
     const settings = yield* serverSettings.getSettings;
@@ -616,6 +652,7 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
     health: Ref.get(health),
     subscribeHealth: subscribeBeforeSnapshotWithoutMutex(healthChanges, Ref.get(health)),
     setDiagnosticsDemand,
+    setHostPowerIntervalsOverride,
   });
 });
 
@@ -656,6 +693,7 @@ export const layerTest = (
           })),
         ),
       setDiagnosticsDemand: () => Effect.void,
+      setHostPowerIntervalsOverride: () => Effect.void,
       ...overrides,
     }),
   );

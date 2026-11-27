@@ -128,11 +128,102 @@ export function evaluateBackupFilePath(input: {
   return { included: true, reason: "ok" };
 }
 
+export const USERDATA_BACKUP_CANDIDATES: ReadonlyArray<{
+  readonly name: string;
+  readonly displayName: string;
+  readonly requiresSnapshot: boolean;
+}> = [
+  { name: "memory-v2", displayName: "T3 장기기억 (memory-v2)", requiresSnapshot: false },
+  {
+    name: "semantic-rag",
+    displayName: "시맨틱 RAG 인덱스 (semantic-rag)",
+    requiresSnapshot: false,
+  },
+  { name: "document-rag", displayName: "문서 RAG 인덱스 (document-rag)", requiresSnapshot: false },
+  { name: "attachments", displayName: "대화 첨부파일 (attachments)", requiresSnapshot: false },
+  { name: "archives", displayName: "이벤트 콜드 아카이브 (archives)", requiresSnapshot: false },
+  {
+    name: "memory-cold-archive",
+    displayName: "장기기억 콜드 아카이브 (memory-cold-archive)",
+    requiresSnapshot: false,
+  },
+  {
+    name: "provider-history",
+    displayName: "프로바이더 이력 (provider-history)",
+    requiresSnapshot: false,
+  },
+  {
+    name: "workspace-context",
+    displayName: "워크스페이스 문맥 (workspace-context)",
+    requiresSnapshot: false,
+  },
+  { name: "document-ocr", displayName: "문서 OCR 캐시 (document-ocr)", requiresSnapshot: false },
+  {
+    name: "watchdog-journal.sqlite",
+    displayName: "워치독 저널 DB (watchdog-journal.sqlite · 스냅샷)",
+    requiresSnapshot: true,
+  },
+];
+
+export const USERDATA_HARD_EXCLUDED_NAMES = new Set([
+  "secrets",
+  "provider-auth",
+  "clerk-tokens.json",
+  "logs",
+  "desktop-profile",
+  "active-work.json",
+  "server-runtime.json",
+  "clerk-callback-relay.json",
+  "jasna",
+  "provider-instances",
+]);
+
+export function isUserdataHardExcluded(relativePosixPath: string): boolean {
+  const norm = relativePosixPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const segments = norm.split("/");
+  for (const seg of segments) {
+    const lower = seg.toLowerCase();
+    if (USERDATA_HARD_EXCLUDED_NAMES.has(lower)) return true;
+    if (lower.startsWith("server-runtime.json.")) return true;
+    if (lower.endsWith(".sqlite-wal") || lower.endsWith(".sqlite-shm")) return true;
+  }
+  return false;
+}
+
+export interface DiscoveredUserdataCandidate {
+  readonly id: string;
+  readonly name: string;
+  readonly displayName: string;
+  readonly rootPath: string;
+  readonly requiresSnapshot: boolean;
+}
+
+export function discoverUserdataCandidates(
+  stateDir: string,
+): ReadonlyArray<DiscoveredUserdataCandidate> {
+  if (!stateDir || !NodeFs.existsSync(stateDir)) return [];
+  const results: DiscoveredUserdataCandidate[] = [];
+  for (const cand of USERDATA_BACKUP_CANDIDATES) {
+    if (isUserdataHardExcluded(cand.name)) continue;
+    const fullPath = NodePath.join(stateDir, cand.name);
+    if (!NodeFs.existsSync(fullPath)) continue;
+    results.push({
+      id: `userdata:${cand.name}`,
+      name: cand.name,
+      displayName: cand.displayName,
+      rootPath: fullPath,
+      requiresSnapshot: cand.requiresSnapshot,
+    });
+  }
+  return results;
+}
+
 export interface ScannedProjectFiles {
   readonly includedFiles: ReadonlyArray<{
     readonly absolutePath: string;
     readonly relativePath: string;
     readonly sizeBytes: number;
+    readonly mtimeMs: number;
   }>;
   readonly totalRawBytes: number;
   readonly blockedSecretsCount: number;
@@ -145,13 +236,21 @@ export function scanSelectedDirectory(input: {
   readonly customExcludeGlobs?: ReadonlyArray<string>;
   readonly maxFiles?: number;
   readonly maxTotalBytes?: number;
+  readonly maxSingleFileBytes?: number;
+  readonly unlimited?: boolean;
 }): ScannedProjectFiles {
-  const maxFiles = input.maxFiles ?? 25_000;
-  const maxTotalBytes = input.maxTotalBytes ?? 512 * 1024 * 1024;
+  const maxFiles = input.unlimited ? Number.POSITIVE_INFINITY : (input.maxFiles ?? 25_000);
+  const maxTotalBytes = input.unlimited
+    ? Number.POSITIVE_INFINITY
+    : (input.maxTotalBytes ?? 512 * 1024 * 1024);
+  const maxSingleFileBytes = input.unlimited
+    ? Number.POSITIVE_INFINITY
+    : (input.maxSingleFileBytes ?? 50 * 1024 * 1024);
   const includedFiles: Array<{
     readonly absolutePath: string;
     readonly relativePath: string;
     readonly sizeBytes: number;
+    readonly mtimeMs: number;
   }> = [];
   const blockedSecretsSample: string[] = [];
   const warnings: string[] = [];
@@ -170,6 +269,45 @@ export function scanSelectedDirectory(input: {
     };
   }
 
+  // 단일 파일 대상(예: watchdog-journal.sqlite)도 안전 지원
+  try {
+    const rootStat = NodeFs.statSync(input.rootPath);
+    if (rootStat.isFile()) {
+      const base = NodePath.basename(input.rootPath);
+      if (isUserdataHardExcluded(base)) {
+        return {
+          includedFiles: [],
+          totalRawBytes: 0,
+          blockedSecretsCount: 1,
+          blockedSecretsSample: [base],
+          warnings: [],
+        };
+      }
+      return {
+        includedFiles: [
+          {
+            absolutePath: input.rootPath,
+            relativePath: base,
+            sizeBytes: rootStat.size,
+            mtimeMs: Math.floor(rootStat.mtimeMs),
+          },
+        ],
+        totalRawBytes: rootStat.size,
+        blockedSecretsCount: 0,
+        blockedSecretsSample: [],
+        warnings: [],
+      };
+    }
+  } catch {
+    return {
+      includedFiles: [],
+      totalRawBytes: 0,
+      blockedSecretsCount: 0,
+      blockedSecretsSample: [],
+      warnings: [`경로 상태를 읽을 수 없습니다: ${input.rootPath}`],
+    };
+  }
+
   const walk = (dir: string, relPrefix: string) => {
     if (hitFileCap || hitByteCap) return;
     let entries: NodeFs.Dirent[];
@@ -183,6 +321,14 @@ export function scanSelectedDirectory(input: {
       if (entry.isSymbolicLink()) continue;
       const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
       const abs = NodePath.join(dir, entry.name);
+
+      if (isUserdataHardExcluded(rel)) {
+        if (/(?:secrets?|provider-auth|clerk-tokens\.json)/i.test(rel)) {
+          blockedSecretsCount += 1;
+          if (blockedSecretsSample.length < 10) blockedSecretsSample.push(rel);
+        }
+        continue;
+      }
 
       if (entry.isDirectory()) {
         if (DEFAULT_EXCLUDED_DIR_NAMES.has(entry.name.toLowerCase())) continue;
@@ -205,6 +351,7 @@ export function scanSelectedDirectory(input: {
       const check = evaluateBackupFilePath({
         relativePosixPath: rel,
         sizeBytes: stat.size,
+        maxSingleFileBytes,
         ...(input.customExcludeGlobs ? { customExcludeGlobs: input.customExcludeGlobs } : {}),
       });
       if (!check.included) {
@@ -228,7 +375,12 @@ export function scanSelectedDirectory(input: {
         return;
       }
 
-      includedFiles.push({ absolutePath: abs, relativePath: rel, sizeBytes: stat.size });
+      includedFiles.push({
+        absolutePath: abs,
+        relativePath: rel,
+        sizeBytes: stat.size,
+        mtimeMs: Math.floor(stat.mtimeMs),
+      });
       totalRawBytes += stat.size;
     }
   };

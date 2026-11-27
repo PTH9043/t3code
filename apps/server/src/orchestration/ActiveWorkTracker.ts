@@ -29,6 +29,7 @@ export interface ActiveWorkSnapshot {
  */
 class ActiveWorkRegistry {
   private readonly items = new Map<string, ActiveWorkItem>();
+  private readonly listeners = new Set<(snapshot: ActiveWorkSnapshot) => void>();
   private stateFilePath: string | null = null;
 
   configureStateDir(stateDir: string): void {
@@ -36,20 +37,42 @@ class ActiveWorkRegistry {
     this.flushToDisk();
   }
 
+  subscribe(listener: (snapshot: ActiveWorkSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notifyListeners(): void {
+    if (this.listeners.size === 0) return;
+    const snap = this.snapshot();
+    for (const listener of this.listeners) {
+      try {
+        listener(snap);
+      } catch {
+        // Best-effort subscriber notification; never break active work tracking.
+      }
+    }
+  }
+
   register(item: ActiveWorkItem): void {
     this.items.set(`${item.kind}:${item.id}`, item);
     this.flushToDisk();
+    this.notifyListeners();
   }
 
   unregister(kind: ActiveWorkItem["kind"], id: string): void {
     if (this.items.delete(`${kind}:${id}`)) {
       this.flushToDisk();
+      this.notifyListeners();
     }
   }
 
   clearAll(): void {
     this.items.clear();
     this.flushToDisk();
+    this.notifyListeners();
   }
 
   snapshot(nowMs = Date.now()): ActiveWorkSnapshot {

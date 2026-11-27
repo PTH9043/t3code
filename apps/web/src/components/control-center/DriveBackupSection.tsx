@@ -76,6 +76,8 @@ export function runStatusLabelKr(status: DriveBackupRunStatus): string {
   switch (status) {
     case "running":
       return "실행 중";
+    case "paused":
+      return "일시정지됨";
     case "succeeded":
       return "성공";
     case "partial":
@@ -95,6 +97,7 @@ export function runStatusBadgeVariant(
       return "success";
     case "running":
       return "info";
+    case "paused":
     case "skipped_busy":
     case "partial":
       return "warning";
@@ -111,6 +114,8 @@ export function runKindLabelKr(kind: DriveBackupRunKind): string {
       return "복구 검증";
     case "knowledge_mirror":
       return "지식 미러";
+    case "exchange_sync":
+      return "PC↔VPS 교환소";
   }
 }
 
@@ -150,10 +155,20 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
   const [gdriveRefreshToken, setGdriveRefreshToken] = useState("");
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
   const [encryptionPassphrase, setEncryptionPassphrase] = useState("");
+  const [passphraseBackupAck, setPassphraseBackupAck] = useState(false);
   const [retentionCount, setRetentionCount] = useState("7");
   const [includeCoreSettings, setIncludeCoreSettings] = useState(true);
   const [includeCoreSqliteSnapshot, setIncludeCoreSqliteSnapshot] = useState(false);
+  const [includeEventArchives, setIncludeEventArchives] = useState(false);
   const [autoSyncIdleOnly, setAutoSyncIdleOnly] = useState(true);
+  const [autoScheduleEnabled, setAutoScheduleEnabled] = useState(false);
+  const [idleMinMinutes, setIdleMinMinutes] = useState("10");
+  const [pauseOnBattery, setPauseOnBattery] = useState(true);
+  const [readLimitMBps, setReadLimitMBps] = useState("50");
+  const [uploadLimitMbps, setUploadLimitMbps] = useState("20");
+  const [workerRssLimitMb, setWorkerRssLimitMb] = useState("300");
+  const [fullSnapshotIntervalDays, setFullSnapshotIntervalDays] = useState("7");
+  const [snapshotLocalRetentionCount, setSnapshotLocalRetentionCount] = useState("1");
 
   const [newRepoName, setNewRepoName] = useState("");
   const [newRepoPath, setNewRepoPath] = useState("");
@@ -303,7 +318,16 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
     setRetentionCount(String(config.retentionCount));
     setIncludeCoreSettings(config.includeCoreSettings);
     setIncludeCoreSqliteSnapshot(config.includeCoreSqliteSnapshot);
+    setIncludeEventArchives(config.includeEventArchives);
     setAutoSyncIdleOnly(config.autoSyncIdleOnly);
+    setAutoScheduleEnabled(config.autoScheduleEnabled);
+    setIdleMinMinutes(String(Math.max(1, Math.round(config.idleMinSeconds / 60))));
+    setPauseOnBattery(config.pauseOnBattery);
+    setReadLimitMBps(String(config.readLimitMBps));
+    setUploadLimitMbps(String(config.uploadLimitMbps));
+    setWorkerRssLimitMb(String(config.workerRssLimitMb));
+    setFullSnapshotIntervalDays(String(config.fullSnapshotIntervalDays));
+    setSnapshotLocalRetentionCount(String(config.snapshotLocalRetentionCount));
   }, [config]);
 
   const summary = useMemo(
@@ -312,6 +336,15 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
   );
 
   const handleSaveConfig = async () => {
+    if (encryptionPassphrase.trim().length > 0 && !passphraseBackupAck) {
+      toastManager.add({
+        type: "error",
+        title: "백업 비밀번호 외부 보관 확인 필요",
+        description:
+          "백업 비밀번호는 T3 밖(비밀번호 관리자 등)에 별도로 보관해야 복구할 수 있습니다. 아래 확인 체크박스를 선택해 주세요.",
+      });
+      return;
+    }
     setBusyAction("save-config");
     try {
       const parsedRetention = Math.max(1, Math.min(90, Number(retentionCount) || 7));
@@ -328,12 +361,24 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
           ...(gdriveRefreshToken.trim() ? { gdriveRefreshToken: gdriveRefreshToken.trim() } : {}),
           encryptionEnabled,
           ...(encryptionPassphrase.trim()
-            ? { encryptionPassphrase: encryptionPassphrase.trim() }
+            ? {
+                encryptionPassphrase: encryptionPassphrase.trim(),
+                passphraseBackupAcknowledged: passphraseBackupAck,
+              }
             : {}),
           retentionCount: parsedRetention,
           includeCoreSettings,
           includeCoreSqliteSnapshot,
+          includeEventArchives,
           autoSyncIdleOnly,
+          autoScheduleEnabled,
+          idleMinSeconds: Math.max(60, (Number(idleMinMinutes) || 10) * 60),
+          pauseOnBattery,
+          readLimitMBps: Math.max(0, Number(readLimitMBps) || 50),
+          uploadLimitMbps: Math.max(0, Number(uploadLimitMbps) || 20),
+          workerRssLimitMb: Math.max(128, Number(workerRssLimitMb) || 300),
+          fullSnapshotIntervalDays: Math.max(1, Number(fullSnapshotIntervalDays) || 7),
+          snapshotLocalRetentionCount: Math.max(1, Number(snapshotLocalRetentionCount) || 1),
         },
       });
       if (result._tag !== "Success") {
@@ -344,10 +389,8 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
       setGdriveClientSecret("");
       setGdriveRefreshToken("");
       setEncryptionPassphrase("");
-      notifySuccess(
-        "백업 설정 저장 완료",
-        "암호화 키와 OAuth 자격증명은 로컬 DPAPI에 안전 보관됩니다.",
-      );
+      setPassphraseBackupAck(false);
+      notifySuccess("백업 설정 저장 완료", "설정과 키 지문(key_fingerprint)이 저장되었습니다.");
       stateQuery.refresh();
     } finally {
       setBusyAction(null);
@@ -592,6 +635,38 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
               </Badge>
             ) : null}
           </div>
+
+          {config?.lastAuthErrorCode === "invalid_grant" ? (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs"
+            >
+              <div className="flex items-center gap-1.5 font-semibold text-amber-800 dark:text-amber-200">
+                <AlertTriangleIcon className="size-4 shrink-0" />
+                Google OAuth 토큰 만료(invalid_grant) — 자동 백업이 멈췄습니다
+              </div>
+              <p className="mt-1 leading-relaxed text-amber-900/90 dark:text-amber-100/90">
+                OAuth 앱이 Testing이면 7일마다 만료됩니다. Google Cloud 콘솔에서{" "}
+                <strong>Production으로 게시</strong>한 뒤 아래에서 Google 계정의 Drive 권한을 다시
+                허용해 주세요.
+              </p>
+              {config.lastAuthErrorAtMs ? (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  최근 감지 시각: {formatMs(config.lastAuthErrorAtMs)}
+                </p>
+              ) : null}
+            </div>
+          ) : config?.lastAuthErrorCode === "auth_failed" ? (
+            <div
+              role="status"
+              className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"
+            >
+              <div className="font-semibold">Google Drive 인증 갱신 오류</div>
+              <p className="mt-1">
+                {config.lastAuthErrorMessage ?? "OAuth 자격증명을 다시 확인해 주세요."}
+              </p>
+            </div>
+          ) : null}
 
           <div className="flex flex-wrap gap-2">
             <Button
@@ -869,7 +944,7 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
                       onChange={(e) => setGdriveClientSecret(e.target.value)}
                       placeholder={
                         config?.gdriveHasCredentials
-                          ? "•••••••• (DPAPI 암호화 보관 중)"
+                          ? "•••••••• (로컬 암호화 보관 중 · Windows DPAPI)"
                           : "GOCSPX-..."
                       }
                     />
@@ -883,7 +958,9 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
                       value={gdriveRefreshToken}
                       onChange={(e) => setGdriveRefreshToken(e.target.value)}
                       placeholder={
-                        config?.gdriveHasCredentials ? "•••••••• (DPAPI 암호화 보관 중)" : "1//0..."
+                        config?.gdriveHasCredentials
+                          ? "•••••••• (로컬 암호화 보관 중 · Windows DPAPI)"
+                          : "1//0..."
                       }
                     />
                   </div>
@@ -898,13 +975,35 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
               <Input
                 type="password"
                 value={encryptionPassphrase}
-                onChange={(e) => setEncryptionPassphrase(e.target.value)}
+                onChange={(e) => {
+                  setEncryptionPassphrase(e.target.value);
+                  if (e.target.value.trim().length === 0) setPassphraseBackupAck(false);
+                }}
                 placeholder={
                   config?.keyFingerprint
                     ? `설정됨 (지문 ${config.keyFingerprint}) — 변경 시 입력`
                     : "새 백업 복구 비밀번호 입력"
                 }
               />
+              {config?.keyFingerprint ? (
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  현재 키 지문(key_fingerprint): {config.keyFingerprint} (원문 미노출)
+                </span>
+              ) : null}
+              {encryptionPassphrase.trim().length > 0 ? (
+                <label className="mt-1 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] leading-snug text-amber-900 dark:text-amber-100">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-3.5 shrink-0"
+                    checked={passphraseBackupAck}
+                    onChange={(e) => setPassphraseBackupAck(e.target.checked)}
+                  />
+                  <span>
+                    이 비밀번호를 T3 밖(비밀번호 관리자 등)에 별도로 보관해야 백업을 복구할 수
+                    있음을 확인했습니다.
+                  </span>
+                </label>
+              ) : null}
             </div>
             <div className="grid gap-1.5">
               <label className="text-xs font-medium">대상별 롤링 보존 세대 수 (1~90)</label>
@@ -941,12 +1040,95 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
               <Switch checked={includeCoreSettings} onCheckedChange={setIncludeCoreSettings} />
             </label>
             <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
-              <span>T3 state.sqlite 읽기 전용 스냅샷 포함 (VACUUM INTO · 대용량)</span>
+              <span>
+                T3 state.sqlite 읽기 전용 스냅샷 포함 (자식 프로세스 VACUUM INTO · 주간 기본)
+              </span>
               <Switch
                 checked={includeCoreSqliteSnapshot}
                 onCheckedChange={setIncludeCoreSqliteSnapshot}
               />
             </label>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
+              <span>월별 이벤트 아카이브(archives/events-*.sqlite) 신규분만 포함</span>
+              <Switch checked={includeEventArchives} onCheckedChange={setIncludeEventArchives} />
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
+              <span>무방해 자동 백업 일정 (기본 OFF · dry-run/수동 1회/복원 검증 후 활성화)</span>
+              <Switch checked={autoScheduleEnabled} onCheckedChange={setAutoScheduleEnabled} />
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
+              <span>배터리/저전력 모드 시 시작 보류 및 자동 일시정지</span>
+              <Switch checked={pauseOnBattery} onCheckedChange={setPauseOnBattery} />
+            </label>
+          </div>
+
+          <div className="grid gap-3 rounded-xl border border-border/70 bg-muted/15 p-3.5 sm:grid-cols-3">
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">유휴 대기 시간 (분 · 기본 10)</label>
+              <Input
+                type="number"
+                min={1}
+                max={1440}
+                value={idleMinMinutes}
+                onChange={(e) => setIdleMinMinutes(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">디스크 읽기 제한 (MB/s · 기본 50)</label>
+              <Input
+                type="number"
+                min={0}
+                max={2000}
+                value={readLimitMBps}
+                onChange={(e) => setReadLimitMBps(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">업로드 속도 제한 (Mbps · 기본 20)</label>
+              <Input
+                type="number"
+                min={0}
+                max={10000}
+                value={uploadLimitMbps}
+                onChange={(e) => setUploadLimitMbps(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">
+                워커 메모리 RSS 상한 (MB · 기본 300)
+              </label>
+              <Input
+                type="number"
+                min={128}
+                max={2048}
+                value={workerRssLimitMb}
+                onChange={(e) => setWorkerRssLimitMb(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">
+                전체 SQLite 스냅샷 주기 (일 · 기본 7)
+              </label>
+              <Input
+                type="number"
+                min={1}
+                max={90}
+                value={fullSnapshotIntervalDays}
+                onChange={(e) => setFullSnapshotIntervalDays(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-[11px] font-medium">
+                대용량 스냅샷 로컬 보존 세대 (기본 1)
+              </label>
+              <Input
+                type="number"
+                min={1}
+                max={10}
+                value={snapshotLocalRetentionCount}
+                onChange={(e) => setSnapshotLocalRetentionCount(e.target.value)}
+              />
+            </div>
           </div>
         </div>
       </SectionCard>
@@ -978,7 +1160,9 @@ export function DriveBackupSection({ project }: { readonly project: EnvironmentP
                             ? "T3 프로젝트"
                             : target.kind === "core"
                               ? "T3 본체"
-                              : "추가 저장소"}
+                              : target.kind === "userdata"
+                                ? "T3 userdata"
+                                : "추가 저장소"}
                         </Badge>
                         {isCurrentProject ? (
                           <Badge variant="info" size="sm">

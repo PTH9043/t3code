@@ -133,7 +133,7 @@ function LocalMultiGoogleAccountsPanel() {
         type: "success",
         title: "Google OAuth 앱 설정 저장 완료",
         description: saved.hasClientSecret
-          ? "Windows DPAPI에 안전 저장되었습니다. 이제 버튼 클릭만으로 계정을 추가하고 Drive 권한을 허용할 수 있습니다."
+          ? "로컬 비밀 저장소(Windows DPAPI · 비-Windows 0600 권한)에 암호화 저장되었습니다. 이제 버튼 클릭만으로 계정을 추가하고 Drive 권한을 허용할 수 있습니다."
           : "Client ID가 저장되었습니다. Drive 권한 허용을 사용하려면 Client Secret도 함께 입력해 주세요.",
       });
       if (thenAddAccount) {
@@ -205,7 +205,7 @@ function LocalMultiGoogleAccountsPanel() {
         type: "error",
         title: "OAuth Client Secret 1회 입력 필요",
         description:
-          "Google Drive 백업 토큰(Refresh Token)을 로컬 DPAPI에 보관하려면 OAuth 앱 설정에 Client Secret을 먼저 저장해 주세요.",
+          "Google Drive 백업 토큰(Refresh Token)을 로컬 비밀 저장소(Windows DPAPI · 비-Windows 0600)에 암호화 보관하려면 OAuth 앱 설정에 Client Secret을 먼저 저장해 주세요.",
       });
       return;
     }
@@ -390,7 +390,7 @@ function LocalMultiGoogleAccountsPanel() {
             </span>
             {status?.hasClientSecret ? (
               <Badge variant="success" size="sm">
-                Client Secret DPAPI 보관 중
+                Client Secret 암호화 보관 중 (Windows DPAPI)
               </Badge>
             ) : null}
           </div>

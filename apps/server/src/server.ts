@@ -82,6 +82,7 @@ import { WorkspaceCollaborationReactorLive } from "./orchestration/Layers/Worksp
 import { WorkspaceAgentExecutorLive } from "./orchestration/Layers/WorkspaceAgentExecutor.ts";
 import { CouncilOrchestratorLive } from "./orchestration/council/CouncilOrchestratorLive.ts";
 import { GoogleDriveBackupServiceLive } from "./t3x/driveBackup/GoogleDriveBackupServiceLive.ts";
+import { DriveBackupSchedulerLive } from "./t3x/driveBackup/DriveBackupScheduler.ts";
 import { MissionOrchestratorLive } from "./t3x/missionControl/MissionOrchestratorLive.ts";
 import { ReadOnlyResultCache } from "./documents/ReadOnlyResultCache.ts";
 import * as WorkspaceWorktreeCleanup from "./orchestration/Layers/WorkspaceWorktreeCleanup.ts";
@@ -204,7 +205,7 @@ const HostPowerMonitorLayerLive = HostPowerMonitor.layer.pipe(
 );
 
 const BackgroundLayerLive = BackgroundPolicy.layer.pipe(
-  Layer.provide(HostPowerMonitorLayerLive),
+  Layer.provideMerge(HostPowerMonitorLayerLive),
   Layer.provideMerge(ServerSettingsLayerLive),
 );
 
@@ -532,17 +533,17 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
 );
 
-const RuntimeDependenciesLive = TelegramChannelsLive.pipe(
-  Layer.provideMerge(RuntimeCoreDependenciesLive),
-).pipe(
-  // Misc.
-  Layer.provideMerge(BackgroundLayerLive),
-  Layer.provideMerge(ResourceDiagnosticsLayerLive),
-  Layer.provideMerge(TraceDiagnostics.layer),
-  Layer.provideMerge(AnalyticsService.layer),
-  Layer.provideMerge(ServerLifecycleEvents.layer),
-  Layer.provide(NetService.layer),
-);
+const RuntimeDependenciesLive = Layer.mergeAll(TelegramChannelsLive, DriveBackupSchedulerLive)
+  .pipe(Layer.provideMerge(RuntimeCoreDependenciesLive))
+  .pipe(
+    // Misc.
+    Layer.provideMerge(BackgroundLayerLive),
+    Layer.provideMerge(ResourceDiagnosticsLayerLive),
+    Layer.provideMerge(TraceDiagnostics.layer),
+    Layer.provideMerge(AnalyticsService.layer),
+    Layer.provideMerge(ServerLifecycleEvents.layer),
+    Layer.provide(NetService.layer),
+  );
 
 const commandReadinessLayer = HttpRouter.middleware(
   (httpEffect) =>

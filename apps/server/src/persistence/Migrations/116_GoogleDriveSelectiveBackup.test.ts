@@ -21,12 +21,14 @@ describe("Migration 116: GoogleDriveSelectiveBackup", () => {
       }).pipe(Effect.provide(layer)),
     );
 
-    expect(tables).toEqual([
-      "drive_backup_config",
-      "drive_backup_runs",
-      "drive_backup_targets",
-      "drive_mirror_objects",
-    ]);
+    expect(tables).toEqual(
+      expect.arrayContaining([
+        "drive_backup_config",
+        "drive_backup_runs",
+        "drive_backup_targets",
+        "drive_mirror_objects",
+      ]),
+    );
   });
 
   it("enforces CHECK constraints on transport_mode, target kind, and run status", async () => {

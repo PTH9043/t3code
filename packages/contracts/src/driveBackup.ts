@@ -45,20 +45,29 @@ export class DriveBackupError extends Schema.TaggedErrorClass<DriveBackupError>(
 export const DriveBackupTransportMode = Schema.Literals(["gdrive_api", "local_drive_folder"]);
 export type DriveBackupTransportMode = typeof DriveBackupTransportMode.Type;
 
-export const DriveBackupTargetKind = Schema.Literals(["project", "repo", "core"]);
+export const DriveBackupTargetKind = Schema.Literals(["project", "repo", "core", "userdata"]);
 export type DriveBackupTargetKind = typeof DriveBackupTargetKind.Type;
 
-export const DriveBackupRunKind = Schema.Literals(["backup", "restore_verify", "knowledge_mirror"]);
+export const DriveBackupRunKind = Schema.Literals([
+  "backup",
+  "restore_verify",
+  "knowledge_mirror",
+  "exchange_sync",
+]);
 export type DriveBackupRunKind = typeof DriveBackupRunKind.Type;
 
 export const DriveBackupRunStatus = Schema.Literals([
   "running",
+  "paused",
   "succeeded",
   "partial",
   "failed",
   "skipped_busy",
 ]);
 export type DriveBackupRunStatus = typeof DriveBackupRunStatus.Type;
+
+export const DriveBackupAuthErrorCode = Schema.Literals(["invalid_grant", "auth_failed"]);
+export type DriveBackupAuthErrorCode = typeof DriveBackupAuthErrorCode.Type;
 
 export const DriveBackupConfig = Schema.Struct({
   transportMode: DriveBackupTransportMode,
@@ -78,6 +87,28 @@ export const DriveBackupConfig = Schema.Struct({
   includeCoreSqliteSnapshot: Schema.Boolean,
   includeEventArchives: Schema.Boolean,
   autoSyncIdleOnly: Schema.Boolean,
+  /** OAuth 갱신 실패 상태 (예: Testing 앱 7일 만료 invalid_grant) */
+  lastAuthErrorCode: Schema.NullOr(DriveBackupAuthErrorCode),
+  lastAuthErrorMessage: Schema.NullOr(Schema.String),
+  lastAuthErrorAtMs: Schema.NullOr(Schema.Number),
+  /** 무방해 유휴 자동 백업 스케줄 (기본 OFF — 수동 1회 + 복원 검증 후 활성화) */
+  autoScheduleEnabled: Schema.Boolean,
+  idleMinSeconds: NonNegativeInt,
+  pauseOnBattery: Schema.Boolean,
+  allowedWindowEnabled: Schema.Boolean,
+  allowedWindowStartHour: NonNegativeInt,
+  allowedWindowEndHour: NonNegativeInt,
+  /** 디스크 읽기 속도 상한 (MB/s, 기본 50) */
+  readLimitMBps: NonNegativeInt,
+  /** 네트워크 업로드 속도 상한 (Mbps, 기본 20) */
+  uploadLimitMbps: NonNegativeInt,
+  /** 자식 프로세스 메모리 RSS 상한 (MB, 기본 300) */
+  workerRssLimitMb: NonNegativeInt,
+  /** 전체 SQLite 스냅샷 주기 (일, 기본 7) */
+  fullSnapshotIntervalDays: NonNegativeInt,
+  /** 대용량 SQLite 스냅샷 로컬 롤링 보존 세대 수 (기본 1) */
+  snapshotLocalRetentionCount: NonNegativeInt,
+  lastFullSnapshotAtMs: Schema.NullOr(Schema.Number),
   updatedAtMs: Schema.Number,
 });
 export type DriveBackupConfig = typeof DriveBackupConfig.Type;
@@ -123,6 +154,9 @@ export const DriveBackupRunRecord = Schema.Struct({
   errorMessage: Schema.NullOr(Schema.String),
   startedAtMs: Schema.Number,
   finishedAtMs: Schema.NullOr(Schema.Number),
+  walGrowthBytes: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  pausedCount: Schema.optionalKey(NonNegativeInt),
+  resumedFromCheckpoint: Schema.optionalKey(Schema.Boolean),
 });
 export type DriveBackupRunRecord = typeof DriveBackupRunRecord.Type;
 
@@ -189,13 +223,26 @@ export const DriveBackupUpdateConfigInput = Schema.Struct({
     Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
   ),
   encryptionEnabled: Schema.optionalKey(Schema.Boolean),
-  /** 설정 시 ServerSecretStore에 암호화 보관하고 DB엔 SHA-256 지문만 저장 */
+  /** 설정 시 로컬 비밀 저장소에 보관하고 DB엔 SHA-256 지문만 저장 */
   encryptionPassphrase: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(300))),
+  /** 비밀번호를 T3 밖(비밀번호 관리자 등)에 보관해야 복구 가능하다는 사용자 확인 */
+  passphraseBackupAcknowledged: Schema.optionalKey(Schema.Boolean),
   retentionCount: Schema.optionalKey(Schema.Number),
   includeCoreSettings: Schema.optionalKey(Schema.Boolean),
   includeCoreSqliteSnapshot: Schema.optionalKey(Schema.Boolean),
   includeEventArchives: Schema.optionalKey(Schema.Boolean),
   autoSyncIdleOnly: Schema.optionalKey(Schema.Boolean),
+  autoScheduleEnabled: Schema.optionalKey(Schema.Boolean),
+  idleMinSeconds: Schema.optionalKey(Schema.Number),
+  pauseOnBattery: Schema.optionalKey(Schema.Boolean),
+  allowedWindowEnabled: Schema.optionalKey(Schema.Boolean),
+  allowedWindowStartHour: Schema.optionalKey(Schema.Number),
+  allowedWindowEndHour: Schema.optionalKey(Schema.Number),
+  readLimitMBps: Schema.optionalKey(Schema.Number),
+  uploadLimitMbps: Schema.optionalKey(Schema.Number),
+  workerRssLimitMb: Schema.optionalKey(Schema.Number),
+  fullSnapshotIntervalDays: Schema.optionalKey(Schema.Number),
+  snapshotLocalRetentionCount: Schema.optionalKey(Schema.Number),
 });
 export type DriveBackupUpdateConfigInput = typeof DriveBackupUpdateConfigInput.Type;
 

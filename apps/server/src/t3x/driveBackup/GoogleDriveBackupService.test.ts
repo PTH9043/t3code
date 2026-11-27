@@ -8,15 +8,18 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { activeWorkRegistry } from "../../orchestration/ActiveWorkTracker.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import { decryptBufferAes256Gcm } from "./DriveBackupCrypto.ts";
+import { verifyAndExtractArchiveFile } from "./StreamingArchivePacker.ts";
+import {
+  exchangeRefreshTokenForAccessToken,
+  OAuthTokenRefreshError,
+} from "./DriveTransportAdapter.ts";
 import { GoogleDriveBackupService } from "./GoogleDriveBackupService.ts";
 import { GoogleDriveBackupServiceLive } from "./GoogleDriveBackupServiceLive.ts";
-import { verifyAndUnpackArchive } from "./ProjectArchivePacker.ts";
 
 function makeMemorySecretStoreLayer() {
   const store = new Map<string, Uint8Array>();
@@ -149,6 +152,7 @@ describe("GoogleDriveBackupService", () => {
           gdriveFolderName: "T3-Backup",
           encryptionEnabled: true,
           encryptionPassphrase: "StrongPassphrase!2026",
+          passphraseBackupAcknowledged: true,
           retentionCount: 2,
           includeCoreSettings: false,
           includeCoreSqliteSnapshot: false,
@@ -192,14 +196,23 @@ describe("GoogleDriveBackupService", () => {
       }).pipe(Effect.provide(layer)),
     );
 
-    // 실제 디스크 아카이브 직접 검사:
+    // 실제 디스크 아카이브 직접 검사 (스트리밍 T3ARC2 + T3ENC2):
     // 1) 잘못된 키로 복호화 시 반드시 거부
-    const archiveBuf = NodeFs.readFileSync(outcome.run.destinationPath!);
-    expect(() => decryptBufferAes256Gcm(archiveBuf, "WrongPassword")).toThrow();
+    await expect(
+      verifyAndExtractArchiveFile({
+        archivePath: outcome.run.destinationPath!,
+        passphrase: "WrongPassword",
+      }),
+    ).rejects.toThrow();
 
     // 2) 정확한 키로 복호화 시 선택된 파일 + T3 스코프만 존재, 시크릿/비선택 파일은 0건
-    const unpacked = verifyAndUnpackArchive(archiveBuf, "StrongPassphrase!2026");
-    const paths = unpacked.entries.map((e) => e.path);
+    const unpacked = await verifyAndExtractArchiveFile({
+      archivePath: outcome.run.destinationPath!,
+      passphrase: "StrongPassphrase!2026",
+    });
+    expect(unpacked.format).toBe("T3ARC2");
+    expect(unpacked.encryptionFormat).toBe("T3ENC2");
+    const paths = unpacked.manifest.entries.map((e) => e.path);
     expect(paths).toContain("workspace/src/main.ts");
     expect(paths).toContain("workspace/.env.example");
     expect(paths).toContain("t3-scope/project-scope.json");
@@ -288,5 +301,86 @@ describe("GoogleDriveBackupService", () => {
     expect(res.mirror2.skippedUnchangedCount).toBe(1);
     const mirroredFile = NodePath.join(res.mirror1.mirrorLocalDir, "playbook.md");
     expect(NodeFs.readFileSync(mirroredFile, "utf8")).toBe("# Drive Playbook\n");
+  });
+
+  it("requires external backup acknowledgement when setting passphrase and detects invalid_grant into config status", async () => {
+    const baseDir = mkTempDir("t3-drv-base3-");
+    const repoDir = mkTempDir("t3-drv-repo3-");
+    NodeFs.writeFileSync(NodePath.join(repoDir, "a.txt"), "hello\n");
+    const layer = makeTestLayer(repoDir, baseDir);
+
+    // 1) Unit check on OAuthTokenRefreshError invalid_grant parsing
+    const invalidGrantFetcher = vi.fn(
+      async () =>
+        new Response(
+          '{"error":"invalid_grant","error_description":"Token has been expired or revoked."}',
+          {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      exchangeRefreshTokenForAccessToken(
+        { clientId: "cid", clientSecret: "sec", refreshToken: "1//expired" },
+        invalidGrantFetcher,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof OAuthTokenRefreshError &&
+        err.isInvalidGrant === true &&
+        err.message.includes("Production"),
+    );
+
+    // 2) Service-level check: passphrase ack gate + invalid_grant persistence into state card
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = invalidGrantFetcher;
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const svc = yield* GoogleDriveBackupService;
+
+          // Without acknowledgement -> rejected
+          const unackedExit = yield* svc
+            .updateConfig({
+              encryptionEnabled: true,
+              encryptionPassphrase: "MyBackupPassword!99",
+            })
+            .pipe(Effect.exit);
+          expect(unackedExit._tag).toBe("Failure");
+
+          // With acknowledgement -> succeeds and only exposes keyFingerprint
+          const acked = yield* svc.updateConfig({
+            transportMode: "gdrive_api",
+            gdriveClientId: "cid-1",
+            gdriveClientSecret: "sec-1",
+            gdriveRefreshToken: "1//expired-tok",
+            encryptionEnabled: true,
+            encryptionPassphrase: "MyBackupPassword!99",
+            passphraseBackupAcknowledged: true,
+          });
+          expect(acked.keyFingerprint).toHaveLength(12);
+          expect(Object.values(acked)).not.toContain("MyBackupPassword!99");
+
+          // Trigger syncKnowledgeMirror -> invalid_grant recorded into config
+          const mirrorExit = yield* svc.syncKnowledgeMirror({}).pipe(Effect.exit);
+          expect(mirrorExit._tag).toBe("Failure");
+
+          const afterErr = yield* svc.getState({});
+          expect(afterErr.config.lastAuthErrorCode).toBe("invalid_grant");
+          expect(afterErr.config.lastAuthErrorMessage).toContain("Production");
+          expect(afterErr.config.lastAuthErrorAtMs).toBeTypeOf("number");
+
+          // Re-saving fresh OAuth credentials clears lastAuthErrorCode
+          const refreshedCfg = yield* svc.updateConfig({
+            gdriveRefreshToken: "1//fresh-tok",
+          });
+          expect(refreshedCfg.lastAuthErrorCode).toBeNull();
+        }).pipe(Effect.provide(layer)),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

@@ -12,8 +12,18 @@ function windowsDpapi(): typeof import("@primno/dpapi").Dpapi {
   return module.Dpapi;
 }
 
+const PROTECTED_CREDENTIAL_PREFIXES = ["provider-env-", "google-oauth-", "drive_backup_"] as const;
+
+const PROTECTED_CREDENTIAL_EXACT_NAMES = new Set<string>([
+  "google-login-account",
+  "google-login-accounts",
+]);
+
 export function isProtectedCredentialName(name: string): boolean {
-  return name.startsWith("provider-env-");
+  if (PROTECTED_CREDENTIAL_EXACT_NAMES.has(name)) {
+    return true;
+  }
+  return PROTECTED_CREDENTIAL_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
 export function isWindowsProtectedCredential(value: Uint8Array): boolean {

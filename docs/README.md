@@ -58,4 +58,5 @@
 - [GPT Sol 작업 지시서](./operations/gpt-sol-work-brief.md)
 - [Google Colab 무료 T4 16GB GPU 오프로드](./operations/colab-t4-gpu-offload.md)
 - [billion-context 선택적 컨텍스트 압축 프록시](./operations/billion-context-optin.md)
+- [Google Drive 무방해 백업 · PC↔VPS 교환소 운영 절차서](./operations/drive-backup-vps-exchange.md)
 - [Orca 업스트림 주간 감시 매니페스트](./operations/orca-upstream-manifest.json)
