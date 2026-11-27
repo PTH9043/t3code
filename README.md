@@ -1,5 +1,21 @@
 # T3 Code
 
+## 이 포크에서 만든 AI 제어센터
+
+여러 프로젝트에서 AI에게 작업을 요청하고 대화, 진행 상황, 결과를 한곳에서 확인하고 싶어 T3 Code를 포크했습니다. 그전에 AI 지원으로 개발하던 AutoUsage는 목표했던 상주 자율 AI 구현에 실패해 중단했습니다.
+
+저는 필요한 기능과 우선순위, 작업 범위와 확인 기준을 정했습니다. AI가 코드를 구현하고 조사·시험을 지원했으며, 저는 실제 동작과 결과를 확인하고 필요한 수정을 다시 요청했습니다.
+
+기술소개서에는 프로젝트별 작업 요청과 대화, 여러 AI의 작업 분담, 질문에 대한 답변, 파일과 결과 확인 과정을 담았습니다. 기본 T3 기능을 바탕으로 작업했으며, 추가하거나 수정한 범위와 원본 기능은 구분합니다.
+
+### 공개 코드와 영상
+
+- [AI 제어센터 소개 영상](https://youtu.be/d2IS_8vBK0c)
+- 이 포크는 [T3 Code 원본](https://github.com/pingdotgg/t3code)을 기반으로 합니다. 원본 라이선스와 저작권 표기는 아래와 [LICENSE](./LICENSE)에 유지했습니다.
+- 이 소개문을 추가하기 전 공개 브랜치의 마지막 코드 커밋은 2026년 9월입니다. PPT에 나오는 10월 작업과 일부 시연은 로컬 저장본 기준이므로 이 공개 브랜치에 모두 들어 있다고 보장하지 않습니다.
+
+> 아래의 T3 Code 소개와 설치 안내는 원본 프로젝트의 안내입니다. 원본 패키지 설치가 이 포크에 추가한 기능을 설치한다는 뜻은 아닙니다.
+
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
