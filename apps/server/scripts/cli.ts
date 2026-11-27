@@ -164,6 +164,7 @@ const buildCmd = Command.make(
         ["src/service-launcher.ts", "--out-dir", "dist", "--no-clean"],
         ["src/orchestration/watchdog-worker.ts", "--out-dir", "dist", "--no-clean"],
         ["src/mcp/codex-watch-stdio.ts", "--out-dir", "dist", "--no-clean"],
+        ["src/t3x/driveBackup/drive-backup-worker.ts", "--out-dir", "dist", "--no-clean"],
       ]) {
         yield* runCommand(
           ChildProcess.make(process.execPath, [...pack, ...args], {
@@ -258,6 +259,7 @@ const publishCmd = Command.make(
         "dist/watchdog-worker.mjs",
         "dist/watchdog-wmi-launch.vbs",
         "dist/codex-watch-stdio.mjs",
+        "dist/drive-backup-worker.mjs",
         "dist/client/index.html",
       ]) {
         const abs = path.join(serverDir, relPath);
