@@ -73,6 +73,10 @@ export class BackgroundAutoCompactor {
     return this.cache.get(threadId);
   }
 
+  setSnapshot(snapshot: PrecomputedCompactionSnapshot): void {
+    this.cache.set(snapshot.threadId, snapshot);
+  }
+
   consumeSnapshot(threadId: string): PrecomputedCompactionSnapshot | undefined {
     const snapshot = this.cache.get(threadId);
     if (snapshot) this.cache.delete(threadId);

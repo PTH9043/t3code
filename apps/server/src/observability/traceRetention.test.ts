@@ -52,6 +52,25 @@ describe("shouldPersistTraceRecord", () => {
     assert.strictEqual(shouldPersistTraceRecord(span({ durationMs: Number.NaN })), true);
   });
 
+  it("keeps always-persisted telemetry spans even when faster than 50ms", () => {
+    assert.strictEqual(
+      shouldPersistTraceRecord(span({ name: "WorkspaceRoutingGraph.queryMoc", durationMs: 2 })),
+      true,
+    );
+    assert.strictEqual(
+      shouldPersistTraceRecord(
+        span({ name: "WorkspaceRoutingGraph.promptInject", durationMs: 0.2 }),
+      ),
+      true,
+    );
+    assert.strictEqual(
+      shouldPersistTraceRecord(
+        span({ name: "ClaudeSession.firstPromptBreakdown", durationMs: 1.5 }),
+      ),
+      true,
+    );
+  });
+
   it("keeps spans that did not come from this process", () => {
     const browser: TraceRecord = {
       ...span({}),

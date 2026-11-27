@@ -50,6 +50,13 @@ export type ServerSelfSpanRates = Pick<
   "slowSpansPerMin" | "failedSpansPerMin"
 >;
 
+export interface SlowOperationSummary {
+  readonly name: string;
+  readonly maxMs: number;
+  readonly totalMs: number;
+  readonly count: number;
+}
+
 export interface ServerSelfSignalsShape {
   /** Fed by the trace sink; must stay cheap. */
   readonly recordSpan: (record: TraceRecord) => void;
@@ -57,6 +64,8 @@ export interface ServerSelfSignalsShape {
   readonly recordDelegationEvent?: (kind: ServerDelegationCounterKind) => void;
   /** Read current cumulative delegation health counters. */
   readonly readDelegationCounters?: () => ServerDelegationCounters;
+  /** Drain and return top N operations >= 1s since the last drain (used by MemoryWatchdog). */
+  readonly drainSlowOperationsTop?: (limit?: number) => ReadonlyArray<SlowOperationSummary>;
   readonly read: (windowMin: number, nowMs: number) => ServerSelfSignalsReading;
   /** Read a span window without resetting the event-loop histogram. */
   readonly readRates: (windowMin: number, nowMs: number) => ServerSelfSpanRates;
@@ -71,6 +80,7 @@ export function makeServerSelfSignals(options?: {
 }): ServerSelfSignalsShape & {
   readonly recordDelegationEvent: (kind: ServerDelegationCounterKind) => void;
   readonly readDelegationCounters: () => ServerDelegationCounters;
+  readonly drainSlowOperationsTop: (limit?: number) => ReadonlyArray<SlowOperationSummary>;
 } {
   const buckets: SecondBucket[] = Array.from({ length: RING_SECONDS }, () => ({
     second: Number.NEGATIVE_INFINITY,
@@ -120,12 +130,30 @@ export function makeServerSelfSignals(options?: {
   let delegationLimitsHit = 0;
   let delegationsDeduplicated = 0;
   let delegationsLost = 0;
+  const MAX_TRACKED_SLOW_OP_NAMES = 256;
+  const slowOpStats = new Map<string, { maxMs: number; totalMs: number; count: number }>();
 
   const readDelegationCounters = (): ServerDelegationCounters => ({
     delegationLimitsHit,
     delegationsDeduplicated,
     delegationsLost,
   });
+
+  const drainSlowOperationsTop = (limit = 5): ReadonlyArray<SlowOperationSummary> => {
+    if (slowOpStats.size === 0) return [];
+    const ranked: SlowOperationSummary[] = [];
+    for (const [name, stat] of slowOpStats.entries()) {
+      ranked.push({
+        name,
+        maxMs: Math.round(stat.maxMs * 10) / 10,
+        totalMs: Math.round(stat.totalMs * 10) / 10,
+        count: stat.count,
+      });
+    }
+    slowOpStats.clear();
+    ranked.sort((a, b) => b.maxMs - a.maxMs || b.totalMs - a.totalMs);
+    return ranked.slice(0, Math.max(1, limit));
+  };
 
   return {
     readRates,
@@ -135,12 +163,27 @@ export function makeServerSelfSignals(options?: {
       else if (kind === "lost") delegationsLost += 1;
     },
     readDelegationCounters,
+    drainSlowOperationsTop,
     recordSpan: (record) => {
       if (record.type !== "effect-span") return;
       const category = classifySpanCategory(record.name, record.attributes);
       const slow = category === "operation" && record.durationMs >= SELF_SIGNAL_SLOW_SPAN_MS;
       const failed = record.exit._tag === "Failure";
       if (!slow && !failed) return;
+      if (slow && Number.isFinite(record.durationMs)) {
+        const existing = slowOpStats.get(record.name);
+        if (existing) {
+          if (record.durationMs > existing.maxMs) existing.maxMs = record.durationMs;
+          existing.totalMs += record.durationMs;
+          existing.count += 1;
+        } else if (slowOpStats.size < MAX_TRACKED_SLOW_OP_NAMES) {
+          slowOpStats.set(record.name, {
+            maxMs: record.durationMs,
+            totalMs: record.durationMs,
+            count: 1,
+          });
+        }
+      }
       const endedAtMs = Number(record.endTimeUnixNano) / 1_000_000;
       if (!Number.isFinite(endedAtMs)) return;
       const bucket = bucketFor(endedAtMs);

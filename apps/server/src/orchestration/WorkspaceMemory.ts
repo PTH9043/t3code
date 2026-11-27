@@ -1787,10 +1787,51 @@ export class WorkspaceMemory extends Context.Service<
           yield* Effect.yieldNow;
         }
       });
+      const lastReconcileWatermarkByProject = new Map<string, string>();
+      const lastDreamMsByProject = new Map<string, number>();
+      const RECONCILE_LOOP_BUDGET_MS = 6_000;
+      const DREAM_NO_DIRTY_COOLDOWN_MS = 10 * 60 * 1000;
+
+      const computeReconcileWatermark = (projectId: ProjectId) =>
+        Effect.gen(function* () {
+          const [k] = yield* sql<{ c: number; m: string | null }>`
+            SELECT COUNT(*) AS c, MAX(updated_at) AS m
+            FROM projection_workspace_knowledge_items
+            WHERE project_id=${projectId}
+          `.pipe(Effect.orElseSucceed(() => [{ c: -1, m: null }]));
+          const [msg] = yield* sql<{ c: number; m: string | null }>`
+            SELECT COUNT(*) AS c, MAX(pm.created_at) AS m
+            FROM projection_thread_messages pm
+            JOIN projection_threads pt ON pt.thread_id = pm.thread_id
+            WHERE pt.project_id=${projectId}
+          `.pipe(Effect.orElseSucceed(() => [{ c: -1, m: null }]));
+          const [d] = yield* sql<{ c: number }>`
+            SELECT COUNT(*) AS c FROM workspace_memory_v2_dirty
+            WHERE project_id=${projectId} OR scope='global'
+          `.pipe(Effect.orElseSucceed(() => [{ c: -1 }]));
+          const [m2] = yield* sql<{ c: number; m: string | null }>`
+            SELECT COUNT(*) AS c, MAX(created_at) AS m FROM workspace_memory_v2
+            WHERE project_id=${projectId}
+          `.pipe(Effect.orElseSucceed(() => [{ c: -1, m: null }]));
+          return {
+            watermark: `${k?.c ?? -1}:${k?.m ?? ""}|${msg?.c ?? -1}:${msg?.m ?? ""}|${d?.c ?? -1}|${m2?.c ?? -1}:${m2?.m ?? ""}`,
+            dirtyCount: d?.c ?? 0,
+          };
+        });
+
       const reconcileUnsafe = Effect.fn("WorkspaceMemory.reconcile")(function* (
         projectId: ProjectId,
       ) {
         if ((yield* checkedProject(projectId)).conversationRag?.enabled === false) return;
+        const pre = yield* computeReconcileWatermark(projectId);
+        if (
+          pre.dirtyCount === 0 &&
+          lastReconcileWatermarkByProject.get(projectId) === pre.watermark
+        ) {
+          return;
+        }
+        const loopDeadlineMs = clock.currentTimeMillisUnsafe() + RECONCILE_LOOP_BUDGET_MS;
+        let hitBudget = false;
         let cursor = "";
         while (true) {
           const notes = yield* sql<{
@@ -1858,14 +1899,36 @@ export class WorkspaceMemory extends Context.Service<
         while (more) {
           more = (yield* backfill(projectId)).hasMore;
           yield* Effect.yieldNow;
+          if (more && clock.currentTimeMillisUnsafe() >= loopDeadlineMs) {
+            hitBudget = true;
+            break;
+          }
         }
-        more = true;
+        more = !hitBudget;
         while (more) {
           more = yield* backfillLongMessages(projectId);
           yield* Effect.yieldNow;
+          if (more && clock.currentTimeMillisUnsafe() >= loopDeadlineMs) {
+            hitBudget = true;
+            break;
+          }
         }
-        yield* refreshLongMessages(projectId);
-        yield* dream(projectId);
+        if (!hitBudget) {
+          yield* refreshLongMessages(projectId);
+        }
+        const post = yield* computeReconcileWatermark(projectId);
+        const nowMs = clock.currentTimeMillisUnsafe();
+        const lastDreamMs = lastDreamMsByProject.get(projectId) ?? 0;
+        if (post.dirtyCount > 0 || nowMs - lastDreamMs >= DREAM_NO_DIRTY_COOLDOWN_MS) {
+          yield* dream(projectId);
+          lastDreamMsByProject.set(projectId, clock.currentTimeMillisUnsafe());
+        }
+        if (!hitBudget) {
+          const finalState = yield* computeReconcileWatermark(projectId);
+          if (finalState.dirtyCount === 0) {
+            lastReconcileWatermarkByProject.set(projectId, finalState.watermark);
+          }
+        }
       });
       const sourceScopeIsCurrent = sql`CASE WHEN json_valid(r.source_json) THEN (
         json_extract(r.source_json,'$.kind') <> 'knowledge' OR EXISTS (

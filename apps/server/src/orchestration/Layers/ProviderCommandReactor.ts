@@ -1672,12 +1672,37 @@ const make = Effect.gen(function* () {
       const precomputed = autoCompactorOpt.value.consumeSnapshot(thread.id);
       if (precomputed?.summaryText) {
         const block = `<t3_precomputed_compaction coveredTurns="${precomputed.coveredTurnCount}">\n${precomputed.summaryText}\n</t3_precomputed_compaction>`;
-        handoff = handoff ? `${block}\n\n${handoff}` : block;
+        if (handoff && handoff.includes('profile="profile-claude-return"')) {
+          // Wave 3-A1: Avoid stacking redundant full handoff blocks on Claude return; keep compact cap.
+          const combined = `${block}\n\n${handoff}`;
+          handoff =
+            combined.length > 12_000
+              ? `${combined.slice(0, 11_950)}\n...</t3_adaptive_handoff>`
+              : combined;
+        } else {
+          handoff = handoff ? `${block}\n\n${handoff}` : block;
+        }
       }
     }
-    if (contextPlan.includeRoutingMoc && routingMoc?.renderedMoc) {
-      taskInput += `\n\n${routingMoc.renderedMoc}`;
+    const routingMocInjected = Boolean(contextPlan.includeRoutingMoc && routingMoc?.renderedMoc);
+    const routingMocInjectedChars = routingMocInjected ? routingMoc!.renderedMoc.length : 0;
+    if (routingMocInjected) {
+      taskInput += `\n\n${routingMoc!.renderedMoc}`;
       hasRag = true;
+    }
+    if (routingMoc !== null) {
+      yield* Effect.void.pipe(
+        Effect.withSpan("WorkspaceRoutingGraph.promptInject", {
+          attributes: {
+            "routing.project_id": thread.projectId,
+            "routing.prompt_injected": routingMocInjected,
+            "routing.prompt_injected_chars": routingMocInjectedChars,
+            "routing.rendered_moc_chars": routingMoc.renderedMoc.length,
+            "routing.seed_count": routingMoc.seedCount,
+            "routing.plan_include_moc": contextPlan.includeRoutingMoc,
+          },
+        }),
+      );
     }
     if (contextPlan.includeMemoryContext && Option.isSome(memory)) {
       const memoryResult = yield* memory.value

@@ -25,6 +25,7 @@ import {
 import { WorkspaceKnowledgeFileStore } from "../Services/WorkspaceKnowledgeFileStore.ts";
 import { WorkspaceKnowledgeReactor } from "../Services/WorkspaceKnowledgeReactor.ts";
 import { WorkspaceKnowledgeReactorLive } from "./WorkspaceKnowledgeReactor.ts";
+import { activeWorkRegistry } from "../ActiveWorkTracker.ts";
 
 const now = "2026-08-08T00:00:00.000Z";
 const projectId = ProjectId.make("workspace-a");
@@ -145,6 +146,57 @@ it.effect("reconciles a long-term-memory event into its Workspace-selected root"
         expect([...mirroredItems.keys()].sort()).toEqual([item.id, archivedItem.id].sort());
         expect(mirroredItems.get(archivedItem.id)?.status).toBe("archived");
       }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+
+it.effect("Wave 5-A4: yields immediately (0ms) on turn-settled when live work is active", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      let syncCalls = 0;
+      const query = {
+        getShellSnapshot: () =>
+          Effect.succeed({ snapshotSequence: 0, projects: [project], threads: [], updatedAt: now }),
+        getProjectShellById: () => Effect.succeed(Option.some(project)),
+        listWorkspaceKnowledge: () => Effect.succeed({ items: [item] }),
+      } as unknown as ProjectionSnapshotQueryShape;
+      const layer = WorkspaceKnowledgeReactorLive.pipe(
+        Layer.provideMerge(
+          Layer.succeed(OrchestrationEngineService, {
+            readEvents: () => Stream.empty,
+            dispatch: () => Effect.die("dispatch should not be called"),
+            streamDomainEvents: Stream.empty,
+            latestSequence: Effect.succeed(0),
+          }),
+        ),
+        Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
+        Layer.provideMerge(
+          Layer.succeed(WorkspaceKnowledgeFileStore, {
+            syncItem: () =>
+              Effect.sync(() => {
+                syncCalls += 1;
+              }),
+          }),
+        ),
+      );
+
+      activeWorkRegistry.register({
+        kind: "turn",
+        id: "active-turn-a4-test",
+        threadId: "active-turn-a4-test",
+        summary: "test",
+        startedAtMs: 1795767800000,
+      });
+      try {
+        yield* Effect.gen(function* () {
+          const reactor = yield* WorkspaceKnowledgeReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+          expect(syncCalls).toBe(0);
+        }).pipe(Effect.provide(layer));
+      } finally {
+        activeWorkRegistry.unregister("turn", "active-turn-a4-test");
+      }
     }),
   ),
 );

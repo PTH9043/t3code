@@ -92,6 +92,12 @@ import {
   resolveClaudeConductorWorker,
 } from "../ClaudeDeveloperInstructions.ts";
 import { readAgentsMdForClaude } from "../projectAgentInstructions.ts";
+import { resolveClaudeAutoCompactSdkSettings } from "../../orchestration/ProactiveContextCompactor.ts";
+import {
+  computeClaudeFirstPromptBreakdown,
+  flattenBreakdownToSpanAttributes,
+  writeClaudePromptMetricRecord,
+} from "../ClaudePromptTelemetry.ts";
 import { isSafeguardBlock } from "../providerContentRefusal.ts";
 import {
   buildSubordinateRoster,
@@ -142,6 +148,8 @@ import {
   compactBoundaryTokenUsageSnapshot,
   normalizeClaudeTaskProgressTokenUsage,
   readClaudeResumeState,
+  resolveAuthoritativeContextWindow,
+  resolveClaudePromptCacheTtlEnv,
   trimmedString,
   normalizeTaskUsage,
 } from "./ClaudeTokenLedger.ts";
@@ -696,8 +704,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return undefined;
     }
 
-    context.lastKnownContextWindow = usage.maxTokens;
-    return normalizeClaudeContextUsageApiSnapshot(usage, totalProcessedTokens);
+    const resolvedWindow = resolveAuthoritativeContextWindow({
+      currentWindow: context.lastKnownContextWindow,
+      currentSource: context.lastKnownContextWindowSource,
+      incomingWindow: usage.maxTokens,
+      incomingSource: "context_usage_api",
+    });
+    context.lastKnownContextWindow = resolvedWindow.window;
+    context.lastKnownContextWindowSource = resolvedWindow.source;
+    return normalizeClaudeContextUsageApiSnapshot(
+      usage,
+      totalProcessedTokens,
+      resolvedWindow.window,
+    );
   });
 
   const emitProposedPlanCompleted = Effect.fn("emitProposedPlanCompleted")(function* (
@@ -791,10 +810,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     if (resultContextWindow !== undefined) {
-      context.lastKnownContextWindow = resultContextWindow;
+      const resolved = resolveAuthoritativeContextWindow({
+        currentWindow: context.lastKnownContextWindow,
+        currentSource: context.lastKnownContextWindowSource,
+        incomingWindow: resultContextWindow,
+        incomingSource: "model_usage_result",
+      });
+      context.lastKnownContextWindow = resolved.window;
+      context.lastKnownContextWindowSource = resolved.source;
     }
 
-    const maxTokens = resultContextWindow ?? context.lastKnownContextWindow;
+    const maxTokens = context.lastKnownContextWindow ?? resultContextWindow;
     const accumulatedTotalProcessedTokens = claudeTotalProcessedTokens(result?.usage);
     if (accumulatedTotalProcessedTokens !== undefined) {
       context.lastKnownTotalProcessedTokens = accumulatedTotalProcessedTokens;
@@ -1765,7 +1791,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     switch (message.subtype) {
-      case "init":
+      case "init": {
+        const initMsg = message as unknown as Record<string, unknown>;
+        const tools = Array.isArray(initMsg.tools) ? initMsg.tools : [];
+        const skills = Array.isArray(initMsg.skills) ? initMsg.skills : [];
+        const slashCommands = Array.isArray(initMsg.slash_commands) ? initMsg.slash_commands : [];
+        const agents = Array.isArray(initMsg.agents) ? initMsg.agents : [];
+        const mcpRaw = Array.isArray(initMsg.mcp_servers) ? initMsg.mcp_servers : [];
+        const mcpNames = mcpRaw
+          .map((item) =>
+            typeof item === "string"
+              ? item
+              : item && typeof item === "object" && "name" in item && typeof item.name === "string"
+                ? item.name
+                : "",
+          )
+          .filter((name) => name.length > 0);
+        writeClaudePromptMetricRecord(serverConfig.logsDir, {
+          ts: stamp.createdAt,
+          event: "session_init_meta",
+          threadId: context.session.threadId,
+          sessionId: context.resumeSessionId ?? "",
+          cwd: context.session.cwd ?? "",
+          model: context.currentApiModelId ?? context.session.model ?? "",
+          isExecution: context.firstPromptTelemetryPending?.isExecution ?? false,
+          toolsCount: tools.length,
+          skillsCount: skills.length,
+          slashCommandsCount: slashCommands.length,
+          agentsCount: agents.length,
+          mcpServersCount: mcpNames.length,
+          mcpServerNames: mcpNames,
+        });
         yield* offerRuntimeEvent({
           ...base,
           type: "session.configured",
@@ -1774,6 +1830,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
+      }
       case "status":
         yield* offerRuntimeEvent({
           ...base,
@@ -2976,6 +3033,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           "full-access": "bypassPermissions",
         };
         const permissionMode = runtimeModeToPermission[input.runtimeMode];
+        const allServerSettings = Option.isSome(settingsService)
+          ? yield* settingsService.value.getSettings.pipe(Effect.orElseSucceed(() => undefined))
+          : undefined;
+        const threadCompactDisabled =
+          allServerSettings?.threadProactiveCompactDisabled?.[threadId] === true;
+        const autoCompactSdk = resolveClaudeAutoCompactSdkSettings({
+          proactiveCompactEnabled: claudeSettings.proactiveCompactEnabled,
+          proactiveCompactThresholdTokens: claudeSettings.proactiveCompactThresholdTokens,
+          threadDisabled: threadCompactDisabled,
+        });
         const settings = {
           ...(claudeSettings.promptCacheTtl && claudeSettings.promptCacheTtl !== "inherit"
             ? { promptCacheTtl: claudeSettings.promptCacheTtl }
@@ -2984,6 +3051,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           claudeSettings.subagentPromptCacheTtl !== "inherit"
             ? { subagentPromptCacheTtl: claudeSettings.subagentPromptCacheTtl }
             : {}),
+          ...autoCompactSdk,
           ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
@@ -3023,32 +3091,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ]
             : []),
         ]);
+        const projectAgentsMdInjected = readAgentsMdForClaude(input.cwd, {
+          skipWhenClaudeLoadsNatively: claudeSettings.skipDuplicateAgentsMdInjection !== false,
+        });
+        const systemAppendFull = buildClaudeDeveloperInstructions({
+          conductorWorker,
+          subordinateRoster,
+          projectInstructions: projectAgentsMdInjected,
+          globalInstructions: input.globalSystemInstructions,
+        });
+        const pluginPaths = [...(input.workflowSkillPlugins ?? []), chatSkillPlugin.root];
+        const managedServerNames = Object.keys(managedServers.servers);
+        const programmaticAgents = conductorWorker
+          ? buildClaudeConductorAgents(conductorWorker)
+          : undefined;
         const queryOptions: ClaudeQueryOptions = {
           ...(input.execution
             ? {}
             : { hooks: claudeChatWatchHooks(() => runPromise(watchEnabled(input.threadId))) }),
           ...(nativeSubagentsRestricted ? { disallowedTools } : {}),
-          plugins: [...(input.workflowSkillPlugins ?? []), chatSkillPlugin.root].map((plugin) => ({
+          plugins: pluginPaths.map((plugin) => ({
             type: "local" as const,
             path: plugin,
           })),
-          ...(Object.keys(managedServers.servers).length > 0
-            ? { mcpServers: managedServers.servers }
-            : {}),
+          ...(managedServerNames.length > 0 ? { mcpServers: managedServers.servers } : {}),
           ...(input.cwd ? { cwd: input.cwd } : {}),
           ...(apiModelId ? { model: apiModelId } : {}),
           pathToClaudeCodeExecutable: claudeBinaryPath,
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
-            append: buildClaudeDeveloperInstructions({
-              conductorWorker,
-              subordinateRoster,
-              projectInstructions: readAgentsMdForClaude(input.cwd),
-              globalInstructions: input.globalSystemInstructions,
-            }),
+            append: systemAppendFull,
           },
-          ...(conductorWorker ? { agents: buildClaudeConductorAgents(conductorWorker) } : {}),
+          ...(programmaticAgents ? { agents: programmaticAgents } : {}),
           settingSources: [...CLAUDE_SETTING_SOURCES],
           // `ultracode` is a Claude Code setting, not an API effort level. It is
           // normalized to `xhigh` above and paired with `settings.ultracode`.
@@ -3071,6 +3146,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           // four minutes while another agent works; a value the user set wins.
           env: {
             MCP_TOOL_TIMEOUT: "300000",
+            ...resolveClaudePromptCacheTtlEnv(claudeSettings, claudeEnvironment),
             ...claudeEnvironment,
             ...managedServers.environment,
           },
@@ -3194,6 +3270,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           watchStopRequested: false,
           turnState: undefined,
           lastKnownContextWindow: initialContextWindow,
+          lastKnownContextWindowSource: initialContextWindow !== undefined ? "catalog" : undefined,
           lastKnownTokenUsage: undefined,
           lastKnownTotalProcessedTokens: undefined,
           modelUsageLedger:
@@ -3209,6 +3286,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           lastAssistantUuid: resumeState?.resumeSessionAt,
           lastThreadStartedId: undefined,
           stopped: false,
+          firstPromptTelemetryPending: {
+            systemAppendFull,
+            projectAgentsMdInjected,
+            subordinateRoster,
+            globalSystemInstructions: input.globalSystemInstructions,
+            conductorEnabled: conductorWorker !== undefined,
+            pluginCount: pluginPaths.length,
+            mcpServerNames: managedServerNames,
+            programmaticAgentCount: programmaticAgents ? Object.keys(programmaticAgents).length : 0,
+            isResume: existingResumeSessionId !== undefined,
+            isExecution: input.execution !== undefined,
+          },
         };
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
@@ -3415,6 +3504,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
+        const switchedCatalogWindow = selectedClaudeContextWindow(modelSelection);
+        context.lastKnownContextWindow = switchedCatalogWindow;
+        context.lastKnownContextWindowSource =
+          switchedCatalogWindow !== undefined ? "catalog" : undefined;
       }
       context.session = {
         ...context.session,
@@ -3485,6 +3578,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
     });
+    if (context.firstPromptTelemetryPending) {
+      const pending = context.firstPromptTelemetryPending;
+      context.firstPromptTelemetryPending = undefined;
+      const breakdown = computeClaudeFirstPromptBreakdown({
+        threadId: context.session.threadId,
+        sessionId: context.resumeSessionId ?? "",
+        cwd: context.session.cwd,
+        model: context.currentApiModelId ?? context.session.model ?? "",
+        isResume: pending.isResume,
+        isExecution: pending.isExecution,
+        systemAppendFull: pending.systemAppendFull,
+        projectAgentsMdInjected: pending.projectAgentsMdInjected,
+        subordinateRoster: pending.subordinateRoster,
+        globalSystemInstructions: pending.globalSystemInstructions,
+        conductorEnabled: pending.conductorEnabled,
+        firstTurnPromptText: sendInput.input ?? "",
+        pluginCount: pending.pluginCount,
+        mcpServerNames: pending.mcpServerNames,
+        programmaticAgentCount: pending.programmaticAgentCount,
+      });
+      writeClaudePromptMetricRecord(serverConfig.logsDir, breakdown);
+      yield* Effect.void.pipe(
+        Effect.withSpan("ClaudeSession.firstPromptBreakdown", {
+          attributes: flattenBreakdownToSpanAttributes(breakdown),
+        }),
+      );
+    }
     const message: SDKUserMessage = {
       ...preparedMessage,
       uuid: (yield* randomUUIDv4) as NonNullable<SDKUserMessage["uuid"]>,

@@ -536,7 +536,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "대화 캐시 유지 시간",
         description:
-          "inherit: Claude 기본 설정 유지, 5m: 5분, 1h: 1시간. 1시간은 캐시 쓰기 비용이 더 높습니다. 환경 변수·관리자 설정이 우선할 수 있으며 새 세션부터 적용됩니다.",
+          "inherit: Claude 기본 설정 유지(대형 문맥 대화 권장), 5m: 5분, 1h: 1시간. 5~60분 간격 재쓰기가 잦은 대형 문맥에서는 1시간(또는 기본 설정)이 유리하며 새 세션부터 적용됩니다.",
         providerSettingsForm: {
           control: "select",
           options: [
@@ -551,7 +551,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Claude 내부 에이전트 캐시 유지 시간",
         description:
-          "inherit, 5m, 1h 중 선택합니다. Claude가 내부에서 생성한 에이전트에 적용됩니다. 오케스트라의 개별 AI 실행은 위 대화 설정을 사용합니다.",
+          "inherit, 5m(단기 위임 작업 권장), 1h 중 선택합니다. Claude가 내부에서 생성한 에이전트에 적용됩니다. 오케스트라의 개별 AI 실행은 위 대화 설정을 사용합니다.",
         providerSettingsForm: {
           control: "select",
           options: [
@@ -559,6 +559,35 @@ export const ClaudeSettings = makeProviderSettingsSchema(
             { value: "5m", label: "5분" },
             { value: "1h", label: "1시간" },
           ],
+        },
+      }),
+    ),
+    skipDuplicateAgentsMdInjection: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "AGENTS.md 중복 주입 방지",
+        description:
+          "Claude Code 0.3.x가 프로젝트 루트 AGENTS.md를 자체 로드할 때 시스템 프롬프트에 64KB 사본을 중복 주입하지 않습니다(OIBOT 기준 세션당 약 5.1만 토큰 절감). 구버전 CLI에서만 끄세요.",
+      }),
+    ),
+    proactiveCompactEnabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "문맥 사전 압축 활성화",
+        description:
+          "턴 종료 경계에서 입력 토큰이 임계치를 넘으면 핵심 맥락을 기억에 저장한 뒤 문맥을 사전 압축합니다. 턴 도중에는 절대 압축하지 않으며 스레드별로 끌 수 있습니다.",
+      }),
+    ),
+    proactiveCompactThresholdTokens: Schema.Int.check(
+      Schema.isBetween({ minimum: 50_000, maximum: 900_000 }),
+    ).pipe(
+      Schema.withDecodingDefault(Effect.succeed(250_000)),
+      Schema.annotateKey({
+        title: "사전 압축 토큰 임계치",
+        description:
+          "턴 종료 시 실제 입력 토큰이 이 값을 넘으면 사전 압축과 SDK autoCompactWindow가 동작합니다(기본 250,000 토큰, 권장 200,000~300,000).",
+        providerSettingsForm: {
+          placeholder: "250000",
         },
       }),
     ),
@@ -622,6 +651,9 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       "helperScope",
       "promptCacheTtl",
       "subagentPromptCacheTtl",
+      "skipDuplicateAgentsMdInjection",
+      "proactiveCompactEnabled",
+      "proactiveCompactThresholdTokens",
     ],
   },
 );
@@ -1052,6 +1084,10 @@ export const ServerSettings = Schema.Struct({
     Schema.NullOr(ThreadAssistantComputer),
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   threadCreatorModes: Schema.Record(TrimmedNonEmptyString, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /** Wave 3-B2: per-thread opt-out map for proactive context compaction (false/absent = enabled). */
+  threadProactiveCompactDisabled: Schema.Record(ThreadId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   searchModels: Schema.Array(WorkspaceSearchModel).pipe(

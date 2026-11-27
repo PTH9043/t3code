@@ -4,6 +4,7 @@ import { activeWorkRegistry } from "../orchestration/ActiveWorkTracker.ts";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -173,14 +174,16 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
       yield* sql`UPDATE workspace_semantic_index_jobs SET through_rowid=${through}
         WHERE scope_key=${job.scope_key} AND revision=${job.revision}`;
     }
+    // Wave 5-A4: Bound per-page chunk batch to 12 (from 24) and enforce 25s embedding timeout
+    // so single pages don't stall 47-75s or starve interactive chat embeddings.
     const rows = yield* sql<Row>`SELECT rowid AS "rowId",item_id AS "itemId",
       CAST(chunk_index AS TEXT) AS "chunkId",title,content,
       tags_text AS "tagsText",scope,applies_to_folder AS "appliesToFolder",updated_at AS "updatedAt"
       FROM projection_workspace_rag_chunks
       WHERE project_id=${job.project_id} AND rowid>${job.after_rowid} AND rowid<=${through}
-      ORDER BY rowid LIMIT 24`;
+      ORDER BY rowid LIMIT 12`;
     if (rows.length) {
-      const indexed = yield* Effect.tryPromise({
+      const indexedOpt = yield* Effect.tryPromise({
         try: (signal) =>
           runBackgroundModelJob(signal, () =>
             options.vectors.index({
@@ -203,7 +206,11 @@ export const makeSemanticIndexJobs = Effect.fn("makeSemanticIndexJobs")(function
           }
           return new OllamaEmbeddingError({ model: job.model, reason: "request" });
         },
-      });
+      }).pipe(Effect.timeoutOption("25 seconds"));
+      if (Option.isNone(indexedOpt)) {
+        return yield* new OllamaEmbeddingError({ model: job.model, reason: "request" });
+      }
+      const indexed = indexedOpt.value;
       const keys = new Map(indexed.references.map((entry) => [entry.id, entry.key]));
       yield* sql.withTransaction(
         Effect.gen(function* () {

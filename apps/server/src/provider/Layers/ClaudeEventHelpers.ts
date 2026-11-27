@@ -213,12 +213,28 @@ export interface ClaudeSessionContext {
   readonly liveTaskIds: Set<string>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
+  lastKnownContextWindowSource?: "catalog" | "context_usage_api" | "model_usage_result" | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   /** Running modelUsage totals of this query process; see claudeTokenConsumption. */
   readonly modelUsageLedger: ClaudeModelUsageLedger;
   /** True when this query process was started via `--resume`. */
   readonly startedFromResume: boolean;
+  /** Wave 1-A1: pending first-prompt sizing metadata (body is never persisted). */
+  firstPromptTelemetryPending?:
+    | {
+        readonly isResume: boolean;
+        readonly isExecution: boolean;
+        readonly systemAppendFull: string;
+        readonly projectAgentsMdInjected: string | undefined;
+        readonly subordinateRoster: string | undefined;
+        readonly globalSystemInstructions: string | undefined;
+        readonly conductorEnabled: boolean;
+        readonly pluginCount: number;
+        readonly mcpServerNames: ReadonlyArray<string>;
+        readonly programmaticAgentCount: number;
+      }
+    | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
   stopped: boolean;

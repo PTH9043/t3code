@@ -129,26 +129,55 @@ const make = Effect.gen(function* () {
       return result.success;
     },
   });
+  // Wave 5-A4: Short 5s TTL cache for `indexingEnabled` so SemanticIndexJobs's
+  // 1,400+ page polls don't serialize behind `ServerSettingsService` lock waits (was up to 51s).
+  let cachedIndexingSettings: {
+    readonly fetchedAtMs: number;
+    readonly semanticEnabled: boolean;
+    readonly mode: "embedding" | "rerank";
+    readonly normalizedEndpoint: string | null;
+    readonly model: string;
+  } | null = null;
+  const INDEXING_SETTINGS_CACHE_TTL_MS = 5_000;
+
   const indexJobs =
     Option.isSome(config) && Option.isSome(settings) && Option.isSome(http)
       ? yield* makeSemanticIndexJobs({
           stateDir: config.value.stateDir,
           vectors: semanticSearch,
           enabled: Effect.fn("ProjectionWorkspaceRag.indexingEnabled")(function* (job) {
-            const current = yield* settings.value.getSettings.pipe(
-              Effect.orElseSucceed(() => null),
-            );
-            if (current?.aiSearch.semanticEnabled !== true) return false;
-            const target = resolveSemanticTarget(current.aiSearch);
-            if (target.mode !== "embedding") return false;
-            try {
-              return (
-                normalizeSemanticEndpoint(target.endpoint) === job.endpoint &&
-                target.model === job.model
+            const nowMs = clock.currentTimeMillisUnsafe();
+            if (
+              cachedIndexingSettings === null ||
+              nowMs - cachedIndexingSettings.fetchedAtMs >= INDEXING_SETTINGS_CACHE_TTL_MS
+            ) {
+              const current = yield* settings.value.getSettings.pipe(
+                Effect.orElseSucceed(() => null),
               );
-            } catch {
-              return false;
+              const semanticEnabled = current?.aiSearch.semanticEnabled === true;
+              const target = current ? resolveSemanticTarget(current.aiSearch) : null;
+              let normalizedEndpoint: string | null = null;
+              if (target) {
+                try {
+                  normalizedEndpoint = normalizeSemanticEndpoint(target.endpoint);
+                } catch {
+                  normalizedEndpoint = null;
+                }
+              }
+              cachedIndexingSettings = {
+                fetchedAtMs: nowMs,
+                semanticEnabled,
+                mode: target?.mode ?? "embedding",
+                normalizedEndpoint,
+                model: target?.model ?? "",
+              };
             }
+            if (!cachedIndexingSettings.semanticEnabled) return false;
+            if (cachedIndexingSettings.mode !== "embedding") return false;
+            return (
+              cachedIndexingSettings.normalizedEndpoint === job.endpoint &&
+              cachedIndexingSettings.model === job.model
+            );
           }),
         })
       : undefined;

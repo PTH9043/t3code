@@ -17,13 +17,24 @@ import type { TraceRecord } from "@t3tools/shared/observability";
 export const ROUTINE_SPAN_MAX_DURATION_MS = 50;
 
 /**
+ * Low-volume diagnostic spans that carry high-value telemetry (RAG routing hit-rate,
+ * prompt breakdown) and must persist even when faster than {@link ROUTINE_SPAN_MAX_DURATION_MS}.
+ */
+export const ALWAYS_PERSIST_SPAN_NAMES: ReadonlySet<string> = new Set([
+  "WorkspaceRoutingGraph.queryMoc",
+  "WorkspaceRoutingGraph.promptInject",
+  "ClaudeSession.firstPromptBreakdown",
+]);
+
+/**
  * True when the span belongs in the local trace file: anything that failed or
- * was interrupted, logged an event, took at least
+ * was interrupted, logged an event, is an always-persisted telemetry span, took at least
  * {@link ROUTINE_SPAN_MAX_DURATION_MS}, or did not come from this process.
  */
 export function shouldPersistTraceRecord(record: TraceRecord): boolean {
   if (record.type !== "effect-span") return true;
   if (record.exit._tag !== "Success") return true;
   if (record.events.length > 0) return true;
+  if (ALWAYS_PERSIST_SPAN_NAMES.has(record.name)) return true;
   return !(record.durationMs < ROUTINE_SPAN_MAX_DURATION_MS);
 }

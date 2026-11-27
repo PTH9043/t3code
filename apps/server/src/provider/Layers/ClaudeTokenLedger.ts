@@ -22,6 +22,74 @@ export function isSyntheticClaudeThreadId(value: string): boolean {
   return value.startsWith("claude-thread-");
 }
 
+export type ClaudeContextWindowSource = "catalog" | "context_usage_api" | "model_usage_result";
+
+const CONTEXT_WINDOW_SOURCE_PRIORITY: Record<ClaudeContextWindowSource, number> = {
+  catalog: 1,
+  context_usage_api: 2,
+  model_usage_result: 3,
+};
+
+/**
+ * Wave 2-B4: Resolves authoritative context window with strict source precedence:
+ * `model_usage_result` (API response) > `context_usage_api` > `catalog` (local guess).
+ * Lower-precedence sources can never downgrade an already-confirmed window (e.g. 1M -> 200k).
+ */
+export function resolveAuthoritativeContextWindow(input: {
+  readonly currentWindow: number | undefined;
+  readonly currentSource: ClaudeContextWindowSource | undefined;
+  readonly incomingWindow: number | undefined;
+  readonly incomingSource: ClaudeContextWindowSource;
+}): {
+  readonly window: number | undefined;
+  readonly source: ClaudeContextWindowSource | undefined;
+} {
+  const incoming = finitePositiveInteger(input.incomingWindow);
+  if (incoming === undefined) {
+    return { window: input.currentWindow, source: input.currentSource };
+  }
+  const current = finitePositiveInteger(input.currentWindow);
+  if (current === undefined || input.currentSource === undefined) {
+    return { window: incoming, source: input.incomingSource };
+  }
+  const currentRank = CONTEXT_WINDOW_SOURCE_PRIORITY[input.currentSource];
+  const incomingRank = CONTEXT_WINDOW_SOURCE_PRIORITY[input.incomingSource];
+  if (incomingRank < currentRank) {
+    return { window: current, source: input.currentSource };
+  }
+  return { window: incoming, source: input.incomingSource };
+}
+
+/**
+ * Wave 2-B3: Builds official Claude Agent SDK prompt cache TTL environment variables
+ * (`CLAUDE_CODE_PROMPT_CACHE_TTL`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`) from
+ * server settings without overriding explicit user environment variables.
+ */
+export function resolveClaudePromptCacheTtlEnv(
+  settings: {
+    readonly promptCacheTtl?: "inherit" | "5m" | "1h" | undefined;
+    readonly subagentPromptCacheTtl?: "inherit" | "5m" | "1h" | undefined;
+  },
+  baseEnv: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (
+    settings.promptCacheTtl &&
+    settings.promptCacheTtl !== "inherit" &&
+    !baseEnv.CLAUDE_CODE_PROMPT_CACHE_TTL
+  ) {
+    env.CLAUDE_CODE_PROMPT_CACHE_TTL = settings.promptCacheTtl;
+  }
+  if (
+    settings.subagentPromptCacheTtl &&
+    settings.subagentPromptCacheTtl !== "inherit" &&
+    !baseEnv.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL
+  ) {
+    env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL = settings.subagentPromptCacheTtl;
+  }
+  return env;
+}
+
 export function maxClaudeContextWindowFromModelUsage(
   modelUsage: Record<string, ModelUsage> | undefined,
 ): number | undefined {
@@ -119,11 +187,14 @@ export function makeClaudeTokenUsageSnapshot(input: {
     return undefined;
   }
 
-  const maxTokens = finitePositiveInteger(input.contextWindow);
-  const usedTokens = maxTokens !== undefined ? Math.min(activeTokens, maxTokens) : activeTokens;
-  const lastUsedTokens =
-    finiteNonNegativeInteger(input.lastUsedTokens) ??
-    (maxTokens !== undefined ? Math.min(activeTokens, maxTokens) : activeTokens);
+  const rawMaxTokens = finitePositiveInteger(input.contextWindow);
+  // Wave 2-B4: Never clamp real token usage down to a stale/lower maxTokens guess (e.g. 262k -> 200k).
+  // If observed activeTokens already exceeds rawMaxTokens, omit the stale maxTokens bound
+  // rather than showing a false 100% / 200k ceiling.
+  const usedTokens = activeTokens;
+  const lastUsedTokens = finiteNonNegativeInteger(input.lastUsedTokens) ?? activeTokens;
+  const maxTokens =
+    rawMaxTokens !== undefined && activeTokens > rawMaxTokens ? undefined : rawMaxTokens;
   const totalProcessedTokens = finiteNonNegativeInteger(input.totalProcessedTokens);
   const inputTokens = finiteNonNegativeInteger(input.inputTokens);
   const outputTokens = finiteNonNegativeInteger(input.outputTokens);
@@ -173,10 +244,15 @@ export function normalizeClaudeActiveTokenUsage(
 export function normalizeClaudeContextUsageApiSnapshot(
   value: SDKControlGetContextUsageResponse,
   totalProcessedTokens?: number,
+  authoritativeContextWindow?: number,
 ): ThreadTokenUsageSnapshot | undefined {
+  const effectiveWindow =
+    authoritativeContextWindow !== undefined && authoritativeContextWindow > value.maxTokens
+      ? authoritativeContextWindow
+      : value.maxTokens;
   return makeClaudeTokenUsageSnapshot({
     activeTokens: value.totalTokens,
-    contextWindow: value.maxTokens,
+    contextWindow: effectiveWindow,
     ...(totalProcessedTokens !== undefined ? { totalProcessedTokens } : {}),
     compactsAutomatically: value.isAutoCompactEnabled,
   });

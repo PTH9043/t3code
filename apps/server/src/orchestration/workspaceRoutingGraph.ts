@@ -2,6 +2,13 @@
 import * as Effect from "effect/Effect";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { applyMonorepoPathAliases } from "./contextAssemblyGate.ts";
+import {
+  buildKoreanBigramFtsMatchExpr,
+  buildKoreanBigramIndexFields,
+  expandKoreanTermVariants,
+  hasStrippableKoreanParticle,
+  normalizeKoreanKeywordToken,
+} from "./koreanTextNormalization.ts";
 import { compressRagText } from "./ragContextCompression.ts";
 
 export const ROUTING_NODE_KIND = {
@@ -65,12 +72,38 @@ export interface RoutingNodeRecord {
   readonly updatedAtMs: number;
 }
 
+export interface RoutingMocChannelSeeds {
+  readonly totalDocs: number;
+  readonly fileSeeds: number;
+  readonly symbolSeeds: number;
+  readonly keywordSeeds: number;
+  readonly ftsSeeds: number;
+}
+
 export interface RoutingMocResult {
   readonly renderedMoc: string;
   readonly primaryNode: RoutingNodeRecord | null;
   readonly pointerNodes: ReadonlyArray<RoutingNodeRecord>;
   readonly seedCount: number;
   readonly elapsedMs: number;
+  readonly channelSeeds?: RoutingMocChannelSeeds;
+}
+
+export function routingNodeKindLabel(nodeKind: number | null | undefined): string {
+  switch (nodeKind) {
+    case ROUTING_NODE_KIND.PHRASE:
+      return "phrase";
+    case ROUTING_NODE_KIND.SYMBOL:
+      return "symbol";
+    case ROUTING_NODE_KIND.FILE:
+      return "file";
+    case ROUTING_NODE_KIND.MASTER_REPORT:
+      return "master_report";
+    case ROUTING_NODE_KIND.MEMORY_FACT:
+      return "memory_fact";
+    default:
+      return "none";
+  }
 }
 
 const FILE_PATH_EXTRACT_PATTERN =
@@ -136,22 +169,28 @@ export function extractKeywordPhrases(
   explicitKeywords?: ReadonlyArray<string>,
 ): string[] {
   const found = new Set<string>();
-  for (const kw of explicitKeywords ?? []) {
-    const norm = kw.trim().toLowerCase();
-    if (norm.length >= 2 && norm.length <= 48 && !KEYWORD_STOPWORDS.has(norm)) {
-      found.add(norm);
+  const addNormalized = (raw: string) => {
+    const trimmed = raw.trim().toLowerCase();
+    if (trimmed.length < 2 || trimmed.length > 48) return;
+    const norm = normalizeKoreanKeywordToken(trimmed);
+    const chosen = norm.length >= 2 ? norm : trimmed;
+    if (!KEYWORD_STOPWORDS.has(chosen)) {
+      found.add(chosen);
     }
+  };
+  for (const kw of explicitKeywords ?? []) {
+    addNormalized(kw);
   }
   for (const match of text.matchAll(WIKI_LINK_PATTERN)) {
-    const norm = match[1]!.trim().toLowerCase();
-    if (norm.length >= 2 && norm.length <= 48) found.add(norm);
+    addNormalized(match[1]!);
   }
-  // Extract salient Hangul/ASCII terms from title + opening summary
+  // Extract salient Hangul/ASCII terms from title + opening summary, normalized
+  // so particle variants ("토큰을"/"토큰은"/"토큰의") unify onto one canonical `kw:*` hub.
   const source = `${title} ${text.slice(0, 600)}`;
   const tokens = source
     .replace(/[^\p{L}\p{N}_-]+/gu, " ")
     .split(/\s+/)
-    .map((t) => t.trim().toLowerCase())
+    .map((t) => normalizeKoreanKeywordToken(t.trim().toLowerCase()))
     .filter(
       (t) => t.length >= 2 && t.length <= 36 && !/^\d+$/.test(t) && !KEYWORD_STOPWORDS.has(t),
     );
@@ -200,7 +239,19 @@ function tokenizeQueryTerms(query: string): string[] {
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length >= 2 && t.length <= 64);
-  return [...new Set(raw)].slice(0, 16);
+  // Wave 4-A2: Emit both normalized Korean stem and original form so both
+  // newly normalized `kw:*` hubs and legacy particle-bearing nodes hit cleanly.
+  const expanded: string[] = [];
+  const seen = new Set<string>();
+  for (const term of raw) {
+    for (const variant of expandKoreanTermVariants(term)) {
+      if (variant.length >= 2 && !seen.has(variant)) {
+        seen.add(variant);
+        expanded.push(variant);
+      }
+    }
+  }
+  return expanded.slice(0, 24);
 }
 
 export const upsertRoutingNode = Effect.fn("WorkspaceRoutingGraph.upsertNode")(function* (
@@ -247,7 +298,29 @@ export const upsertRoutingNode = Effect.fn("WorkspaceRoutingGraph.upsertNode")(f
       AND node_kind = ${input.nodeKind}
       AND canonical_key = ${input.canonicalKey}
   `;
-  return row!.node_id;
+  const nodeId = row!.node_id;
+
+  // Wave 4-A2: Keep auxiliary Korean bigram FTS5 index in sync for document nodes
+  // (gracefully ignored on older test DBs that have not applied Migration 118).
+  if (
+    input.nodeKind === ROUTING_NODE_KIND.MASTER_REPORT ||
+    input.nodeKind === ROUTING_NODE_KIND.MEMORY_FACT
+  ) {
+    const ko = buildKoreanBigramIndexFields({
+      title: input.title,
+      summaryMoc,
+      bodyMarkdown,
+    });
+    yield* Effect.gen(function* () {
+      yield* sql`DELETE FROM workspace_routing_fts_ko WHERE rowid = ${nodeId}`;
+      yield* sql`
+        INSERT INTO workspace_routing_fts_ko (rowid, title_ko, body_ko)
+        VALUES (${nodeId}, ${ko.titleKo}, ${ko.bodyKo})
+      `;
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  }
+
+  return nodeId;
 });
 
 export const upsertRoutingEdge = Effect.fn("WorkspaceRoutingGraph.upsertEdge")(function* (
@@ -433,6 +506,19 @@ export const removeRoutingNodeByCanonicalKey = Effect.fn(
     yield* sql`DELETE FROM workspace_routing_edges WHERE project_id = ${input.projectId} AND (src_id = ${row.node_id} OR dst_id = ${row.node_id})`;
     yield* sql`DELETE FROM workspace_routing_edges_rev WHERE project_id = ${input.projectId} AND (src_id = ${row.node_id} OR dst_id = ${row.node_id})`;
     yield* sql`DELETE FROM workspace_routing_nodes WHERE project_id = ${input.projectId} AND node_id = ${row.node_id}`;
+  }
+  if (rows.length > 0) {
+    // Clean up orphaned phrase/file/symbol anchor nodes that no longer connect to any document.
+    yield* sql`
+      DELETE FROM workspace_routing_nodes
+      WHERE project_id = ${input.projectId}
+        AND node_kind IN (${ROUTING_NODE_KIND.PHRASE}, ${ROUTING_NODE_KIND.FILE}, ${ROUTING_NODE_KIND.SYMBOL})
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_routing_edges e
+          WHERE e.project_id = ${input.projectId}
+            AND (e.src_id = workspace_routing_nodes.node_id OR e.dst_id = workspace_routing_nodes.node_id)
+        )
+    `;
   }
   return rows.length;
 });
@@ -643,14 +729,57 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
     SELECT COUNT(*) AS cnt FROM workspace_routing_nodes WHERE project_id = ${input.projectId}
   `;
   const totalDocs = countRow?.cnt ?? 0;
+
+  let fileSeeds = 0;
+  let symbolSeeds = 0;
+  let keywordSeeds = 0;
+  let ftsSeeds = 0;
+
+  const finalize = (payload: {
+    readonly renderedMoc: string;
+    readonly primaryNode: RoutingNodeRecord | null;
+    readonly pointerNodes: ReadonlyArray<RoutingNodeRecord>;
+    readonly seedCount: number;
+  }) => {
+    const elapsedMs = Date.now() - startedAt;
+    const channelSeeds: RoutingMocChannelSeeds = {
+      totalDocs,
+      fileSeeds,
+      symbolSeeds,
+      keywordSeeds,
+      ftsSeeds,
+    };
+    return Effect.annotateCurrentSpan({
+      "routing.project_id": input.projectId,
+      "routing.total_docs": totalDocs,
+      "routing.seed_file_count": fileSeeds,
+      "routing.seed_symbol_count": symbolSeeds,
+      "routing.seed_keyword_count": keywordSeeds,
+      "routing.seed_fts_count": ftsSeeds,
+      "routing.seed_count": payload.seedCount,
+      "routing.primary_node_kind": routingNodeKindLabel(payload.primaryNode?.nodeKind),
+      "routing.pointer_nodes_count": payload.pointerNodes.length,
+      "routing.rendered_moc_chars": payload.renderedMoc.length,
+      "routing.elapsed_ms": elapsedMs,
+    }).pipe(
+      Effect.as({
+        renderedMoc: payload.renderedMoc,
+        primaryNode: payload.primaryNode,
+        pointerNodes: payload.pointerNodes,
+        seedCount: payload.seedCount,
+        elapsedMs,
+        channelSeeds,
+      } satisfies RoutingMocResult),
+    );
+  };
+
   if (totalDocs === 0) {
-    return {
+    return yield* finalize({
       renderedMoc: "",
       primaryNode: null,
       pointerNodes: [],
       seedCount: 0,
-      elapsedMs: Date.now() - startedAt,
-    } satisfies RoutingMocResult;
+    });
   }
 
   const seedScores = new Map<number, number>();
@@ -663,6 +792,7 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
   const querySymbols = extractReferencedSymbols(input.query);
   const queryTerms = tokenizeQueryTerms(input.query);
 
+  const fileSeedIds = new Set<number>();
   for (const filePath of queryFiles) {
     const rows = yield* sql<{ node_id: number }>`
       SELECT node_id FROM workspace_routing_nodes
@@ -670,9 +800,14 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
         AND (file_path = ${filePath} OR canonical_key = ${`file:${filePath}`})
       LIMIT 8
     `;
-    for (const r of rows) addSeed(r.node_id, 0.45);
+    for (const r of rows) {
+      addSeed(r.node_id, 0.45);
+      fileSeedIds.add(r.node_id);
+    }
   }
+  fileSeeds = fileSeedIds.size;
 
+  const symbolSeedIds = new Set<number>();
   for (const sym of querySymbols) {
     const rows = yield* sql<{ node_id: number }>`
       SELECT node_id FROM workspace_routing_nodes
@@ -681,12 +816,17 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
         AND canonical_key = ${`sym:${sym}`}
       LIMIT 8
     `;
-    for (const r of rows) addSeed(r.node_id, 0.45);
+    for (const r of rows) {
+      addSeed(r.node_id, 0.45);
+      symbolSeedIds.add(r.node_id);
+    }
   }
+  symbolSeeds = symbolSeedIds.size;
 
   // Channel 1B (lambda=0.25): Direct keyword phrase anchors (`kw:*`) on SQLite B-Tree
   // so non-code Korean/English RAG documents immediately route through 2-Hop keyword edges.
-  for (const term of queryTerms.slice(0, 8)) {
+  const keywordSeedIds = new Set<number>();
+  for (const term of queryTerms.slice(0, 12)) {
     const rows = yield* sql<{ node_id: number }>`
       SELECT node_id FROM workspace_routing_nodes
       WHERE project_id = ${input.projectId}
@@ -694,10 +834,14 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
         AND canonical_key = ${`kw:${term}`}
       LIMIT 4
     `;
-    for (const r of rows) addSeed(r.node_id, 0.25);
+    for (const r of rows) {
+      addSeed(r.node_id, 0.25);
+      keywordSeedIds.add(r.node_id);
+    }
   }
+  keywordSeeds = keywordSeedIds.size;
 
-  // Channel 2 (lambda=0.30): Rare-term BM25 via O(1) `fts5vocab` document frequency filtering.
+  // Channel 2 (lambda=0.30): Rare-term BM25 via O(1) `fts5vocab` + Wave 4-A2 Korean Bigram FTS5.
   const weightedTerms: Array<{ term: string; specificity: number }> = [];
   for (const term of queryTerms) {
     const [vocab] = yield* sql<{ doc: number }>`
@@ -712,6 +856,7 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
   weightedTerms.sort((a, b) => b.specificity - a.specificity);
 
   const topFtsTerms = weightedTerms.slice(0, 6);
+  const ftsSeedIds = new Set<number>();
   if (topFtsTerms.length > 0) {
     const matchExpr = topFtsTerms.map((t) => `"${t.term.replaceAll('"', "")}"`).join(" OR ");
     const ftsRows = yield* sql<{ node_id: number; rank: number }>`
@@ -728,17 +873,40 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
       const r = ftsRows[i]!;
       const normScore = 0.3 / (1 + i * 0.25);
       addSeed(r.node_id, normScore);
+      ftsSeedIds.add(r.node_id);
     }
   }
 
+  // Channel 2B (Wave 4-A2): Auxiliary Korean bigram FTS5 (`workspace_routing_fts_ko`)
+  // catches 2-char Korean nouns ("토큰", "캐시", "백업") and particle-inflected text.
+  const koMatchExpr = buildKoreanBigramFtsMatchExpr(queryTerms);
+  if (koMatchExpr) {
+    const koRows = yield* sql<{ node_id: number; rank: number }>`
+      SELECT n.node_id, bm25(workspace_routing_fts_ko) AS rank
+      FROM workspace_routing_fts_ko f
+      JOIN workspace_routing_nodes n ON n.node_id = f.rowid
+      WHERE f.workspace_routing_fts_ko MATCH ${koMatchExpr}
+        AND n.project_id = ${input.projectId}
+      ORDER BY rank ASC
+      LIMIT 24
+    `.pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<{ node_id: number; rank: number }>));
+
+    for (let i = 0; i < koRows.length; i += 1) {
+      const r = koRows[i]!;
+      const normScore = 0.28 / (1 + i * 0.25);
+      addSeed(r.node_id, normScore);
+      ftsSeedIds.add(r.node_id);
+    }
+  }
+  ftsSeeds = ftsSeedIds.size;
+
   if (seedScores.size === 0) {
-    return {
+    return yield* finalize({
       renderedMoc: "",
       primaryNode: null,
       pointerNodes: [],
       seedCount: 0,
-      elapsedMs: Date.now() - startedAt,
-    } satisfies RoutingMocResult;
+    });
   }
 
   // 2-Hop Truncated Push PPR (alpha = 0.50, beam B = 48, degree cap = 64).
@@ -820,13 +988,12 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
 
   candidates.sort((a, b) => b.score - a.score);
   if (candidates.length === 0) {
-    return {
+    return yield* finalize({
       renderedMoc: "",
       primaryNode: null,
       pointerNodes: [],
       seedCount: seedScores.size,
-      elapsedMs: Date.now() - startedAt,
-    } satisfies RoutingMocResult;
+    });
   }
 
   // MMR-style deduplication by title/file diversity.
@@ -872,13 +1039,12 @@ export const queryRoutingGraphMoc = Effect.fn("WorkspaceRoutingGraph.queryMoc")(
     ? aliased.text.replace("<t3_routing_moc>", `<t3_routing_moc>\n${aliased.header}`)
     : aliased.text;
 
-  return {
+  return yield* finalize({
     renderedMoc,
     primaryNode,
     pointerNodes,
     seedCount: seedScores.size,
-    elapsedMs: Date.now() - startedAt,
-  } satisfies RoutingMocResult;
+  });
 });
 
 /** Batch-read up to 5 routing graph nodes by `nodeId` in a single query. */
@@ -912,4 +1078,187 @@ export const readRoutingNodesBatch = Effect.fn("WorkspaceRoutingGraph.readBatch"
     if (row) out.push(mapRow(row));
   }
   return out;
+});
+
+/**
+ * Wave 4-A2: Merges legacy particle-bearing `kw:*` nodes (e.g. `kw:토큰을`, `kw:토큰은`)
+ * into their normalized canonical hub (`kw:토큰`), migrating all forward & reverse edges
+ * losslessly in bounded batches.
+ */
+export const mergeKoreanParticleKeywordNodes = Effect.fn(
+  "WorkspaceRoutingGraph.mergeKoreanKeywords",
+)(function* (
+  sql: SqlClient.SqlClient,
+  input: { readonly projectId: string; readonly maxBatch?: number | undefined },
+) {
+  const maxBatch = input.maxBatch ?? 200;
+  const kwRows = yield* sql<{ node_id: number; canonical_key: string; title: string }>`
+    SELECT node_id, canonical_key, title
+    FROM workspace_routing_nodes
+    WHERE project_id = ${input.projectId}
+      AND node_kind = ${ROUTING_NODE_KIND.PHRASE}
+      AND canonical_key LIKE 'kw:%'
+    LIMIT ${maxBatch * 4}
+  `;
+
+  let mergedNodes = 0;
+  let migratedEdges = 0;
+
+  for (const row of kwRows) {
+    if (mergedNodes >= maxBatch) break;
+    const rawKw = row.canonical_key.slice(3);
+    if (!hasStrippableKoreanParticle(rawKw)) continue;
+    const normKw = normalizeKoreanKeywordToken(rawKw);
+    if (!normKw || normKw === rawKw || normKw.length < 2) continue;
+
+    const targetNodeId = yield* upsertRoutingNode(sql, {
+      projectId: input.projectId,
+      nodeKind: ROUTING_NODE_KIND.PHRASE,
+      canonicalKey: `kw:${normKw}`,
+      title: normKw,
+      summaryMoc: `Keyword ${normKw}`,
+      epistemicState: "fact",
+    });
+    if (targetNodeId === row.node_id) continue;
+
+    const inEdges = yield* sql<{
+      src_id: number;
+      edge_type: number;
+      weight: number;
+      valid_from_ms: number;
+      valid_to_ms: number | null;
+    }>`
+      SELECT src_id, edge_type, weight, valid_from_ms, valid_to_ms
+      FROM workspace_routing_edges_rev
+      WHERE project_id = ${input.projectId} AND dst_id = ${row.node_id}
+    `;
+    for (const e of inEdges) {
+      yield* upsertRoutingEdge(sql, {
+        projectId: input.projectId,
+        srcId: e.src_id,
+        edgeType: e.edge_type as RoutingEdgeType,
+        dstId: targetNodeId,
+        weight: e.weight,
+        validFromMs: e.valid_from_ms,
+        validToMs: e.valid_to_ms,
+      });
+      migratedEdges += 1;
+    }
+
+    const outEdges = yield* sql<{
+      dst_id: number;
+      edge_type: number;
+      weight: number;
+      valid_from_ms: number;
+      valid_to_ms: number | null;
+    }>`
+      SELECT dst_id, edge_type, weight, valid_from_ms, valid_to_ms
+      FROM workspace_routing_edges
+      WHERE project_id = ${input.projectId} AND src_id = ${row.node_id}
+    `;
+    for (const e of outEdges) {
+      yield* upsertRoutingEdge(sql, {
+        projectId: input.projectId,
+        srcId: targetNodeId,
+        edgeType: e.edge_type as RoutingEdgeType,
+        dstId: e.dst_id,
+        weight: e.weight,
+        validFromMs: e.valid_from_ms,
+        validToMs: e.valid_to_ms,
+      });
+      migratedEdges += 1;
+    }
+
+    yield* sql`DELETE FROM workspace_routing_edges WHERE project_id = ${input.projectId} AND (src_id = ${row.node_id} OR dst_id = ${row.node_id})`;
+    yield* sql`DELETE FROM workspace_routing_edges_rev WHERE project_id = ${input.projectId} AND (src_id = ${row.node_id} OR dst_id = ${row.node_id})`;
+    yield* sql`DELETE FROM workspace_routing_nodes WHERE project_id = ${input.projectId} AND node_id = ${row.node_id}`;
+    mergedNodes += 1;
+  }
+
+  return { mergedNodes, migratedEdges };
+});
+
+/**
+ * Wave 4-A2: Incremental, resumable cursor-based backfill of `workspace_routing_fts_ko`
+ * and legacy `kw:*` normalization (designed to run in small chunks while user is away).
+ */
+export const backfillRoutingKoreanBigramBatch = Effect.fn(
+  "WorkspaceRoutingGraph.backfillKoreanBigramBatch",
+)(function* (
+  sql: SqlClient.SqlClient,
+  input: { readonly projectId: string; readonly batchSize?: number | undefined },
+) {
+  const batchSize = input.batchSize ?? 100;
+  const nowMs = Date.now();
+  const [cursor] = yield* sql<{
+    last_node_id: number;
+    normalized_docs: number;
+    merged_kw_nodes: number;
+  }>`
+    SELECT last_node_id, normalized_docs, merged_kw_nodes
+    FROM workspace_routing_reindex_state
+    WHERE project_id = ${input.projectId}
+  `.pipe(Effect.orElseSucceed(() => []));
+
+  const lastNodeId = cursor?.last_node_id ?? 0;
+  const docs = yield* sql<{
+    node_id: number;
+    title: string;
+    summary_moc: string;
+    body_markdown: string;
+  }>`
+    SELECT node_id, title, summary_moc, body_markdown
+    FROM workspace_routing_nodes
+    WHERE project_id = ${input.projectId}
+      AND node_kind IN (${ROUTING_NODE_KIND.MASTER_REPORT}, ${ROUTING_NODE_KIND.MEMORY_FACT})
+      AND node_id > ${lastNodeId}
+    ORDER BY node_id ASC
+    LIMIT ${batchSize}
+  `;
+
+  let maxSeenId = lastNodeId;
+  for (const doc of docs) {
+    const ko = buildKoreanBigramIndexFields({
+      title: doc.title,
+      summaryMoc: doc.summary_moc,
+      bodyMarkdown: doc.body_markdown,
+    });
+    yield* sql`DELETE FROM workspace_routing_fts_ko WHERE rowid = ${doc.node_id}`;
+    yield* sql`
+      INSERT INTO workspace_routing_fts_ko (rowid, title_ko, body_ko)
+      VALUES (${doc.node_id}, ${ko.titleKo}, ${ko.bodyKo})
+    `;
+    if (doc.node_id > maxSeenId) maxSeenId = doc.node_id;
+  }
+
+  const mergeRes = yield* mergeKoreanParticleKeywordNodes(sql, {
+    projectId: input.projectId,
+    maxBatch: batchSize,
+  });
+
+  const done = docs.length < batchSize && mergeRes.mergedNodes < batchSize;
+  const nextDocs = (cursor?.normalized_docs ?? 0) + docs.length;
+  const nextMerged = (cursor?.merged_kw_nodes ?? 0) + mergeRes.mergedNodes;
+
+  yield* sql`
+    INSERT INTO workspace_routing_reindex_state (
+      project_id, last_node_id, normalized_docs, merged_kw_nodes, status, updated_at_ms
+    ) VALUES (
+      ${input.projectId}, ${maxSeenId}, ${nextDocs}, ${nextMerged}, ${done ? "completed" : "in_progress"}, ${nowMs}
+    )
+    ON CONFLICT(project_id) DO UPDATE SET
+      last_node_id = excluded.last_node_id,
+      normalized_docs = excluded.normalized_docs,
+      merged_kw_nodes = excluded.merged_kw_nodes,
+      status = excluded.status,
+      updated_at_ms = excluded.updated_at_ms
+  `.pipe(Effect.orElseSucceed(() => undefined));
+
+  return {
+    processedDocs: docs.length,
+    mergedKwNodes: mergeRes.mergedNodes,
+    migratedEdges: mergeRes.migratedEdges,
+    lastNodeId: maxSeenId,
+    done,
+  };
 });

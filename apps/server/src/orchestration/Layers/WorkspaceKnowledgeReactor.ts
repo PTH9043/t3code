@@ -1,6 +1,7 @@
 import type { OrchestrationEvent, ProjectId, WorkspaceKnowledgeItemId } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -27,36 +28,64 @@ import {
 type ReactorInput = {
   readonly projectId: ProjectId;
   readonly itemId?: WorkspaceKnowledgeItemId;
+  readonly itemIds?: ReadonlyArray<WorkspaceKnowledgeItemId>;
+  readonly fullSync?: boolean;
   readonly reason: "startup" | "item-upserted" | "item-archived" | "root-updated" | "turn-settled";
 };
+
+/** Minimum interval between heavy turn-settled reconciles for the same project (10 min). */
+const TURN_SETTLED_RECONCILE_COOLDOWN_MS = 10 * 60 * 1000;
+/** Soft wall-clock deadline per physical file sync batch so background work never hogs the loop. */
+const FILE_SYNC_TIME_BUDGET_MS = 8_000;
 
 export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const fileStore = yield* WorkspaceKnowledgeFileStore;
+  const clock = yield* Clock.Clock;
   const memory = yield* Effect.serviceOption(WorkspaceMemory);
   const config = yield* Effect.serviceOption(ServerConfig);
   const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
   const path = yield* Effect.serviceOption(Path.Path);
   const revisionSql = yield* Effect.serviceOption(SqlClient.SqlClient);
 
+  const lastTurnReconcileMsByProject = new Map<ProjectId, number>();
+  const lastSyncedItemFingerprintByProject = new Map<ProjectId, Map<string, string>>();
+
   const reconcile = Effect.fn("WorkspaceKnowledgeReactor.reconcile")(function* (
     input: ReactorInput,
   ) {
-    // Yield background memory/graph reconciliation while live turns or workers are running.
-    if (input.reason === "turn-settled" || input.reason === "startup") {
-      for (let waitAttempt = 0; waitAttempt < 3; waitAttempt += 1) {
-        if (activeWorkRegistry.snapshot().totalActive === 0) break;
-        yield* Effect.sleep("15 seconds");
-      }
+    const nowMs = clock.currentTimeMillisUnsafe();
+    const isHeavyTrigger = input.reason === "turn-settled" || input.reason === "startup";
+
+    // Wave 5-A4: Never sleep 45s inside span and force-run while live work is active.
+    // Yield immediately (0ms) so live chat turns / workers face zero background contention.
+    if (isHeavyTrigger && activeWorkRegistry.snapshot(nowMs).totalActive > 0) {
+      return;
     }
+
+    // Wave 5-A4: Coalesce rapid `turn-settled` triggers per project (was firing every ~2.6 min).
+    if (input.reason === "turn-settled") {
+      const lastMs = lastTurnReconcileMsByProject.get(input.projectId) ?? 0;
+      if (nowMs - lastMs < TURN_SETTLED_RECONCILE_COOLDOWN_MS) {
+        return;
+      }
+      lastTurnReconcileMsByProject.set(input.projectId, nowMs);
+    }
+
     const project = yield* projectionSnapshotQuery.getProjectShellById(input.projectId);
     if (Option.isNone(project)) return;
-    if (Option.isSome(memory)) yield* memory.value.reconcile(input.projectId);
+
+    // Only run full memory.reconcile (which includes dream crystallization) on heavy triggers,
+    // not on every single knowledge-item upsert/archive.
+    if (Option.isSome(memory) && (isHeavyTrigger || input.reason === "root-updated")) {
+      yield* memory.value.reconcile(input.projectId);
+    }
+
     if (Option.isSome(revisionSql)) {
       yield* syncMissingKnowledgeToRoutingGraph(revisionSql.value, {
         projectId: input.projectId,
-        maxItems: 40,
+        maxItems: 20,
       }).pipe(Effect.ignore);
     }
     const root = project.value.workspaceControl?.longTermMemoryRoot ?? null;
@@ -74,11 +103,33 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
       projectId: input.projectId,
       kinds: ["long-term-memory"],
     });
-    const items = result.items;
-    yield* Effect.forEach(items, (item) => fileStore.syncItem({ root, item }), {
-      concurrency: 1,
-      discard: true,
-    });
+    const targetedIds =
+      !input.fullSync && (input.reason === "item-upserted" || input.reason === "item-archived")
+        ? new Set<string>([...(input.itemId ? [input.itemId] : []), ...(input.itemIds ?? [])])
+        : null;
+    const candidates =
+      targetedIds && targetedIds.size > 0
+        ? result.items.filter((item) => targetedIds.has(item.id))
+        : result.items;
+
+    let fingerprints = lastSyncedItemFingerprintByProject.get(input.projectId);
+    if (!fingerprints || input.reason === "root-updated") {
+      fingerprints = new Map<string, string>();
+      lastSyncedItemFingerprintByProject.set(input.projectId, fingerprints);
+    }
+
+    const deadlineMs = clock.currentTimeMillisUnsafe() + FILE_SYNC_TIME_BUDGET_MS;
+    for (const item of candidates) {
+      const fp = `${item.status}|${item.updatedAt}|${item.title.length}|${item.content.length}`;
+      if (fingerprints.get(item.id) === fp) {
+        continue;
+      }
+      yield* fileStore.syncItem({ root, item });
+      fingerprints.set(item.id, fp);
+      if (clock.currentTimeMillisUnsafe() >= deadlineMs) {
+        break;
+      }
+    }
   });
 
   const reconcileSafely = (input: ReactorInput) =>
@@ -95,7 +146,25 @@ export const makeWorkspaceKnowledgeReactor = Effect.gen(function* () {
     );
 
   const coalescingWorker = yield* makeKeyedCoalescingWorker({
-    merge: (_current: ReactorInput, next: ReactorInput) => next,
+    merge: (current: ReactorInput, next: ReactorInput): ReactorInput => {
+      const mergedIds = new Set<WorkspaceKnowledgeItemId>();
+      if (current.itemId) mergedIds.add(current.itemId);
+      for (const id of current.itemIds ?? []) mergedIds.add(id);
+      if (next.itemId) mergedIds.add(next.itemId);
+      for (const id of next.itemIds ?? []) mergedIds.add(id);
+      const fullSync =
+        current.fullSync === true ||
+        next.fullSync === true ||
+        current.reason === "root-updated" ||
+        next.reason === "root-updated" ||
+        current.reason === "startup" ||
+        next.reason === "startup";
+      return {
+        ...next,
+        ...(mergedIds.size > 0 ? { itemIds: [...mergedIds] } : {}),
+        ...(fullSync ? { fullSync: true } : {}),
+      };
+    },
     process: (_projectId: ProjectId, input: ReactorInput) => reconcileSafely(input),
   });
   const worker = {

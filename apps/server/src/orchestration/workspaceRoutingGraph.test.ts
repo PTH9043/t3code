@@ -3,15 +3,21 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vite-plus/test";
 import Migration0106 from "../persistence/Migrations/106_CcrToolOutputs.ts";
 import Migration0113 from "../persistence/Migrations/113_WorkspaceRoutingGraphAndAdaptiveHandoff.ts";
+import Migration0118 from "../persistence/Migrations/118_WorkspaceRoutingKoreanBigramAndNorm.ts";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import {
   ROUTING_NODE_KIND,
+  backfillRoutingKoreanBigramBatch,
   indexTextArtifactIntoRoutingGraph,
+  mergeKoreanParticleKeywordNodes,
   propagateFileHashStaleness,
   queryRoutingGraphMoc,
   readRoutingNodesBatch,
   removeRoutingNodeByCanonicalKey,
   syncMissingKnowledgeToRoutingGraph,
+  upsertRoutingEdge,
+  upsertRoutingNode,
+  ROUTING_EDGE_TYPE,
 } from "./workspaceRoutingGraph.ts";
 import { runDreamCrystallizationCycle, shouldRunDreamCycle } from "./workspaceDreamCompiler.ts";
 
@@ -219,8 +225,226 @@ describe("Phase 4 — Disk-Resident SQLite WITHOUT ROWID Routing Graph & Dream C
         query: "크라임코인 백테스팅",
       });
       expect(afterMoc.primaryNode).toBeNull();
+      expect(afterMoc.channelSeeds).toBeDefined();
+      expect(afterMoc.channelSeeds?.keywordSeeds).toBe(0);
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory()));
 
     await Effect.runPromise(program);
+  });
+
+  it("Wave 1-A3: records channel seed counts & queryMoc/promptInject span attributes and summarizes via summarize-routing-moc.mjs", async () => {
+    const { execFile } = await import("node:child_process");
+    const NodeFs = await import("node:fs");
+    const NodeOs = await import("node:os");
+    const NodePath = await import("node:path");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+
+    const moc = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* Migration0106;
+        yield* sql`CREATE TABLE IF NOT EXISTS projection_thread_activities (
+          thread_id TEXT, kind TEXT, created_at TEXT
+        )`;
+        yield* sql`CREATE TABLE IF NOT EXISTS projection_workspace_knowledge_items (
+          project_id TEXT, item_id TEXT, title TEXT, content TEXT, status TEXT, updated_at TEXT
+        )`;
+        yield* sql`CREATE TABLE IF NOT EXISTS workspace_memory_v2 (
+          id TEXT, project_id TEXT, topic TEXT, text TEXT, memory_layer TEXT, rationale TEXT,
+          entity_key TEXT, entities_json TEXT, valid_to INTEGER, status TEXT, created_at TEXT
+        )`;
+        yield* Migration0113;
+        const projectId = "proj-a3-obs";
+        yield* indexTextArtifactIntoRoutingGraph(sql, {
+          projectId,
+          canonicalKey: "knowledge:obs-1",
+          nodeKind: ROUTING_NODE_KIND.MEMORY_FACT,
+          title: "토큰 게이지 수정 가이드",
+          summaryMoc: "토큰 게이지 잘림 수정 가이드",
+          bodyMarkdown:
+            "In apps/server/src/provider/Layers/ClaudeTokenLedger.ts, `makeClaudeTokenUsageSnapshot` clamps tokens.",
+          keywords: ["토큰게이지"],
+          bodyRefKind: "knowledge",
+          bodyRefId: "obs-1",
+        });
+        return yield* queryRoutingGraphMoc(sql, {
+          projectId,
+          query:
+            "apps/server/src/provider/Layers/ClaudeTokenLedger.ts `makeClaudeTokenUsageSnapshot` 토큰게이지 확인",
+        });
+      }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    );
+
+    expect(moc.seedCount).toBeGreaterThan(0);
+    expect(moc.channelSeeds?.totalDocs).toBeGreaterThan(0);
+    expect(moc.channelSeeds?.fileSeeds).toBeGreaterThanOrEqual(1);
+    expect(moc.channelSeeds?.symbolSeeds).toBeGreaterThanOrEqual(1);
+    expect(moc.channelSeeds?.keywordSeeds).toBeGreaterThanOrEqual(1);
+
+    // Verify summarize-routing-moc.mjs CLI against synthetic trace records
+    const tmpDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-moc-cli-"));
+    try {
+      const tracePath = NodePath.join(tmpDir, "server.trace.ndjson");
+      const nowNano = "1795765432000000000";
+      const lines = [
+        {
+          type: "effect-span",
+          name: "WorkspaceRoutingGraph.queryMoc",
+          durationMs: 12,
+          endTimeUnixNano: nowNano,
+          attributes: {
+            "routing.total_docs": 100,
+            "routing.seed_file_count": 1,
+            "routing.seed_symbol_count": 1,
+            "routing.seed_keyword_count": 2,
+            "routing.seed_fts_count": 3,
+            "routing.seed_count": 5,
+            "routing.primary_node_kind": "master_report",
+            "routing.pointer_nodes_count": 3,
+            "routing.rendered_moc_chars": 640,
+            "routing.elapsed_ms": 12,
+          },
+        },
+        {
+          type: "effect-span",
+          name: "WorkspaceRoutingGraph.queryMoc",
+          durationMs: 4,
+          endTimeUnixNano: nowNano,
+          attributes: {
+            "routing.total_docs": 100,
+            "routing.seed_file_count": 0,
+            "routing.seed_symbol_count": 0,
+            "routing.seed_keyword_count": 0,
+            "routing.seed_fts_count": 0,
+            "routing.seed_count": 0,
+            "routing.primary_node_kind": "none",
+            "routing.pointer_nodes_count": 0,
+            "routing.rendered_moc_chars": 0,
+            "routing.elapsed_ms": 4,
+          },
+        },
+        {
+          type: "effect-span",
+          name: "WorkspaceRoutingGraph.promptInject",
+          durationMs: 0.2,
+          endTimeUnixNano: nowNano,
+          attributes: {
+            "routing.prompt_injected": true,
+            "routing.prompt_injected_chars": 640,
+          },
+        },
+      ];
+      NodeFs.writeFileSync(
+        tracePath,
+        lines.map((l) => JSON.stringify(l)).join("\n") + "\n",
+        "utf8",
+      );
+      const cliPath = NodePath.resolve(
+        import.meta.dirname,
+        "../../../../scripts/summarize-routing-moc.mjs",
+      );
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [cliPath, "--file", tracePath, "--hours", "24", "--json"],
+        { windowsHide: true },
+      );
+      const parsed = JSON.parse(stdout) as {
+        readonly queryCount: number;
+        readonly zeroSeedCount: number;
+        readonly zeroSeedRatePct: number;
+        readonly channels: { readonly keyword: { readonly hits: number } };
+        readonly promptInjection: {
+          readonly injectedCount: number;
+          readonly avgInjectedChars: number;
+        };
+      };
+      expect(parsed.queryCount).toBe(2);
+      expect(parsed.zeroSeedCount).toBe(1);
+      expect(parsed.zeroSeedRatePct).toBe(50);
+      expect(parsed.channels.keyword.hits).toBe(1);
+      expect(parsed.promptInjection.injectedCount).toBe(1);
+      expect(parsed.promptInjection.avgInjectedChars).toBe(640);
+    } finally {
+      NodeFs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("Wave 4-A2: runs Migration 118, retrieves 2-char Korean nouns via bigram FTS5, merges particle kw:* hubs, and tracks backfill cursor", async () => {
+    const res = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* Migration0106;
+        yield* sql`CREATE TABLE IF NOT EXISTS projection_thread_activities (thread_id TEXT, kind TEXT, created_at TEXT)`;
+        yield* sql`CREATE TABLE IF NOT EXISTS projection_workspace_knowledge_items (project_id TEXT, item_id TEXT, title TEXT, content TEXT, status TEXT, updated_at TEXT)`;
+        yield* sql`CREATE TABLE IF NOT EXISTS workspace_memory_v2 (id TEXT, project_id TEXT, topic TEXT, text TEXT, memory_layer TEXT, rationale TEXT, entity_key TEXT, entities_json TEXT, valid_to INTEGER, status TEXT, created_at TEXT)`;
+        yield* Migration0113;
+        yield* Migration0118;
+
+        const projectId = "proj-a2-ko";
+        // 1. Index a doc with particle-inflected Korean text ("토큰을", "수익률에서는")
+        const indexed = yield* indexTextArtifactIntoRoutingGraph(sql, {
+          projectId,
+          nodeKind: ROUTING_NODE_KIND.MEMORY_FACT,
+          canonicalKey: "knowledge:ko-1",
+          title: "토큰을 절감하고 수익률에서는 복리 확인",
+          summaryMoc: "백업으로 안전하게 보관한다",
+          bodyMarkdown: "토큰 게이지를 수정하고 수익률을 검증했다.",
+          bodyRefKind: "knowledge",
+          bodyRefId: "ko-1",
+        });
+
+        // 2. Query using 2-char stem ("토큰") and different particle ("수익률은") -> hits cleanly!
+        const moc1 = yield* queryRoutingGraphMoc(sql, {
+          projectId,
+          query: "토큰 수익률은",
+        });
+
+        // 3. Seed legacy particle-bearing kw:* node (`kw:캐시를`) and merge into `kw:캐시`
+        const legacyKwId = yield* upsertRoutingNode(sql, {
+          projectId,
+          nodeKind: ROUTING_NODE_KIND.PHRASE,
+          canonicalKey: "kw:캐시를",
+          title: "캐시를",
+          summaryMoc: "Keyword 캐시를",
+        });
+        yield* upsertRoutingEdge(sql, {
+          projectId,
+          srcId: indexed.nodeId,
+          edgeType: ROUTING_EDGE_TYPE.CONTAINS,
+          dstId: legacyKwId,
+          weight: 0.75,
+        });
+        const merged = yield* mergeKoreanParticleKeywordNodes(sql, { projectId, maxBatch: 50 });
+
+        const [remainingLegacy] = yield* sql<{ cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM workspace_routing_nodes
+          WHERE project_id = ${projectId} AND canonical_key = 'kw:캐시를'
+        `;
+        const [canonicalHub] = yield* sql<{ cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM workspace_routing_nodes
+          WHERE project_id = ${projectId} AND canonical_key = 'kw:캐시'
+        `;
+
+        // 4. Incremental cursor backfill completes cleanly
+        const backfill = yield* backfillRoutingKoreanBigramBatch(sql, { projectId, batchSize: 50 });
+
+        return {
+          moc1,
+          merged,
+          remainingLegacy: remainingLegacy?.cnt ?? -1,
+          canonicalHub: canonicalHub?.cnt ?? -1,
+          backfill,
+        };
+      }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    );
+
+    expect(res.moc1.primaryNode?.bodyRefId).toBe("ko-1");
+    expect(res.moc1.seedCount).toBeGreaterThan(0);
+    expect(res.merged.mergedNodes).toBeGreaterThanOrEqual(1);
+    expect(res.remainingLegacy).toBe(0);
+    expect(res.canonicalHub).toBe(1);
+    expect(res.backfill.processedDocs).toBeGreaterThanOrEqual(1);
+    expect(res.backfill.done).toBe(true);
   });
 });

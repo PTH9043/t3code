@@ -59,4 +59,12 @@ describe("readAgentsMdForClaude", () => {
     expect(block).toContain("AGENTS.md is longer than shown here");
     expect(block?.length).toBeLessThan(65_000);
   });
+
+  it("Wave 3-A1: skips duplicate systemPrompt injection when skipWhenClaudeLoadsNatively is enabled", () => {
+    const dir = project({ "AGENTS.md": "규칙 본문 ".repeat(5_000) });
+    expect(readAgentsMdForClaude(dir, { skipWhenClaudeLoadsNatively: true })).toBeUndefined();
+    expect(readAgentsMdForClaude(dir, { skipWhenClaudeLoadsNatively: false })).toContain(
+      "<project_agents_md>",
+    );
+  });
 });

@@ -38,6 +38,14 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { BackgroundAutoCompactorService } from "../BackgroundAutoCompactor.ts";
+import {
+  DEFAULT_PROACTIVE_COMPACT_THRESHOLD_TOKENS,
+  evaluateProactiveCompactionDecision,
+  extractCompactBoundaryTokens,
+  formatCompactionSummaryLine,
+  prepareCompactionMemoryCheckpoint,
+} from "../ProactiveContextCompactor.ts";
+import { WorkspaceMemory } from "../WorkspaceMemory.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { activeWorkRegistry } from "../ActiveWorkTracker.ts";
 import {
@@ -803,16 +811,18 @@ export function runtimeEventToActivities(
       if (event.payload.state !== "compacted") {
         return [];
       }
-
+      const { preTokens, postTokens } = extractCompactBoundaryTokens(event.payload.detail);
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "info",
           kind: "context-compaction",
-          summary: "Context compacted",
+          summary: formatCompactionSummaryLine(preTokens, postTokens),
           payload: {
             state: event.payload.state,
+            ...(preTokens !== undefined ? { preTokens } : {}),
+            ...(postTokens !== undefined ? { postTokens } : {}),
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -936,10 +946,16 @@ const make = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const autoCompactorOpt = yield* Effect.serviceOption(BackgroundAutoCompactorService);
+  const workspaceMemoryOpt = yield* Effect.serviceOption(WorkspaceMemory);
   const lastContextUsageByThreadId = new Map<
     ThreadId,
-    { readonly usedTokens: number; readonly maxTokens: number | undefined }
+    {
+      readonly usedTokens: number;
+      readonly inputTokens: number | undefined;
+      readonly maxTokens: number | undefined;
+    }
   >();
+  const lastProactiveCompactedTurnByThreadId = new Map<ThreadId, TurnId>();
   const lastDriftAuditedTurnCount = new Map<ThreadId, number>();
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -2260,29 +2276,111 @@ const make = Effect.gen(function* () {
             if (Option.isSome(autoCompactorOpt)) {
               const ctxUsage = lastContextUsageByThreadId.get(thread.id);
               const usedTokens = ctxUsage?.usedTokens;
+              const actualInputTokens = ctxUsage?.inputTokens ?? usedTokens;
               const maxTokens = ctxUsage?.maxTokens;
               const estimatedContextRatio =
                 usedTokens !== undefined && maxTokens !== undefined && maxTokens > 0
                   ? usedTokens / maxTokens
                   : 0;
               const turnCount = messages.filter((m) => m.role === "user").length;
+              const recentTurns = messages.slice(-16).map((m) => ({ role: m.role, text: m.text }));
+
+              // Wave 3-B2: Turn-boundary proactive compaction (never mid-turn, actual inputTokens).
+              if (event.provider === "claudeAgent") {
+                const currentSettings = yield* serverSettingsService.getSettings.pipe(
+                  Effect.orElseSucceed(() => undefined),
+                );
+                const claudeCfg = currentSettings?.providers?.claudeAgent;
+                const decision = evaluateProactiveCompactionDecision({
+                  turnId,
+                  turnStatus: normalizedTurnState,
+                  actualInputTokens,
+                  enabled: claudeCfg?.proactiveCompactEnabled !== false,
+                  threadDisabled:
+                    currentSettings?.threadProactiveCompactDisabled?.[thread.id] === true,
+                  thresholdTokens:
+                    claudeCfg?.proactiveCompactThresholdTokens ??
+                    DEFAULT_PROACTIVE_COMPACT_THRESHOLD_TOKENS,
+                  lastCompactedTurnId: lastProactiveCompactedTurnByThreadId.get(thread.id),
+                });
+                if (decision.shouldCompact) {
+                  lastProactiveCompactedTurnByThreadId.set(thread.id, turnId);
+                  const checkpoint = prepareCompactionMemoryCheckpoint({
+                    threadId: thread.id,
+                    turns: recentTurns,
+                    actualInputTokens: decision.actualInputTokens,
+                  });
+                  // 1. Pre-save key decisions/constraints/open tasks into WorkspaceMemory
+                  if (Option.isSome(workspaceMemoryOpt)) {
+                    yield* workspaceMemoryOpt.value
+                      .invoke(
+                        {
+                          projectId: thread.projectId,
+                          action: "remember",
+                          requestId: `compact-${turnId}`,
+                          topic: "proactive-compaction-checkpoint",
+                          text: checkpoint.memoryNote.slice(0, 8_000),
+                        },
+                        { threadId: thread.id },
+                      )
+                      .pipe(Effect.ignore);
+                  }
+                  // 2. Prime BackgroundAutoCompactor snapshot for 0ms clean handoff on next turn
+                  autoCompactorOpt.value.setSnapshot({
+                    threadId: thread.id,
+                    coveredTurnCount: turnCount,
+                    summaryText: checkpoint.summaryText,
+                    computedAtMs: Date.parse(now) || 0,
+                    usedTokens: decision.actualInputTokens,
+                  });
+                  // 3. Reset session cleanly at the completed turn boundary so the next turn
+                  //    starts fresh with the preserved checkpoint (zero mid-turn disruption).
+                  yield* providerService.stopSession({ threadId: thread.id }).pipe(Effect.ignore);
+                  // 4. Emit single-line Korean record in thread timeline (no popups/focus theft)
+                  yield* orchestrationEngine
+                    .dispatch({
+                      type: "thread.activity.append",
+                      commandId: yield* providerCommandId(event, "proactive-context-compacted"),
+                      threadId: thread.id,
+                      activity: {
+                        id: EventId.make(yield* crypto.randomUUIDv4),
+                        tone: "info",
+                        kind: "context-compaction",
+                        summary: formatCompactionSummaryLine(
+                          decision.actualInputTokens,
+                          checkpoint.estimatedPostTokens,
+                        ),
+                        payload: {
+                          state: "compacted",
+                          trigger: "proactive_turn_boundary",
+                          preTokens: decision.actualInputTokens,
+                          postTokens: checkpoint.estimatedPostTokens,
+                          thresholdTokens: decision.thresholdTokens,
+                          savedToMemory: Option.isSome(workspaceMemoryOpt),
+                        },
+                        turnId,
+                        createdAt: now,
+                      },
+                      createdAt: now,
+                    })
+                    .pipe(Effect.ignore);
+                }
+              }
+
               if (
                 autoCompactorOpt.value.shouldPrecompute({
                   threadId: thread.id,
                   turnCount,
                   estimatedContextRatio,
-                  usedTokens,
+                  usedTokens: actualInputTokens,
                 })
               ) {
-                const recentTurns = messages
-                  .slice(-16)
-                  .map((m) => ({ role: m.role, text: m.text }));
                 void autoCompactorOpt.value
                   .schedulePrecompute({
                     threadId: thread.id,
                     turnCount,
                     estimatedContextRatio,
-                    usedTokens,
+                    usedTokens: actualInputTokens,
                     recentTurns,
                   })
                   .catch(() => undefined);
@@ -2379,9 +2477,16 @@ const make = Effect.gen(function* () {
 
       if (event.type === "thread.token-usage.updated" && event.payload.usage) {
         const usedTokens = event.payload.usage.usedTokens;
+        const inputTokens =
+          typeof event.payload.usage.inputTokens === "number" &&
+          Number.isFinite(event.payload.usage.inputTokens) &&
+          event.payload.usage.inputTokens > 0
+            ? event.payload.usage.inputTokens
+            : undefined;
         if (typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens > 0) {
           lastContextUsageByThreadId.set(thread.id, {
             usedTokens,
+            inputTokens,
             maxTokens:
               typeof event.payload.usage.maxTokens === "number" &&
               Number.isFinite(event.payload.usage.maxTokens)
