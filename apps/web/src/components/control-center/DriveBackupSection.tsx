@@ -18,6 +18,7 @@ import {
   CheckCircle2Icon,
   CloudIcon,
   FolderGit2Icon,
+  FolderOpenIcon,
   FolderPlusIcon,
   HardDriveIcon,
   KeyRoundIcon,
@@ -178,7 +179,8 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
 
   const [newRepoName, setNewRepoName] = useState("");
   const [newRepoPath, setNewRepoPath] = useState("");
-  const [newRepoKind, setNewRepoKind] = useState<DriveBackupTargetKind>("repo");
+  const [newRepoKind, setNewRepoKind] = useState<DriveBackupTargetKind>("knowledge");
+  const [newRepoUploadKnowledge, setNewRepoUploadKnowledge] = useState(false);
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DriveBackupDryRunResult | null>(null);
@@ -406,7 +408,14 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
   const handleToggleTarget = async (
     target: DriveBackupTarget,
     patch: Partial<
-      Pick<DriveBackupTarget, "enabled" | "syncFiles" | "syncT3Scope" | "syncDriveToLocalRag">
+      Pick<
+        DriveBackupTarget,
+        | "enabled"
+        | "syncFiles"
+        | "syncT3Scope"
+        | "syncDriveToLocalRag"
+        | "syncLocalToDriveKnowledge"
+      >
     >,
   ) => {
     setBusyAction(`target:${target.id}`);
@@ -423,6 +432,8 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
           syncFiles: patch.syncFiles ?? target.syncFiles,
           syncT3Scope: patch.syncT3Scope ?? target.syncT3Scope,
           syncDriveToLocalRag: patch.syncDriveToLocalRag ?? target.syncDriveToLocalRag,
+          syncLocalToDriveKnowledge:
+            patch.syncLocalToDriveKnowledge ?? Boolean(target.syncLocalToDriveKnowledge),
           excludeGlobs: [...target.excludeGlobs],
         },
       });
@@ -431,6 +442,28 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
         return;
       }
       stateQuery.refresh();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handlePickFolder = async () => {
+    const pickFn = typeof window !== "undefined" ? window.desktopBridge?.pickFolder : undefined;
+    if (!pickFn) return;
+    setBusyAction("pick-folder");
+    try {
+      const picked = await pickFn();
+      if (!picked) return;
+      setNewRepoPath(picked);
+      if (!newRepoName.trim()) {
+        const trimmed = picked.replace(/[\\/]+$/, "");
+        const parts = trimmed.split(/[\\/]/).filter(Boolean);
+        const leaf = parts[parts.length - 1] ?? "";
+        const suggested = /^[a-zA-Z]:$/.test(leaf)
+          ? `${leaf[0]!.toUpperCase()}드라이브 지식`
+          : leaf || "지식 폴더";
+        setNewRepoName(suggested);
+      }
     } finally {
       setBusyAction(null);
     }
@@ -452,6 +485,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
           syncFiles: true,
           syncT3Scope: false,
           syncDriveToLocalRag: false,
+          syncLocalToDriveKnowledge: newRepoUploadKnowledge,
         },
       });
       if (result._tag !== "Success") {
@@ -460,7 +494,8 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
       }
       setNewRepoName("");
       setNewRepoPath("");
-      notifySuccess("백업 대상 추가 완료", `'${name}' 항목이 선택 목록에 추가되었습니다.`);
+      setNewRepoUploadKnowledge(false);
+      notifySuccess("백업·지식 대상 추가 완료", `'${name}' 항목이 목록에 추가되었습니다.`);
       stateQuery.refresh();
     } finally {
       setBusyAction(null);
@@ -693,7 +728,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
               onClick={handleSyncMirror}
             >
               <HardDriveIcon className="size-3.5" />
-              드라이브 지식 폴더 → 로컬 미러 동기화
+              지식 폴더 양방향 동기화 (올리기 · 내려받기)
             </Button>
             {(snapshot?.activeWorkCount ?? 0) > 0 ? (
               <Button
@@ -726,8 +761,12 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                 {mirrorResult.message}
               </div>
               <div className="mt-1 font-mono text-[11px] text-muted-foreground break-all">
-                로컬 미러 경로: {mirrorResult.mirrorLocalDir} (전송{" "}
-                {formatBackupBytes(mirrorResult.totalBytes)})
+                로컬 미러 경로: {mirrorResult.mirrorLocalDir} (내려받기{" "}
+                {formatBackupBytes(mirrorResult.totalBytes)}
+                {mirrorResult.uploadedBytes
+                  ? ` · 업로드 ${formatBackupBytes(mirrorResult.uploadedBytes)}`
+                  : ""}
+                )
               </div>
             </div>
           ) : null}
@@ -1042,23 +1081,6 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
               <Switch checked={autoSyncIdleOnly} onCheckedChange={setAutoSyncIdleOnly} />
             </label>
             <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
-              <span>T3 코어 설정·단축키 백업 (비밀키 자동 마스킹)</span>
-              <Switch checked={includeCoreSettings} onCheckedChange={setIncludeCoreSettings} />
-            </label>
-            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
-              <span>
-                T3 state.sqlite 읽기 전용 스냅샷 포함 (자식 프로세스 VACUUM INTO · 주간 기본)
-              </span>
-              <Switch
-                checked={includeCoreSqliteSnapshot}
-                onCheckedChange={setIncludeCoreSqliteSnapshot}
-              />
-            </label>
-            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
-              <span>월별 이벤트 아카이브(archives/events-*.sqlite) 신규분만 포함</span>
-              <Switch checked={includeEventArchives} onCheckedChange={setIncludeEventArchives} />
-            </label>
-            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
               <span>무방해 자동 백업 일정 (기본 OFF · dry-run/수동 1회/복원 검증 후 활성화)</span>
               <Switch checked={autoScheduleEnabled} onCheckedChange={setAutoScheduleEnabled} />
             </label>
@@ -1139,17 +1161,19 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
         </div>
       </SectionCard>
 
-      {/* 3. 선택형 프로젝트 & 저장소 체크리스트 */}
+      {/* 3. 선택형 프로젝트 · 통합 T3 데이터 · 다른 드라이브 지식 폴더 */}
       <SectionCard
         icon={FolderGit2Icon}
         scopeLabel="Opt-In 선택 목록"
-        title="백업할 T3 프로젝트 폴더 · Git 저장소 선택"
-        description="기본값은 모두 OFF입니다. 백업을 켠(ON) 항목만 패킹·암호화되어 업로드되며, 비선택 항목은 드라이브로 0바이트도 전송되지 않습니다."
+        title="백업 · 지식 업로드 대상 선택"
+        description="T3 전체 데이터(장기기억·첨부파일·RAG·아카이브·DB·설정)는 하나의 스위치로 묶여 있습니다. 아래에서 C:/D:/E:/F: 등 다른 드라이브의 지식 폴더도 바로 찾아 올릴 수 있습니다."
       >
         <div className="grid gap-4">
           <div className="grid gap-2">
             {(snapshot?.targets ?? []).map((target) => {
               const isCurrentProject = project ? target.projectId === project.id : false;
+              const isUnifiedUserdata = target.kind === "userdata";
+              const canDelete = target.kind === "repo" || target.kind === "knowledge";
               return (
                 <div
                   key={target.id}
@@ -1161,15 +1185,22 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-sm font-semibold">{target.displayName}</span>
-                        <Badge variant="outline" size="sm">
+                        <Badge variant={isUnifiedUserdata ? "info" : "outline"} size="sm">
                           {target.kind === "project"
                             ? "T3 프로젝트"
                             : target.kind === "core"
                               ? "T3 본체"
                               : target.kind === "userdata"
-                                ? "T3 userdata"
-                                : "추가 저장소"}
+                                ? "T3 전체 데이터"
+                                : target.kind === "knowledge"
+                                  ? "지식 폴더"
+                                  : "추가 저장소"}
                         </Badge>
+                        {target.syncLocalToDriveKnowledge ? (
+                          <Badge variant="success" size="sm">
+                            T3-Knowledge 원본 업로드
+                          </Badge>
+                        ) : null}
                         {isCurrentProject ? (
                           <Badge variant="info" size="sm">
                             현재 프로젝트
@@ -1189,9 +1220,19 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                       <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
                         {target.rootPath}
                       </p>
+                      {isUnifiedUserdata ? (
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          포함: 장기기억(memory-v2) · 첨부파일 · RAG · 아카이브 · state.sqlite 및
+                          watchdog-journal 스냅샷 · 설정 (시크릿·로그 자동 제외)
+                        </p>
+                      ) : null}
                       <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-                        <span>대화 {target.threadCount.toLocaleString()}건</span>
-                        <span>장기기억 {target.memoryCount.toLocaleString()}건</span>
+                        {target.kind === "project" ? (
+                          <>
+                            <span>대화 {target.threadCount.toLocaleString()}건</span>
+                            <span>장기기억 {target.memoryCount.toLocaleString()}건</span>
+                          </>
+                        ) : null}
                         <span>최근 백업: {formatMs(target.lastBackedUpAtMs)}</span>
                       </div>
                       {target.riskWarning ? (
@@ -1213,7 +1254,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                           handleToggleTarget(target, { enabled: checked })
                         }
                       />
-                      {target.kind === "repo" ? (
+                      {canDelete ? (
                         <Button
                           type="button"
                           size="xs"
@@ -1238,7 +1279,11 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                             handleToggleTarget(target, { syncFiles: checked })
                           }
                         />
-                        <span>폴더 파일 · Git bundle 업로드</span>
+                        <span>
+                          {isUnifiedUserdata
+                            ? "T3 전체 데이터 암호화 증분 백업 (T3-Backup)"
+                            : "폴더 파일 암호화 백업 (T3-Backup)"}
+                        </span>
                       </label>
                       {target.projectId ? (
                         <label className="inline-flex items-center gap-2">
@@ -1252,16 +1297,34 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                           <span>이 프로젝트의 T3 대화·기억·미션 추출 백업</span>
                         </label>
                       ) : null}
-                      <label className="inline-flex items-center gap-2">
-                        <Switch
-                          checked={target.syncDriveToLocalRag}
-                          disabled={busyAction !== null}
-                          onCheckedChange={(checked) =>
-                            handleToggleTarget(target, { syncDriveToLocalRag: checked })
-                          }
-                        />
-                        <span>드라이브 지식 → 로컬 RAG 활용</span>
-                      </label>
+                      {!isUnifiedUserdata ? (
+                        <label className="inline-flex items-center gap-2">
+                          <Switch
+                            checked={Boolean(target.syncLocalToDriveKnowledge)}
+                            disabled={busyAction !== null}
+                            onCheckedChange={(checked) =>
+                              handleToggleTarget(target, { syncLocalToDriveKnowledge: checked })
+                            }
+                          />
+                          <span>
+                            원본 그대로 지식 폴더(
+                            {config?.gdriveKnowledgeFolderName ?? "T3-Knowledge"}
+                            )에도 업로드
+                          </span>
+                        </label>
+                      ) : null}
+                      {!isUnifiedUserdata ? (
+                        <label className="inline-flex items-center gap-2">
+                          <Switch
+                            checked={target.syncDriveToLocalRag}
+                            disabled={busyAction !== null}
+                            onCheckedChange={(checked) =>
+                              handleToggleTarget(target, { syncDriveToLocalRag: checked })
+                            }
+                          />
+                          <span>드라이브 지식 → 로컬 RAG 활용</span>
+                        </label>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1269,30 +1332,45 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
             })}
           </div>
 
-          {/* 사용자 저장소 / 폴더 직접 추가 */}
+          {/* 다른 드라이브 지식 폴더 · 저장소 직접 추가 */}
           <div className="grid gap-2.5 rounded-xl border border-dashed border-border bg-muted/15 p-3.5">
-            <div className="flex items-center gap-1.5 text-xs font-semibold">
-              <FolderPlusIcon className="size-3.5 text-primary" />
-              추가 폴더 · Git 저장소 직접 등록
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold">
+                <FolderPlusIcon className="size-3.5 text-primary" />
+                다른 드라이브 지식 폴더 · 저장소 추가 (C: / D: / E: / F: ...)
+              </div>
+              {typeof window !== "undefined" && window.desktopBridge?.pickFolder ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={busyAction !== null}
+                  onClick={() => void handlePickFolder()}
+                >
+                  <FolderOpenIcon className="size-3.5" />
+                  폴더 찾기
+                </Button>
+              ) : null}
             </div>
             <div className="grid gap-2 sm:grid-cols-12">
               <Input
                 className="sm:col-span-3"
                 value={newRepoName}
                 onChange={(e) => setNewRepoName(e.target.value)}
-                placeholder="표시 이름 (예: MyResearch)"
+                placeholder="표시 이름 (예: F드라이브 지식)"
               />
               <Input
-                className="sm:col-span-6"
+                className="sm:col-span-5"
                 value={newRepoPath}
                 onChange={(e) => setNewRepoPath(e.target.value)}
-                placeholder="절대 경로 (예: D:\Projects\MyResearch)"
+                placeholder="폴더 경로 (예: F:\지식자료 또는 [폴더 찾기] 클릭)"
               />
               <select
                 value={newRepoKind}
                 onChange={(e) => setNewRepoKind(e.target.value as DriveBackupTargetKind)}
-                className="h-9 rounded-lg border border-input bg-background px-2.5 text-xs sm:col-span-2"
+                className="h-9 rounded-lg border border-input bg-background px-2.5 text-xs sm:col-span-3"
               >
+                <option value="knowledge">지식 폴더 (다른 드라이브 자료)</option>
                 <option value="repo">Git 저장소/폴더</option>
                 <option value="project">프로젝트</option>
               </select>
@@ -1306,6 +1384,19 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                 추가
               </Button>
             </div>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="size-3.5 shrink-0"
+                checked={newRepoUploadKnowledge}
+                onChange={(e) => setNewRepoUploadKnowledge(e.target.checked)}
+              />
+              <span>
+                원본 파일 그대로 Google Drive 지식 폴더(
+                {config?.gdriveKnowledgeFolderName ?? "T3-Knowledge"})에도 업로드 (미체크 시{" "}
+                {config?.gdriveFolderName ?? "T3-Backup"}에 암호화 백업만 수행)
+              </span>
+            </label>
           </div>
         </div>
       </SectionCard>

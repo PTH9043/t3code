@@ -41,6 +41,61 @@ function sanitizeSegment(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "item";
 }
 
+/** 지식 폴더·파일명용 안전 정리: 한글/유니코드·공백은 보존하고 경로 구분자·Windows 금지 문자만 치환한다. */
+export function sanitizeKnowledgePathSegment(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/\.+$/g, "")
+    .slice(0, 140)
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return "item";
+  return cleaned;
+}
+
+function guessMimeTypeForKnowledgeFile(fileName: string): string {
+  const ext = NodePath.extname(fileName).toLowerCase();
+  switch (ext) {
+    case ".md":
+    case ".markdown":
+      return "text/markdown";
+    case ".txt":
+    case ".csv":
+    case ".tsv":
+    case ".yaml":
+    case ".yml":
+    case ".toml":
+      return "text/plain";
+    case ".json":
+    case ".jsonl":
+      return "application/json";
+    case ".pdf":
+      return "application/pdf";
+    case ".html":
+    case ".htm":
+      return "text/html";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case ".xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case ".pptx":
+      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function atomicWriteBuffer(destPath: string, content: Buffer): void {
   NodeFs.mkdirSync(NodePath.dirname(destPath), { recursive: true });
   const tmpPath = `${destPath}.${NodeCrypto.randomUUID().slice(0, 8)}.tmp`;
@@ -1294,4 +1349,321 @@ export async function downloadKnowledgeMirrorFromGoogleDriveApi(
     });
   }
   return items;
+}
+
+/**
+ * 로컬 지식 폴더의 원본 파일을 로컬 Google Drive 마운트 폴더(`T3-Knowledge/<폴더명>/...`)에
+ * 스트리밍·원자적으로 복사한다(한글 파일명·하위 폴더 구조 보존, 롤링 삭제 없음).
+ */
+export async function copyKnowledgeFileToLocalDriveFolder(
+  rootDir: string,
+  knowledgeFolderName: string,
+  input: {
+    readonly subFolder: string;
+    readonly fileName: string;
+    readonly filePath: string;
+    readonly uploadLimitMbps?: number;
+    readonly signal?: AbortSignal;
+  },
+): Promise<{ readonly destinationPath: string; readonly bytesCopied: number }> {
+  const safeRoot = sanitizeKnowledgePathSegment(knowledgeFolderName);
+  const safeSubParts = input.subFolder
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((s) => s.length > 0 && s !== "." && s !== "..")
+    .map(sanitizeKnowledgePathSegment);
+  const safeName = sanitizeKnowledgePathSegment(input.fileName);
+  const targetDir = NodePath.join(rootDir, safeRoot, ...safeSubParts);
+  const destPath = NodePath.join(targetDir, safeName);
+  NodeFs.mkdirSync(targetDir, { recursive: true });
+  const tmpPath = `${destPath}.${NodeCrypto.randomUUID().slice(0, 8)}.tmp`;
+
+  const bucket =
+    input.uploadLimitMbps && input.uploadLimitMbps > 0
+      ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
+      : null;
+
+  let bytesCopied = 0;
+  try {
+    const rs = NodeFs.createReadStream(input.filePath, { highWaterMark: 256 * 1024 });
+    const ws = NodeFs.createWriteStream(tmpPath, { highWaterMark: 256 * 1024 });
+    try {
+      for await (const raw of rs) {
+        if (input.signal?.aborted) {
+          throw new Error(`지식 파일 복사 일시정지됨: ${String(input.signal.reason ?? "aborted")}`);
+        }
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        bytesCopied += chunk.byteLength;
+        if (bucket) {
+          await bucket.consume(chunk.byteLength, input.signal);
+        }
+        if (!ws.write(chunk)) {
+          await new Promise<void>((res, rej) => {
+            ws.once("drain", res);
+            ws.once("error", rej);
+          });
+        }
+      }
+      await new Promise<void>((res, rej) => {
+        ws.end(() => res());
+        ws.once("error", rej);
+      });
+    } catch (err) {
+      rs.destroy();
+      ws.destroy();
+      throw err;
+    }
+    if (NodeFs.existsSync(destPath)) NodeFs.rmSync(destPath, { force: true });
+    NodeFs.renameSync(tmpPath, destPath);
+    return { destinationPath: destPath, bytesCopied };
+  } finally {
+    if (NodeFs.existsSync(tmpPath)) {
+      try {
+        NodeFs.rmSync(tmpPath, { force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+async function ensureGdriveFolderPathPreserveUnicode(input: {
+  readonly accessToken: string;
+  readonly folderSegments: ReadonlyArray<string>;
+  readonly fetcher?: typeof fetch;
+  readonly signal?: AbortSignal;
+}): Promise<string> {
+  const fetcher = input.fetcher ?? fetch;
+  let parentId: string | undefined;
+  for (const rawSeg of input.folderSegments) {
+    const folderName = sanitizeKnowledgePathSegment(rawSeg);
+    const escaped = folderName.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const qParts = [`name = '${escaped}'`, `mimeType = '${GOOGLE_FOLDER_MIME}'`, "trashed = false"];
+    if (parentId) qParts.push(`'${parentId}' in parents`);
+    const queryUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(qParts.join(" and "))}&fields=files(id,name)&pageSize=1`;
+    const searchRes = await fetchWithRetry(
+      fetcher,
+      queryUrl,
+      { headers: { Authorization: `Bearer ${input.accessToken}` } },
+      input.signal,
+    );
+    if (!searchRes.ok) {
+      throw new Error(`Google Drive 지식 폴더 조회 실패 (${searchRes.status})`);
+    }
+    const found = (await searchRes.json()) as {
+      readonly files?: ReadonlyArray<{ readonly id: string }>;
+    };
+    if (found.files?.[0]?.id) {
+      parentId = found.files[0].id;
+      continue;
+    }
+    const createRes = await fetchWithRetry(
+      fetcher,
+      "https://www.googleapis.com/drive/v3/files?fields=id",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${input.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: folderName,
+          mimeType: GOOGLE_FOLDER_MIME,
+          ...(parentId ? { parents: [parentId] } : {}),
+        }),
+      },
+      input.signal,
+    );
+    if (!createRes.ok) {
+      throw new Error(`Google Drive 지식 폴더 생성 실패 (${createRes.status})`);
+    }
+    parentId = ((await createRes.json()) as { readonly id: string }).id;
+  }
+  if (!parentId) {
+    throw new Error("유효한 Google Drive 지식 폴더 경로가 지정되지 않았습니다.");
+  }
+  return parentId;
+}
+
+/**
+ * 로컬 지식 파일을 Google Drive `T3-Knowledge/<폴더명>/...`에 원본 파일 그대로(평문) 업로드한다.
+ * 동일 폴더에 동일 파일명이 이미 있으면 PATCH로 제자리 갱신해 중복 파일 생성을 방지한다.
+ */
+export async function uploadKnowledgeFileToGoogleDriveApi(
+  creds: GdriveOAuthCredentials,
+  knowledgeFolderName: string,
+  input: {
+    readonly subFolder: string;
+    readonly fileName: string;
+    readonly filePath: string;
+    readonly uploadLimitMbps?: number;
+    readonly chunkSizeBytes?: number;
+    readonly accessToken?: string;
+    readonly fetcher?: typeof fetch;
+    readonly signal?: AbortSignal;
+  },
+): Promise<{
+  readonly destinationPath: string;
+  readonly fileId: string;
+  readonly updatedExisting: boolean;
+  readonly bytesUploaded: number;
+}> {
+  const fetcher = input.fetcher ?? fetch;
+  const accessToken =
+    input.accessToken || (await exchangeRefreshTokenForAccessToken(creds, fetcher));
+  const safeSubParts = input.subFolder
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((s) => s.length > 0 && s !== "." && s !== "..")
+    .map(sanitizeKnowledgePathSegment);
+  const safeName = sanitizeKnowledgePathSegment(input.fileName);
+  const parentId = await ensureGdriveFolderPathPreserveUnicode({
+    accessToken,
+    folderSegments: [knowledgeFolderName, ...safeSubParts],
+    fetcher,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+
+  // 동일 폴더 내 기존 파일 존재 여부 확인 (있으면 PATCH 제자리 갱신)
+  const escaped = safeName.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const existingQ = `name = '${escaped}' and '${parentId}' in parents and trashed = false and mimeType != '${GOOGLE_FOLDER_MIME}'`;
+  const existingRes = await fetchWithRetry(
+    fetcher,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(existingQ)}&fields=files(id,name)&pageSize=1`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+    input.signal,
+  );
+  let existingFileId: string | null = null;
+  if (existingRes.ok) {
+    const existingData = (await existingRes.json()) as {
+      readonly files?: ReadonlyArray<{ readonly id: string }>;
+    };
+    existingFileId = existingData.files?.[0]?.id ?? null;
+  }
+
+  const stat = await NodeFs.promises.stat(input.filePath);
+  const totalBytes = stat.size;
+  const mimeType = guessMimeTypeForKnowledgeFile(safeName);
+  const rawChunk = input.chunkSizeBytes ?? 2 * 1024 * 1024;
+  const chunkSize = Math.max(256 * 1024, Math.floor(rawChunk / (256 * 1024)) * (256 * 1024));
+  const bucket =
+    input.uploadLimitMbps && input.uploadLimitMbps > 0
+      ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
+      : null;
+
+  const initUrl = existingFileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=resumable&fields=id,name`
+    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name";
+  const initRes = await fetchWithRetry(
+    fetcher,
+    initUrl,
+    {
+      method: existingFileId ? "PATCH" : "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": mimeType,
+        "X-Upload-Content-Length": String(totalBytes),
+      },
+      body: JSON.stringify(
+        existingFileId
+          ? { name: safeName }
+          : {
+              name: safeName,
+              parents: [parentId],
+            },
+      ),
+    },
+    input.signal,
+  );
+  if (!initRes.ok) {
+    const errText = await initRes.text().catch(() => "");
+    throw new Error(
+      `Google Drive 지식 파일 업로드 세션 시작 실패 (${initRes.status}): ${errText.slice(0, 200)}`,
+    );
+  }
+  const sessionUri = initRes.headers.get("location");
+  if (!sessionUri) {
+    throw new Error("Google Drive 지식 업로드 Location URL을 받지 못했습니다.");
+  }
+
+  let uploadedFile: { readonly id: string; readonly name: string } | null = null;
+  if (totalBytes === 0) {
+    const putRes = await fetchWithRetry(
+      fetcher,
+      sessionUri,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": mimeType,
+          "Content-Length": "0",
+        },
+      },
+      input.signal,
+    );
+    if (!putRes.ok) {
+      throw new Error(`Google Drive 빈 지식 파일 업로드 실패 (${putRes.status})`);
+    }
+    uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
+  } else {
+    const fh = await NodeFs.promises.open(input.filePath, "r");
+    const chunkBuf = Buffer.allocUnsafe(Math.min(chunkSize, totalBytes));
+    let offset = 0;
+    try {
+      while (!uploadedFile) {
+        if (input.signal?.aborted) {
+          throw new Error(
+            `지식 파일 업로드 일시정지됨: ${String(input.signal.reason ?? "aborted")}`,
+          );
+        }
+        const toRead = Math.min(chunkSize, totalBytes - offset);
+        const { bytesRead } = await fh.read(chunkBuf, 0, toRead, offset);
+        if (bytesRead <= 0) {
+          throw new Error(`지식 파일 읽기 조기 종료 (${offset}/${totalBytes})`);
+        }
+        if (bucket) {
+          await bucket.consume(bytesRead, input.signal);
+        }
+        const endByte = offset + bytesRead - 1;
+        const slice = chunkBuf.subarray(0, bytesRead);
+        const putRes = await fetchWithRetry(
+          fetcher,
+          sessionUri,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": mimeType,
+              "Content-Length": String(bytesRead),
+              "Content-Range": `bytes ${offset}-${endByte}/${totalBytes}`,
+            },
+            body: new Uint8Array(slice),
+          },
+          input.signal,
+        );
+        if (putRes.status === 200 || putRes.status === 201) {
+          uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
+          break;
+        }
+        if (putRes.status === 308) {
+          const confirmed = parseResumeRangeOffset(putRes.headers.get("range"));
+          offset = confirmed ?? offset + bytesRead;
+          continue;
+        }
+        const errText = await putRes.text().catch(() => "");
+        throw new Error(
+          `Google Drive 지식 파일 청크 업로드 실패 (${putRes.status}): ${errText.slice(0, 200)}`,
+        );
+      }
+    } finally {
+      await fh.close();
+    }
+  }
+
+  const relDisplay = [...safeSubParts, uploadedFile.name].join("/");
+  return {
+    destinationPath: `gdrive://${sanitizeKnowledgePathSegment(knowledgeFolderName)}/${relDisplay} (${uploadedFile.id})`,
+    fileId: uploadedFile.id,
+    updatedExisting: existingFileId !== null,
+    bytesUploaded: totalBytes,
+  };
 }

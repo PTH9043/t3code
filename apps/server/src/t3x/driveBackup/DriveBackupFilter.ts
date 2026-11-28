@@ -165,6 +165,9 @@ export const USERDATA_BACKUP_CANDIDATES: ReadonlyArray<{
   },
 ];
 
+export const UNIFIED_USERDATA_TARGET_ID = "userdata:all";
+export const UNIFIED_USERDATA_DISPLAY_NAME = "T3 전체 데이터 (userdata · DB · 설정)";
+
 export const USERDATA_HARD_EXCLUDED_NAMES = new Set([
   "secrets",
   "provider-auth",
@@ -176,6 +179,11 @@ export const USERDATA_HARD_EXCLUDED_NAMES = new Set([
   "clerk-callback-relay.json",
   "jasna",
   "provider-instances",
+  "backups",
+  "drive-mirror",
+  "drive-backup-staging",
+  "drive-backup-snapshots",
+  "drive-knowledge-mirror",
 ]);
 
 export function isUserdataHardExcluded(relativePosixPath: string): boolean {
@@ -238,6 +246,8 @@ export function scanSelectedDirectory(input: {
   readonly maxTotalBytes?: number;
   readonly maxSingleFileBytes?: number;
   readonly unlimited?: boolean;
+  /** true이면 .sqlite/.sqlite3/.db 등 라이브 DB 파일을 일반 파일 스캔에서 제외 (워커 스냅샷으로 별도 백업 또는 지식 업로드 차단) */
+  readonly excludeSqliteFiles?: boolean;
 }): ScannedProjectFiles {
   const maxFiles = input.unlimited ? Number.POSITIVE_INFINITY : (input.maxFiles ?? 25_000);
   const maxTotalBytes = input.unlimited
@@ -342,6 +352,12 @@ export function scanSelectedDirectory(input: {
       }
 
       if (!entry.isFile()) continue;
+      if (
+        input.excludeSqliteFiles &&
+        /\.(?:sqlite|sqlite3|db|sqlite-wal|sqlite-shm|sqlite-journal)$/i.test(entry.name)
+      ) {
+        continue;
+      }
       let stat: NodeFs.Stats;
       try {
         stat = NodeFs.statSync(abs);

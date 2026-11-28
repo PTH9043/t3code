@@ -46,17 +46,23 @@ import {
 import {
   detectLocalGoogleDriveRoots,
   detectRiskWarningForFolder,
-  discoverUserdataCandidates,
   scanSelectedDirectory,
+  UNIFIED_USERDATA_DISPLAY_NAME,
+  UNIFIED_USERDATA_TARGET_ID,
 } from "./DriveBackupFilter.ts";
 import { computeIncrementalDiff, parseIncrementalManifest } from "./DriveBackupIncremental.ts";
 import {
   copyFileToLocalDriveFolder,
+  copyKnowledgeFileToLocalDriveFolder,
+  DEFAULT_MIRROR_MAX_FILE_BYTES,
+  exchangeRefreshTokenForAccessToken,
   isInvalidGrantError,
   listLocalKnowledgeMirrorMetadata,
   OAuthTokenRefreshError,
   ResumableUploadPausedError,
+  sanitizeKnowledgePathSegment,
   uploadFileResumableToGoogleDriveApi,
+  uploadKnowledgeFileToGoogleDriveApi,
   type GdriveOAuthCredentials,
 } from "./DriveTransportAdapter.ts";
 import {
@@ -118,6 +124,7 @@ interface TargetRow {
   readonly sync_files: number;
   readonly sync_t3_scope: number;
   readonly sync_drive_to_local_rag: number;
+  readonly sync_local_to_drive_knowledge?: number;
   readonly exclude_globs_json: string;
   readonly last_backed_up_at_ms: number | null;
   readonly updated_at_ms: number;
@@ -432,6 +439,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         syncFiles: Boolean(row.sync_files),
         syncT3Scope: Boolean(row.sync_t3_scope),
         syncDriveToLocalRag: Boolean(row.sync_drive_to_local_rag),
+        syncLocalToDriveKnowledge: Boolean(row.sync_local_to_drive_knowledge ?? 0),
         excludeGlobs: parseJsonStringArray(row.exclude_globs_json),
         riskWarning: detectRiskWarningForFolder(row.display_name, row.root_path),
         threadCount: counts.threadCount,
@@ -531,23 +539,75 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         }
       }
 
-      // userdata 핵심 백업 후보군 (memory-v2, semantic-rag, document-rag, attachments, archives, watchdog-journal.sqlite 등)
-      // 기본값은 모두 enabled=0 (Opt-In)이며 secrets/logs/desktop-profile/wal 등은 하드 제외된다.
-      for (const cand of discoverUserdataCandidates(serverConfig.stateDir)) {
-        const key = normalizePathKey(cand.rootPath);
-        if (knownPaths.has(key)) continue;
-        knownPaths.add(key);
+      // 기존 10개로 쪼개져 있던 개별 userdata:* 후보군을 단일 통합 항목('userdata:all') 1개로 자동 정리·이관한다.
+      // (시크릿·로그·데스크톱 프로필·WAL/SHM·백업 스테이징은 하드 제외, state.sqlite/watchdog-journal/월별 아카이브는 워커 스냅샷으로 안전 포함)
+      const legacyUserdataRows = yield* sql<{
+        readonly id: string;
+        readonly enabled: number;
+        readonly last_backed_up_at_ms: number | null;
+      }>`
+        SELECT id, enabled, last_backed_up_at_ms
+        FROM drive_backup_targets
+        WHERE id LIKE 'userdata:%' AND id != ${UNIFIED_USERDATA_TARGET_ID}
+      `.pipe(
+        Effect.catch(() =>
+          Effect.succeed(
+            [] as ReadonlyArray<{
+              readonly id: string;
+              readonly enabled: number;
+              readonly last_backed_up_at_ms: number | null;
+            }>,
+          ),
+        ),
+      );
+      let inheritedEnabled = false;
+      let inheritedLastBackedUpAtMs: number | null = null;
+      if (legacyUserdataRows.length > 0) {
+        for (const lr of legacyUserdataRows) {
+          if (lr.enabled) inheritedEnabled = true;
+          if (
+            lr.last_backed_up_at_ms !== null &&
+            (inheritedLastBackedUpAtMs === null ||
+              lr.last_backed_up_at_ms > inheritedLastBackedUpAtMs)
+          ) {
+            inheritedLastBackedUpAtMs = lr.last_backed_up_at_ms;
+          }
+        }
         yield* sql`
-          INSERT OR IGNORE INTO drive_backup_targets (
-            id, kind, project_id, display_name, root_path,
-            enabled, sync_files, sync_t3_scope, sync_drive_to_local_rag,
-            exclude_globs_json, last_backed_up_at_ms, updated_at_ms
-          ) VALUES (
-            ${cand.id}, 'userdata', NULL, ${cand.displayName}, ${cand.rootPath},
-            0, 1, 0, 0,
-            '[]', NULL, ${now}
-          )
+          DELETE FROM drive_backup_targets
+          WHERE id LIKE 'userdata:%' AND id != ${UNIFIED_USERDATA_TARGET_ID}
         `.pipe(Effect.catch(() => Effect.void));
+      }
+
+      if (serverConfig.stateDir && NodeFs.existsSync(serverConfig.stateDir)) {
+        const stateKey = normalizePathKey(serverConfig.stateDir);
+        const existingUnified = yield* sql<{ readonly id: string; readonly enabled: number }>`
+          SELECT id, enabled FROM drive_backup_targets WHERE id = ${UNIFIED_USERDATA_TARGET_ID} LIMIT 1
+        `.pipe(
+          Effect.catch(() =>
+            Effect.succeed([] as ReadonlyArray<{ readonly id: string; readonly enabled: number }>),
+          ),
+        );
+        if (!existingUnified[0]) {
+          knownPaths.add(stateKey);
+          yield* sql`
+            INSERT OR IGNORE INTO drive_backup_targets (
+              id, kind, project_id, display_name, root_path,
+              enabled, sync_files, sync_t3_scope, sync_drive_to_local_rag,
+              sync_local_to_drive_knowledge, exclude_globs_json, last_backed_up_at_ms, updated_at_ms
+            ) VALUES (
+              ${UNIFIED_USERDATA_TARGET_ID}, 'userdata', NULL, ${UNIFIED_USERDATA_DISPLAY_NAME}, ${serverConfig.stateDir},
+              ${inheritedEnabled ? 1 : 0}, 1, 0, 0,
+              0, '[]', ${inheritedLastBackedUpAtMs}, ${now}
+            )
+          `.pipe(Effect.catch(() => Effect.void));
+        } else if (inheritedEnabled && !existingUnified[0].enabled) {
+          yield* sql`
+            UPDATE drive_backup_targets
+            SET enabled = 1, updated_at_ms = ${now}
+            WHERE id = ${UNIFIED_USERDATA_TARGET_ID}
+          `.pipe(Effect.catch(() => Effect.void));
+        }
       }
     });
 
@@ -683,7 +743,15 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
   const listTargetRows = (): Effect.Effect<ReadonlyArray<TargetRow>, DriveBackupError> =>
     sql<TargetRow>`
       SELECT * FROM drive_backup_targets
-      ORDER BY enabled DESC, kind ASC, display_name ASC
+      ORDER BY
+        CASE
+          WHEN id = ${UNIFIED_USERDATA_TARGET_ID} THEN 0
+          WHEN kind = 'knowledge' THEN 1
+          ELSE 2
+        END,
+        enabled DESC,
+        kind ASC,
+        display_name ASC
     `.pipe(
       Effect.mapError(
         (e) =>
@@ -1005,11 +1073,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         INSERT INTO drive_backup_targets (
           id, kind, project_id, display_name, root_path,
           enabled, sync_files, sync_t3_scope, sync_drive_to_local_rag,
-          exclude_globs_json, last_backed_up_at_ms, updated_at_ms
+          sync_local_to_drive_knowledge, exclude_globs_json, last_backed_up_at_ms, updated_at_ms
         ) VALUES (
           ${targetId}, ${input.kind}, ${input.projectId ?? null}, ${input.displayName.trim()}, ${rootPath},
           ${input.enabled ? 1 : 0}, ${input.syncFiles ? 1 : 0}, ${input.syncT3Scope ? 1 : 0},
-          ${input.syncDriveToLocalRag ? 1 : 0}, ${excludeGlobsJson}, NULL, ${now}
+          ${input.syncDriveToLocalRag ? 1 : 0}, ${input.syncLocalToDriveKnowledge ? 1 : 0},
+          ${excludeGlobsJson}, NULL, ${now}
         )
         ON CONFLICT(id) DO UPDATE SET
           kind = excluded.kind,
@@ -1020,6 +1089,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           sync_files = excluded.sync_files,
           sync_t3_scope = excluded.sync_t3_scope,
           sync_drive_to_local_rag = excluded.sync_drive_to_local_rag,
+          sync_local_to_drive_knowledge = excluded.sync_local_to_drive_knowledge,
           exclude_globs_json = excluded.exclude_globs_json,
           updated_at_ms = excluded.updated_at_ms
       `.pipe(
@@ -1076,10 +1146,241 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       return { deleted: true, targetId: input.targetId };
     });
 
+  const loadTargetManifest = (targetId: string) =>
+    sql<{ readonly manifest_json: string }>`
+      SELECT manifest_json FROM drive_backup_manifests WHERE target_id = ${targetId} LIMIT 1
+    `.pipe(
+      Effect.map((rows) => parseIncrementalManifest(rows[0]?.manifest_json)),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+
+  const saveTargetManifest = (
+    targetId: string,
+    manifestJson: string,
+    manifestSha256: string,
+    remoteFileId: string | null = null,
+  ) =>
+    sql`
+      INSERT INTO drive_backup_manifests (
+        target_id, manifest_json, manifest_sha256, remote_file_id, updated_at_ms
+      ) VALUES (
+        ${targetId}, ${manifestJson}, ${manifestSha256}, ${remoteFileId}, ${Date.now()}
+      )
+      ON CONFLICT(target_id) DO UPDATE SET
+        manifest_json = excluded.manifest_json,
+        manifest_sha256 = excluded.manifest_sha256,
+        remote_file_id = COALESCE(excluded.remote_file_id, drive_backup_manifests.remote_file_id),
+        updated_at_ms = excluded.updated_at_ms
+    `.pipe(
+      Effect.asVoid,
+      Effect.catch(() => Effect.void),
+    );
+
+  const uploadLocalKnowledgeForTarget = (opts: {
+    readonly row: TargetRow;
+    readonly config: DriveBackupConfig;
+    readonly oauthCreds: GdriveOAuthCredentials | null;
+    readonly accessToken?: string;
+    readonly createdAtIso: string;
+    readonly pauseSignal?: AbortSignal;
+  }): Effect.Effect<
+    {
+      readonly uploadedCount: number;
+      readonly skippedUnchangedCount: number;
+      readonly uploadedBytes: number;
+      readonly blockedSecretsCount: number;
+      readonly blockedSecretsSample: ReadonlyArray<string>;
+      readonly lastDestPath: string | null;
+    },
+    DriveBackupError
+  > =>
+    Effect.gen(function* () {
+      if (!NodeFs.existsSync(opts.row.root_path)) {
+        return {
+          uploadedCount: 0,
+          skippedUnchangedCount: 0,
+          uploadedBytes: 0,
+          blockedSecretsCount: 0,
+          blockedSecretsSample: [],
+          lastDestPath: null,
+        };
+      }
+      const scanned = scanSelectedDirectory({
+        rootPath: opts.row.root_path,
+        customExcludeGlobs: parseJsonStringArray(opts.row.exclude_globs_json),
+        maxSingleFileBytes: DEFAULT_MIRROR_MAX_FILE_BYTES,
+        excludeSqliteFiles: true,
+      });
+      const manifestKey = `knowledge-upload:${opts.row.id}`;
+      const prevManifest = yield* loadTargetManifest(manifestKey);
+      const diff = yield* Effect.tryPromise({
+        try: () =>
+          computeIncrementalDiff({
+            targetId: manifestKey,
+            files: scanned.includedFiles,
+            previousManifest: prevManifest,
+            nowIso: opts.createdAtIso,
+            ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
+          }),
+        catch: (e) =>
+          new DriveBackupError({
+            code: opts.pauseSignal?.aborted ? "BUSY_DEFERRED" : "UNAVAILABLE",
+            message: `지식 폴더 증분 비교 실패 (${opts.row.display_name}): ${errMsg(e)}`,
+          }),
+      });
+
+      const skippedUnchangedCount = Math.max(
+        0,
+        scanned.includedFiles.length - diff.changedFiles.length,
+      );
+      if (diff.changedFiles.length === 0) {
+        yield* saveTargetManifest(manifestKey, diff.nextManifestJson, diff.nextManifestSha256);
+        return {
+          uploadedCount: 0,
+          skippedUnchangedCount,
+          uploadedBytes: 0,
+          blockedSecretsCount: scanned.blockedSecretsCount,
+          blockedSecretsSample: scanned.blockedSecretsSample,
+          lastDestPath: null,
+        };
+      }
+
+      const folderPrefix = sanitizeKnowledgePathSegment(opts.row.display_name || opts.row.id);
+      let cachedAccessToken = opts.accessToken;
+      if (opts.config.transportMode === "gdrive_api" && !cachedAccessToken) {
+        if (!opts.oauthCreds) {
+          return yield* new DriveBackupError({
+            code: "AUTH_REQUIRED",
+            message: "Google Drive API OAuth2 자격증명이 연결되어 있지 않습니다.",
+          });
+        }
+        cachedAccessToken = yield* Effect.tryPromise({
+          try: () => exchangeRefreshTokenForAccessToken(opts.oauthCreds!),
+          catch: (e) =>
+            new DriveBackupError({
+              code: "AUTH_REQUIRED",
+              message: errMsg(e),
+            }),
+        }).pipe(
+          Effect.tapError((err) =>
+            recordAuthError(
+              isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+              err.message,
+            ),
+          ),
+        );
+      }
+
+      let uploadedCount = 0;
+      let uploadedBytes = 0;
+      let lastDestPath: string | null = null;
+
+      for (const file of diff.changedFiles) {
+        if (isForbiddenExchangeFile(file.relativePath)) continue;
+        const relPosix = file.relativePath.replace(/\\/g, "/");
+        const slashIdx = relPosix.lastIndexOf("/");
+        const dirPart = slashIdx >= 0 ? relPosix.slice(0, slashIdx) : "";
+        const fileName = slashIdx >= 0 ? relPosix.slice(slashIdx + 1) : relPosix;
+        const subFolder = dirPart ? `${folderPrefix}/${dirPart}` : folderPrefix;
+
+        if (opts.config.transportMode === "local_drive_folder") {
+          if (!opts.config.localDriveRoot) {
+            return yield* new DriveBackupError({
+              code: "INVALID_STATE",
+              message: "로컬 Google Drive 폴더 경로가 설정되어 있지 않습니다.",
+            });
+          }
+          const copied = yield* Effect.tryPromise({
+            try: () =>
+              copyKnowledgeFileToLocalDriveFolder(
+                opts.config.localDriveRoot!,
+                opts.config.gdriveKnowledgeFolderName,
+                {
+                  subFolder,
+                  fileName,
+                  filePath: file.absolutePath,
+                  uploadLimitMbps: opts.config.uploadLimitMbps,
+                  ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
+                },
+              ),
+            catch: (e) =>
+              new DriveBackupError({
+                code: opts.pauseSignal?.aborted ? "BUSY_DEFERRED" : "TRANSPORT_ERROR",
+                message: `지식 파일 로컬 복사 실패 (${file.relativePath}): ${errMsg(e)}`,
+              }),
+          });
+          uploadedCount += 1;
+          uploadedBytes += copied.bytesCopied;
+          lastDestPath = copied.destinationPath;
+        } else {
+          const uploaded = yield* Effect.tryPromise({
+            try: () =>
+              uploadKnowledgeFileToGoogleDriveApi(
+                opts.oauthCreds!,
+                opts.config.gdriveKnowledgeFolderName,
+                {
+                  subFolder,
+                  fileName,
+                  filePath: file.absolutePath,
+                  uploadLimitMbps: opts.config.uploadLimitMbps,
+                  ...(cachedAccessToken ? { accessToken: cachedAccessToken } : {}),
+                  ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
+                },
+              ),
+            catch: (e) =>
+              new DriveBackupError({
+                code:
+                  e instanceof OAuthTokenRefreshError
+                    ? "AUTH_REQUIRED"
+                    : opts.pauseSignal?.aborted
+                      ? "BUSY_DEFERRED"
+                      : "TRANSPORT_ERROR",
+                message:
+                  e instanceof OAuthTokenRefreshError
+                    ? e.message
+                    : `지식 파일 업로드 실패 (${file.relativePath}): ${errMsg(e)}`,
+              }),
+          }).pipe(
+            Effect.tapError((err) =>
+              err.code === "AUTH_REQUIRED"
+                ? recordAuthError(
+                    isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                    err.message,
+                  )
+                : Effect.void,
+            ),
+            Effect.tap(() => clearAuthError()),
+          );
+          uploadedCount += 1;
+          uploadedBytes += uploaded.bytesUploaded;
+          lastDestPath = uploaded.destinationPath;
+        }
+      }
+
+      yield* saveTargetManifest(manifestKey, diff.nextManifestJson, diff.nextManifestSha256);
+      const doneMs = Date.now();
+      yield* sql`
+        UPDATE drive_backup_targets
+        SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
+        WHERE id = ${opts.row.id}
+      `.pipe(Effect.catch(() => Effect.void));
+
+      return {
+        uploadedCount,
+        skippedUnchangedCount,
+        uploadedBytes,
+        blockedSecretsCount: scanned.blockedSecretsCount,
+        blockedSecretsSample: scanned.blockedSecretsSample,
+        lastDestPath,
+      };
+    });
+
   const dryRun = (
     input: DriveBackupDryRunInput,
   ): Effect.Effect<DriveBackupDryRunResult, DriveBackupError> =>
     Effect.gen(function* () {
+      const cfgRow = yield* ensureConfigRow();
+      const config = yield* mapConfigRow(cfgRow);
       const allRows = yield* listTargetRows();
       const filterSet =
         input.targetIds && input.targetIds.length > 0 ? new Set(input.targetIds) : null;
@@ -1104,17 +1405,66 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         let blockedSecretsCount = 0;
         let blockedSecretsSample: ReadonlyArray<string> = [];
 
-        if (row.sync_files) {
+        const isUnifiedUserdata = row.id === UNIFIED_USERDATA_TARGET_ID;
+        const uploadToKnowledge = Boolean(row.sync_local_to_drive_knowledge ?? 0);
+
+        if (row.sync_files || uploadToKnowledge) {
           const scanned = scanSelectedDirectory({
             rootPath: row.root_path,
             customExcludeGlobs: excludeGlobs,
             unlimited: row.kind === "userdata",
+            excludeSqliteFiles: isUnifiedUserdata || (!row.sync_files && uploadToKnowledge),
+            ...(row.kind === "knowledge" || uploadToKnowledge
+              ? { maxSingleFileBytes: DEFAULT_MIRROR_MAX_FILE_BYTES }
+              : {}),
           });
           includedFilesCount = scanned.includedFiles.length;
           estimatedRawBytes = scanned.totalRawBytes;
           blockedSecretsCount = scanned.blockedSecretsCount;
           blockedSecretsSample = scanned.blockedSecretsSample;
           for (const w of scanned.warnings) warnings.push(w);
+        }
+
+        if (isUnifiedUserdata) {
+          const addFileIfExists = (filePath: string) => {
+            try {
+              if (filePath && filePath !== ":memory:" && NodeFs.existsSync(filePath)) {
+                const st = NodeFs.statSync(filePath);
+                if (st.isFile()) {
+                  includedFilesCount += 1;
+                  estimatedRawBytes += st.size;
+                }
+              }
+            } catch {
+              // ignore
+            }
+          };
+          addFileIfExists(NodePath.join(serverConfig.stateDir, "watchdog-journal.sqlite"));
+          addFileIfExists(serverConfig.dbPath);
+          addFileIfExists(serverConfig.settingsPath);
+          addFileIfExists(serverConfig.keybindingsConfigPath);
+          const archivesDir = NodePath.join(serverConfig.stateDir, "archives");
+          if (NodeFs.existsSync(archivesDir)) {
+            try {
+              for (const d of NodeFs.readdirSync(archivesDir, { withFileTypes: true })) {
+                if (d.isFile() && /^events-\d{6}\.sqlite$/i.test(d.name)) {
+                  addFileIfExists(NodePath.join(archivesDir, d.name));
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }
+          warnings.push(
+            "통합 백업: userdata 안전 폴더 + state.sqlite · watchdog-journal · 월별 아카이브 워커 스냅샷 + 설정 (시크릿·로그 자동 제외)",
+          );
+        }
+
+        if (uploadToKnowledge) {
+          const safeFolder = sanitizeKnowledgePathSegment(row.display_name || row.id);
+          warnings.push(
+            `원본 지식 업로드: Google Drive '${config.gdriveKnowledgeFolderName}/${safeFolder}'에 원본 파일 그대로 증분 업로드`,
+          );
         }
 
         const counts = row.sync_t3_scope
@@ -1128,7 +1478,10 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         const isGitRepo =
           NodeFs.existsSync(row.root_path) &&
           NodeFs.existsSync(NodePath.join(row.root_path, ".git"));
-        const estimatedArchiveBytes = Math.max(0, Math.round(estimatedRawBytes * 0.35));
+        const estimatedArchiveBytes =
+          !row.sync_files && uploadToKnowledge
+            ? estimatedRawBytes
+            : Math.max(0, Math.round(estimatedRawBytes * 0.35));
 
         targetResults.push({
           targetId: row.id,
@@ -1178,10 +1531,21 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           filterSet ? filterSet.has(row.id) : Boolean(row.enabled),
         );
 
+        const hasUnifiedUserdata = selectedRows.some((r) => r.id === UNIFIED_USERDATA_TARGET_ID);
+        const hasRealDbFile = Boolean(
+          serverConfig.dbPath &&
+          serverConfig.dbPath !== ":memory:" &&
+          NodeFs.existsSync(serverConfig.dbPath),
+        );
+        const effectiveIncludeCoreSettings = config.includeCoreSettings || hasUnifiedUserdata;
+        const effectiveIncludeCoreSqliteSnapshot =
+          config.includeCoreSqliteSnapshot || (hasUnifiedUserdata && hasRealDbFile);
+        const effectiveIncludeEventArchives = config.includeEventArchives || hasUnifiedUserdata;
+
         const hasCoreWork =
-          config.includeCoreSettings ||
-          config.includeCoreSqliteSnapshot ||
-          config.includeEventArchives;
+          effectiveIncludeCoreSettings ||
+          effectiveIncludeCoreSqliteSnapshot ||
+          effectiveIncludeEventArchives;
         if (selectedRows.length === 0 && !hasCoreWork) {
           return yield* new DriveBackupError({
             code: "INVALID_STATE",
@@ -1218,9 +1582,14 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           return skipped;
         }
 
-        // 암호화 비밀번호 확인
+        // 암호화 비밀번호 확인 (원본 지식 업로드만 수행하는 경우는 비밀번호 없이도 허용)
+        const needsArchiveEncryption =
+          hasCoreWork ||
+          selectedRows.some(
+            (r) => Boolean(r.sync_files) || (Boolean(r.sync_t3_scope) && Boolean(r.project_id)),
+          );
         let passphrase: string | null = null;
-        if (config.encryptionEnabled) {
+        if (config.encryptionEnabled && needsArchiveEncryption) {
           passphrase = yield* readSecretText(SECRET_PASSPHRASE_KEY);
           if (!passphrase || passphrase.length < 4) {
             return yield* new DriveBackupError({
@@ -1384,36 +1753,6 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             Effect.catch(() => Effect.void),
           );
 
-        const loadTargetManifest = (targetId: string) =>
-          sql<{ readonly manifest_json: string }>`
-          SELECT manifest_json FROM drive_backup_manifests WHERE target_id = ${targetId} LIMIT 1
-        `.pipe(
-            Effect.map((rows) => parseIncrementalManifest(rows[0]?.manifest_json)),
-            Effect.catch(() => Effect.succeed(null)),
-          );
-
-        const saveTargetManifest = (
-          targetId: string,
-          manifestJson: string,
-          manifestSha256: string,
-          remoteFileId: string | null = null,
-        ) =>
-          sql`
-          INSERT INTO drive_backup_manifests (
-            target_id, manifest_json, manifest_sha256, remote_file_id, updated_at_ms
-          ) VALUES (
-            ${targetId}, ${manifestJson}, ${manifestSha256}, ${remoteFileId}, ${Date.now()}
-          )
-          ON CONFLICT(target_id) DO UPDATE SET
-            manifest_json = excluded.manifest_json,
-            manifest_sha256 = excluded.manifest_sha256,
-            remote_file_id = COALESCE(excluded.remote_file_id, drive_backup_manifests.remote_file_id),
-            updated_at_ms = excluded.updated_at_ms
-        `.pipe(
-            Effect.asVoid,
-            Effect.catch(() => Effect.void),
-          );
-
         const executionResult = yield* Effect.gen(function* () {
           for (const row of selectedRows) {
             const workerEntries: Array<{
@@ -1424,19 +1763,148 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             let blockedSecretsCount = 0;
             let blockedSecretsSample: ReadonlyArray<string> = [];
             const tempFilesToClean: string[] = [];
-            let pendingIncrementalManifest: {
+            const pendingManifests: Array<{
               readonly targetId: string;
               readonly json: string;
               readonly sha256: string;
-            } | null = null;
+            }> = [];
+            let shouldPackArchive = Boolean(
+              row.sync_files || (row.sync_t3_scope && row.project_id),
+            );
 
+            const isUnifiedUserdata = row.id === UNIFIED_USERDATA_TARGET_ID;
             const isSingleSqliteUserdata =
+              !isUnifiedUserdata &&
               row.kind === "userdata" &&
               row.root_path.toLowerCase().endsWith(".sqlite") &&
               NodeFs.existsSync(row.root_path) &&
               NodeFs.statSync(row.root_path).isFile();
 
-            if (isSingleSqliteUserdata) {
+            if (isUnifiedUserdata && row.sync_files && NodeFs.existsSync(row.root_path)) {
+              const scanned = scanSelectedDirectory({
+                rootPath: row.root_path,
+                customExcludeGlobs: parseJsonStringArray(row.exclude_globs_json),
+                unlimited: true,
+                excludeSqliteFiles: true,
+              });
+              blockedSecretsCount = scanned.blockedSecretsCount;
+              blockedSecretsSample = scanned.blockedSecretsSample;
+
+              const prevManifest = yield* loadTargetManifest(row.id);
+              const diff = yield* Effect.tryPromise({
+                try: () =>
+                  computeIncrementalDiff({
+                    targetId: row.id,
+                    files: scanned.includedFiles,
+                    previousManifest: prevManifest,
+                    nowIso: createdAtIso,
+                    ...(pauseSignal ? { signal: pauseSignal } : {}),
+                  }),
+                catch: (e) =>
+                  new DriveBackupError({
+                    code: pauseSignal?.aborted ? "BUSY_DEFERRED" : "UNAVAILABLE",
+                    message: `통합 userdata 증분 매니페스트 계산 실패: ${errMsg(e)}`,
+                  }),
+              });
+              pendingManifests.push({
+                targetId: row.id,
+                json: diff.nextManifestJson,
+                sha256: diff.nextManifestSha256,
+              });
+              for (const file of diff.changedFiles) {
+                workerEntries.push({
+                  archivePath: `userdata/${file.relativePath}`,
+                  filePath: file.absolutePath,
+                });
+              }
+
+              let watchdogChanged = false;
+              const wdPath = NodePath.join(serverConfig.stateDir, "watchdog-journal.sqlite");
+              if (NodeFs.existsSync(wdPath) && NodeFs.statSync(wdPath).isFile()) {
+                const wdStat = NodeFs.statSync(wdPath);
+                const prevWd = yield* loadTargetManifest("userdata:watchdog-journal.sqlite");
+                const wdDiff = yield* Effect.tryPromise({
+                  try: () =>
+                    computeIncrementalDiff({
+                      targetId: "userdata:watchdog-journal.sqlite",
+                      files: [
+                        {
+                          absolutePath: wdPath,
+                          relativePath: "watchdog-journal.sqlite",
+                          sizeBytes: wdStat.size,
+                          mtimeMs: Math.floor(wdStat.mtimeMs),
+                        },
+                      ],
+                      previousManifest: prevWd,
+                      nowIso: createdAtIso,
+                      ...(pauseSignal ? { signal: pauseSignal } : {}),
+                    }),
+                  catch: (e) =>
+                    new DriveBackupError({
+                      code: pauseSignal?.aborted ? "BUSY_DEFERRED" : "UNAVAILABLE",
+                      message: `watchdog-journal 증분 비교 실패: ${errMsg(e)}`,
+                    }),
+                });
+                pendingManifests.push({
+                  targetId: "userdata:watchdog-journal.sqlite",
+                  json: wdDiff.nextManifestJson,
+                  sha256: wdDiff.nextManifestSha256,
+                });
+                if (wdDiff.changedFiles.length > 0) {
+                  watchdogChanged = true;
+                  const snapOut = NodePath.join(
+                    snapshotStagingDir,
+                    `udsnap-${runId}-watchdog-journal.sqlite`,
+                  );
+                  tempFilesToClean.push(snapOut);
+                  const snap = yield* Effect.tryPromise({
+                    try: () =>
+                      runSqliteSnapshotInWorker({
+                        dbPath: wdPath,
+                        outputPath: snapOut,
+                        rssLimitMb: config.workerRssLimitMb,
+                        ...(pauseSignal ? { signal: pauseSignal } : {}),
+                      }),
+                    catch: (e) => {
+                      if (e instanceof SnapshotPausedError) {
+                        return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                      }
+                      return new DriveBackupError({
+                        code: "UNAVAILABLE",
+                        message: `watchdog-journal SQLite 스냅샷 실패: ${errMsg(e)}`,
+                      });
+                    },
+                  });
+                  totalWalGrowthBytes = (totalWalGrowthBytes ?? 0) + snap.walGrowthBytes;
+                  workerEntries.push({
+                    archivePath: "userdata/watchdog-journal.sqlite",
+                    filePath: snap.outputPath,
+                  });
+                }
+              }
+
+              if (
+                diff.changedFiles.length === 0 &&
+                diff.deletedPaths.length === 0 &&
+                !watchdogChanged
+              ) {
+                for (const pm of pendingManifests) {
+                  yield* saveTargetManifest(pm.targetId, pm.json, pm.sha256);
+                }
+                const doneMs = Date.now();
+                yield* sql`
+                  UPDATE drive_backup_targets
+                  SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
+                  WHERE id = ${row.id}
+                `.pipe(Effect.catch(() => Effect.void));
+                shouldPackArchive = false;
+              } else {
+                workerEntries.push({
+                  archivePath: `manifests/${sanitizeSegment(row.id)}.manifest.json`,
+                  contentBase64: Buffer.from(diff.nextManifestJson, "utf8").toString("base64"),
+                });
+              }
+            } else if (isSingleSqliteUserdata && row.sync_files) {
               const snapOut = NodePath.join(
                 snapshotStagingDir,
                 `udsnap-${runId}-${sanitizeSegment(NodePath.basename(row.root_path))}`,
@@ -1470,12 +1938,14 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 rootPath: row.root_path,
                 customExcludeGlobs: parseJsonStringArray(row.exclude_globs_json),
                 unlimited: row.kind === "userdata",
+                ...(row.kind === "knowledge"
+                  ? { maxSingleFileBytes: DEFAULT_MIRROR_MAX_FILE_BYTES }
+                  : {}),
               });
               blockedSecretsCount = scanned.blockedSecretsCount;
               blockedSecretsSample = scanned.blockedSecretsSample;
 
               if (row.kind === "userdata") {
-                // userdata 디렉터리(memory-v2 등 12만+ 파일): 파일별 size/mtime/sha256 증분 매니페스트로 바뀐 파일만 업로드
                 const prevManifest = yield* loadTargetManifest(row.id);
                 const diff = yield* Effect.tryPromise({
                   try: () =>
@@ -1492,11 +1962,11 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       message: `증분 매니페스트 계산 실패 (${row.display_name}): ${errMsg(e)}`,
                     }),
                 });
-                pendingIncrementalManifest = {
+                pendingManifests.push({
                   targetId: row.id,
                   json: diff.nextManifestJson,
                   sha256: diff.nextManifestSha256,
-                };
+                });
                 for (const file of diff.changedFiles) {
                   workerEntries.push({
                     archivePath: `userdata/${sanitizeSegment(NodePath.basename(row.root_path))}/${file.relativePath}`,
@@ -1504,21 +1974,20 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   });
                 }
                 if (diff.changedFiles.length === 0 && diff.deletedPaths.length === 0) {
-                  // 변경 없음 -> 0바이트 업로드 생략, last_backed_up_at_ms만 갱신
                   yield* saveTargetManifest(row.id, diff.nextManifestJson, diff.nextManifestSha256);
                   const doneMs = Date.now();
                   yield* sql`
-                  UPDATE drive_backup_targets
-                  SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
-                  WHERE id = ${row.id}
-                `.pipe(Effect.catch(() => Effect.void));
-                  continue;
+                    UPDATE drive_backup_targets
+                    SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
+                    WHERE id = ${row.id}
+                  `.pipe(Effect.catch(() => Effect.void));
+                  shouldPackArchive = false;
+                } else {
+                  workerEntries.push({
+                    archivePath: `manifests/${sanitizeSegment(row.id)}.manifest.json`,
+                    contentBase64: Buffer.from(diff.nextManifestJson, "utf8").toString("base64"),
+                  });
                 }
-                // 증분 매니페스트 스냅샷도 아카이브에 동반 기록
-                workerEntries.push({
-                  archivePath: `manifests/${sanitizeSegment(row.id)}.manifest.json`,
-                  contentBase64: Buffer.from(diff.nextManifestJson, "utf8").toString("base64"),
-                });
               } else {
                 for (const file of scanned.includedFiles) {
                   workerEntries.push({
@@ -1554,122 +2023,153 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               }
             }
 
-            const safeFolder = sanitizeSegment(row.display_name || row.id);
-            const subFolderPrefix =
-              row.kind === "userdata" ? `userdata/${safeFolder}` : `projects/${safeFolder}`;
-            const ext = passphrase ? "t3enc" : "t3arc";
-            const fileName = `${stamp}_${safeFolder}.${ext}`;
-            const stagedArchivePath = NodePath.join(snapshotStagingDir, `arc-${runId}-${fileName}`);
-            tempFilesToClean.push(stagedArchivePath);
-
-            let preserveArchiveForResume = false;
-            try {
-              const built = yield* Effect.tryPromise({
-                try: () =>
-                  runPackAndEncryptInWorker({
-                    targetId: row.id,
-                    targetDisplayName: row.display_name,
-                    entries: workerEntries,
-                    outputPath: stagedArchivePath,
-                    createdAtIso,
-                    encryptionPassphrase: passphrase,
-                    readLimitMBps: config.readLimitMBps,
-                    rssLimitMb: config.workerRssLimitMb,
-                    ...(pauseSignal ? { signal: pauseSignal } : {}),
-                  }),
-                catch: (e) => {
-                  if (e instanceof SnapshotPausedError) {
-                    return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
-                  }
-                  return new DriveBackupError({
-                    code: "TRANSPORT_ERROR",
-                    message: `대상 '${row.display_name}' 스트리밍 패킹 실패: ${errMsg(e)}`,
-                  });
-                },
-              });
-
-              yield* saveCheckpoint({
-                stage: "uploading",
-                targetId: row.id,
-                archivePath: stagedArchivePath,
-                totalBytes: built.archiveBytes,
-                manifestSha256: built.manifestSha256,
-              });
-
-              const uploaded = yield* Effect.tryPromise({
-                try: () =>
-                  uploadArchiveFile({
-                    targetId: row.id,
-                    subFolder: subFolderPrefix,
-                    fileName,
-                    stagedArchivePath,
-                  }),
-                catch: (e) => {
-                  if (e instanceof ResumableUploadPausedError) {
-                    preserveArchiveForResume = true;
-                    return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
-                  }
-                  return new DriveBackupError({
-                    code: e instanceof OAuthTokenRefreshError ? "AUTH_REQUIRED" : "TRANSPORT_ERROR",
-                    message:
-                      e instanceof OAuthTokenRefreshError
-                        ? e.message
-                        : `대상 '${row.display_name}' 업로드 실패: ${errMsg(e)}`,
-                  });
-                },
-              }).pipe(
-                Effect.tapError((err) =>
-                  err.code === "AUTH_REQUIRED"
-                    ? recordAuthError(
-                        isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
-                        err.message,
-                      )
-                    : Effect.void,
-                ),
-                Effect.tap(() =>
-                  config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
-                ),
+            if (shouldPackArchive) {
+              const safeFolder = isUnifiedUserdata
+                ? "t3-all-userdata"
+                : sanitizeSegment(row.display_name || row.id);
+              const subFolderPrefix =
+                row.kind === "userdata"
+                  ? `userdata/${safeFolder}`
+                  : row.kind === "knowledge"
+                    ? `knowledge/${safeFolder}`
+                    : `projects/${safeFolder}`;
+              const ext = passphrase ? "t3enc" : "t3arc";
+              const fileName = `${stamp}_${safeFolder}.${ext}`;
+              const stagedArchivePath = NodePath.join(
+                snapshotStagingDir,
+                `arc-${runId}-${fileName}`,
               );
+              tempFilesToClean.push(stagedArchivePath);
 
-              if (pendingIncrementalManifest) {
-                yield* saveTargetManifest(
-                  pendingIncrementalManifest.targetId,
-                  pendingIncrementalManifest.json,
-                  pendingIncrementalManifest.sha256,
+              let preserveArchiveForResume = false;
+              try {
+                const built = yield* Effect.tryPromise({
+                  try: () =>
+                    runPackAndEncryptInWorker({
+                      targetId: row.id,
+                      targetDisplayName: row.display_name,
+                      entries: workerEntries,
+                      outputPath: stagedArchivePath,
+                      createdAtIso,
+                      encryptionPassphrase: passphrase,
+                      readLimitMBps: config.readLimitMBps,
+                      rssLimitMb: config.workerRssLimitMb,
+                      ...(pauseSignal ? { signal: pauseSignal } : {}),
+                    }),
+                  catch: (e) => {
+                    if (e instanceof SnapshotPausedError) {
+                      return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
+                    return new DriveBackupError({
+                      code: "TRANSPORT_ERROR",
+                      message: `대상 '${row.display_name}' 스트리밍 패킹 실패: ${errMsg(e)}`,
+                    });
+                  },
+                });
+
+                yield* saveCheckpoint({
+                  stage: "uploading",
+                  targetId: row.id,
+                  archivePath: stagedArchivePath,
+                  totalBytes: built.archiveBytes,
+                  manifestSha256: built.manifestSha256,
+                });
+
+                const uploaded = yield* Effect.tryPromise({
+                  try: () =>
+                    uploadArchiveFile({
+                      targetId: row.id,
+                      subFolder: subFolderPrefix,
+                      fileName,
+                      stagedArchivePath,
+                    }),
+                  catch: (e) => {
+                    if (e instanceof ResumableUploadPausedError) {
+                      preserveArchiveForResume = true;
+                      return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
+                    return new DriveBackupError({
+                      code:
+                        e instanceof OAuthTokenRefreshError ? "AUTH_REQUIRED" : "TRANSPORT_ERROR",
+                      message:
+                        e instanceof OAuthTokenRefreshError
+                          ? e.message
+                          : `대상 '${row.display_name}' 업로드 실패: ${errMsg(e)}`,
+                    });
+                  },
+                }).pipe(
+                  Effect.tapError((err) =>
+                    err.code === "AUTH_REQUIRED"
+                      ? recordAuthError(
+                          isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                          err.message,
+                        )
+                      : Effect.void,
+                  ),
+                  Effect.tap(() =>
+                    config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
+                  ),
                 );
-              }
 
-              totalFiles += built.fileCount;
-              totalRawBytes += built.rawBytes;
-              totalArchiveBytes += built.archiveBytes;
-              totalBlockedSecrets += blockedSecretsCount;
-              for (const sample of blockedSecretsSample) {
-                if (blockedSamples.length < 15)
-                  blockedSamples.push(`${row.display_name}:${sample}`);
-              }
-              lastManifestSha256 = built.manifestSha256;
-              lastDestPath = uploaded.destinationPath;
-
-              const doneMs = Date.now();
-              yield* sql`
-              UPDATE drive_backup_targets
-              SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
-              WHERE id = ${row.id}
-            `.pipe(Effect.catch(() => Effect.void));
-            } finally {
-              for (const tmp of tempFilesToClean) {
-                if (preserveArchiveForResume && tmp === stagedArchivePath) continue;
-                try {
-                  if (NodeFs.existsSync(tmp)) NodeFs.rmSync(tmp, { force: true });
-                } catch {
-                  // ignore
+                for (const pm of pendingManifests) {
+                  yield* saveTargetManifest(pm.targetId, pm.json, pm.sha256);
                 }
+
+                totalFiles += built.fileCount;
+                totalRawBytes += built.rawBytes;
+                totalArchiveBytes += built.archiveBytes;
+                totalBlockedSecrets += blockedSecretsCount;
+                for (const sample of blockedSecretsSample) {
+                  if (blockedSamples.length < 15)
+                    blockedSamples.push(`${row.display_name}:${sample}`);
+                }
+                lastManifestSha256 = built.manifestSha256;
+                lastDestPath = uploaded.destinationPath;
+
+                const doneMs = Date.now();
+                yield* sql`
+                  UPDATE drive_backup_targets
+                  SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
+                  WHERE id = ${row.id}
+                `.pipe(Effect.catch(() => Effect.void));
+              } finally {
+                for (const tmp of tempFilesToClean) {
+                  if (preserveArchiveForResume && tmp === stagedArchivePath) continue;
+                  try {
+                    if (NodeFs.existsSync(tmp)) NodeFs.rmSync(tmp, { force: true });
+                  } catch {
+                    // ignore
+                  }
+                }
+              }
+            }
+
+            if (Boolean(row.sync_local_to_drive_knowledge ?? 0)) {
+              const kRes = yield* uploadLocalKnowledgeForTarget({
+                row,
+                config,
+                oauthCreds,
+                createdAtIso,
+                ...(pauseSignal ? { pauseSignal } : {}),
+              });
+              totalFiles += kRes.uploadedCount;
+              totalRawBytes += kRes.uploadedBytes;
+              totalArchiveBytes += kRes.uploadedBytes;
+              if (!shouldPackArchive) {
+                totalBlockedSecrets += kRes.blockedSecretsCount;
+                for (const sample of kRes.blockedSecretsSample) {
+                  if (blockedSamples.length < 15)
+                    blockedSamples.push(`${row.display_name}:${sample}`);
+                }
+              }
+              if (kRes.lastDestPath && !lastDestPath) {
+                lastDestPath = kRes.lastDestPath;
               }
             }
           }
 
-          // 선택적 월별 이벤트 아카이브 증분 백업 (includeEventArchives=true일 때 신규/변경분만 업로드)
-          if (config.includeEventArchives) {
+          // 선택적 월별 이벤트 아카이브 증분 백업 (includeEventArchives 또는 통합 userdata:all ON일 때 신규/변경분만 업로드)
+          if (effectiveIncludeEventArchives) {
             const archivesDir = NodePath.join(serverConfig.stateDir, "archives");
             if (NodeFs.existsSync(archivesDir)) {
               const eventFiles = NodeFs.readdirSync(archivesDir, { withFileTypes: true })
@@ -1818,13 +2318,13 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           }
 
           // 선택적 T3 코어 설정 / 읽기 전용 SQLite 스냅샷 백업 (완전 스트리밍 — >2GiB 메모리 버퍼 0건!)
-          if (config.includeCoreSettings || config.includeCoreSqliteSnapshot) {
+          if (effectiveIncludeCoreSettings || effectiveIncludeCoreSqliteSnapshot) {
             const coreWorkerEntries: Array<{
               readonly archivePath: string;
               readonly filePath?: string;
               readonly contentBase64?: string;
             }> = [];
-            if (config.includeCoreSettings) {
+            if (effectiveIncludeCoreSettings) {
               if (NodeFs.existsSync(serverConfig.settingsPath)) {
                 try {
                   const rawJson = JSON.parse(
@@ -1854,7 +2354,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             }
             let snapshotPathToCleanup: string | null = null;
             const snapshotDue = isFullSnapshotDue({
-              includeCoreSqliteSnapshot: config.includeCoreSqliteSnapshot,
+              includeCoreSqliteSnapshot: effectiveIncludeCoreSqliteSnapshot,
               lastFullSnapshotAtMs: config.lastFullSnapshotAtMs,
               fullSnapshotIntervalDays: config.fullSnapshotIntervalDays,
               nowMs: startedAtMs,
@@ -2193,6 +2693,30 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         let syncedCount = 0;
         let skippedUnchangedCount = 0;
         let totalBytes = 0;
+        let uploadedCount = 0;
+        let uploadedSkippedUnchangedCount = 0;
+        let uploadedBytes = 0;
+
+        const allTargetRows = yield* listTargetRows();
+        const knowledgeUploadTargets = allTargetRows.filter(
+          (row) => Boolean(row.enabled) && Boolean(row.sync_local_to_drive_knowledge ?? 0),
+        );
+        const oauthForKnowledge =
+          config.transportMode === "gdrive_api" ? yield* readOAuthCredentials() : null;
+        if (knowledgeUploadTargets.length > 0) {
+          const uploadCreatedAtIso = new Date(startedAtMs).toISOString();
+          for (const kRow of knowledgeUploadTargets) {
+            const up = yield* uploadLocalKnowledgeForTarget({
+              row: kRow,
+              config,
+              oauthCreds: oauthForKnowledge,
+              createdAtIso: uploadCreatedAtIso,
+            });
+            uploadedCount += up.uploadedCount;
+            uploadedSkippedUnchangedCount += up.skippedUnchangedCount;
+            uploadedBytes += up.uploadedBytes;
+          }
+        }
 
         if (config.transportMode === "local_drive_folder") {
           if (!config.localDriveRoot) {
@@ -2422,10 +2946,10 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           kind: "knowledge_mirror",
           status: "succeeded",
           transportMode: config.transportMode,
-          targetIds: [],
-          fileCount: syncedCount,
-          rawBytes: totalBytes,
-          archiveBytes: totalBytes,
+          targetIds: knowledgeUploadTargets.map((t) => t.id),
+          fileCount: syncedCount + uploadedCount,
+          rawBytes: totalBytes + uploadedBytes,
+          archiveBytes: totalBytes + uploadedBytes,
           skippedSecretsCount: 0,
           skippedSecretsSample: [],
           manifestSha256: null,
@@ -2435,15 +2959,31 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           finishedAtMs: Date.now(),
         });
 
+        const msgParts: string[] = [];
+        if (uploadedCount > 0) {
+          msgParts.push(
+            `로컬 지식 ${uploadedCount}개 문서를 '${config.gdriveKnowledgeFolderName}'에 업로드`,
+          );
+        }
+        if (syncedCount > 0) {
+          msgParts.push(
+            `'${config.gdriveKnowledgeFolderName}'에서 ${syncedCount}개 문서를 로컬 미러로 내려받음`,
+          );
+        }
+        const message =
+          msgParts.length > 0
+            ? `${msgParts.join(" · ")} (미변경 생략: 업로드 ${uploadedSkippedUnchangedCount}건 / 내려받기 ${skippedUnchangedCount}건).`
+            : `새로운 변경 문서가 없습니다 (미변경 생략: 업로드 ${uploadedSkippedUnchangedCount}건 / 내려받기 ${skippedUnchangedCount}건).`;
+
         return {
           syncedCount,
           skippedUnchangedCount,
           totalBytes,
+          uploadedCount,
+          uploadedSkippedUnchangedCount,
+          uploadedBytes,
           mirrorLocalDir,
-          message:
-            syncedCount > 0
-              ? `Google Drive '${config.gdriveKnowledgeFolderName}'에서 ${syncedCount}개 문서를 로컬 지식 미러에 동기화했습니다 (변경 없음 ${skippedUnchangedCount}건).`
-              : `새로운 변경 문서가 없습니다 (기존 동일 ${skippedUnchangedCount}건).`,
+          message,
         };
       }),
     );

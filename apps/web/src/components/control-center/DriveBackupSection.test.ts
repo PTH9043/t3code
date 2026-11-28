@@ -29,6 +29,7 @@ describe("DriveBackupSection helpers", () => {
       syncFiles: true,
       syncT3Scope: true,
       syncDriveToLocalRag: false,
+      syncLocalToDriveKnowledge: false,
       excludeGlobs: [],
       threadCount: 0,
       memoryCount: 0,

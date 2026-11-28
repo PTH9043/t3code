@@ -45,7 +45,13 @@ export class DriveBackupError extends Schema.TaggedErrorClass<DriveBackupError>(
 export const DriveBackupTransportMode = Schema.Literals(["gdrive_api", "local_drive_folder"]);
 export type DriveBackupTransportMode = typeof DriveBackupTransportMode.Type;
 
-export const DriveBackupTargetKind = Schema.Literals(["project", "repo", "core", "userdata"]);
+export const DriveBackupTargetKind = Schema.Literals([
+  "project",
+  "repo",
+  "core",
+  "userdata",
+  "knowledge",
+]);
 export type DriveBackupTargetKind = typeof DriveBackupTargetKind.Type;
 
 export const DriveBackupRunKind = Schema.Literals([
@@ -129,6 +135,8 @@ export const DriveBackupTarget = Schema.Struct({
   syncT3Scope: Schema.Boolean,
   /** Google Drive /T3-Knowledge -> 로컬 미러 동기화 대상 여부 */
   syncDriveToLocalRag: Schema.Boolean,
+  /** 로컬 폴더 파일을 원본 그대로 Google Drive /T3-Knowledge에 증분 업로드 (기본 false: T3-Backup 암호화만) */
+  syncLocalToDriveKnowledge: Schema.optionalKey(Schema.Boolean),
   excludeGlobs: Schema.Array(Schema.String),
   riskWarning: Schema.NullOr(Schema.String),
   threadCount: NonNegativeInt,
@@ -256,6 +264,7 @@ export const DriveBackupUpsertTargetInput = Schema.Struct({
   syncFiles: Schema.Boolean,
   syncT3Scope: Schema.Boolean,
   syncDriveToLocalRag: Schema.Boolean,
+  syncLocalToDriveKnowledge: Schema.optionalKey(Schema.Boolean),
   excludeGlobs: Schema.optionalKey(
     Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(120))),
   ),
@@ -305,6 +314,9 @@ export const DriveBackupSyncMirrorResult = Schema.Struct({
   syncedCount: NonNegativeInt,
   skippedUnchangedCount: NonNegativeInt,
   totalBytes: NonNegativeInt,
+  uploadedCount: Schema.optionalKey(NonNegativeInt),
+  uploadedSkippedUnchangedCount: Schema.optionalKey(NonNegativeInt),
+  uploadedBytes: Schema.optionalKey(NonNegativeInt),
   mirrorLocalDir: Schema.String,
   message: Schema.String,
 });
