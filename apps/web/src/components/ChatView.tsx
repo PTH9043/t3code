@@ -5915,23 +5915,35 @@ function ChatViewContent(props: ChatViewProps) {
     })();
   }, [props.desktopAssistantVoiceRequest]);
 
+  const interruptInFlightThreadRef = useRef<ThreadId | null>(null);
   const onInterrupt = async () => {
     if (!activeThread) return;
     if (liveMeetingRun !== undefined) {
       await handleStopMeetingRun();
       return;
     }
-    const result = await interruptThreadTurn({
-      environmentId,
-      input: buildThreadTurnInterruptInput(
-        activeThread,
-        activePendingUserInput && isRecoverableUserInputRequestId(activePendingUserInput.requestId)
-          ? { questionRequestId: activePendingUserInput.requestId }
-          : undefined,
-      ),
-    });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      setThreadError(activeThread.id, "현재 턴을 중단하지 못했습니다.");
+    if (interruptInFlightThreadRef.current === activeThread.id) {
+      return;
+    }
+    interruptInFlightThreadRef.current = activeThread.id;
+    try {
+      const result = await interruptThreadTurn({
+        environmentId,
+        input: buildThreadTurnInterruptInput(
+          activeThread,
+          activePendingUserInput &&
+            isRecoverableUserInputRequestId(activePendingUserInput.requestId)
+            ? { questionRequestId: activePendingUserInput.requestId }
+            : undefined,
+        ),
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        setThreadError(activeThread.id, "현재 턴을 중단하지 못했습니다.");
+      }
+    } finally {
+      if (interruptInFlightThreadRef.current === activeThread.id) {
+        interruptInFlightThreadRef.current = null;
+      }
     }
   };
 

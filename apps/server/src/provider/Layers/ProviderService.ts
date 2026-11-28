@@ -1065,7 +1065,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const routed = yield* resolveRoutableSession({
           threadId: input.threadId,
           operation: "ProviderService.interruptTurn",
-          allowRecovery: true,
+          allowRecovery: false,
         });
         metricProvider = routed.adapter.provider;
         yield* Effect.annotateCurrentSpan({
@@ -1074,6 +1074,31 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
           "provider.turn_id": input.turnId,
         });
+        if (!routed.isActive) {
+          // No live provider subprocess exists for this thread (e.g. a stranded
+          // session after restart). Never spawn a fresh CLI subprocess just to
+          // stop a dead turn — emit session.exited so ingestion clears the
+          // stale running state immediately.
+          if (input.questionRequestId === undefined && input.stopBackground !== true) {
+            const createdAt = yield* nowIso;
+            yield* publishRuntimeEvent({
+              type: "session.exited",
+              eventId: EventId.make(`interrupt-inactive:${input.threadId}:${createdAt}`),
+              provider: routed.adapter.provider,
+              providerInstanceId: routed.instanceId,
+              threadId: input.threadId,
+              createdAt,
+              payload: {
+                reason: "interrupted-inactive-session",
+                recoverable: true,
+              },
+            });
+          }
+          yield* analytics.record("provider.turn.interrupted", {
+            provider: routed.adapter.provider,
+          });
+          return;
+        }
         yield* routed.adapter.interruptTurn(routed.threadId, input.turnId, {
           stopBackground: input.stopBackground === true,
           ...(input.questionRequestId !== undefined

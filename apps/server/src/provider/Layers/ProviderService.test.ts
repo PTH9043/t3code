@@ -1343,6 +1343,44 @@ routing.layer("ProviderServiceLive routing", (it) => {
       }),
   );
 
+  it.effect(
+    "settles an inactive persisted session immediately on interruptTurn without spawning recovery",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("thread-interrupt-inactive");
+
+        yield* provider.startSession(threadId, {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/dead-turn",
+          runtimeMode: "full-access",
+        });
+
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+        routing.codex.interruptTurn.mockClear();
+
+        const exitedFiber = yield* Stream.runHead(
+          Stream.filter(
+            provider.streamEvents,
+            (event) => event.threadId === threadId && event.type === "session.exited",
+          ),
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+
+        yield* provider.interruptTurn({ threadId });
+
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+        assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+        const exitedEvent = yield* Fiber.join(exitedFiber);
+        assert.equal(Option.isSome(exitedEvent), true);
+        if (Option.isSome(exitedEvent) && exitedEvent.value.type === "session.exited") {
+          assert.equal(exitedEvent.value.payload.reason, "interrupted-inactive-session");
+        }
+      }),
+  );
+
   it.effect("recovers stale sessions for sendTurn using persisted cwd", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

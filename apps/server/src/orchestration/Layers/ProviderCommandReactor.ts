@@ -3137,7 +3137,7 @@ const make = Effect.gen(function* () {
         Effect.catchCause((cause) => Effect.succeed(Cause.pretty(cause))),
       );
     if (failureDetail !== null) {
-      return yield* appendProviderFailureActivity({
+      yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.interrupt.failed",
         summary: "Provider turn interrupt failed",
@@ -3145,6 +3145,29 @@ const make = Effect.gen(function* () {
         turnId: event.payload.turnId ?? null,
         createdAt: event.payload.createdAt,
       });
+      // Never leave a thread permanently wedged in "running"/"starting" after a
+      // failed or timed-out turn interrupt: force-stop the stuck provider
+      // session best-effort and settle the projected session back to ready.
+      if (
+        event.payload.questionRequestId === undefined &&
+        (session.status === "running" || session.status === "starting")
+      ) {
+        yield* providerService
+          .stopSession({ threadId: event.payload.threadId })
+          .pipe(Effect.timeoutOption("5 seconds"), Effect.ignore);
+        const now = DateTime.formatIso(yield* DateTime.now);
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            ...session,
+            status: "ready",
+            activeTurnId: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+      }
+      return;
     }
 
     // The provider acknowledged the interrupt, but codex (observed 2026-08-29)
@@ -3155,7 +3178,7 @@ const make = Effect.gen(function* () {
     // period to report the end itself, then settle the session.
     const interruptedTurnId = session.activeTurnId;
     yield* Effect.gen(function* () {
-      yield* Effect.sleep("20 seconds");
+      yield* Effect.sleep("5 seconds");
       const current = yield* resolveThread(event.payload.threadId);
       const currentSession = current?.session;
       if (
