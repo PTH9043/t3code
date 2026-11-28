@@ -209,8 +209,47 @@ export const mergeProviderSnapshot = (
       ...(nextProvider.usage ? { usage: nextProvider.usage } : {}),
     };
   }
+  const hasNextQuotaWindows =
+    nextProvider.usage?.primary !== undefined ||
+    nextProvider.usage?.secondary !== undefined ||
+    (nextProvider.usage?.extraWindows?.length ?? 0) > 0;
+  const hasPreviousQuotaWindows =
+    previousProvider.usage?.primary !== undefined ||
+    previousProvider.usage?.secondary !== undefined ||
+    (previousProvider.usage?.extraWindows?.length ?? 0) > 0;
+  const canPreservePreviousUsage =
+    nextProvider.enabled &&
+    nextProvider.status === "ready" &&
+    nextProvider.auth.status === "authenticated" &&
+    previousProvider.usage !== undefined;
+  const mergedUsage =
+    canPreservePreviousUsage && nextProvider.usage === undefined
+      ? previousProvider.usage
+      : canPreservePreviousUsage &&
+          nextProvider.usage !== undefined &&
+          nextProvider.usage.source === "runtime" &&
+          !hasNextQuotaWindows &&
+          hasPreviousQuotaWindows
+        ? {
+            ...previousProvider.usage,
+            ...nextProvider.usage,
+            source: "combined" as const,
+            ...(previousProvider.usage.primary ? { primary: previousProvider.usage.primary } : {}),
+            ...(previousProvider.usage.secondary
+              ? { secondary: previousProvider.usage.secondary }
+              : {}),
+            ...(previousProvider.usage.extraWindows?.length
+              ? { extraWindows: previousProvider.usage.extraWindows }
+              : {}),
+            ...(previousProvider.usage.credits ? { credits: previousProvider.usage.credits } : {}),
+            ...(previousProvider.usage.planType
+              ? { planType: previousProvider.usage.planType }
+              : {}),
+          }
+        : nextProvider.usage;
   return {
     ...nextProvider,
+    ...(mergedUsage !== undefined ? { usage: mergedUsage } : {}),
     models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
     ...(nextProvider.driver === "codex" &&
     nextProvider.status === "warning" &&

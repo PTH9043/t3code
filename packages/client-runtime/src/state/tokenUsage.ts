@@ -47,8 +47,23 @@ export function quotaWindowShortLabel(window: ServerProviderUsageWindow, fallbac
 }
 
 export function formatQuotaResetTime(resetsAt: number | undefined): string | undefined {
-  if (resetsAt === undefined || !Number.isFinite(resetsAt)) return undefined;
+  if (resetsAt === undefined || !Number.isFinite(resetsAt) || resetsAt <= 0) return undefined;
   return `${quotaResetFormatter.format(resetsAt * 1_000)} 초기화`;
+}
+
+export function hasExpiredQuotaWindow(
+  usage: ServerProviderUsage | undefined,
+  nowMs: number,
+): boolean {
+  if (!usage) return false;
+  const windows = [usage.primary, usage.secondary, ...(usage.extraWindows ?? [])];
+  return windows.some(
+    (window) =>
+      window?.resetsAt !== undefined &&
+      Number.isFinite(window.resetsAt) &&
+      window.resetsAt > 0 &&
+      window.resetsAt * 1_000 <= nowMs,
+  );
 }
 
 function toQuotaDisplay(

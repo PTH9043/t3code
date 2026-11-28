@@ -27,6 +27,29 @@ export const MIN_DEFAULT_PERIODIC_REFRESH_INTERVAL_MS = 3 * 60_000;
 /** Reuse a recently probed healthy snapshot during periodic sweeps within this TTL window. */
 const PERIODIC_SNAPSHOT_REUSE_TTL_MS = 2.5 * 60_000;
 
+function hasQuotaUsage(snapshot: ServerProvider): boolean {
+  return (
+    snapshot.usage?.primary !== undefined ||
+    snapshot.usage?.secondary !== undefined ||
+    (snapshot.usage?.extraWindows?.length ?? 0) > 0
+  );
+}
+
+function hasExpiredQuotaWindow(snapshot: ServerProvider, nowMs: number): boolean {
+  const windows = [
+    snapshot.usage?.primary,
+    snapshot.usage?.secondary,
+    ...(snapshot.usage?.extraWindows ?? []),
+  ];
+  return windows.some(
+    (window) =>
+      window?.resetsAt !== undefined &&
+      Number.isFinite(window.resetsAt) &&
+      window.resetsAt > 0 &&
+      window.resetsAt * 1_000 <= nowMs,
+  );
+}
+
 export function computeProviderRefreshIntervalMs(
   baseIntervalMs: number,
   consecutiveUnreadyCount: number,
@@ -169,7 +192,8 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         lastProbeAtMs > 0 &&
         effectiveReuseTtlMs > 0 &&
         currentState.snapshot.status === "ready" &&
-        nowMs - lastProbeAtMs < effectiveReuseTtlMs
+        nowMs - lastProbeAtMs < effectiveReuseTtlMs &&
+        !hasExpiredQuotaWindow(currentState.snapshot, nowMs)
       ) {
         return currentState.snapshot;
       }
@@ -234,7 +258,32 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       backgroundPolicy.shouldRunScopeWork({ type: "provider-status" }),
       backgroundPolicy.shouldRunScopeWork({ type: "provider-status", instanceId }),
     ]);
-    return genericDemand || instanceDemand;
+    if (genericDemand || instanceDemand) {
+      return true;
+    }
+    // Keep subscription quota windows fresh whenever at least one connected client
+    // holds a provider-status lease and the host is awake, even if the user briefly
+    // switched focus to another window when the periodic tick fired.
+    if (!hasQuotaUsage(state.snapshot)) {
+      return false;
+    }
+    const [hasGenericLease, hasInstanceLease, policySnapshot] = yield* Effect.all([
+      backgroundPolicy.hasDemand({ type: "provider-status" }),
+      backgroundPolicy.hasDemand({ type: "provider-status", instanceId }),
+      backgroundPolicy.snapshot,
+    ]);
+    if (!hasGenericLease && !hasInstanceLease) {
+      return false;
+    }
+    if (
+      !policySnapshot.hostPower.stale &&
+      (policySnapshot.hostPower.suspended ||
+        policySnapshot.hostPower.thermalState === "serious" ||
+        policySnapshot.hostPower.thermalState === "critical")
+    ) {
+      return false;
+    }
+    return true;
   });
 
   const getRefreshInterval =
@@ -282,17 +331,45 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         ).pipe(
           Effect.flatMap((intervalElapsed) => {
             if (!intervalElapsed || baseIntervalMs <= 0) return Effect.void;
-            // Defer periodic CLI status probes while active chat turns / workers are running
-            // so background checks do not compete with user-facing work.
-            if (
-              input.refreshInterval === undefined &&
-              activeWorkRegistry.snapshot().totalActive > 0
-            ) {
-              return Effect.void;
-            }
-            return hasProviderStatusDemand.pipe(
-              Effect.flatMap((shouldRefresh) =>
-                shouldRefresh ? refreshSnapshot("periodic").pipe(Effect.asVoid) : Effect.void,
+            // Defer bursty periodic CLI probes while active chat turns / workers are running,
+            // but never starve subscription quota refreshes (or overdue probes) indefinitely
+            // during long continuous agent sessions.
+            const shouldSkipForActiveWork =
+              input.refreshInterval === undefined && activeWorkRegistry.snapshot().totalActive > 0
+                ? Effect.all([
+                    Ref.get(lastLiveProbeAtMsRef),
+                    Ref.get(snapshotStateRef),
+                    Clock.currentTimeMillis,
+                  ]).pipe(
+                    Effect.map(([lastProbeAtMs, currentState, nowMs]) => {
+                      if (hasExpiredQuotaWindow(currentState.snapshot, nowMs)) {
+                        return false;
+                      }
+                      if (
+                        hasQuotaUsage(currentState.snapshot) &&
+                        (lastProbeAtMs <= 0 || nowMs - lastProbeAtMs >= baseIntervalMs)
+                      ) {
+                        return false;
+                      }
+                      const overdueMs = Math.max(baseIntervalMs * 2, 20 * 60_000);
+                      if (lastProbeAtMs > 0 && nowMs - lastProbeAtMs >= overdueMs) {
+                        return false;
+                      }
+                      return true;
+                    }),
+                  )
+                : Effect.succeed(false);
+            return shouldSkipForActiveWork.pipe(
+              Effect.flatMap((skipForActiveWork) =>
+                skipForActiveWork
+                  ? Effect.void
+                  : hasProviderStatusDemand.pipe(
+                      Effect.flatMap((shouldRefresh) =>
+                        shouldRefresh
+                          ? refreshSnapshot("periodic").pipe(Effect.asVoid)
+                          : Effect.void,
+                      ),
+                    ),
               ),
             );
           }),

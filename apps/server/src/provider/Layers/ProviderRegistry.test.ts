@@ -2788,6 +2788,87 @@ it.layer(
       );
     });
 
+    it("preserves prior quota windows when a ready refresh transiently lacks quota data", () => {
+      const previous: ServerProvider = {
+        instanceId: ProviderInstanceId.make("gemini"),
+        driver: ProviderDriverKind.make("gemini"),
+        enabled: true,
+        installed: true,
+        version: "0.2.0",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-11-28T06:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+        usage: {
+          source: "combined",
+          updatedAt: "2026-11-28T06:00:00.000Z",
+          sessionTokens: 1_000,
+          sessionCount: 1,
+          activeSessionCount: 1,
+          primary: {
+            label: "Gemini 5시간",
+            bucket: "gemini",
+            usedPercent: 28,
+            windowDurationMinutes: 300,
+            resetsAt: 1_795_849_306,
+          },
+          secondary: {
+            label: "Gemini 7일",
+            bucket: "gemini",
+            usedPercent: 64,
+            windowDurationMinutes: 10_080,
+          },
+        },
+      };
+
+      const transientRuntimeOnly: ServerProvider = {
+        ...previous,
+        checkedAt: "2026-11-28T06:10:00.000Z",
+        usage: {
+          source: "runtime",
+          updatedAt: "2026-11-28T06:10:00.000Z",
+          sessionTokens: 2_500,
+          sessionCount: 1,
+          activeSessionCount: 0,
+        },
+      };
+      const mergedTransient = mergeProviderSnapshot(previous, transientRuntimeOnly);
+      assert.strictEqual(mergedTransient.usage?.source, "combined");
+      assert.strictEqual(mergedTransient.usage?.sessionTokens, 2_500);
+      assert.strictEqual(mergedTransient.usage?.primary?.usedPercent, 28);
+      assert.strictEqual(mergedTransient.usage?.secondary?.usedPercent, 64);
+
+      const freshQuota: ServerProvider = {
+        ...previous,
+        checkedAt: "2026-11-28T06:15:00.000Z",
+        usage: {
+          source: "combined",
+          updatedAt: "2026-11-28T06:15:00.000Z",
+          sessionTokens: 3_000,
+          sessionCount: 1,
+          activeSessionCount: 0,
+          primary: {
+            label: "Gemini 5시간",
+            bucket: "gemini",
+            usedPercent: 3,
+            windowDurationMinutes: 300,
+            resetsAt: 1_795_867_306,
+          },
+          secondary: {
+            label: "Gemini 7일",
+            bucket: "gemini",
+            usedPercent: 68,
+            windowDurationMinutes: 10_080,
+          },
+        },
+      };
+      const mergedFresh = mergeProviderSnapshot(previous, freshQuota);
+      assert.strictEqual(mergedFresh.usage?.primary?.usedPercent, 3);
+      assert.strictEqual(mergedFresh.usage?.secondary?.usedPercent, 68);
+    });
+
     it.effect("returns warning when the Claude initialization result is unavailable", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus(

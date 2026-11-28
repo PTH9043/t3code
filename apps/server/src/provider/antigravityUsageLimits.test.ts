@@ -107,4 +107,18 @@ describe("antigravityUsageLimits", () => {
       antigravityAccountUsage({ fetchedAt: "2026-11-20T10:15:00.000Z", rateLimits: {} }),
     ).toBeUndefined();
   });
+
+  it("drops epoch-zero sentinel reset timestamps (1970-01-01T00:00:00Z)", () => {
+    const parsed = parseAntigravityUsageOutput(
+      "Claude and GPT models	Five Hour Limit Remaining	100%	1970-01-01T00:00:00Z",
+    );
+    expect(parsed).toEqual({
+      primary: {
+        label: "Claude·GPT 5시간",
+        bucket: "claude-gpt",
+        usedPercent: 0,
+        windowDurationMinutes: 300,
+      },
+    });
+  });
 });

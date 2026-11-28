@@ -221,6 +221,7 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
   /** Models the user placed under this account (server settings), read when a session starts. */
   readonly subordinates?: Effect.Effect<ReadonlyArray<SubordinateRow>>;
+  readonly onTurnSettled?: () => Effect.Effect<void>;
 }
 
 export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
@@ -228,6 +229,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   options?: ClaudeAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("claudeAgent");
+  const onTurnSettled = options?.onTurnSettled;
+  let lastQuotaRefreshAtMs: number | undefined = undefined;
+  const triggerTurnSettledRefresh = () =>
+    Effect.gen(function* () {
+      if (!onTurnSettled) return;
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      if (lastQuotaRefreshAtMs !== undefined && nowMs - lastQuotaRefreshAtMs < 60_000) return;
+      lastQuotaRefreshAtMs = nowMs;
+      yield* Effect.forkDetach(Effect.ignore(onTurnSettled()));
+    });
   const fileSystem = yield* FileSystem.FileSystem;
   const resolveManagedMcp = yield* makeManagedMcpResolver();
   const settingsService = yield* Effect.serviceOption(ServerSettingsService);
@@ -914,6 +925,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         },
         providerRefs: {},
       });
+      yield* triggerTurnSettledRefresh();
       return;
     }
 
@@ -1003,6 +1015,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(status === "failed" && errorMessage ? { lastError: errorMessage } : {}),
     };
     yield* updateResumeCursor(context);
+    yield* triggerTurnSettledRefresh();
   });
 
   const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (

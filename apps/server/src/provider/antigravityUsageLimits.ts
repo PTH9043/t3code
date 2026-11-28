@@ -55,7 +55,7 @@ function epochSecondsFromIso(value: string | undefined): number | undefined {
   const parsed = DateTime.make(trimmed);
   if (Option.isNone(parsed)) return undefined;
   const seconds = Math.floor(DateTime.toEpochMillis(parsed.value) / 1_000);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
 }
 
 function parsePercent(value: string | undefined): number | undefined {

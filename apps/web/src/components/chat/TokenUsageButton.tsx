@@ -1,7 +1,13 @@
 import { HandoffSettings } from "./HandoffSettings";
-import type { EnvironmentId, ServerProviderUsage, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProviderInstanceId,
+  ServerProviderUsage,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   formatTokenCount,
+  hasExpiredQuotaWindow,
   providerQuotaWindows,
   tokenUsageCountLabels,
   tokenUsageEfficiencyDiagnostics,
@@ -11,10 +17,12 @@ import {
   tokenUsageOutcomeLabel,
   tokenUsageDiagnosticRows,
 } from "@t3tools/client-runtime/state/token-usage";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
+import { serverEnvironment } from "~/state/server";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 function quotaToneClass(usedPercent: number): string {
@@ -51,16 +59,27 @@ export function ProviderQuotaPill(props: {
   );
 }
 
+const AUTO_QUOTA_REFRESH_STALE_MS = 2 * 60_000;
+const AUTO_QUOTA_REFRESH_COOLDOWN_MS = 30_000;
+
 export function TokenUsageButton(props: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   busy: boolean;
+  providerInstanceId?: ProviderInstanceId | undefined;
+  providerCheckedAt?: string | undefined;
   providerUsage?: ServerProviderUsage | undefined;
   providerDisplayName?: string | null | undefined;
   selectedModel?: string | null | undefined;
 }) {
   const [workId, setWorkId] = useState<string | undefined>();
   const [beforeSequence, setBeforeSequence] = useState<number | undefined>();
+  const [isRefreshingQuota, setIsRefreshingQuota] = useState(false);
+  const quotaRefreshInFlightRef = useRef(false);
+  const lastAutoQuotaRefreshAtRef = useRef(0);
+  const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
   const query = useEnvironmentQuery(
     orchestrationEnvironment.threadTokenUsage({
       environmentId: props.environmentId,
@@ -71,6 +90,45 @@ export function TokenUsageButton(props: {
       },
     }),
   );
+  const refreshQuota = useCallback(
+    (force: boolean) => {
+      if (!props.providerInstanceId || quotaRefreshInFlightRef.current) return;
+      const nowMs = Date.now();
+      if (!force) {
+        if (nowMs - lastAutoQuotaRefreshAtRef.current < AUTO_QUOTA_REFRESH_COOLDOWN_MS) return;
+        const checkedAtMs = props.providerCheckedAt ? Date.parse(props.providerCheckedAt) : NaN;
+        const isStale =
+          !Number.isFinite(checkedAtMs) || nowMs - checkedAtMs >= AUTO_QUOTA_REFRESH_STALE_MS;
+        const isExpired = hasExpiredQuotaWindow(props.providerUsage, nowMs);
+        if (!isStale && !isExpired) return;
+        lastAutoQuotaRefreshAtRef.current = nowMs;
+      }
+      quotaRefreshInFlightRef.current = true;
+      setIsRefreshingQuota(true);
+      void (async () => {
+        try {
+          await refreshServerProviders({
+            environmentId: props.environmentId,
+            input: { instanceId: props.providerInstanceId },
+          });
+        } finally {
+          quotaRefreshInFlightRef.current = false;
+          setIsRefreshingQuota(false);
+        }
+      })();
+    },
+    [
+      props.environmentId,
+      props.providerCheckedAt,
+      props.providerInstanceId,
+      props.providerUsage,
+      refreshServerProviders,
+    ],
+  );
+  const handleRefreshAll = useCallback(() => {
+    query.refresh();
+    refreshQuota(true);
+  }, [query.refresh, refreshQuota]);
   const lastBusy = useRef(props.busy);
   useEffect(() => {
     if (lastBusy.current !== props.busy) {
@@ -85,7 +143,10 @@ export function TokenUsageButton(props: {
   return (
     <Popover
       onOpenChange={(open) => {
-        if (open) query.refresh();
+        if (open) {
+          query.refresh();
+          refreshQuota(false);
+        }
       }}
     >
       <PopoverTrigger
@@ -134,7 +195,9 @@ export function TokenUsageButton(props: {
                     ? `${props.providerDisplayName} 계정 한도`
                     : "계정 한도"}
                 </strong>
-                <span className="text-[11px] text-muted-foreground">5시간 · 주간</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {isRefreshingQuota ? "한도 갱신 중…" : "5시간 · 주간"}
+                </span>
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
                 {allQuotaWindows.map((window) => (
@@ -173,10 +236,10 @@ export function TokenUsageButton(props: {
             <button
               type="button"
               className="underline"
-              onClick={query.refresh}
-              disabled={query.isPending}
+              onClick={handleRefreshAll}
+              disabled={query.isPending || isRefreshingQuota}
             >
-              {query.isPending ? "갱신 중" : "새로고침"}
+              {query.isPending || isRefreshingQuota ? "갱신 중" : "새로고침"}
             </button>
           </div>
           {query.error ? (

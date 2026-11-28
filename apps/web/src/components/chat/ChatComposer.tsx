@@ -3522,6 +3522,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     environmentId={environmentId}
                     threadId={activeThreadId}
                     busy={phase === "running"}
+                    providerInstanceId={activeThreadProvider?.instanceId}
+                    providerCheckedAt={activeThreadProvider?.checkedAt}
                     providerUsage={activeThreadProvider?.usage}
                     providerDisplayName={sanitizeProviderDisplayAlias(
                       activeThreadProvider?.displayName,

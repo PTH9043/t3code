@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -49,7 +50,10 @@ it.layer(layer)("GeminiAdapter history lifecycle", (it) => {
             `${failPrompt ? 'process.env.T3_ACP_FAIL_PROMPT="1";' : ""}\nawait import(${mockUrl});`,
           );
           const settings = yield* decodeSettings({ binaryPath });
-          const adapter = yield* makeGeminiAdapter(settings);
+          const turnSettledSignal = yield* Deferred.make<void>();
+          const adapter = yield* makeGeminiAdapter(settings, {
+            onTurnSettled: () => Deferred.succeed(turnSettledSignal, undefined).pipe(Effect.asVoid),
+          });
           const threadId = ThreadId.make(`gemini-history-${failPrompt}`);
           const starting = yield* adapter
             .startSession({
@@ -82,6 +86,7 @@ it.layer(layer)("GeminiAdapter history lifecycle", (it) => {
           const completed = yield* Fiber.join(events);
           const terminal = completed.find((event) => event.type === "turn.completed");
           assert.equal(terminal?.payload.state, failPrompt ? "failed" : "completed");
+          yield* Deferred.await(turnSettledSignal);
           if (!failPrompt) assert.isTrue(completed.some((event) => event.type === "content.delta"));
           assert.equal(sent._tag, failPrompt ? "Failure" : "Success");
           const snapshot = yield* adapter.readThread(threadId);

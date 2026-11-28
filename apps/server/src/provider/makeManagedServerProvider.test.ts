@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import { activeWorkRegistry } from "../orchestration/ActiveWorkTracker.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   computeProviderRefreshIntervalMs,
@@ -518,5 +519,118 @@ describe("makeManagedServerProvider", () => {
           assert.strictEqual(yield* Ref.get(checkCalls), 4);
         }),
       ).pipe(Effect.provide(Layer.mergeAll(AlwaysRunTestLayer, TestClock.layer()))),
+  );
+
+  it.effect(
+    "continues periodic quota refreshes during active work and when a connected client loses focus",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const initialServerSettings = {
+            ...DEFAULT_SERVER_SETTINGS,
+            providerHealthRefreshInterval: Duration.minutes(10),
+          };
+          const serverSettingsLayer = Layer.succeed(
+            ServerSettingsService,
+            ServerSettingsService.of({
+              start: Effect.void,
+              ready: Effect.void,
+              getSettings: Effect.succeed(initialServerSettings),
+              updateSettings: () => Effect.die(new Error("unused in this test")),
+              initializeThreadModelTeams: () => Effect.die(new Error("unused in this test")),
+              runMonitoringAutoAction: () => Effect.die(new Error("unused in this test")),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.succeed(Stream.empty),
+            }),
+          );
+          // Client has an active lease (hasDemand=true), but window is unfocused (shouldRunScopeWork=false).
+          const unfocusedClientPolicy = Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+            reportClientActivity: () => Effect.void,
+            removeRpcClient: () => Effect.void,
+            reportHostPowerState: () => Effect.void,
+            snapshot: Effect.succeed({
+              hostPower: {
+                source: "unknown",
+                idle: "unknown",
+                idleSeconds: null,
+                locked: "unknown",
+                suspended: false,
+                onBattery: "unknown",
+                lowPowerMode: "unknown",
+                thermalState: "unknown",
+                stale: true,
+                updatedAt: TEST_EPOCH,
+              },
+              leases: [],
+              activeForegroundLeaseCount: 0,
+              activeScopeKeys: ["provider-status"],
+              shouldRunOpportunisticWork: false,
+              updatedAt: TEST_EPOCH,
+            }),
+            streamChanges: Stream.empty,
+            hasDemand: () => Effect.succeed(true),
+            shouldRunScopeWork: () => Effect.succeed(false),
+            shouldRunOpportunisticWork: Effect.succeed(false),
+          });
+
+          const quotaSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            usage: {
+              source: "provider",
+              updatedAt: "2026-04-10T00:00:01.000Z",
+              sessionTokens: 0,
+              sessionCount: 0,
+              activeSessionCount: 0,
+              primary: {
+                label: "Gemini 5시간",
+                bucket: "gemini",
+                usedPercent: 28,
+                windowDurationMinutes: 300,
+                resetsAt: 600,
+              },
+            },
+          };
+
+          const checkCalls = yield* Ref.make(0);
+          const initialDone = yield* Deferred.make<void>();
+          const periodicDone = yield* Deferred.make<void>();
+
+          activeWorkRegistry.register({
+            kind: "turn",
+            id: "quota-refresh-active-turn",
+            threadId: "thread-1",
+            summary: "gemini:test",
+            startedAtMs: 0,
+          });
+
+          yield* Effect.ensuring(
+            Effect.gen(function* () {
+              yield* makeManagedServerProvider<TestSettings>({
+                maintenanceCapabilities,
+                getSettings: Effect.succeed({ enabled: true }),
+                streamSettings: Stream.empty,
+                haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+                initialSnapshot: () => Effect.succeed(initialSnapshot),
+                checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+                  Effect.tap((count) =>
+                    count === 1
+                      ? Deferred.succeed(initialDone, undefined).pipe(Effect.ignore)
+                      : Deferred.succeed(periodicDone, undefined).pipe(Effect.ignore),
+                  ),
+                  Effect.as(quotaSnapshot),
+                ),
+              }).pipe(Effect.provide(Layer.merge(unfocusedClientPolicy, serverSettingsLayer)));
+
+              yield* Deferred.await(initialDone);
+              assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+              yield* TestClock.adjust("10 minutes");
+              yield* Deferred.await(periodicDone);
+              assert.strictEqual(yield* Ref.get(checkCalls), 2);
+            }),
+            Effect.sync(() => activeWorkRegistry.unregister("turn", "quota-refresh-active-turn")),
+          );
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
   );
 });

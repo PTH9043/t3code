@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  formatQuotaResetTime,
   formatTokenCount,
+  hasExpiredQuotaWindow,
   providerQuotaSummary,
   providerQuotaWindows,
   tokenUsageSummary,
@@ -140,5 +142,29 @@ describe("token usage presentation", () => {
     expect(eff.cacheWarningMessage).toContain("30.0%");
     expect(eff.reasoningOutputShare).toBeCloseTo(0.55);
     expect(eff.weightedInputTokens).toBe(7_000 + 750 + 5 * 3_100);
+  });
+
+  it("ignores epoch-zero reset timestamps and detects expired quota windows", () => {
+    expect(formatQuotaResetTime(0)).toBeUndefined();
+    expect(formatQuotaResetTime(-10)).toBeUndefined();
+    const baseUsage: ServerProviderUsage = {
+      source: "provider",
+      updatedAt: "2026-11-28T06:00:00.000Z",
+      sessionTokens: 0,
+      sessionCount: 0,
+      activeSessionCount: 0,
+      primary: { usedPercent: 0, resetsAt: 0 },
+      secondary: { usedPercent: 50, resetsAt: 2_000_000_000 },
+    };
+    expect(hasExpiredQuotaWindow(baseUsage, 1_795_849_500_000)).toBe(false);
+    expect(
+      hasExpiredQuotaWindow(
+        {
+          ...baseUsage,
+          primary: { usedPercent: 28, resetsAt: 1_795_849_306 },
+        },
+        1_795_849_500_000,
+      ),
+    ).toBe(true);
   });
 });

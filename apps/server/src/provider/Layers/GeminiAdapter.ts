@@ -283,8 +283,16 @@ export function makeGeminiAdapter(
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("gemini");
     const onTurnSettled = options?.onTurnSettled;
-    let lastQuotaRefreshAtMs = 0;
+    let lastQuotaRefreshAtMs: number | undefined = undefined;
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
+    const triggerTurnSettledRefresh = () =>
+      Effect.gen(function* () {
+        if (!onTurnSettled) return;
+        const nowMs = yield* Clock.currentTimeMillis;
+        if (lastQuotaRefreshAtMs !== undefined && nowMs - lastQuotaRefreshAtMs < 30_000) return;
+        lastQuotaRefreshAtMs = nowMs;
+        yield* Effect.forkDetach(Effect.ignore(onTurnSettled()));
+      });
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const resolveManagedMcp = yield* makeManagedMcpResolver();
@@ -485,14 +493,8 @@ export function makeGeminiAdapter(
             },
           });
         }
-        if (onTurnSettled && (shouldEmitCompletedTurn || shouldEmitFailedTurn)) {
-          const nowMs = yield* Clock.currentTimeMillis;
-          if (nowMs - lastQuotaRefreshAtMs >= 30_000) {
-            lastQuotaRefreshAtMs = nowMs;
-            yield* Effect.sync(() => {
-              runFork(Effect.ignore(onTurnSettled()));
-            });
-          }
+        if (shouldEmitCompletedTurn || shouldEmitFailedTurn) {
+          yield* triggerTurnSettledRefresh();
         }
       });
 
@@ -1843,6 +1845,7 @@ export function makeGeminiAdapter(
                     stopReason: completedStopReason,
                   },
                 });
+                yield* triggerTurnSettledRefresh();
               } else if (remainingPrompts > 0) {
                 yield* Ref.set(promptSettled, true);
               }

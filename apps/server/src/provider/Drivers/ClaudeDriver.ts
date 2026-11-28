@@ -166,10 +166,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
+      let refreshSnapshotOnTurnSettled: Effect.Effect<void> = Effect.void;
       const adapterOptions = {
         instanceId,
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        ...(config.authMode !== "api-key"
+          ? { onTurnSettled: () => refreshSnapshotOnTurnSettled }
+          : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);
@@ -207,6 +211,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         initialSnapshot: (settings) =>
           makePendingClaudeProvider(settings.provider).pipe(Effect.map(stampIdentity)),
         checkProvider,
+        beforeManualRefresh: Cache.invalidate(capabilitiesProbeCache, capabilitiesCacheKey),
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
           enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
             enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
@@ -225,6 +230,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             }),
         ),
       );
+
+      refreshSnapshotOnTurnSettled = Effect.ignore(snapshot.refresh);
 
       return {
         instanceId,

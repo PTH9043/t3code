@@ -3,6 +3,7 @@ import { GrokResearchPanel } from "./GrokResearchPanel";
 import type { EnvironmentId, ServerProvider, ThreadId } from "@t3tools/contracts";
 import {
   formatTokenCount,
+  hasExpiredQuotaWindow,
   providerQuotaSummary,
   providerQuotaWindows,
   tokenUsageCountLabels,
@@ -12,12 +13,14 @@ import {
   tokenUsageOutcomeLabel,
   tokenUsageDiagnosticRows,
 } from "@t3tools/client-runtime/state/token-usage";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 
 function ProviderQuotaSection(props: {
   readonly title: string;
@@ -62,6 +65,12 @@ export function TokenUsageButton(props: {
   const [open, setOpen] = useState(false);
   const [workId, setWorkId] = useState<string | undefined>();
   const [beforeSequence, setBeforeSequence] = useState<number | undefined>();
+  const [isRefreshingQuota, setIsRefreshingQuota] = useState(false);
+  const quotaRefreshInFlightRef = useRef(false);
+  const lastAutoQuotaRefreshAtRef = useRef(0);
+  const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
   const query = useEnvironmentQuery(
     orchestrationEnvironment.threadTokenUsage({
       environmentId: props.environmentId,
@@ -71,6 +80,37 @@ export function TokenUsageButton(props: {
         ...(beforeSequence !== undefined ? { beforeSequence } : {}),
       },
     }),
+  );
+  const refreshQuota = useCallback(
+    (force: boolean) => {
+      const instanceId = props.selectedProvider?.instanceId;
+      if (!instanceId || quotaRefreshInFlightRef.current) return;
+      const nowMs = Date.now();
+      if (!force) {
+        if (nowMs - lastAutoQuotaRefreshAtRef.current < 30_000) return;
+        const checkedAtMs = props.selectedProvider?.checkedAt
+          ? Date.parse(props.selectedProvider.checkedAt)
+          : NaN;
+        const isStale = !Number.isFinite(checkedAtMs) || nowMs - checkedAtMs >= 2 * 60_000;
+        const isExpired = hasExpiredQuotaWindow(props.selectedProvider?.usage, nowMs);
+        if (!isStale && !isExpired) return;
+        lastAutoQuotaRefreshAtRef.current = nowMs;
+      }
+      quotaRefreshInFlightRef.current = true;
+      setIsRefreshingQuota(true);
+      void (async () => {
+        try {
+          await refreshServerProviders({
+            environmentId: props.environmentId,
+            input: { instanceId },
+          });
+        } finally {
+          quotaRefreshInFlightRef.current = false;
+          setIsRefreshingQuota(false);
+        }
+      })();
+    },
+    [props.environmentId, props.selectedProvider, refreshServerProviders],
   );
   const lastBusy = useRef(props.busy);
   useEffect(() => {
@@ -97,6 +137,7 @@ export function TokenUsageButton(props: {
         onPress={() => {
           setOpen(true);
           query.refresh();
+          refreshQuota(false);
         }}
       >
         <Text className="text-xs text-muted-foreground" numberOfLines={1}>
@@ -138,11 +179,14 @@ export function TokenUsageButton(props: {
             <GrokResearchPanel {...props} />
             <Pressable
               accessibilityRole="button"
-              onPress={query.refresh}
-              disabled={query.isPending}
+              onPress={() => {
+                query.refresh();
+                refreshQuota(true);
+              }}
+              disabled={query.isPending || isRefreshingQuota}
             >
               <Text className="text-blue-600 dark:text-blue-400">
-                {query.isPending ? "갱신 중" : "새로고침"}
+                {query.isPending || isRefreshingQuota ? "갱신 중" : "새로고침"}
               </Text>
             </Pressable>
             {query.error ? <Text accessibilityRole="alert">{query.error}</Text> : null}
