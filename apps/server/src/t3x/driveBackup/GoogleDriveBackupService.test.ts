@@ -12,7 +12,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { activeWorkRegistry } from "../../orchestration/ActiveWorkTracker.ts";
+import { memoryScopeDirectory } from "../../orchestration/memoryFiles.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { encodeClaudeProjectDirName } from "./DriveBackupProjectMemories.ts";
 import { verifyAndExtractArchiveFile } from "./StreamingArchivePacker.ts";
 import {
   exchangeRefreshTokenForAccessToken,
@@ -515,5 +517,212 @@ describe("GoogleDriveBackupService", () => {
       totalBackedUpFiles: 12,
       lastSucceededArchiveBytes: 3_200_000_000,
     });
+  });
+
+  it("collects related memories across T3 DB, memory-v2, Claude, Codex, and Grok for any selected target (even without projectId) and mirrors markdown memories to T3-Knowledge", async () => {
+    const baseDir = mkTempDir("t3-drv-xmem-base-");
+    const driveRoot = mkTempDir("t3-drv-xmem-drive-");
+    const fakeHome = mkTempDir("t3-drv-xmem-home-");
+    const projRootParent = mkTempDir("t3-drv-xmem-ws-");
+    const projDir = NodePath.join(projRootParent, "__MyDemoProj");
+    NodeFs.mkdirSync(projDir, { recursive: true });
+    NodeFs.writeFileSync(NodePath.join(projDir, "README.md"), "# MyDemoProj\n");
+
+    const prevExternalHome = process.env.T3CODE_DRIVE_BACKUP_EXTERNAL_HOME;
+    process.env.T3CODE_DRIVE_BACKUP_EXTERNAL_HOME = fakeHome;
+
+    try {
+      const stateDir = NodePath.join(baseDir, "userdata");
+      const archivedProjId = "proj-archived-demo-1";
+
+      // 1) T3 memory-v2 워크스페이스 기억 + 공용 기억
+      const wsMemDir = memoryScopeDirectory(stateDir, archivedProjId, "project");
+      NodeFs.mkdirSync(NodePath.join(wsMemDir, "user-utterances"), { recursive: true });
+      NodeFs.writeFileSync(NodePath.join(wsMemDir, "MEMORY.md"), "# T3 Workspace Memory\n");
+      NodeFs.writeFileSync(
+        NodePath.join(wsMemDir, "user-utterances", "utterances-0000.md"),
+        "PRIVATE_UTTERANCE_ARCHIVE_ONLY\n",
+      );
+      const globalMemDir = memoryScopeDirectory(stateDir, "", "global");
+      NodeFs.mkdirSync(globalMemDir, { recursive: true });
+      NodeFs.writeFileSync(NodePath.join(globalMemDir, "MEMORY.md"), "# T3 Global Rule\n");
+
+      // 2) 외부 AI CLI 기억 (Claude + Codex + Grok)
+      const claudeDir = NodePath.join(
+        fakeHome,
+        ".claude",
+        "projects",
+        encodeClaudeProjectDirName(projDir),
+        "memory",
+      );
+      NodeFs.mkdirSync(claudeDir, { recursive: true });
+      NodeFs.writeFileSync(NodePath.join(claudeDir, "claude-note.md"), "# Claude Note\n");
+
+      const codexDir = NodePath.join(fakeHome, ".codex", "memories_v2", "rollout_summaries");
+      NodeFs.mkdirSync(codexDir, { recursive: true });
+      NodeFs.writeFileSync(
+        NodePath.join(codexDir, "2026-11-28-mydemoproj.md"),
+        `thread_id: t1\ncwd: ${projDir}\n\nCodex memory summary\n`,
+      );
+
+      const grokDir = NodePath.join(
+        fakeHome,
+        ".grok",
+        "memory-v2",
+        "workspaces",
+        "mydemoproj-a1b2c3d4",
+      );
+      NodeFs.mkdirSync(grokDir, { recursive: true });
+      NodeFs.writeFileSync(NodePath.join(grokDir, "MEMORY.md"), "# Grok Memory\n");
+
+      const layer = makeTestLayer(projDir, baseDir);
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const svc = yield* GoogleDriveBackupService;
+          const nowIso = new Date().toISOString();
+
+          // 삭제된 과거 project_id + DB 기억 + 위키 지식 시딩
+          yield* sql`
+            INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES (${archivedProjId}, '__MyDemoProj', ${projDir}, '[]', ${nowIso}, ${nowIso}, ${nowIso})
+          `;
+          yield* sql`
+            INSERT INTO workspace_memory_v2 (
+              id, project_id, scope, topic, text, source_json, source_hash, origin, verification, status, created_at, updated_at
+            ) VALUES (
+              'mem-demo-1', ${archivedProjId}, 'project', 'arch', '핵심 아키텍처 결정', '{}', 'h1', 'user', 'verified', 'active', ${nowIso}, ${nowIso}
+            )
+          `;
+          yield* sql`
+            INSERT INTO projection_workspace_knowledge_items (
+              project_id, item_id, kind, title, content, status, origin, relative_folder, tags_json, created_at, updated_at, prompt_uses
+            ) VALUES (
+              ${archivedProjId}, 'know-demo-1', 'long-term-memory', '설계 원칙', '지식 원문', 'active', 'user', NULL, '[]', ${nowIso}, ${nowIso}, 0
+            )
+          `;
+
+          yield* svc.updateConfig({
+            transportMode: "local_drive_folder",
+            localDriveRoot: driveRoot,
+            gdriveFolderName: "T3-Backup",
+            gdriveKnowledgeFolderName: "T3-Knowledge",
+            encryptionEnabled: true,
+            encryptionPassphrase: "CrossMemPass!2026",
+            passphraseBackupAcknowledged: true,
+            includeCoreSettings: false,
+            includeCoreSqliteSnapshot: false,
+          });
+
+          // projectId = null인 추가 저장소(repo)로 등록하되 syncT3Scope=true, syncLocalToDriveKnowledge=true
+          const target = yield* svc.upsertTarget({
+            kind: "repo",
+            projectId: null,
+            displayName: "__MyDemoProj",
+            rootPath: projDir,
+            enabled: true,
+            syncFiles: true,
+            syncT3Scope: true,
+            syncDriveToLocalRag: false,
+            syncLocalToDriveKnowledge: true,
+          });
+
+          const dry = yield* svc.dryRun({ targetIds: [target.id] });
+          const run = yield* svc.runNow({ targetIds: [target.id] });
+          return { target, dry, run };
+        }).pipe(Effect.provide(layer)),
+      );
+
+      // 1) target 메타데이터에 projectId=null이어도 DB 기억·지식·외부 기억 출처가 자동 연결됨
+      expect(result.target.memoryCount).toBe(1);
+      expect(result.target.knowledgeItemCount).toBe(1);
+      expect(result.target.externalMemoryFilesCount).toBe(6); // T3 ws(2) + global(1) + Claude(1) + Codex(1) + Grok(1)
+      expect(result.target.relatedMemorySources).toEqual(
+        expect.arrayContaining(["T3 DB", "T3 memory-v2", "Claude", "Codex", "Grok"]),
+      );
+
+      // 2) Dry-Run 반영 확인
+      expect(result.dry.targets[0]?.t3ScopeMemoriesCount).toBe(1);
+      expect(result.dry.targets[0]?.t3ScopeKnowledgeCount).toBe(1);
+      expect(result.dry.targets[0]?.relatedMemoryFilesCount).toBe(6);
+
+      // 3) 암호화 아카이브(.t3enc) 검증: T3 scope JSON(v2) + 5개 저장소 기억 파일 전부 포함
+      expect(result.run.status).toBe("succeeded");
+      const extractDir = mkTempDir("t3-drv-xmem-extract-");
+      const unpacked = await verifyAndExtractArchiveFile({
+        archivePath: result.run.destinationPath!,
+        passphrase: "CrossMemPass!2026",
+        extractToDir: extractDir,
+      });
+      const entryPaths = unpacked.manifest.entries.map((e) => e.path);
+      expect(entryPaths).toContain("workspace/README.md");
+      expect(entryPaths).toContain("t3-scope/project-scope.json");
+      expect(
+        entryPaths.some((p) => p.endsWith("/MEMORY.md") && p.startsWith("t3-memories/workspace/")),
+      ).toBe(true);
+      expect(entryPaths).toContain("t3-memories/global/MEMORY.md");
+      expect(
+        entryPaths.some(
+          (p) => p.startsWith("external-memories/claude/") && p.endsWith("claude-note.md"),
+        ),
+      ).toBe(true);
+      expect(
+        entryPaths.some(
+          (p) => p.startsWith("external-memories/codex/") && p.endsWith("2026-11-28-mydemoproj.md"),
+        ),
+      ).toBe(true);
+      expect(
+        entryPaths.some((p) => p.startsWith("external-memories/grok/") && p.endsWith("MEMORY.md")),
+      ).toBe(true);
+
+      const scopeJson = JSON.parse(
+        NodeFs.readFileSync(NodePath.join(extractDir, "t3-scope", "project-scope.json"), "utf8"),
+      ) as {
+        schemaVersion: number;
+        matchedProjectIds: string[];
+        memories: unknown[];
+        knowledgeItems: unknown[];
+      };
+      expect(scopeJson.schemaVersion).toBe(2);
+      expect(scopeJson.matchedProjectIds).toContain(archivedProjId);
+      expect(scopeJson.memories.length).toBe(1);
+      expect(scopeJson.knowledgeItems.length).toBe(1);
+
+      // 4) 평문 T3-Knowledge 폴더 검증: 정제 마크다운 기억만 _memories/ 아래 업로드되고 utterances/project-scope.json은 제외!
+      const knowledgeProjRoot = NodePath.join(driveRoot, "T3-Knowledge", "__MyDemoProj");
+      expect(NodeFs.existsSync(NodePath.join(knowledgeProjRoot, "README.md"))).toBe(true);
+      const knowledgeMemDir = NodePath.join(knowledgeProjRoot, "_memories");
+      expect(NodeFs.existsSync(knowledgeMemDir)).toBe(true);
+      const walkRel = (dir: string, prefix = ""): string[] => {
+        const out: string[] = [];
+        for (const d of NodeFs.readdirSync(dir, { withFileTypes: true })) {
+          const rel = prefix ? `${prefix}/${d.name}` : d.name;
+          if (d.isDirectory()) out.push(...walkRel(NodePath.join(dir, d.name), rel));
+          else out.push(rel);
+        }
+        return out;
+      };
+      const uploadedMemRels = walkRel(knowledgeMemDir);
+      expect(
+        uploadedMemRels.some((r) => r.includes("claude/") && r.endsWith("claude-note.md")),
+      ).toBe(true);
+      expect(
+        uploadedMemRels.some((r) => r.includes("codex/") && r.endsWith("2026-11-28-mydemoproj.md")),
+      ).toBe(true);
+      expect(uploadedMemRels.some((r) => r.includes("grok/") && r.endsWith("MEMORY.md"))).toBe(
+        true,
+      );
+      expect(
+        uploadedMemRels.some((r) => r.includes("t3-memory-v2/") && r.endsWith("MEMORY.md")),
+      ).toBe(true);
+      expect(uploadedMemRels.some((r) => r.includes("utterances-0000.md"))).toBe(false);
+      expect(uploadedMemRels.some((r) => r.includes("project-scope.json"))).toBe(false);
+    } finally {
+      if (prevExternalHome === undefined) {
+        delete process.env.T3CODE_DRIVE_BACKUP_EXTERNAL_HOME;
+      } else {
+        process.env.T3CODE_DRIVE_BACKUP_EXTERNAL_HOME = prevExternalHome;
+      }
+    }
   });
 });

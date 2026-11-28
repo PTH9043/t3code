@@ -60,6 +60,13 @@ import {
   type IncrementalTargetManifest,
 } from "./DriveBackupIncremental.ts";
 import {
+  buildProjectIdentity,
+  discoverRelatedProjectMemoryFiles,
+  resolveMatchingProjects,
+  type ProjectCatalogRow,
+  type RelatedMemoryDiscoveryResult,
+} from "./DriveBackupProjectMemories.ts";
+import {
   DAILY_QUOTA_STATE_KEY,
   DEFAULT_DAILY_UPLOAD_BUDGET_BYTES,
   DriveUploadQuotaExceededError,
@@ -583,33 +590,140 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       Effect.catch(() => Effect.void),
     );
 
-  const countProjectT3Scope = (
-    projectId: string | null,
-  ): Effect.Effect<{ readonly threadCount: number; readonly memoryCount: number }, never> =>
+  const listProjectCatalog = (): Effect.Effect<ReadonlyArray<ProjectCatalogRow>, never> =>
+    sql<ProjectCatalogRow>`
+      SELECT project_id, title, workspace_root, deleted_at
+      FROM projection_projects
+    `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<ProjectCatalogRow>)));
+
+  interface TargetRelatedMemoriesSummary {
+    readonly matchedProjectIds: ReadonlyArray<string>;
+    readonly extraProjectRoots: ReadonlyArray<string>;
+    readonly threadCount: number;
+    readonly memoryCount: number;
+    readonly knowledgeItemCount: number;
+    readonly discovered: RelatedMemoryDiscoveryResult;
+    readonly relatedMemorySources: ReadonlyArray<string>;
+  }
+
+  const EMPTY_DISCOVERED_MEMORIES: RelatedMemoryDiscoveryResult = {
+    files: [],
+    totalFiles: 0,
+    totalBytes: 0,
+    knowledgeEligibleFiles: 0,
+    knowledgeEligibleBytes: 0,
+    blockedSecretsCount: 0,
+    blockedSecretsSample: [],
+    sourceLabels: [],
+    countsBySource: {
+      t3MemoryV2: 0,
+      t3GlobalMemory: 0,
+      t3ColdArchive: 0,
+      claude: 0,
+      codex: 0,
+      grok: 0,
+    },
+    warnings: [],
+  };
+
+  const summarizeTargetRelatedMemories = (
+    row: Pick<TargetRow, "id" | "kind" | "project_id" | "display_name" | "root_path">,
+    projectCatalog?: ReadonlyArray<ProjectCatalogRow>,
+  ): Effect.Effect<TargetRelatedMemoriesSummary, never> =>
     Effect.gen(function* () {
-      if (!projectId) return { threadCount: 0, memoryCount: 0 };
-      const threadCount = yield* sql<{ readonly cnt: number }>`
-        SELECT COUNT(*) AS cnt FROM projection_threads
-        WHERE project_id = ${projectId} AND deleted_at IS NULL
-      `.pipe(
-        Effect.map((rows) => Math.max(0, Number(rows[0]?.cnt ?? 0))),
-        Effect.catch(() => Effect.succeed(0)),
+      if (row.id === UNIFIED_USERDATA_TARGET_ID || row.kind === "userdata") {
+        return {
+          matchedProjectIds: [],
+          extraProjectRoots: [],
+          threadCount: 0,
+          memoryCount: 0,
+          knowledgeItemCount: 0,
+          discovered: EMPTY_DISCOVERED_MEMORIES,
+          relatedMemorySources: [],
+        };
+      }
+
+      const catalog = projectCatalog ?? (yield* listProjectCatalog());
+      const matchedRows = resolveMatchingProjects(
+        {
+          projectId: row.project_id,
+          displayName: row.display_name,
+          rootPath: row.root_path,
+        },
+        catalog,
       );
-      const memoryCount = yield* sql<{ readonly cnt: number }>`
-        SELECT COUNT(*) AS cnt FROM workspace_memory_v2
-        WHERE project_id = ${projectId}
-      `.pipe(
-        Effect.map((rows) => Math.max(0, Number(rows[0]?.cnt ?? 0))),
-        Effect.catch(() => Effect.succeed(0)),
-      );
-      return { threadCount, memoryCount };
+      const matchedProjectIds = [
+        ...new Set([
+          ...(row.project_id ? [row.project_id] : []),
+          ...matchedRows.map((m) => m.project_id),
+        ]),
+      ];
+      const extraProjectRoots = matchedRows
+        .map((m) => m.workspace_root)
+        .filter((p) => p && p.trim().length > 0);
+
+      let threadCount = 0;
+      let memoryCount = 0;
+      let knowledgeItemCount = 0;
+      for (const pid of matchedProjectIds) {
+        threadCount += yield* sql<{ readonly cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM projection_threads
+          WHERE project_id = ${pid} AND deleted_at IS NULL
+        `.pipe(
+          Effect.map((rows) => Math.max(0, Number(rows[0]?.cnt ?? 0))),
+          Effect.catch(() => Effect.succeed(0)),
+        );
+        memoryCount += yield* sql<{ readonly cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM workspace_memory_v2
+          WHERE project_id = ${pid}
+        `.pipe(
+          Effect.map((rows) => Math.max(0, Number(rows[0]?.cnt ?? 0))),
+          Effect.catch(() => Effect.succeed(0)),
+        );
+        knowledgeItemCount += yield* sql<{ readonly cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM projection_workspace_knowledge_items
+          WHERE project_id = ${pid}
+        `.pipe(
+          Effect.map((rows) => Math.max(0, Number(rows[0]?.cnt ?? 0))),
+          Effect.catch(() => Effect.succeed(0)),
+        );
+      }
+
+      const discovered = discoverRelatedProjectMemoryFiles({
+        displayName: row.display_name,
+        rootPath: row.root_path,
+        matchedProjectIds,
+        extraProjectRoots,
+        stateDir: serverConfig.stateDir,
+      });
+
+      const sources: string[] = [];
+      if (threadCount > 0 || memoryCount > 0 || knowledgeItemCount > 0) {
+        sources.push("T3 DB");
+      }
+      for (const label of discovered.sourceLabels) {
+        if (!sources.includes(label)) sources.push(label);
+      }
+
+      return {
+        matchedProjectIds,
+        extraProjectRoots,
+        threadCount,
+        memoryCount,
+        knowledgeItemCount,
+        discovered,
+        relatedMemorySources: sources,
+      };
     });
 
-  const hydrateTarget = (row: TargetRow): Effect.Effect<DriveBackupTarget, never> =>
+  const hydrateTarget = (
+    row: TargetRow,
+    projectCatalog?: ReadonlyArray<ProjectCatalogRow>,
+  ): Effect.Effect<DriveBackupTarget, never> =>
     Effect.gen(function* () {
       const existsOnDisk = NodeFs.existsSync(row.root_path);
       const isGitRepo = existsOnDisk && NodeFs.existsSync(NodePath.join(row.root_path, ".git"));
-      const counts = yield* countProjectT3Scope(row.project_id);
+      const summary = yield* summarizeTargetRelatedMemories(row, projectCatalog);
       return {
         id: row.id,
         kind: row.kind,
@@ -625,8 +739,11 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         syncLocalToDriveKnowledge: Boolean(row.sync_local_to_drive_knowledge ?? 0),
         excludeGlobs: parseJsonStringArray(row.exclude_globs_json),
         riskWarning: detectRiskWarningForFolder(row.display_name, row.root_path),
-        threadCount: counts.threadCount,
-        memoryCount: counts.memoryCount,
+        threadCount: summary.threadCount,
+        memoryCount: summary.memoryCount,
+        knowledgeItemCount: summary.knowledgeItemCount,
+        externalMemoryFilesCount: summary.discovered.totalFiles,
+        relatedMemorySources: [...summary.relatedMemorySources],
         lastBackedUpAtMs:
           row.last_backed_up_at_ms !== null ? Number(row.last_backed_up_at_ms) : null,
         updatedAtMs: Number(row.updated_at_ms),
@@ -714,7 +831,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 exclude_globs_json, last_backed_up_at_ms, updated_at_ms
               ) VALUES (
                 'core:t3-repo', 'core', NULL, 'T3 본체 저장소', ${serverConfig.cwd},
-                0, 1, 0, 0,
+                0, 1, 1, 0,
                 '[]', NULL, ${now}
               )
             `.pipe(Effect.catch(() => Effect.void));
@@ -794,22 +911,104 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       }
     });
 
-  const exportProjectT3ScopeJson = (projectId: string): Effect.Effect<Buffer | null, never> =>
+  const exportRelatedT3ScopeJson = (input: {
+    readonly targetId: string;
+    readonly displayName: string;
+    readonly rootPath: string;
+    readonly summary: TargetRelatedMemoriesSummary;
+  }): Effect.Effect<Buffer | null, never> =>
     Effect.gen(function* () {
-      const projectRows = yield* sql`
-        SELECT * FROM projection_projects WHERE project_id = ${projectId}
-      `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+      const { matchedProjectIds, discovered } = input.summary;
+      if (matchedProjectIds.length === 0 && discovered.totalFiles === 0) {
+        return null;
+      }
 
-      const threadRows = yield* sql<{ readonly thread_id: string }>`
-        SELECT * FROM projection_threads
-        WHERE project_id = ${projectId} AND deleted_at IS NULL
-        ORDER BY updated_at DESC LIMIT 200
-      `.pipe(
-        Effect.catch(() => Effect.succeed([] as ReadonlyArray<{ readonly thread_id: string }>)),
-      );
-
+      const projects: unknown[] = [];
+      const threadRows: Array<{ readonly thread_id: string }> = [];
       const messages: unknown[] = [];
-      for (const th of threadRows.slice(0, 60)) {
+      const memories: unknown[] = [];
+      const knowledgeItems: unknown[] = [];
+      const wikiLinks: unknown[] = [];
+      const wikiBindings: unknown[] = [];
+      const routingNodes: unknown[] = [];
+      const routingEdges: unknown[] = [];
+      const missionRuns: unknown[] = [];
+      const missionReports: unknown[] = [];
+
+      for (const pid of matchedProjectIds) {
+        const pRows = yield* sql`
+          SELECT * FROM projection_projects WHERE project_id = ${pid}
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const r of pRows) projects.push(r);
+
+        const tRows = yield* sql<{ readonly thread_id: string }>`
+          SELECT * FROM projection_threads
+          WHERE project_id = ${pid} AND deleted_at IS NULL
+          ORDER BY updated_at DESC LIMIT 300
+        `.pipe(
+          Effect.catch(() => Effect.succeed([] as ReadonlyArray<{ readonly thread_id: string }>)),
+        );
+        for (const t of tRows) threadRows.push(t);
+
+        const mRows = yield* sql`
+          SELECT * FROM workspace_memory_v2
+          WHERE project_id = ${pid}
+          ORDER BY updated_at DESC LIMIT 50000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const m of mRows) memories.push(m);
+
+        const kRows = yield* sql`
+          SELECT * FROM projection_workspace_knowledge_items
+          WHERE project_id = ${pid}
+          ORDER BY updated_at DESC LIMIT 10000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const k of kRows) knowledgeItems.push(k);
+
+        const wlRows = yield* sql`
+          SELECT * FROM projection_workspace_wiki_links
+          WHERE project_id = ${pid}
+          LIMIT 5000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const wl of wlRows) wikiLinks.push(wl);
+
+        const wbRows = yield* sql`
+          SELECT * FROM workspace_wiki_bindings
+          WHERE project_id = ${pid}
+          LIMIT 5000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const wb of wbRows) wikiBindings.push(wb);
+
+        const rnRows = yield* sql`
+          SELECT node_id, project_id, node_kind, canonical_key, title, summary_moc,
+                 body_ref_kind, body_ref_id, epistemic_state, stale_status,
+                 file_path, start_line, end_line, updated_at
+          FROM workspace_routing_nodes
+          WHERE project_id = ${pid}
+          ORDER BY updated_at DESC LIMIT 20000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const rn of rnRows) routingNodes.push(rn);
+
+        const reRows = yield* sql`
+          SELECT * FROM workspace_routing_edges
+          WHERE project_id = ${pid}
+          LIMIT 30000
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const re of reRows) routingEdges.push(re);
+
+        const mrRows = yield* sql`
+          SELECT * FROM mission_runs WHERE project_id = ${pid}
+          ORDER BY created_at_ms DESC LIMIT 200
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const mr of mrRows) missionRuns.push(mr);
+
+        const repRows = yield* sql`
+          SELECT * FROM mission_reports WHERE project_id = ${pid}
+          ORDER BY created_at_ms DESC LIMIT 200
+        `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+        for (const rep of repRows) missionReports.push(rep);
+      }
+
+      for (const th of threadRows.slice(0, 80)) {
         const rows = yield* sql`
           SELECT * FROM projection_thread_messages
           WHERE thread_id = ${th.thread_id}
@@ -818,32 +1017,99 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         for (const r of rows) messages.push(r);
       }
 
-      const memories = yield* sql`
+      const globalMemories = yield* sql`
         SELECT * FROM workspace_memory_v2
-        WHERE project_id = ${projectId}
-        ORDER BY updated_at DESC LIMIT 5000
+        WHERE scope = 'global'
+        ORDER BY updated_at DESC LIMIT 2000
       `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
 
-      const missionRuns = yield* sql`
-        SELECT * FROM mission_runs WHERE project_id = ${projectId}
-        ORDER BY created_at_ms DESC LIMIT 200
+      const environmentKnowledge = yield* sql`
+        SELECT * FROM projection_workspace_knowledge_items
+        WHERE scope = 'environment'
+        ORDER BY updated_at DESC LIMIT 1000
       `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
 
-      const missionReports = yield* sql`
-        SELECT * FROM mission_reports WHERE project_id = ${projectId}
-        ORDER BY created_at_ms DESC LIMIT 200
-      `.pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<unknown>)));
+      // living_memories 중 전역/핀 고정 항목 또는 해당 프로젝트 이름·경로가 언급된 증류 기억 선별
+      const identity = buildProjectIdentity({
+        displayName: input.displayName,
+        rootPath: input.rootPath,
+        extraPaths: input.summary.extraProjectRoots,
+      });
+      const rawLiving = yield* sql<{
+        readonly scope?: string | null;
+        readonly is_pinned?: number | null;
+        readonly content_distilled?: string | null;
+        readonly morpheme_tokens?: string | null;
+      }>`
+        SELECT * FROM living_memories
+        WHERE expired_at IS NULL
+        ORDER BY importance DESC, created_at DESC LIMIT 1000
+      `.pipe(
+        Effect.catch(() =>
+          Effect.succeed(
+            [] as ReadonlyArray<{
+              readonly scope?: string | null;
+              readonly is_pinned?: number | null;
+              readonly content_distilled?: string | null;
+              readonly morpheme_tokens?: string | null;
+            }>,
+          ),
+        ),
+      );
+
+      const livingMemories = rawLiving.filter((lm) => {
+        if (lm.scope === "global" || Boolean(lm.is_pinned)) return true;
+        const haystack = `${lm.content_distilled ?? ""} ${lm.morpheme_tokens ?? ""}`.toLowerCase();
+        for (const slug of identity.slugCandidates) {
+          if (slug.length >= 4 && haystack.includes(slug)) return true;
+        }
+        if (identity.basenameLower && identity.basenameLower.length >= 4) {
+          if (haystack.includes(identity.basenameLower)) return true;
+        }
+        return false;
+      });
+
+      const hasAnyContent =
+        projects.length > 0 ||
+        threadRows.length > 0 ||
+        memories.length > 0 ||
+        globalMemories.length > 0 ||
+        knowledgeItems.length > 0 ||
+        environmentKnowledge.length > 0 ||
+        livingMemories.length > 0 ||
+        discovered.totalFiles > 0;
+      if (!hasAnyContent) return null;
 
       const payload = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         exportedAtIso: new Date().toISOString(),
-        projectId,
-        project: projectRows[0] ?? null,
+        targetId: input.targetId,
+        displayName: input.displayName,
+        rootPath: input.rootPath,
+        projectId: matchedProjectIds[0] ?? null,
+        matchedProjectIds: [...matchedProjectIds],
+        project: projects[0] ?? null,
+        projects,
         threads: threadRows,
         messages,
         memories,
+        globalMemories,
+        knowledgeItems,
+        environmentKnowledge,
+        wikiLinks,
+        wikiBindings,
+        routingNodes,
+        routingEdges,
+        livingMemories,
         missionRuns,
         missionReports,
+        relatedMemorySources: [...input.summary.relatedMemorySources],
+        discoveredMemoryFiles: discovered.files.map((f) => ({
+          sourceKind: f.sourceKind,
+          sourceLabel: f.sourceLabel,
+          archivePath: f.archivePath,
+          sizeBytes: f.sizeBytes,
+        })),
       };
       return Buffer.from(JSON.stringify(payload, null, 2), "utf8");
     });
@@ -1237,7 +1503,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       yield* syncRegisteredProjectCandidates(Boolean(input.includeArchivedProjects));
       const config = yield* mapConfigRow(cfgRow);
       const targetRows = yield* listTargetRows();
-      const targets = yield* Effect.forEach(targetRows, hydrateTarget, { concurrency: 4 });
+      const projectCatalog = yield* listProjectCatalog();
+      const targets = yield* Effect.forEach(
+        targetRows,
+        (row) => hydrateTarget(row, projectCatalog),
+        { concurrency: 4 },
+      );
       const recentRuns = yield* listRecentRuns(20);
       const quotaLedger = yield* loadDailyQuotaLedger();
       const activeWorkCount = activeWorkRegistry.snapshot().totalActive;
@@ -1608,6 +1879,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
     readonly createdAtIso: string;
     readonly pauseSignal?: AbortSignal;
     readonly ignoreQuotaCooldown?: boolean;
+    readonly projectCatalog?: ReadonlyArray<ProjectCatalogRow>;
     readonly onProgress?: (progress: {
       readonly completedFiles: number;
       readonly totalFiles: number;
@@ -1626,29 +1898,69 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
     DriveBackupError
   > =>
     Effect.gen(function* () {
-      if (!NodeFs.existsSync(opts.row.root_path)) {
+      const rootExists = NodeFs.existsSync(opts.row.root_path);
+      const scanned = rootExists
+        ? scanSelectedDirectory({
+            rootPath: opts.row.root_path,
+            customExcludeGlobs: parseJsonStringArray(opts.row.exclude_globs_json),
+            maxSingleFileBytes: DEFAULT_MIRROR_MAX_FILE_BYTES,
+            excludeSqliteFiles: true,
+          })
+        : {
+            includedFiles: [],
+            totalRawBytes: 0,
+            blockedSecretsCount: 0,
+            blockedSecretsSample: [],
+            warnings: [],
+          };
+
+      const combinedFiles: Array<{
+        readonly absolutePath: string;
+        readonly relativePath: string;
+        readonly sizeBytes: number;
+        readonly mtimeMs: number;
+      }> = [...scanned.includedFiles];
+      let combinedBlockedSecretsCount = scanned.blockedSecretsCount;
+      const combinedBlockedSecretsSample = [...scanned.blockedSecretsSample];
+
+      if (opts.row.sync_t3_scope && opts.row.id !== UNIFIED_USERDATA_TARGET_ID) {
+        const relSummary = yield* summarizeTargetRelatedMemories(opts.row, opts.projectCatalog);
+        combinedBlockedSecretsCount += relSummary.discovered.blockedSecretsCount;
+        for (const sample of relSummary.discovered.blockedSecretsSample) {
+          if (combinedBlockedSecretsSample.length < 10) {
+            combinedBlockedSecretsSample.push(sample);
+          }
+        }
+        for (const mf of relSummary.discovered.files) {
+          if (!mf.knowledgeRelativePath) continue;
+          if (mf.sizeBytes > DEFAULT_MIRROR_MAX_FILE_BYTES) continue;
+          combinedFiles.push({
+            absolutePath: mf.absolutePath,
+            relativePath: `_memories/${mf.knowledgeRelativePath}`,
+            sizeBytes: mf.sizeBytes,
+            mtimeMs: mf.mtimeMs,
+          });
+        }
+      }
+
+      if (combinedFiles.length === 0) {
         return {
           uploadedCount: 0,
           skippedUnchangedCount: 0,
           uploadedBytes: 0,
-          blockedSecretsCount: 0,
-          blockedSecretsSample: [],
+          blockedSecretsCount: combinedBlockedSecretsCount,
+          blockedSecretsSample: combinedBlockedSecretsSample,
           lastDestPath: null,
         };
       }
-      const scanned = scanSelectedDirectory({
-        rootPath: opts.row.root_path,
-        customExcludeGlobs: parseJsonStringArray(opts.row.exclude_globs_json),
-        maxSingleFileBytes: DEFAULT_MIRROR_MAX_FILE_BYTES,
-        excludeSqliteFiles: true,
-      });
+
       const manifestKey = `knowledge-upload:${opts.row.id}`;
       const prevManifest = yield* loadTargetManifest(manifestKey);
       const diff = yield* Effect.tryPromise({
         try: () =>
           computeIncrementalDiff({
             targetId: manifestKey,
-            files: scanned.includedFiles,
+            files: combinedFiles,
             previousManifest: prevManifest,
             nowIso: opts.createdAtIso,
             ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
@@ -1660,18 +1972,15 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           }),
       });
 
-      const skippedUnchangedCount = Math.max(
-        0,
-        scanned.includedFiles.length - diff.changedFiles.length,
-      );
+      const skippedUnchangedCount = Math.max(0, combinedFiles.length - diff.changedFiles.length);
       if (diff.changedFiles.length === 0) {
         yield* saveTargetManifest(manifestKey, diff.nextManifestJson, diff.nextManifestSha256);
         return {
           uploadedCount: 0,
           skippedUnchangedCount,
           uploadedBytes: 0,
-          blockedSecretsCount: scanned.blockedSecretsCount,
-          blockedSecretsSample: scanned.blockedSecretsSample,
+          blockedSecretsCount: combinedBlockedSecretsCount,
+          blockedSecretsSample: combinedBlockedSecretsSample,
           lastDestPath: null,
         };
       }
@@ -1865,8 +2174,8 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         uploadedCount,
         skippedUnchangedCount,
         uploadedBytes,
-        blockedSecretsCount: scanned.blockedSecretsCount,
-        blockedSecretsSample: scanned.blockedSecretsSample,
+        blockedSecretsCount: combinedBlockedSecretsCount,
+        blockedSecretsSample: combinedBlockedSecretsSample,
         lastDestPath,
       };
     });
@@ -1878,6 +2187,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       const cfgRow = yield* ensureConfigRow();
       const config = yield* mapConfigRow(cfgRow);
       const allRows = yield* listTargetRows();
+      const projectCatalog = yield* listProjectCatalog();
       const filterSet =
         input.targetIds && input.targetIds.length > 0 ? new Set(input.targetIds) : null;
       const selected = allRows.filter((row) =>
@@ -1963,12 +2273,35 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           );
         }
 
-        const counts = row.sync_t3_scope
-          ? yield* countProjectT3Scope(row.project_id)
-          : { threadCount: 0, memoryCount: 0 };
-        if (row.sync_t3_scope && row.project_id) {
-          includedFilesCount += 1; // t3-scope/project-scope.json
-          estimatedRawBytes += counts.threadCount * 4_096 + counts.memoryCount * 512;
+        const relatedSummary =
+          row.sync_t3_scope && !isUnifiedUserdata
+            ? yield* summarizeTargetRelatedMemories(row, projectCatalog)
+            : null;
+        if (relatedSummary) {
+          const hasDbScope =
+            relatedSummary.matchedProjectIds.length > 0 || relatedSummary.discovered.totalFiles > 0;
+          if (hasDbScope) {
+            includedFilesCount += 1; // t3-scope/project-scope.json
+            estimatedRawBytes +=
+              relatedSummary.threadCount * 4_096 +
+              relatedSummary.memoryCount * 512 +
+              relatedSummary.knowledgeItemCount * 1_024;
+          }
+          includedFilesCount += relatedSummary.discovered.totalFiles;
+          estimatedRawBytes += relatedSummary.discovered.totalBytes;
+          if (relatedSummary.discovered.blockedSecretsCount > 0) {
+            blockedSecretsCount += relatedSummary.discovered.blockedSecretsCount;
+            blockedSecretsSample = [
+              ...blockedSecretsSample,
+              ...relatedSummary.discovered.blockedSecretsSample,
+            ].slice(0, 10);
+          }
+          for (const w of relatedSummary.discovered.warnings) warnings.push(w);
+          if (relatedSummary.relatedMemorySources.length > 0) {
+            warnings.push(
+              `연관 기억 통합 포함 (${relatedSummary.relatedMemorySources.join(" · ")}): DB 기억 ${relatedSummary.memoryCount.toLocaleString()}건 · 위키·지식 ${relatedSummary.knowledgeItemCount.toLocaleString()}건 · 기억 파일 ${relatedSummary.discovered.totalFiles.toLocaleString()}개`,
+            );
+          }
         }
 
         const isGitRepo =
@@ -1988,8 +2321,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           estimatedRawBytes,
           estimatedArchiveBytes,
           isGitRepo,
-          t3ScopeThreadsCount: counts.threadCount,
-          t3ScopeMemoriesCount: counts.memoryCount,
+          t3ScopeThreadsCount: relatedSummary?.threadCount ?? 0,
+          t3ScopeMemoriesCount: relatedSummary?.memoryCount ?? 0,
+          t3ScopeKnowledgeCount: relatedSummary?.knowledgeItemCount ?? 0,
+          relatedMemoryFilesCount: relatedSummary?.discovered.totalFiles ?? 0,
+          relatedMemoryBytes: relatedSummary?.discovered.totalBytes ?? 0,
+          relatedMemorySources: [...(relatedSummary?.relatedMemorySources ?? [])],
           blockedSecretsCount,
           blockedSecretsSample: [...blockedSecretsSample],
           warnings,
@@ -2021,6 +2358,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         const cfgRow = yield* ensureConfigRow();
         const config = yield* mapConfigRow(cfgRow);
         const allRows = yield* listTargetRows();
+        const projectCatalog = yield* listProjectCatalog();
         const filterSet =
           input.targetIds && input.targetIds.length > 0 ? new Set(input.targetIds) : null;
         const selectedRows = allRows.filter((row) =>
@@ -2075,7 +2413,9 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         const needsArchiveEncryption =
           hasCoreWork ||
           selectedRows.some(
-            (r) => Boolean(r.sync_files) || (Boolean(r.sync_t3_scope) && Boolean(r.project_id)),
+            (r) =>
+              Boolean(r.sync_files) ||
+              (Boolean(r.sync_t3_scope) && r.id !== UNIFIED_USERDATA_TARGET_ID),
           );
         let passphrase: string | null = null;
         if (config.encryptionEnabled && needsArchiveEncryption) {
@@ -2513,11 +2853,10 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               readonly json: string;
               readonly sha256: string;
             }> = [];
-            let shouldPackArchive = Boolean(
-              row.sync_files || (row.sync_t3_scope && row.project_id),
-            );
-
             const isUnifiedUserdata = row.id === UNIFIED_USERDATA_TARGET_ID;
+            let shouldPackArchive = Boolean(
+              row.sync_files || (row.sync_t3_scope && !isUnifiedUserdata),
+            );
             const isSingleSqliteUserdata =
               !isUnifiedUserdata &&
               row.kind === "userdata" &&
@@ -2758,13 +3097,35 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               }
             }
 
-            if (row.sync_t3_scope && row.project_id) {
-              const scopeBuf = yield* exportProjectT3ScopeJson(row.project_id);
+            if (row.sync_t3_scope && !isUnifiedUserdata) {
+              const relatedSummary = yield* summarizeTargetRelatedMemories(row, projectCatalog);
+              if (relatedSummary.discovered.blockedSecretsCount > 0) {
+                blockedSecretsCount += relatedSummary.discovered.blockedSecretsCount;
+                blockedSecretsSample = [
+                  ...blockedSecretsSample,
+                  ...relatedSummary.discovered.blockedSecretsSample,
+                ].slice(0, 10);
+              }
+              for (const mf of relatedSummary.discovered.files) {
+                workerEntries.push({
+                  archivePath: mf.archivePath,
+                  filePath: mf.absolutePath,
+                });
+              }
+              const scopeBuf = yield* exportRelatedT3ScopeJson({
+                targetId: row.id,
+                displayName: row.display_name,
+                rootPath: row.root_path,
+                summary: relatedSummary,
+              });
               if (scopeBuf) {
                 workerEntries.push({
                   archivePath: "t3-scope/project-scope.json",
                   contentBase64: scopeBuf.toString("base64"),
                 });
+              }
+              if (!row.sync_files && workerEntries.length === 0) {
+                shouldPackArchive = false;
               }
             }
 
@@ -2974,6 +3335,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 config,
                 oauthCreds,
                 createdAtIso,
+                projectCatalog,
                 ...(pauseSignal ? { pauseSignal } : {}),
                 ignoreQuotaCooldown: Boolean(input.forceWhenBusy),
                 onProgress: (kp) =>
@@ -3628,12 +3990,14 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           config.transportMode === "gdrive_api" ? yield* readOAuthCredentials() : null;
         if (knowledgeUploadTargets.length > 0) {
           const uploadCreatedAtIso = new Date(startedAtMs).toISOString();
+          const mirrorProjectCatalog = yield* listProjectCatalog();
           for (const kRow of knowledgeUploadTargets) {
             const up = yield* uploadLocalKnowledgeForTarget({
               row: kRow,
               config,
               oauthCreds: oauthForKnowledge,
               createdAtIso: uploadCreatedAtIso,
+              projectCatalog: mirrorProjectCatalog,
             });
             uploadedCount += up.uploadedCount;
             uploadedSkippedUnchangedCount += up.skippedUnchangedCount;

@@ -173,6 +173,31 @@ export function computeBackupPercent(uploadedBytes: number, totalBytes: number):
   return Math.min(100, Math.max(0, Math.round((uploadedBytes / totalBytes) * 1000) / 10));
 }
 
+export function formatRelatedMemorySummary(input: {
+  readonly threadCount?: number;
+  readonly memoryCount?: number;
+  readonly knowledgeItemCount?: number;
+  readonly externalMemoryFilesCount?: number;
+  readonly relatedMemorySources?: ReadonlyArray<string>;
+}): string | null {
+  const parts: string[] = [];
+  if ((input.threadCount ?? 0) > 0) {
+    parts.push(`대화 ${(input.threadCount ?? 0).toLocaleString()}건`);
+  }
+  if ((input.memoryCount ?? 0) > 0) {
+    parts.push(`장기기억 ${(input.memoryCount ?? 0).toLocaleString()}건`);
+  }
+  if ((input.knowledgeItemCount ?? 0) > 0) {
+    parts.push(`위키·지식 ${(input.knowledgeItemCount ?? 0).toLocaleString()}건`);
+  }
+  if ((input.externalMemoryFilesCount ?? 0) > 0) {
+    parts.push(`기억 파일 ${(input.externalMemoryFilesCount ?? 0).toLocaleString()}개`);
+  }
+  if (parts.length === 0) return null;
+  const sources = (input.relatedMemorySources ?? []).filter((s) => s.trim().length > 0);
+  return sources.length > 0 ? `${parts.join(" · ")} (${sources.join(" · ")})` : parts.join(" · ");
+}
+
 function formatMs(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return "-";
   return new Date(ms).toLocaleString("ko-KR");
@@ -553,7 +578,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
           rootPath,
           enabled: true,
           syncFiles: true,
-          syncT3Scope: false,
+          syncT3Scope: newRepoKind !== "userdata",
           syncDriveToLocalRag: false,
           syncLocalToDriveKnowledge: newRepoUploadKnowledge,
         },
@@ -681,7 +706,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
         icon={CloudIcon}
         scopeLabel="전역 선택형 백업"
         title="구글 드라이브 선택형 백업 & 양방향 지식 미러"
-        description="T3에 등록된 프로젝트 폴더와 직접 지정한 저장소 중 사용자가 직접 켠(ON) 항목만 AES-256-GCM 암호화하여 Google Drive에 백업합니다. 비선택 폴더는 0바이트도 전송하지 않으며 .env·개인키·지갑 파일은 자동 차단됩니다."
+        description="T3에 등록된 프로젝트 폴더와 직접 지정한 저장소 중 사용자가 직접 켠(ON) 항목만 AES-256-GCM 암호화하여 Google Drive에 백업합니다. 프로젝트를 선택하면 T3 DB·memory-v2·Claude·Codex·Grok 등 흩어져 있는 해당 프로젝트 연관 기억도 자동으로 함께 수집·백업하며, 비선택 폴더는 0바이트도 전송하지 않고 .env·개인키·지갑 파일은 자동 차단됩니다."
         action={
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -1519,12 +1544,23 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                         </p>
                       ) : null}
                       <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-                        {target.kind === "project" ? (
-                          <>
-                            <span>대화 {target.threadCount.toLocaleString()}건</span>
-                            <span>장기기억 {target.memoryCount.toLocaleString()}건</span>
-                          </>
-                        ) : null}
+                        {!isUnifiedUserdata
+                          ? (() => {
+                              const memSummary = formatRelatedMemorySummary(target);
+                              if (memSummary) {
+                                return <span>연관 기억: {memSummary}</span>;
+                              }
+                              if (target.kind === "project") {
+                                return (
+                                  <>
+                                    <span>대화 {target.threadCount.toLocaleString()}건</span>
+                                    <span>장기기억 {target.memoryCount.toLocaleString()}건</span>
+                                  </>
+                                );
+                              }
+                              return null;
+                            })()
+                          : null}
                         <span>최근 백업: {formatMs(target.lastBackedUpAtMs)}</span>
                       </div>
                       {target.riskWarning ? (
@@ -1577,7 +1613,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                             : "폴더 파일 암호화 백업 (T3-Backup)"}
                         </span>
                       </label>
-                      {target.projectId ? (
+                      {!isUnifiedUserdata ? (
                         <label className="inline-flex items-center gap-2">
                           <Switch
                             checked={target.syncT3Scope}
@@ -1586,7 +1622,9 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                               handleToggleTarget(target, { syncT3Scope: checked })
                             }
                           />
-                          <span>이 프로젝트의 T3 대화·기억·미션 추출 백업</span>
+                          <span>
+                            연관 기억 통합 백업 (T3 대화·지식·memory-v2 · Claude · Codex · Grok)
+                          </span>
                         </label>
                       ) : null}
                       {!isUnifiedUserdata ? (
@@ -1602,6 +1640,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                             원본 그대로 지식 폴더(
                             {config?.gdriveKnowledgeFolderName ?? "T3-Knowledge"}
                             )에도 업로드
+                            {target.syncT3Scope ? " (연관 마크다운 기억 포함)" : ""}
                           </span>
                         </label>
                       ) : null}
@@ -1715,6 +1754,29 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                     {formatBackupBytes(item.estimatedArchiveBytes)}
                   </span>
                 </div>
+                {(() => {
+                  const dryMemSummary = formatRelatedMemorySummary({
+                    threadCount: item.t3ScopeThreadsCount,
+                    memoryCount: item.t3ScopeMemoriesCount,
+                    ...(item.t3ScopeKnowledgeCount !== undefined
+                      ? { knowledgeItemCount: item.t3ScopeKnowledgeCount }
+                      : {}),
+                    ...(item.relatedMemoryFilesCount !== undefined
+                      ? { externalMemoryFilesCount: item.relatedMemoryFilesCount }
+                      : {}),
+                    ...(item.relatedMemorySources
+                      ? { relatedMemorySources: item.relatedMemorySources }
+                      : {}),
+                  });
+                  return dryMemSummary ? (
+                    <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
+                      연관 기억 포함: {dryMemSummary}
+                      {(item.relatedMemoryBytes ?? 0) > 0
+                        ? ` · 기억 파일 ${formatBackupBytes(item.relatedMemoryBytes ?? 0)}`
+                        : ""}
+                    </p>
+                  ) : null;
+                })()}
                 {item.blockedSecretsCount > 0 ? (
                   <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
                     자동 차단된 민감 파일 {item.blockedSecretsCount}건:{" "}

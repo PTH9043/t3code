@@ -131,7 +131,7 @@ export const DriveBackupTarget = Schema.Struct({
   enabled: Schema.Boolean,
   /** 로컬 폴더 파일 / Git bundle 업로드 */
   syncFiles: Schema.Boolean,
-  /** 해당 프로젝트의 T3 대화·기억·위키·미션 스코프 추출 백업 */
+  /** 해당 프로젝트의 T3 대화·기억·위키·미션 및 외부 AI CLI 연관 기억 통합 백업 */
   syncT3Scope: Schema.Boolean,
   /** Google Drive /T3-Knowledge -> 로컬 미러 동기화 대상 여부 */
   syncDriveToLocalRag: Schema.Boolean,
@@ -141,6 +141,12 @@ export const DriveBackupTarget = Schema.Struct({
   riskWarning: Schema.NullOr(Schema.String),
   threadCount: NonNegativeInt,
   memoryCount: NonNegativeInt,
+  /** T3 프로젝트 위키·지식 항목 수 */
+  knowledgeItemCount: Schema.optionalKey(NonNegativeInt),
+  /** T3 memory-v2 · 콜드 아카이브 · Claude · Codex · Grok 등 자동 발견된 연관 기억 파일 수 */
+  externalMemoryFilesCount: Schema.optionalKey(NonNegativeInt),
+  /** 연관 기억이 발견된 저장소 출처 목록 (예: T3 DB, T3 memory-v2, Claude, Codex, Grok) */
+  relatedMemorySources: Schema.optionalKey(Schema.Array(Schema.String)),
   lastBackedUpAtMs: Schema.NullOr(Schema.Number),
   updatedAtMs: Schema.Number,
 });
@@ -179,6 +185,10 @@ export const DriveBackupDryRunTarget = Schema.Struct({
   isGitRepo: Schema.Boolean,
   t3ScopeThreadsCount: NonNegativeInt,
   t3ScopeMemoriesCount: NonNegativeInt,
+  t3ScopeKnowledgeCount: Schema.optionalKey(NonNegativeInt),
+  relatedMemoryFilesCount: Schema.optionalKey(NonNegativeInt),
+  relatedMemoryBytes: Schema.optionalKey(NonNegativeInt),
+  relatedMemorySources: Schema.optionalKey(Schema.Array(Schema.String)),
   blockedSecretsCount: NonNegativeInt,
   blockedSecretsSample: Schema.Array(Schema.String),
   warnings: Schema.Array(Schema.String),

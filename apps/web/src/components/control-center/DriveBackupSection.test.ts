@@ -4,6 +4,7 @@ import {
   computeBackupPercent,
   formatBackupBytes,
   formatDurationKr,
+  formatRelatedMemorySummary,
   formatTransferSpeed,
   liveProgressStageLabelKr,
   runKindLabelKr,
@@ -84,5 +85,29 @@ describe("DriveBackupSection helpers", () => {
     expect(formatDurationKr(null)).toBe("계산 중");
     expect(formatTransferSpeed(2_500_000)).toContain("Mbps");
     expect(formatTransferSpeed(null)).toBe("-");
+  });
+
+  it("formats cross-storage related memory summary with source labels", () => {
+    expect(
+      formatRelatedMemorySummary({
+        threadCount: 0,
+        memoryCount: 0,
+        knowledgeItemCount: 0,
+        externalMemoryFilesCount: 0,
+        relatedMemorySources: [],
+      }),
+    ).toBeNull();
+
+    expect(
+      formatRelatedMemorySummary({
+        threadCount: 12,
+        memoryCount: 11418,
+        knowledgeItemCount: 1967,
+        externalMemoryFilesCount: 118,
+        relatedMemorySources: ["T3 DB", "T3 memory-v2", "Claude", "Codex", "Grok"],
+      }),
+    ).toBe(
+      "대화 12건 · 장기기억 11,418건 · 위키·지식 1,967건 · 기억 파일 118개 (T3 DB · T3 memory-v2 · Claude · Codex · Grok)",
+    );
   });
 });
