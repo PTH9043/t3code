@@ -224,7 +224,29 @@ function mapRunRow(row: RunRow): DriveBackupRunRecord {
 }
 
 function errMsg(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+  if (!(cause instanceof Error)) return String(cause);
+  const parts: string[] = [cause.message || cause.name];
+  let cur: unknown = (cause as Error & { readonly cause?: unknown }).cause;
+  let depth = 0;
+  while (cur && depth < 3) {
+    depth += 1;
+    if (cur instanceof Error) {
+      const code = (cur as Error & { readonly code?: unknown }).code;
+      const detail = [typeof code === "string" ? code : null, cur.message || null]
+        .filter(Boolean)
+        .join(" ");
+      if (detail && !parts[0]!.includes(detail)) parts.push(detail);
+      cur = (cur as Error & { readonly cause?: unknown }).cause;
+    } else if (typeof cur === "object") {
+      const rec = cur as Record<string, unknown>;
+      const detail = [rec.code, rec.message].filter(Boolean).join(" ");
+      if (detail && !parts[0]!.includes(detail)) parts.push(detail);
+      break;
+    } else {
+      break;
+    }
+  }
+  return parts.join(" ← ");
 }
 
 export const makeGoogleDriveBackupService = Effect.gen(function* () {
@@ -1644,11 +1666,13 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         let totalArchiveBytes = 0;
         let totalBlockedSecrets = 0;
         let totalWalGrowthBytes: number | null = null;
+        let resumedFromCheckpoint = false;
         const blockedSamples: string[] = [];
         let lastManifestSha256: string | null = null;
         let lastDestPath: string | null = null;
         const stamp = formatStamp(startedAtMs);
         const createdAtIso = new Date(startedAtMs).toISOString();
+        const runCheckpointEffect = Effect.runPromiseWith(yield* Effect.context<never>());
 
         const uploadArchiveFile = async (opts: {
           readonly targetId: string;
@@ -1753,8 +1777,137 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             Effect.catch(() => Effect.void),
           );
 
+        const loadResumableArchiveCheckpoint = (targetId: string, expectedExt: string) =>
+          sql<{
+            readonly run_id: string;
+            readonly archive_path: string | null;
+            readonly uploaded_offset_bytes: number;
+            readonly total_bytes: number;
+            readonly resumable_session_uri: string | null;
+            readonly manifest_sha256: string | null;
+            readonly updated_at_ms: number;
+          }>`
+            SELECT run_id, archive_path, uploaded_offset_bytes, total_bytes,
+                   resumable_session_uri, manifest_sha256, updated_at_ms
+            FROM drive_backup_checkpoints
+            WHERE target_id = ${targetId} AND stage = 'uploading'
+            ORDER BY updated_at_ms DESC
+            LIMIT 1
+          `.pipe(
+            Effect.map((rows) => {
+              const cp = rows[0];
+              if (!cp || !cp.archive_path) return null;
+              if (!cp.archive_path.endsWith(`.${expectedExt}`)) return null;
+              if (Date.now() - Number(cp.updated_at_ms) > 24 * 3_600_000) return null;
+              if (!NodeFs.existsSync(cp.archive_path)) return null;
+              return cp;
+            }),
+            Effect.catch(() => Effect.succeed(null)),
+          );
+
+        const deleteCheckpointsForTarget = (targetId: string) =>
+          sql`DELETE FROM drive_backup_checkpoints WHERE target_id = ${targetId}`.pipe(
+            Effect.asVoid,
+            Effect.catch(() => Effect.void),
+          );
+
         const executionResult = yield* Effect.gen(function* () {
           for (const row of selectedRows) {
+            const isUnifiedUserdataPre = row.id === UNIFIED_USERDATA_TARGET_ID;
+            const expectedExtPre = passphrase ? "t3enc" : "t3arc";
+            const resumableCp = row.sync_files
+              ? yield* loadResumableArchiveCheckpoint(row.id, expectedExtPre)
+              : null;
+            if (resumableCp && resumableCp.archive_path) {
+              // 직전 업로드 중단/실패로 스테이징에 이미 완성된 .t3enc/.t3arc가 남아 있으면 재해싱·재패킹 없이 즉시 업로드 재개
+              const safeFolder = isUnifiedUserdataPre
+                ? "t3-all-userdata"
+                : sanitizeSegment(row.display_name || row.id);
+              const subFolderPrefix =
+                row.kind === "userdata"
+                  ? `userdata/${safeFolder}`
+                  : row.kind === "knowledge"
+                    ? `knowledge/${safeFolder}`
+                    : `projects/${safeFolder}`;
+              const resumedPath = resumableCp.archive_path;
+              const resumedFileName = `${stamp}_${safeFolder}.${expectedExtPre}`;
+              const resumedBytes = (() => {
+                try {
+                  return NodeFs.statSync(resumedPath).size;
+                } catch {
+                  return Math.max(0, Number(resumableCp.total_bytes ?? 0));
+                }
+              })();
+              const uploadedResumed = yield* Effect.tryPromise({
+                try: () =>
+                  uploadArchiveFile({
+                    targetId: row.id,
+                    subFolder: subFolderPrefix,
+                    fileName: resumedFileName,
+                    stagedArchivePath: resumedPath,
+                    ...(resumableCp.resumable_session_uri
+                      ? { resumeSessionUri: resumableCp.resumable_session_uri }
+                      : {}),
+                    resumeOffsetBytes: Math.max(0, Number(resumableCp.uploaded_offset_bytes ?? 0)),
+                    onCheckpoint: (cp) =>
+                      runCheckpointEffect(
+                        saveCheckpoint({
+                          stage: "uploading",
+                          targetId: row.id,
+                          archivePath: resumedPath,
+                          uploadedOffsetBytes: cp.offsetBytes,
+                          totalBytes: cp.totalBytes,
+                          resumableSessionUri: cp.sessionUri,
+                          manifestSha256: resumableCp.manifest_sha256,
+                        }),
+                      ),
+                  }),
+                catch: (e) => {
+                  if (e instanceof ResumableUploadPausedError) {
+                    return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                  }
+                  return new DriveBackupError({
+                    code: e instanceof OAuthTokenRefreshError ? "AUTH_REQUIRED" : "TRANSPORT_ERROR",
+                    message:
+                      e instanceof OAuthTokenRefreshError
+                        ? e.message
+                        : `대상 '${row.display_name}' 체크포인트 재개 업로드 실패: ${errMsg(e)}`,
+                  });
+                },
+              }).pipe(
+                Effect.tapError((err) =>
+                  err.code === "AUTH_REQUIRED"
+                    ? recordAuthError(
+                        isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                        err.message,
+                      )
+                    : Effect.void,
+                ),
+                Effect.tap(() =>
+                  config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
+                ),
+              );
+
+              resumedFromCheckpoint = true;
+              totalFiles += 1;
+              totalRawBytes += resumedBytes;
+              totalArchiveBytes += resumedBytes;
+              if (resumableCp.manifest_sha256) lastManifestSha256 = resumableCp.manifest_sha256;
+              lastDestPath = uploadedResumed.destinationPath;
+              yield* deleteCheckpointsForTarget(row.id);
+              try {
+                if (NodeFs.existsSync(resumedPath)) NodeFs.rmSync(resumedPath, { force: true });
+              } catch {
+                // ignore
+              }
+              const doneMs = Date.now();
+              yield* sql`
+                UPDATE drive_backup_targets
+                SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
+                WHERE id = ${row.id}
+              `.pipe(Effect.catch(() => Effect.void));
+              continue;
+            }
             const workerEntries: Array<{
               readonly archivePath: string;
               readonly filePath?: string;
@@ -2082,6 +2235,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       subFolder: subFolderPrefix,
                       fileName,
                       stagedArchivePath,
+                      onCheckpoint: (cp) =>
+                        runCheckpointEffect(
+                          saveCheckpoint({
+                            stage: "uploading",
+                            targetId: row.id,
+                            archivePath: stagedArchivePath,
+                            uploadedOffsetBytes: cp.offsetBytes,
+                            totalBytes: cp.totalBytes,
+                            resumableSessionUri: cp.sessionUri,
+                            manifestSha256: built.manifestSha256,
+                          }),
+                        ),
                     }),
                   catch: (e) => {
                     if (e instanceof ResumableUploadPausedError) {
@@ -2144,7 +2309,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               }
             }
 
-            if (Boolean(row.sync_local_to_drive_knowledge ?? 0)) {
+            const liveKnowledgeFlag = yield* sql<{
+              readonly sync_local_to_drive_knowledge: number;
+            }>`
+              SELECT sync_local_to_drive_knowledge
+              FROM drive_backup_targets
+              WHERE id = ${row.id}
+              LIMIT 1
+            `.pipe(
+              Effect.map((r) => Boolean(r[0]?.sync_local_to_drive_knowledge ?? 0)),
+              Effect.catch(() => Effect.succeed(Boolean(row.sync_local_to_drive_knowledge ?? 0))),
+            );
+            if (liveKnowledgeFlag) {
               const kRes = yield* uploadLocalKnowledgeForTarget({
                 row,
                 config,
@@ -2520,6 +2696,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           errorMessage: null,
           finishedAtMs: Date.now(),
           walGrowthBytes: totalWalGrowthBytes,
+          resumedFromCheckpoint,
         };
         yield* recordRun(succeededRun);
         return succeededRun;

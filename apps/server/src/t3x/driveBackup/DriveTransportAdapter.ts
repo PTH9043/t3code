@@ -392,6 +392,38 @@ export function isInvalidGrantError(cause: unknown): boolean {
   return /\binvalid_grant\b/i.test(msg);
 }
 
+function formatFetchErrorDetail(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts: string[] = [err.message || err.name];
+  let cur: unknown = (err as Error & { readonly cause?: unknown }).cause;
+  let depth = 0;
+  while (cur && depth < 4) {
+    depth += 1;
+    if (cur instanceof Error) {
+      const code = (cur as Error & { readonly code?: unknown }).code;
+      const syscall = (cur as Error & { readonly syscall?: unknown }).syscall;
+      const detail = [
+        typeof code === "string" && code ? code : null,
+        typeof syscall === "string" && syscall ? syscall : null,
+        cur.message || null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (detail) parts.push(detail);
+      cur = (cur as Error & { readonly cause?: unknown }).cause;
+    } else if (typeof cur === "object") {
+      const rec = cur as Record<string, unknown>;
+      const detail = [rec.code, rec.syscall, rec.message].filter(Boolean).join(" ");
+      if (detail) parts.push(detail);
+      break;
+    } else {
+      parts.push(String(cur));
+      break;
+    }
+  }
+  return parts.join(" ← ");
+}
+
 export async function exchangeRefreshTokenForAccessToken(
   creds: GdriveOAuthCredentials,
   fetcher: typeof fetch = fetch,
@@ -402,11 +434,25 @@ export async function exchangeRefreshTokenForAccessToken(
     refresh_token: creds.refreshToken,
     grant_type: "refresh_token",
   });
-  const res = await fetcher("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  let res: Response;
+  try {
+    res = await fetchWithRetry(
+      fetcher,
+      "https://oauth2.googleapis.com/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      },
+      undefined,
+      3,
+      "OAuth 토큰 갱신",
+    );
+  } catch (err) {
+    throw new Error(`Google OAuth2 토큰 갱신 네트워크 오류: ${formatFetchErrorDetail(err)}`, {
+      cause: err,
+    });
+  }
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     let oauthError: string | null = null;
@@ -588,6 +634,7 @@ async function fetchWithRetry(
   init: RequestInit,
   signal?: AbortSignal,
   maxRetries = 5,
+  stageLabel?: string,
 ): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -610,12 +657,17 @@ async function fetchWithRetry(
       return res;
     } catch (err) {
       lastErr = err;
-      if (signal?.aborted || attempt === maxRetries) throw err;
+      if (signal?.aborted || attempt === maxRetries) {
+        if (signal?.aborted) throw err;
+        const prefix = stageLabel ? `[${stageLabel}] ` : "";
+        throw new Error(`${prefix}${formatFetchErrorDetail(err)}`, { cause: err });
+      }
       const backoffMs = Math.min(16_000, 400 * 2 ** attempt + NodeCrypto.randomInt(0, 250));
       await sleepAbortable(backoffMs, signal);
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  const prefix = stageLabel ? `[${stageLabel}] ` : "";
+  throw new Error(`${prefix}${formatFetchErrorDetail(lastErr)}`, { cause: lastErr });
 }
 
 /**
@@ -723,17 +775,22 @@ export async function uploadFileResumableToGoogleDriveApi(
       sessionUri,
       {
         method: "PUT",
+        redirect: "manual",
         headers: {
           "Content-Range": `bytes */${totalBytes}`,
           "Content-Length": "0",
         },
       },
       input.signal,
+      5,
+      "Resumable 세션 오프셋 조회",
     );
     if (probeRes.status === 200 || probeRes.status === 201) {
       uploadedFile = (await probeRes.json()) as { readonly id: string; readonly name: string };
       resumed = true;
     } else if (probeRes.status === 308) {
+      const nextLoc = probeRes.headers.get("location");
+      if (nextLoc) sessionUri = nextLoc;
       const serverOffset = parseResumeRangeOffset(probeRes.headers.get("range"));
       offset = serverOffset ?? 0;
       resumed = offset > 0;
@@ -775,12 +832,15 @@ export async function uploadFileResumableToGoogleDriveApi(
           sessionUri,
           {
             method: "PUT",
+            redirect: "manual",
             headers: {
               "Content-Type": "application/octet-stream",
               "Content-Length": "0",
             },
           },
           input.signal,
+          5,
+          "빈 파일 업로드",
         );
         if (!putRes.ok) {
           throw new Error(`Google Drive 빈 파일 업로드 실패 (${putRes.status})`);
@@ -819,6 +879,7 @@ export async function uploadFileResumableToGoogleDriveApi(
           sessionUri,
           {
             method: "PUT",
+            redirect: "manual",
             headers: {
               "Content-Type": "application/octet-stream",
               "Content-Length": String(bytesRead),
@@ -827,6 +888,8 @@ export async function uploadFileResumableToGoogleDriveApi(
             body: new Uint8Array(slice),
           },
           input.signal,
+          5,
+          `청크 업로드(${offset}-${endByte}/${totalBytes})`,
         );
       } catch (err) {
         if (input.signal?.aborted) {
@@ -849,6 +912,8 @@ export async function uploadFileResumableToGoogleDriveApi(
       }
 
       if (putRes.status === 308) {
+        const nextLoc = putRes.headers.get("location");
+        if (nextLoc) sessionUri = nextLoc;
         const confirmed = parseResumeRangeOffset(putRes.headers.get("range"));
         offset = confirmed ?? offset + bytesRead;
         await input.onCheckpoint?.({ sessionUri, offsetBytes: offset, totalBytes });
@@ -1588,18 +1653,22 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
   }
 
   let uploadedFile: { readonly id: string; readonly name: string } | null = null;
+  let activeSessionUri = sessionUri;
   if (totalBytes === 0) {
     const putRes = await fetchWithRetry(
       fetcher,
-      sessionUri,
+      activeSessionUri,
       {
         method: "PUT",
+        redirect: "manual",
         headers: {
           "Content-Type": mimeType,
           "Content-Length": "0",
         },
       },
       input.signal,
+      5,
+      `지식 빈 파일 업로드(${safeName})`,
     );
     if (!putRes.ok) {
       throw new Error(`Google Drive 빈 지식 파일 업로드 실패 (${putRes.status})`);
@@ -1628,9 +1697,10 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
         const slice = chunkBuf.subarray(0, bytesRead);
         const putRes = await fetchWithRetry(
           fetcher,
-          sessionUri,
+          activeSessionUri,
           {
             method: "PUT",
+            redirect: "manual",
             headers: {
               "Content-Type": mimeType,
               "Content-Length": String(bytesRead),
@@ -1639,12 +1709,16 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
             body: new Uint8Array(slice),
           },
           input.signal,
+          5,
+          `지식 청크 업로드(${safeName} ${offset}-${endByte}/${totalBytes})`,
         );
         if (putRes.status === 200 || putRes.status === 201) {
           uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
           break;
         }
         if (putRes.status === 308) {
+          const nextLoc = putRes.headers.get("location");
+          if (nextLoc) activeSessionUri = nextLoc;
           const confirmed = parseResumeRangeOffset(putRes.headers.get("range"));
           offset = confirmed ?? offset + bytesRead;
           continue;

@@ -266,7 +266,12 @@ describe("Stage 3: T3ARC2 / T3ENC2 streaming, tamper detection, T3ARC1 compat & 
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ id: `file-${sid}`, name: "archive.t3enc" }));
         } else {
-          res.writeHead(308, { range: `bytes=0-${sess.received - 1}` });
+          // 실제 Google Drive가 308 Resume Incomplete에 Location 헤더를 함께 내려주는 경우를 시뮬레이션
+          // (redirect: "manual"이 누락되면 Node undici가 308을 Permanent Redirect로 처리해 fetch failed 발생)
+          res.writeHead(308, {
+            range: `bytes=0-${sess.received - 1}`,
+            location: `http://127.0.0.1:${port}/resumable/${sid}`,
+          });
           res.end();
         }
         return;
