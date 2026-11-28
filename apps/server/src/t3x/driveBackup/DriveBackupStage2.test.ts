@@ -230,6 +230,22 @@ describe("Stage 2: Non-blocking worker SQLite snapshot, idle/pause gates, TokenB
       }),
     ).toMatchObject({ pause: true, reason: "thermal_pressure" });
 
+    // allowDuringActiveWork=true allows gentle throttled backup even when active work is running
+    expect(
+      evaluateDriveBackupStartGate({
+        config: { ...baseConfig, allowDuringActiveWork: true },
+        hostPower: makePowerSnapshot(),
+        activeWorkCount: 2,
+      }),
+    ).toEqual({ allowed: true });
+    expect(
+      evaluateDriveBackupPauseGate({
+        config: { ...baseConfig, allowDuringActiveWork: true },
+        hostPower: makePowerSnapshot(),
+        activeWorkCount: 2,
+      }),
+    ).toEqual({ pause: false });
+
     // Full snapshot cadence default = weekly (7 days)
     expect(
       isFullSnapshotDue({

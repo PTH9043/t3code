@@ -156,6 +156,8 @@ export interface DriveFileUploadInput {
   readonly retentionCount: number;
   readonly chunkSizeBytes?: number;
   readonly uploadLimitMbps?: number;
+  /** 동적 업로드 속도 조회 콜백 (활성 작업 중 저속 ≤5 Mbps ↔ 유휴 시 원래 속도 자동 전환) */
+  readonly getUploadLimitMbps?: () => number;
   readonly resumeSessionUri?: string | null;
   readonly resumeOffsetBytes?: number;
   readonly onCheckpoint?: (cp: {
@@ -185,7 +187,13 @@ export async function copyFileToLocalDriveFolder(
   backupFolderName: string,
   input: Pick<
     DriveFileUploadInput,
-    "subFolder" | "fileName" | "filePath" | "retentionCount" | "uploadLimitMbps" | "signal"
+    | "subFolder"
+    | "fileName"
+    | "filePath"
+    | "retentionCount"
+    | "uploadLimitMbps"
+    | "getUploadLimitMbps"
+    | "signal"
   >,
 ): Promise<DriveUploadResult> {
   const safeSub = input.subFolder
@@ -198,8 +206,12 @@ export async function copyFileToLocalDriveFolder(
   NodeFs.mkdirSync(targetDir, { recursive: true });
   const tmpPath = `${destPath}.${NodeCrypto.randomUUID().slice(0, 8)}.tmp`;
 
-  const bucket =
-    input.uploadLimitMbps && input.uploadLimitMbps > 0
+  const bucket = input.getUploadLimitMbps
+    ? new TokenBucket({
+        bytesPerSecond: mbpsToBytesPerSec(input.getUploadLimitMbps()),
+        getBytesPerSecond: () => mbpsToBytesPerSec(input.getUploadLimitMbps!()),
+      })
+    : input.uploadLimitMbps && input.uploadLimitMbps > 0
       ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
       : null;
 
@@ -681,8 +693,12 @@ export async function uploadFileResumableToGoogleDriveApi(
   const fetcher = input.fetcher ?? fetch;
   const totalBytes = NodeFs.statSync(input.filePath).size;
   const chunkSize = alignResumableChunkSize(input.chunkSizeBytes);
-  const bucket =
-    input.uploadLimitMbps && input.uploadLimitMbps > 0
+  const bucket = input.getUploadLimitMbps
+    ? new TokenBucket({
+        bytesPerSecond: mbpsToBytesPerSec(input.getUploadLimitMbps()),
+        getBytesPerSecond: () => mbpsToBytesPerSec(input.getUploadLimitMbps!()),
+      })
+    : input.uploadLimitMbps && input.uploadLimitMbps > 0
       ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
       : null;
 
@@ -1428,6 +1444,7 @@ export async function copyKnowledgeFileToLocalDriveFolder(
     readonly fileName: string;
     readonly filePath: string;
     readonly uploadLimitMbps?: number;
+    readonly getUploadLimitMbps?: () => number;
     readonly signal?: AbortSignal;
   },
 ): Promise<{ readonly destinationPath: string; readonly bytesCopied: number }> {
@@ -1443,8 +1460,12 @@ export async function copyKnowledgeFileToLocalDriveFolder(
   NodeFs.mkdirSync(targetDir, { recursive: true });
   const tmpPath = `${destPath}.${NodeCrypto.randomUUID().slice(0, 8)}.tmp`;
 
-  const bucket =
-    input.uploadLimitMbps && input.uploadLimitMbps > 0
+  const bucket = input.getUploadLimitMbps
+    ? new TokenBucket({
+        bytesPerSecond: mbpsToBytesPerSec(input.getUploadLimitMbps()),
+        getBytesPerSecond: () => mbpsToBytesPerSec(input.getUploadLimitMbps!()),
+      })
+    : input.uploadLimitMbps && input.uploadLimitMbps > 0
       ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
       : null;
 
@@ -1562,6 +1583,7 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
     readonly fileName: string;
     readonly filePath: string;
     readonly uploadLimitMbps?: number;
+    readonly getUploadLimitMbps?: () => number;
     readonly chunkSizeBytes?: number;
     readonly accessToken?: string;
     readonly fetcher?: typeof fetch;
@@ -1611,8 +1633,12 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
   const mimeType = guessMimeTypeForKnowledgeFile(safeName);
   const rawChunk = input.chunkSizeBytes ?? 2 * 1024 * 1024;
   const chunkSize = Math.max(256 * 1024, Math.floor(rawChunk / (256 * 1024)) * (256 * 1024));
-  const bucket =
-    input.uploadLimitMbps && input.uploadLimitMbps > 0
+  const bucket = input.getUploadLimitMbps
+    ? new TokenBucket({
+        bytesPerSecond: mbpsToBytesPerSec(input.getUploadLimitMbps()),
+        getBytesPerSecond: () => mbpsToBytesPerSec(input.getUploadLimitMbps!()),
+      })
+    : input.uploadLimitMbps && input.uploadLimitMbps > 0
       ? new TokenBucket({ bytesPerSecond: mbpsToBytesPerSec(input.uploadLimitMbps) })
       : null;
 

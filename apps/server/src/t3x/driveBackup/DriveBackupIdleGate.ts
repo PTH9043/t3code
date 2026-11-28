@@ -17,6 +17,8 @@ export interface DriveBackupGateConfig {
   readonly allowedWindowEnabled: boolean;
   readonly allowedWindowStartHour: number;
   readonly allowedWindowEndHour: number;
+  /** true이면 활성 T3 작업이 실행 중이어도 중단하지 않고 저속 백그라운드 모드로 계속 진행한다. */
+  readonly allowDuringActiveWork?: boolean;
 }
 
 export type StartGateDenyReason =
@@ -63,7 +65,7 @@ export function evaluateDriveBackupStartGate(input: {
   readonly freeDiskBytes?: number | null;
   readonly requiredDiskBytes?: number;
 }): StartGateDecision {
-  if (input.activeWorkCount > 0) {
+  if (input.activeWorkCount > 0 && !input.config.allowDuringActiveWork) {
     return {
       allowed: false,
       reason: "active_work",
@@ -154,12 +156,15 @@ export function evaluateDriveBackupStartGate(input: {
 }
 
 export function evaluateDriveBackupPauseGate(input: {
-  readonly config: Pick<DriveBackupGateConfig, "pauseOnBattery" | "idleMinSeconds">;
+  readonly config: Pick<
+    DriveBackupGateConfig,
+    "pauseOnBattery" | "idleMinSeconds" | "allowDuringActiveWork"
+  >;
   readonly hostPower: HostPowerSnapshot;
   readonly previousLocked?: HostPowerSnapshot["locked"];
   readonly activeWorkCount: number;
 }): PauseGateDecision {
-  if (input.activeWorkCount > 0) {
+  if (input.activeWorkCount > 0 && !input.config.allowDuringActiveWork) {
     return {
       pause: true,
       reason: "active_work",

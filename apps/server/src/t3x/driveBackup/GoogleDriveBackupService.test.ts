@@ -266,7 +266,7 @@ describe("GoogleDriveBackupService", () => {
           syncDriveToLocalRag: true,
         });
 
-        // 활성 작업 1건 등록 -> 자동 유휴 양보(skipped_busy) 확인
+        // 활성 작업 1건 등록 상태에서도 백업을 버리지 않고 저속 백그라운드 모드로 정상 완료 확인
         activeWorkRegistry.register({
           kind: "turn",
           id: "turn-busy-1",
@@ -274,11 +274,13 @@ describe("GoogleDriveBackupService", () => {
           summary: "busy turn",
           startedAtMs: Date.now(),
         });
-        const deferred = yield* svc.runNow({});
-        expect(deferred.status).toBe("skipped_busy");
+        const throttledRun = yield* svc.runNow({});
+        expect(throttledRun.status).toBe("succeeded");
+        expect(throttledRun.fileCount).toBeGreaterThanOrEqual(1);
 
         // 활성 작업 종료 후 연속 3회 백업 -> retentionCount=2 롤링 확인
         activeWorkRegistry.unregister("turn", "turn-busy-1");
+        yield* Effect.sleep("20 millis");
         yield* svc.runNow({});
         yield* Effect.sleep("20 millis");
         yield* svc.runNow({});

@@ -1322,6 +1322,16 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   fileName,
                   filePath: file.absolutePath,
                   uploadLimitMbps: opts.config.uploadLimitMbps,
+                  getUploadLimitMbps: () => {
+                    const base = opts.config.uploadLimitMbps;
+                    if (
+                      opts.config.autoSyncIdleOnly &&
+                      activeWorkRegistry.snapshot().totalActive > 0
+                    ) {
+                      return base > 0 ? Math.min(base, 5) : 5;
+                    }
+                    return base;
+                  },
                   ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
                 },
               ),
@@ -1345,6 +1355,16 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   fileName,
                   filePath: file.absolutePath,
                   uploadLimitMbps: opts.config.uploadLimitMbps,
+                  getUploadLimitMbps: () => {
+                    const base = opts.config.uploadLimitMbps;
+                    if (
+                      opts.config.autoSyncIdleOnly &&
+                      activeWorkRegistry.snapshot().totalActive > 0
+                    ) {
+                      return base > 0 ? Math.min(base, 5) : 5;
+                    }
+                    return base;
+                  },
                   ...(cachedAccessToken ? { accessToken: cachedAccessToken } : {}),
                   ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
                 },
@@ -1580,29 +1600,22 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         const runId = `drvrun_${formatStamp(startedAtMs)}_${NodeCrypto.randomUUID().slice(0, 6)}`;
         const targetIds = selectedRows.map((r) => r.id);
 
-        // 유휴 양보 검사 (활성 턴·위임·오케스트라 진행 중 보호)
-        const activeCount = activeWorkRegistry.snapshot().totalActive;
-        if (config.autoSyncIdleOnly && !input.forceWhenBusy && activeCount > 0) {
-          const skipped: DriveBackupRunRecord = {
-            runId,
-            kind: "backup",
-            status: "skipped_busy",
-            transportMode: config.transportMode,
-            targetIds,
-            fileCount: 0,
-            rawBytes: 0,
-            archiveBytes: 0,
-            skippedSecretsCount: 0,
-            skippedSecretsSample: [],
-            manifestSha256: null,
-            destinationPath: null,
-            errorMessage: `활성 작업 ${activeCount}건이 실행 중이어서 유휴 시점까지 백업을 양보했습니다.`,
-            startedAtMs,
-            finishedAtMs: Date.now(),
-          };
-          yield* recordRun(skipped);
-          return skipped;
-        }
+        // 활성 작업이 실행 중이어도 백업을 중단/양보하지 않고 저속 백그라운드 모드로 천천히 실행한다.
+        // - 활성 작업 >= 1건 & autoSyncIdleOnly=true & !forceWhenBusy: 읽기 ≤10 MB/s · 업로드 ≤5 Mbps 동적 제한
+        // - 활성 작업 0건으로 내려오면 즉시 원래 설정 속도(기본 50 MB/s · 20 Mbps)로 자동 복귀
+        const shouldThrottleWhenBusy = config.autoSyncIdleOnly && !input.forceWhenBusy;
+        const resolveEffectiveReadLimitMBps = (): number => {
+          const base = config.readLimitMBps;
+          if (!shouldThrottleWhenBusy) return base;
+          if (activeWorkRegistry.snapshot().totalActive <= 0) return base;
+          return base > 0 ? Math.min(base, 10) : 10;
+        };
+        const resolveEffectiveUploadLimitMbps = (): number => {
+          const base = config.uploadLimitMbps;
+          if (!shouldThrottleWhenBusy) return base;
+          if (activeWorkRegistry.snapshot().totalActive <= 0) return base;
+          return base > 0 ? Math.min(base, 5) : 5;
+        };
 
         // 암호화 비밀번호 확인 (원본 지식 업로드만 수행하는 경우는 비밀번호 없이도 허용)
         const needsArchiveEncryption =
@@ -1707,6 +1720,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               filePath: opts.stagedArchivePath,
               retentionCount: config.retentionCount,
               uploadLimitMbps: config.uploadLimitMbps,
+              getUploadLimitMbps: resolveEffectiveUploadLimitMbps,
               ...(pauseSignal ? { signal: pauseSignal } : {}),
             });
           }
@@ -1719,6 +1733,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               filePath: opts.stagedArchivePath,
               retentionCount: config.retentionCount,
               uploadLimitMbps: config.uploadLimitMbps,
+              getUploadLimitMbps: resolveEffectiveUploadLimitMbps,
               ...(opts.resumeSessionUri ? { resumeSessionUri: opts.resumeSessionUri } : {}),
               ...(opts.resumeOffsetBytes !== undefined
                 ? { resumeOffsetBytes: opts.resumeOffsetBytes }
@@ -2205,7 +2220,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       outputPath: stagedArchivePath,
                       createdAtIso,
                       encryptionPassphrase: passphrase,
-                      readLimitMBps: config.readLimitMBps,
+                      readLimitMBps: resolveEffectiveReadLimitMBps(),
                       rssLimitMb: config.workerRssLimitMb,
                       ...(pauseSignal ? { signal: pauseSignal } : {}),
                     }),
@@ -2435,7 +2450,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                           outputPath: stagedEvPath,
                           createdAtIso,
                           encryptionPassphrase: passphrase,
-                          readLimitMBps: config.readLimitMBps,
+                          readLimitMBps: resolveEffectiveReadLimitMBps(),
                           rssLimitMb: config.workerRssLimitMb,
                           ...(pauseSignal ? { signal: pauseSignal } : {}),
                         }),
@@ -2574,7 +2589,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       outputPath: stagedCorePath,
                       createdAtIso,
                       encryptionPassphrase: passphrase,
-                      readLimitMBps: config.readLimitMBps,
+                      readLimitMBps: resolveEffectiveReadLimitMBps(),
                       rssLimitMb: config.workerRssLimitMb,
                       ...(pauseSignal ? { signal: pauseSignal } : {}),
                     }),

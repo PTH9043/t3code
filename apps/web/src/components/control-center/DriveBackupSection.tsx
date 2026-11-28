@@ -738,7 +738,7 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                 disabled={busyAction !== null || summary.selectedCount === 0}
                 onClick={() => handleRunBackup(true)}
               >
-                활성 작업 무시하고 읽기 전용 백업 강제 실행
+                저속 제한 없이 최대 속도로 백업 실행
               </Button>
             ) : null}
           </div>
@@ -1077,7 +1077,10 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
               <Switch checked={encryptionEnabled} onCheckedChange={setEncryptionEnabled} />
             </label>
             <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">
-              <span>다른 채팅방/오케스트라 작업 실행 중 자동 유휴 양보</span>
+              <span>
+                다른 채팅방/작업 실행 중 저속 백그라운드 모드 (읽기 ≤10 MB/s · 업로드 ≤5 Mbps로
+                천천히 백업)
+              </span>
               <Switch checked={autoSyncIdleOnly} onCheckedChange={setAutoSyncIdleOnly} />
             </label>
             <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs">

@@ -81,6 +81,7 @@ export const runDriveBackupSchedulerCycle = (input: {
         allowedWindowEnabled: config.allowedWindowEnabled,
         allowedWindowStartHour: config.allowedWindowStartHour,
         allowedWindowEndHour: config.allowedWindowEndHour,
+        allowDuringActiveWork: true,
       },
       hostPower,
       activeWorkCount,
@@ -109,6 +110,7 @@ export const runDriveBackupSchedulerCycle = (input: {
         config: {
           pauseOnBattery: config.pauseOnBattery,
           idleMinSeconds: config.idleMinSeconds,
+          allowDuringActiveWork: true,
         },
         hostPower: nextPower,
         previousLocked,
@@ -120,12 +122,7 @@ export const runDriveBackupSchedulerCycle = (input: {
       }
     };
 
-    const unsubscribeWork = activeWorkRegistry.subscribe((snap) => {
-      if (snap.totalActive > 0 && !abortController.signal.aborted) {
-        abortController.abort("active_work");
-      }
-    });
-
+    // 활성 작업이 실행 중이거나 새로 시작되어도 중단하지 않고 동적 저속 스로틀링으로 천천히 계속 진행한다.
     const powerWatchFiber = yield* input.hostPowerMonitor.streamChanges.pipe(
       Stream.runForEach((nextPower) =>
         Effect.sync(() => {
@@ -151,7 +148,6 @@ export const runDriveBackupSchedulerCycle = (input: {
       }
       return { action: "failed" as const, reason: result.failure.message };
     } finally {
-      unsubscribeWork();
       yield* Fiber.interrupt(powerWatchFiber).pipe(Effect.ignore);
       if (input.telemetryReceiver) {
         yield* input.telemetryReceiver.setHostPowerIntervalsOverride(null).pipe(Effect.ignore);

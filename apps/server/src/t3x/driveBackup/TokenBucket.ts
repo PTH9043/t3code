@@ -6,32 +6,53 @@
  * - `AbortSignal`을 전달하면 일시정지 시 대기 중인 타이머를 즉시 해제한다.
  */
 export class TokenBucket {
-  private readonly bytesPerSecond: number;
-  private readonly capacityBytes: number;
+  private readonly baseBytesPerSecond: number;
+  private readonly getBytesPerSecondFn: (() => number) | undefined;
+  private readonly explicitBurstBytes: number | undefined;
   private tokens: number;
   private lastRefillMs: number;
   private totalConsumedBytes = 0;
   private readonly startedAtMs: number;
 
-  constructor(input: { readonly bytesPerSecond: number; readonly burstBytes?: number }) {
-    this.bytesPerSecond = Math.max(
+  constructor(input: {
+    readonly bytesPerSecond: number;
+    readonly burstBytes?: number;
+    /** 동적 속도 변경용 콜백 (예: 활성 작업 중 저속 모드 ≤5 Mbps ↔ 유휴 시 원래 속도 자동 전환) */
+    readonly getBytesPerSecond?: () => number;
+  }) {
+    this.baseBytesPerSecond = Math.max(
       0,
       Number.isFinite(input.bytesPerSecond) ? input.bytesPerSecond : 0,
     );
-    const defaultBurst = Math.max(256 * 1024, Math.floor(this.bytesPerSecond * 0.5));
-    this.capacityBytes = Math.max(64 * 1024, input.burstBytes ?? defaultBurst);
-    this.tokens = this.capacityBytes;
+    this.getBytesPerSecondFn = input.getBytesPerSecond;
+    this.explicitBurstBytes = input.burstBytes;
+    const initialRate = this.currentBytesPerSecond();
+    this.tokens = this.capacityFor(initialRate);
     const now = Date.now();
     this.lastRefillMs = now;
     this.startedAtMs = now;
   }
 
-  private refill(nowMs: number): void {
-    if (this.bytesPerSecond <= 0) return;
+  private currentBytesPerSecond(): number {
+    if (!this.getBytesPerSecondFn) return this.baseBytesPerSecond;
+    const dynamic = this.getBytesPerSecondFn();
+    return Math.max(0, Number.isFinite(dynamic) ? dynamic : this.baseBytesPerSecond);
+  }
+
+  private capacityFor(rate: number): number {
+    const defaultBurst = Math.max(256 * 1024, Math.floor(rate * 0.5));
+    return Math.max(64 * 1024, this.explicitBurstBytes ?? defaultBurst);
+  }
+
+  private refill(nowMs: number, rate: number): void {
+    if (rate <= 0) return;
+    const cap = this.capacityFor(rate);
     const elapsedSec = Math.max(0, (nowMs - this.lastRefillMs) / 1_000);
     if (elapsedSec > 0) {
-      this.tokens = Math.min(this.capacityBytes, this.tokens + elapsedSec * this.bytesPerSecond);
+      this.tokens = Math.min(cap, this.tokens + elapsedSec * rate);
       this.lastRefillMs = nowMs;
+    } else if (this.tokens > cap) {
+      this.tokens = cap;
     }
   }
 
@@ -41,15 +62,18 @@ export class TokenBucket {
       throw new Error("Paused or aborted while waiting for rate limit.");
     }
     this.totalConsumedBytes += bytes;
-    if (this.bytesPerSecond <= 0) return;
+    const initialRate = this.currentBytesPerSecond();
+    if (initialRate <= 0) return;
 
     let remaining = bytes;
     while (remaining > 0) {
       if (signal?.aborted) {
         throw new Error("Paused or aborted while waiting for rate limit.");
       }
+      const rate = this.currentBytesPerSecond();
+      if (rate <= 0) return;
       const now = Date.now();
-      this.refill(now);
+      this.refill(now, rate);
       if (this.tokens >= remaining) {
         this.tokens -= remaining;
         return;
@@ -58,10 +82,7 @@ export class TokenBucket {
         remaining -= this.tokens;
         this.tokens = 0;
       }
-      const waitMs = Math.max(
-        10,
-        Math.min(500, Math.ceil((remaining / this.bytesPerSecond) * 1_000)),
-      );
+      const waitMs = Math.max(10, Math.min(500, Math.ceil((remaining / rate) * 1_000)));
       await sleepAbortable(waitMs, signal);
     }
   }
