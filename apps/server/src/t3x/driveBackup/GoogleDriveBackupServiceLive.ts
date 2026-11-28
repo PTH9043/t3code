@@ -81,6 +81,9 @@ import { verifyAndExtractArchiveFile } from "./StreamingArchivePacker.ts";
 const CONFIG_ROW_ID = "default";
 const SECRET_PASSPHRASE_KEY = "drive_backup_passphrase";
 const SECRET_GDRIVE_OAUTH_KEY = "drive_backup_gdrive_oauth";
+const SECRET_GOOGLE_ACCOUNTS_KEY = "google-login-accounts";
+const driveOAuthPerSubjectSecretKey = (subject: string) =>
+  `${SECRET_GDRIVE_OAUTH_KEY}_${subject.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64)}`;
 
 interface ConfigRow {
   readonly id: string;
@@ -263,34 +266,93 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
   const readSecretText = (name: string): Effect.Effect<string | null, never> =>
     secretStore.get(name).pipe(
       Effect.map((opt) => (Option.isSome(opt) ? Buffer.from(opt.value).toString("utf8") : null)),
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.tapError((err) =>
+        Effect.logWarning(`DriveBackup 시크릿 '${name}' 조회 실패: ${errMsg(err)}`),
+      ),
+      Effect.orElseSucceed(() => null),
     );
+
+  const parseOAuthCredentialsJson = (
+    raw: string | null,
+    fallbackEmail?: string,
+  ): (GdriveOAuthCredentials & { readonly connectedEmail?: string }) | null => {
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Partial<
+        GdriveOAuthCredentials & { readonly connectedEmail?: string }
+      >;
+      if (parsed.clientId && parsed.clientSecret && parsed.refreshToken) {
+        const connectedEmail = parsed.connectedEmail ?? fallbackEmail;
+        return {
+          clientId: parsed.clientId,
+          clientSecret: parsed.clientSecret,
+          refreshToken: parsed.refreshToken,
+          ...(connectedEmail ? { connectedEmail } : {}),
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseGoogleAccountsList = (
+    raw: string | null,
+  ): ReadonlyArray<{
+    readonly subject?: string;
+    readonly email?: string;
+    readonly isDefault?: boolean;
+    readonly driveBackupLinked?: boolean;
+  }> => {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
 
   const readOAuthCredentials = (): Effect.Effect<
     (GdriveOAuthCredentials & { readonly connectedEmail?: string }) | null,
     never
   > =>
-    readSecretText(SECRET_GDRIVE_OAUTH_KEY).pipe(
-      Effect.map((raw) => {
-        if (!raw) return null;
-        try {
-          const parsed = JSON.parse(raw) as Partial<
-            GdriveOAuthCredentials & { readonly connectedEmail?: string }
-          >;
-          if (parsed.clientId && parsed.clientSecret && parsed.refreshToken) {
-            return {
-              clientId: parsed.clientId,
-              clientSecret: parsed.clientSecret,
-              refreshToken: parsed.refreshToken,
-              ...(parsed.connectedEmail ? { connectedEmail: parsed.connectedEmail } : {}),
-            };
-          }
-          return null;
-        } catch {
-          return null;
+    Effect.gen(function* () {
+      const primary = parseOAuthCredentialsJson(yield* readSecretText(SECRET_GDRIVE_OAUTH_KEY));
+      if (primary) return primary;
+
+      // 주 키가 누락/손상된 경우 google-login-accounts의 계정별 Drive OAuth 시크릿에서 자동 복구
+      const accounts = parseGoogleAccountsList(yield* readSecretText(SECRET_GOOGLE_ACCOUNTS_KEY));
+      if (accounts.length === 0) return null;
+      const candidates = [...accounts]
+        .filter((a) => typeof a.subject === "string" && a.subject.length > 0)
+        .sort((a, b) => {
+          const score = (x: typeof a) => (x.driveBackupLinked ? 2 : 0) + (x.isDefault ? 1 : 0);
+          return score(b) - score(a);
+        });
+      for (const acc of candidates) {
+        const perSubjectRaw = yield* readSecretText(driveOAuthPerSubjectSecretKey(acc.subject!));
+        const recovered = parseOAuthCredentialsJson(perSubjectRaw, acc.email);
+        if (recovered) {
+          yield* secretStore
+            .set(
+              SECRET_GDRIVE_OAUTH_KEY,
+              Uint8Array.from(
+                Buffer.from(
+                  JSON.stringify({
+                    ...recovered,
+                    subject: acc.subject,
+                  }),
+                  "utf8",
+                ),
+              ),
+            )
+            .pipe(Effect.orElseSucceed(() => undefined));
+          return recovered;
         }
-      }),
-    );
+      }
+      return null;
+    });
 
   const ensureConfigRow = (): Effect.Effect<ConfigRow, DriveBackupError> =>
     Effect.gen(function* () {

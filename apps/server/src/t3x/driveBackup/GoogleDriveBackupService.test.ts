@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off
+// @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off preferSchemaOverJson:off
 import * as NodeFs from "node:fs";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
@@ -384,5 +384,59 @@ describe("GoogleDriveBackupService", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("recovers OAuth credentials from per-subject Drive secret when primary secret key is missing", async () => {
+    const baseDir = mkTempDir("t3-drv-base4-");
+    const repoDir = mkTempDir("t3-drv-repo4-");
+    const layer = makeTestLayer(repoDir, baseDir);
+
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const secrets = yield* ServerSecretStore.ServerSecretStore;
+        const svc = yield* GoogleDriveBackupService;
+
+        // 주 키(drive_backup_gdrive_oauth)는 비어 있고 계정별 키에만 저장된 상태를 시뮬레이션
+        yield* secrets.set(
+          "google-login-accounts",
+          Uint8Array.from(
+            Buffer.from(
+              JSON.stringify([
+                {
+                  subject: "sub-linked-12345",
+                  email: "backup-user@example.com",
+                  isDefault: true,
+                  driveBackupLinked: true,
+                },
+              ]),
+              "utf8",
+            ),
+          ),
+        );
+        yield* secrets.set(
+          "drive_backup_gdrive_oauth_sub-linked-12345",
+          Uint8Array.from(
+            Buffer.from(
+              JSON.stringify({
+                clientId: "cid-recovered",
+                clientSecret: "sec-recovered",
+                refreshToken: "1//ref-recovered",
+                connectedEmail: "backup-user@example.com",
+                subject: "sub-linked-12345",
+              }),
+              "utf8",
+            ),
+          ),
+        );
+
+        const snap = yield* svc.getState({});
+        const primaryAfter = yield* secrets.get("drive_backup_gdrive_oauth");
+        return { snap, primaryRestored: Option.isSome(primaryAfter) };
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(state.snap.config.gdriveHasCredentials).toBe(true);
+    expect(state.snap.config.gdriveConnectedEmail).toBe("backup-user@example.com");
+    expect(state.primaryRestored).toBe(true);
   });
 });

@@ -576,11 +576,12 @@ export async function uploadToGoogleDriveApi(
     throw new Error("Google Drive Resumable Upload URL(Location)을 받지 못했습니다.");
   }
 
+  // undici 7/8 Dispatcher1Wrapper 브릿지에서 수동 Content-Length가 UND_ERR_INVALID_ARG를 유발하므로
+  // fetch가 Uint8Array 본문 길이로 Content-Length를 자동 계산하도록 맡긴다.
   const putRes = await fetch(uploadUrl, {
     method: "PUT",
     headers: {
       "Content-Type": "application/octet-stream",
-      "Content-Length": String(input.content.byteLength),
     },
     body: new Uint8Array(input.content),
   });
@@ -794,7 +795,6 @@ export async function uploadFileResumableToGoogleDriveApi(
         redirect: "manual",
         headers: {
           "Content-Range": `bytes */${totalBytes}`,
-          "Content-Length": "0",
         },
       },
       input.signal,
@@ -851,7 +851,6 @@ export async function uploadFileResumableToGoogleDriveApi(
             redirect: "manual",
             headers: {
               "Content-Type": "application/octet-stream",
-              "Content-Length": "0",
             },
           },
           input.signal,
@@ -898,7 +897,6 @@ export async function uploadFileResumableToGoogleDriveApi(
             redirect: "manual",
             headers: {
               "Content-Type": "application/octet-stream",
-              "Content-Length": String(bytesRead),
               "Content-Range": `bytes ${offset}-${endByte}/${totalBytes}`,
             },
             body: new Uint8Array(slice),
@@ -1689,7 +1687,6 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
         redirect: "manual",
         headers: {
           "Content-Type": mimeType,
-          "Content-Length": "0",
         },
       },
       input.signal,
@@ -1729,7 +1726,6 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
             redirect: "manual",
             headers: {
               "Content-Type": mimeType,
-              "Content-Length": String(bytesRead),
               "Content-Range": `bytes ${offset}-${endByte}/${totalBytes}`,
             },
             body: new Uint8Array(slice),

@@ -4,6 +4,8 @@ import * as NodeFs from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
+// 운영 서버(bin.mjs)와 동일하게 @effect/platform-node/NodeHttpClient(undici Dispatcher1Wrapper) 로드 하에서 회귀 검증
+import "@effect/platform-node/NodeHttpClient";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -15,6 +17,7 @@ import {
 import {
   ResumableUploadPausedError,
   uploadFileResumableToGoogleDriveApi,
+  uploadKnowledgeFileToGoogleDriveApi,
 } from "./DriveTransportAdapter.ts";
 import { packEntriesToArchive } from "./ProjectArchivePacker.ts";
 import { packFilesToT3Arc2File, verifyAndExtractArchiveFile } from "./StreamingArchivePacker.ts";
@@ -223,8 +226,13 @@ describe("Stage 3: T3ARC2 / T3ENC2 streaming, tamper detection, T3ARC1 compat & 
         return;
       }
       if (url.pathname === "/drive/v3/files" && req.method === "GET") {
+        const q = url.searchParams.get("q") ?? "";
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ files: [{ id: "folder-1", name: "T3-Backup" }] }));
+        if (q.includes("mimeType !=")) {
+          res.end(JSON.stringify({ files: [] }));
+        } else {
+          res.end(JSON.stringify({ files: [{ id: "folder-1", name: "T3-Backup" }] }));
+        }
         return;
       }
       if (url.pathname === "/upload/drive/v3/files" && req.method === "POST") {
@@ -245,9 +253,16 @@ describe("Stage 3: T3ARC2 / T3ENC2 streaming, tamper detection, T3ARC1 compat & 
           return;
         }
         const cr = String(req.headers["content-range"] ?? "");
+        // 수동 Content-Length 없이도 undici가 자동으로 정확한 Content-Length를 전송함을 검증
+        expect(req.headers["content-length"]).toBe(String(body.length));
         if (cr.startsWith("bytes */")) {
           res.writeHead(308, sess.received > 0 ? { range: `bytes=0-${sess.received - 1}` } : {});
           res.end();
+          return;
+        }
+        if (sess.total === 0 && !cr) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ id: `file-${sid}`, name: "empty.md" }));
           return;
         }
         uploadedRanges.push(cr);
@@ -372,6 +387,38 @@ describe("Stage 3: T3ARC2 / T3ENC2 streaming, tamper detection, T3ARC1 compat & 
       );
       expect(restarted.fileId).toBe("file-sess-2");
       expect(sha256Hex(Buffer.concat(sessions.get("sess-2")!.chunks))).toBe(expectedHash);
+
+      // 4) Knowledge upload (empty file + multi-chunk file) under NodeHttpClient Dispatcher1Wrapper
+      const emptyPath = NodePath.join(dir, "빈노트.md");
+      NodeFs.writeFileSync(emptyPath, "");
+      const multiPath = NodePath.join(dir, "지식문서.md");
+      const multiPayload = NodeCrypto.randomBytes(600 * 1024);
+      NodeFs.writeFileSync(multiPath, multiPayload);
+
+      const emptyUp = await uploadKnowledgeFileToGoogleDriveApi(
+        { clientId: "cid", clientSecret: "sec", refreshToken: "ref" },
+        "T3-Knowledge",
+        {
+          subFolder: "노트",
+          fileName: "빈노트.md",
+          filePath: emptyPath,
+          fetcher: rewrittenFetch,
+        },
+      );
+      expect(emptyUp.bytesUploaded).toBe(0);
+
+      const multiUp = await uploadKnowledgeFileToGoogleDriveApi(
+        { clientId: "cid", clientSecret: "sec", refreshToken: "ref" },
+        "T3-Knowledge",
+        {
+          subFolder: "노트",
+          fileName: "지식문서.md",
+          filePath: multiPath,
+          chunkSizeBytes: 256 * 1024,
+          fetcher: rewrittenFetch,
+        },
+      );
+      expect(multiUp.bytesUploaded).toBe(multiPayload.byteLength);
     } finally {
       server.close();
     }
