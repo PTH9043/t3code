@@ -13,11 +13,14 @@ import {
   type DriveBackupDryRunResult,
   type DriveBackupDryRunTarget,
   type DriveBackupGetStateInput,
+  type DriveBackupLiveProgress,
+  type DriveBackupLiveProgressStage,
   type DriveBackupRunKind,
   type DriveBackupRunNowInput,
   type DriveBackupRunRecord,
   type DriveBackupRunStatus,
   type DriveBackupStateSnapshot,
+  type DriveBackupSummaryStats,
   type DriveBackupSyncMirrorInput,
   type DriveBackupSyncMirrorResult,
   type DriveBackupTarget,
@@ -996,6 +999,236 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       Effect.catch(() => Effect.void),
     );
 
+  interface MutableLiveProgress {
+    runId: string;
+    stage: DriveBackupLiveProgressStage;
+    targetId: string | null;
+    targetDisplayName: string | null;
+    completedTargets: number;
+    totalTargets: number;
+    uploadedBytes: number;
+    totalBytes: number;
+    resumedFromBytes: number;
+    completedFiles: number;
+    totalFiles: number;
+    startedAtMs: number;
+    transferStartedAtMs: number | null;
+    updatedAtMs: number;
+    shouldThrottleWhenBusy: boolean;
+    baseUploadLimitMbps: number;
+    note: string | null;
+  }
+
+  let activeLiveProgress: MutableLiveProgress | null = null;
+
+  const computePercent = (
+    uploadedBytes: number,
+    totalBytes: number,
+    completedFiles: number,
+    totalFiles: number,
+    completedTargets: number,
+    totalTargets: number,
+  ): number | null => {
+    if (totalBytes > 0) {
+      return Math.min(100, Math.max(0, Math.round((uploadedBytes / totalBytes) * 1000) / 10));
+    }
+    if (totalFiles > 0) {
+      return Math.min(100, Math.max(0, Math.round((completedFiles / totalFiles) * 1000) / 10));
+    }
+    if (totalTargets > 0 && completedTargets > 0) {
+      return Math.min(100, Math.max(0, Math.round((completedTargets / totalTargets) * 1000) / 10));
+    }
+    return null;
+  };
+
+  const buildLiveProgressFromMemory = (
+    cur: MutableLiveProgress,
+    activeWorkCount: number,
+  ): DriveBackupLiveProgress => {
+    const throttledByActiveWork = cur.shouldThrottleWhenBusy && activeWorkCount > 0;
+    const effectiveUploadLimitMbps = throttledByActiveWork
+      ? cur.baseUploadLimitMbps > 0
+        ? Math.min(cur.baseUploadLimitMbps, 5)
+        : 5
+      : cur.baseUploadLimitMbps;
+    const percent = computePercent(
+      cur.uploadedBytes,
+      cur.totalBytes,
+      cur.completedFiles,
+      cur.totalFiles,
+      cur.completedTargets,
+      cur.totalTargets,
+    );
+    let bytesPerSec: number | null = null;
+    let etaSeconds: number | null = null;
+    if (
+      cur.transferStartedAtMs !== null &&
+      cur.totalBytes > 0 &&
+      cur.uploadedBytes > cur.resumedFromBytes
+    ) {
+      const elapsedSec = Math.max(0.5, (cur.updatedAtMs - cur.transferStartedAtMs) / 1000);
+      const sentBytes = cur.uploadedBytes - cur.resumedFromBytes;
+      const rate = sentBytes / elapsedSec;
+      if (Number.isFinite(rate) && rate > 0) {
+        bytesPerSec = Math.round(rate);
+        const remaining = Math.max(0, cur.totalBytes - cur.uploadedBytes);
+        etaSeconds = Math.ceil(remaining / rate);
+      }
+    }
+    return {
+      runId: cur.runId,
+      status: "running",
+      stage: cur.stage,
+      targetId: cur.targetId,
+      targetDisplayName: cur.targetDisplayName,
+      completedTargets: cur.completedTargets,
+      totalTargets: cur.totalTargets,
+      uploadedBytes: Math.max(0, Math.round(cur.uploadedBytes)),
+      totalBytes: Math.max(0, Math.round(cur.totalBytes)),
+      resumedFromBytes: Math.max(0, Math.round(cur.resumedFromBytes)),
+      completedFiles: cur.completedFiles,
+      totalFiles: cur.totalFiles,
+      percent,
+      bytesPerSec,
+      etaSeconds,
+      startedAtMs: cur.startedAtMs,
+      updatedAtMs: cur.updatedAtMs,
+      throttledByActiveWork,
+      effectiveUploadLimitMbps,
+      note: cur.note,
+    };
+  };
+
+  const loadFallbackCheckpointProgress = (
+    targets: ReadonlyArray<DriveBackupTarget>,
+    recentRuns: ReadonlyArray<DriveBackupRunRecord>,
+    config: DriveBackupConfig,
+    activeWorkCount: number,
+  ): Effect.Effect<DriveBackupLiveProgress | null, never> =>
+    sql<{
+      readonly run_id: string;
+      readonly stage: string;
+      readonly target_id: string | null;
+      readonly archive_path: string | null;
+      readonly uploaded_offset_bytes: number;
+      readonly total_bytes: number;
+      readonly updated_at_ms: number;
+    }>`
+      SELECT run_id, stage, target_id, archive_path, uploaded_offset_bytes, total_bytes, updated_at_ms
+      FROM drive_backup_checkpoints
+      WHERE total_bytes > 0
+      ORDER BY updated_at_ms DESC
+      LIMIT 1
+    `.pipe(
+      Effect.map((rows): DriveBackupLiveProgress | null => {
+        const cp = rows[0];
+        if (!cp) return null;
+        if (Date.now() - Number(cp.updated_at_ms) > 24 * 3_600_000) return null;
+        if (cp.archive_path && !NodeFs.existsSync(cp.archive_path)) return null;
+        const matchedRun = recentRuns.find((r) => r.runId === cp.run_id);
+        const isRunning = matchedRun?.status === "running";
+        const uploadedBytes = Math.max(0, Math.round(Number(cp.uploaded_offset_bytes ?? 0)));
+        const totalBytes = Math.max(0, Math.round(Number(cp.total_bytes ?? 0)));
+        const targetObj = cp.target_id ? targets.find((t) => t.id === cp.target_id) : undefined;
+        const targetDisplayName =
+          targetObj?.displayName ??
+          (cp.target_id === "core:event-archives"
+            ? "이벤트 아카이브"
+            : cp.target_id === "core:t3-state"
+              ? "T3 코어 상태"
+              : cp.target_id);
+        const throttledByActiveWork = config.autoSyncIdleOnly && activeWorkCount > 0;
+        const effectiveUploadLimitMbps = throttledByActiveWork
+          ? config.uploadLimitMbps > 0
+            ? Math.min(config.uploadLimitMbps, 5)
+            : 5
+          : config.uploadLimitMbps;
+        return {
+          runId: cp.run_id,
+          status: isRunning ? "running" : "paused",
+          stage: isRunning ? "uploading" : "paused_checkpoint",
+          targetId: cp.target_id,
+          targetDisplayName: targetDisplayName ?? null,
+          completedTargets: 0,
+          totalTargets: Math.max(1, matchedRun?.targetIds.length ?? 1),
+          uploadedBytes,
+          totalBytes,
+          resumedFromBytes: uploadedBytes,
+          completedFiles: 0,
+          totalFiles: 0,
+          percent: computePercent(uploadedBytes, totalBytes, 0, 0, 0, 1),
+          bytesPerSec: null,
+          etaSeconds: null,
+          startedAtMs: matchedRun?.startedAtMs ?? Number(cp.updated_at_ms),
+          updatedAtMs: Number(cp.updated_at_ms),
+          throttledByActiveWork,
+          effectiveUploadLimitMbps,
+          note: isRunning
+            ? "진행 중 체크포인트 기준 표시"
+            : (matchedRun?.errorMessage ??
+              "중단 지점 체크포인트 보존됨 — 다음 실행 시 자동 이어올리기"),
+        };
+      }),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+
+  const loadBackupSummaryStats = (): Effect.Effect<DriveBackupSummaryStats, never> =>
+    Effect.gen(function* () {
+      const aggRows = yield* sql<{
+        readonly cnt: number;
+        readonly sum_archive: number;
+        readonly sum_raw: number;
+        readonly sum_files: number;
+      }>`
+        SELECT
+          COUNT(*) AS cnt,
+          COALESCE(SUM(archive_bytes), 0) AS sum_archive,
+          COALESCE(SUM(raw_bytes), 0) AS sum_raw,
+          COALESCE(SUM(file_count), 0) AS sum_files
+        FROM drive_backup_runs
+        WHERE kind = 'backup' AND status = 'succeeded'
+      `.pipe(
+        Effect.catch(() => Effect.succeed([{ cnt: 0, sum_archive: 0, sum_raw: 0, sum_files: 0 }])),
+      );
+      const lastRows = yield* sql<{
+        readonly finished_at_ms: number | null;
+        readonly started_at_ms: number;
+        readonly archive_bytes: number;
+        readonly raw_bytes: number;
+        readonly file_count: number;
+      }>`
+        SELECT finished_at_ms, started_at_ms, archive_bytes, raw_bytes, file_count
+        FROM drive_backup_runs
+        WHERE kind = 'backup' AND status = 'succeeded'
+        ORDER BY COALESCE(finished_at_ms, started_at_ms) DESC
+        LIMIT 1
+      `.pipe(
+        Effect.catch(() =>
+          Effect.succeed(
+            [] as ReadonlyArray<{
+              readonly finished_at_ms: number | null;
+              readonly started_at_ms: number;
+              readonly archive_bytes: number;
+              readonly raw_bytes: number;
+              readonly file_count: number;
+            }>,
+          ),
+        ),
+      );
+      const agg = aggRows[0];
+      const last = lastRows[0];
+      return {
+        succeededBackupCount: Math.max(0, Math.round(Number(agg?.cnt ?? 0))),
+        totalBackedUpArchiveBytes: Math.max(0, Math.round(Number(agg?.sum_archive ?? 0))),
+        totalBackedUpRawBytes: Math.max(0, Math.round(Number(agg?.sum_raw ?? 0))),
+        totalBackedUpFiles: Math.max(0, Math.round(Number(agg?.sum_files ?? 0))),
+        lastSucceededAtMs: last ? Number(last.finished_at_ms ?? last.started_at_ms) : null,
+        lastSucceededArchiveBytes: Math.max(0, Math.round(Number(last?.archive_bytes ?? 0))),
+        lastSucceededRawBytes: Math.max(0, Math.round(Number(last?.raw_bytes ?? 0))),
+        lastSucceededFileCount: Math.max(0, Math.round(Number(last?.file_count ?? 0))),
+      };
+    });
+
   const getState = (
     input: DriveBackupGetStateInput,
   ): Effect.Effect<DriveBackupStateSnapshot, DriveBackupError> =>
@@ -1007,15 +1240,22 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       const targets = yield* Effect.forEach(targetRows, hydrateTarget, { concurrency: 4 });
       const recentRuns = yield* listRecentRuns(20);
       const quotaLedger = yield* loadDailyQuotaLedger();
+      const activeWorkCount = activeWorkRegistry.snapshot().totalActive;
+      const liveProgress = activeLiveProgress
+        ? buildLiveProgressFromMemory(activeLiveProgress, activeWorkCount)
+        : yield* loadFallbackCheckpointProgress(targets, recentRuns, config, activeWorkCount);
+      const backupSummary = yield* loadBackupSummaryStats();
       return {
         config,
         detectedLocalDriveRoots: [...detectLocalGoogleDriveRoots()],
         mirrorLocalDir,
         localStagingDir,
-        activeWorkCount: activeWorkRegistry.snapshot().totalActive,
+        activeWorkCount,
         dailyUploadedBytes: getRolling24hUploadedBytes(quotaLedger),
         dailyUploadBudgetBytes: resolveDailyUploadBudgetBytes(),
         quotaPausedUntilMs: quotaLedger.pausedUntilMs,
+        liveProgress,
+        backupSummary,
         targets,
         recentRuns: [...recentRuns],
       };
@@ -1368,6 +1608,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
     readonly createdAtIso: string;
     readonly pauseSignal?: AbortSignal;
     readonly ignoreQuotaCooldown?: boolean;
+    readonly onProgress?: (progress: {
+      readonly completedFiles: number;
+      readonly totalFiles: number;
+      readonly uploadedBytes: number;
+      readonly totalBytes: number;
+    }) => void;
   }): Effect.Effect<
     {
       readonly uploadedCount: number;
@@ -1597,6 +1843,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           uploadedCount += 1;
           uploadedBytes += uploaded.bytesUploaded;
           lastDestPath = uploaded.destinationPath;
+          opts.onProgress?.({
+            completedFiles: uploadedCount,
+            totalFiles: diff.changedFiles.length,
+            uploadedBytes,
+            totalBytes: diff.changedFiles.reduce((acc, f) => acc + f.sizeBytes, 0),
+          });
           yield* persistIncrementalFile(file);
         }
       }
@@ -1905,6 +2157,31 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         };
         yield* recordRun(initialRun);
 
+        activeLiveProgress = {
+          runId,
+          stage: "scanning",
+          targetId: selectedRows[0]?.id ?? null,
+          targetDisplayName: selectedRows[0]?.display_name ?? null,
+          completedTargets: 0,
+          totalTargets: selectedRows.length,
+          uploadedBytes: 0,
+          totalBytes: 0,
+          resumedFromBytes: 0,
+          completedFiles: 0,
+          totalFiles: 0,
+          startedAtMs,
+          transferStartedAtMs: null,
+          updatedAtMs: startedAtMs,
+          shouldThrottleWhenBusy,
+          baseUploadLimitMbps: config.uploadLimitMbps,
+          note: null,
+        };
+
+        const updateLiveProgress = (patch: Partial<MutableLiveProgress>) => {
+          if (!activeLiveProgress || activeLiveProgress.runId !== runId) return;
+          Object.assign(activeLiveProgress, patch, { updatedAtMs: Date.now() });
+        };
+
         let totalFiles = 0;
         let totalRawBytes = 0;
         let totalArchiveBytes = 0;
@@ -1989,8 +2266,29 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           readonly totalBytes?: number;
           readonly resumableSessionUri?: string | null;
           readonly manifestSha256?: string | null;
-        }) =>
-          sql`
+        }) => {
+          if (activeLiveProgress && activeLiveProgress.runId === runId) {
+            const nextStage: DriveBackupLiveProgressStage =
+              cp.stage === "snapshot" ? "snapshot" : "uploading";
+            const nextUploaded =
+              cp.uploadedOffsetBytes !== undefined
+                ? Math.max(0, cp.uploadedOffsetBytes)
+                : activeLiveProgress.uploadedBytes;
+            const nextTotal =
+              cp.totalBytes !== undefined && cp.totalBytes > 0
+                ? cp.totalBytes
+                : activeLiveProgress.totalBytes;
+            updateLiveProgress({
+              stage: nextStage,
+              ...(cp.targetId ? { targetId: cp.targetId } : {}),
+              uploadedBytes: nextUploaded,
+              totalBytes: nextTotal,
+              ...(nextStage === "uploading" && activeLiveProgress.transferStartedAtMs === null
+                ? { transferStartedAtMs: Date.now(), resumedFromBytes: nextUploaded }
+                : {}),
+            });
+          }
+          return sql`
           INSERT INTO drive_backup_checkpoints (
             run_id, stage, target_id, snapshot_path, archive_path,
             entry_index, chunk_index, uploaded_offset_bytes, total_bytes,
@@ -2017,6 +2315,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             Effect.asVoid,
             Effect.catch(() => Effect.void),
           );
+        };
 
         const clearCheckpoint = () =>
           sql`DELETE FROM drive_backup_checkpoints WHERE run_id = ${runId}`.pipe(
@@ -2059,7 +2358,21 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           );
 
         const executionResult = yield* Effect.gen(function* () {
+          let processedTargets = 0;
           for (const row of selectedRows) {
+            updateLiveProgress({
+              stage: "scanning",
+              targetId: row.id,
+              targetDisplayName: row.display_name,
+              completedTargets: processedTargets,
+              uploadedBytes: 0,
+              totalBytes: 0,
+              resumedFromBytes: 0,
+              completedFiles: 0,
+              totalFiles: 0,
+              transferStartedAtMs: null,
+              note: null,
+            });
             const isUnifiedUserdataPre = row.id === UNIFIED_USERDATA_TARGET_ID;
             const expectedExtPre = passphrase ? "t3enc" : "t3arc";
             const resumableCp = row.sync_files
@@ -2086,6 +2399,16 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 }
               })();
               const resumeOffset = Math.max(0, Number(resumableCp.uploaded_offset_bytes ?? 0));
+              updateLiveProgress({
+                stage: "uploading",
+                targetId: row.id,
+                targetDisplayName: row.display_name,
+                uploadedBytes: resumeOffset,
+                totalBytes: resumedBytes,
+                resumedFromBytes: resumeOffset,
+                transferStartedAtMs: Date.now(),
+                note: resumeOffset > 0 ? "이전 중단 체크포인트에서 이어올리기 중" : null,
+              });
               if (config.transportMode === "gdrive_api" && resumeOffset === 0) {
                 yield* checkDailyQuotaBeforeNewFile({
                   ignoreCooldown: Boolean(input.forceWhenBusy),
@@ -2169,6 +2492,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 SET last_backed_up_at_ms = ${doneMs}, updated_at_ms = ${doneMs}
                 WHERE id = ${row.id}
               `.pipe(Effect.catch(() => Effect.void));
+              processedTargets += 1;
+              updateLiveProgress({
+                completedTargets: processedTargets,
+                uploadedBytes: resumedBytes,
+                totalBytes: resumedBytes,
+              });
               continue;
             }
             const workerEntries: Array<{
@@ -2464,6 +2793,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
 
               let preserveArchiveForResume = false;
               try {
+                updateLiveProgress({
+                  stage: "packing",
+                  targetId: row.id,
+                  targetDisplayName: row.display_name,
+                  totalFiles: workerEntries.length,
+                  completedFiles: 0,
+                  uploadedBytes: 0,
+                  totalBytes: 0,
+                  resumedFromBytes: 0,
+                  transferStartedAtMs: null,
+                  note: null,
+                });
                 const built = yield* Effect.tryPromise({
                   try: () =>
                     runPackAndEncryptInWorker({
@@ -2488,6 +2829,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   },
                 });
 
+                updateLiveProgress({
+                  stage: "uploading",
+                  targetId: row.id,
+                  targetDisplayName: row.display_name,
+                  uploadedBytes: 0,
+                  totalBytes: built.archiveBytes,
+                  resumedFromBytes: 0,
+                  completedFiles: built.fileCount,
+                  totalFiles: built.fileCount,
+                  transferStartedAtMs: Date.now(),
+                  note: null,
+                });
                 yield* saveCheckpoint({
                   stage: "uploading",
                   targetId: row.id,
@@ -2604,6 +2957,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
               Effect.catch(() => Effect.succeed(Boolean(row.sync_local_to_drive_knowledge ?? 0))),
             );
             if (liveKnowledgeFlag) {
+              updateLiveProgress({
+                stage: "knowledge_upload",
+                targetId: row.id,
+                targetDisplayName: row.display_name,
+                uploadedBytes: 0,
+                totalBytes: 0,
+                resumedFromBytes: 0,
+                completedFiles: 0,
+                totalFiles: 0,
+                transferStartedAtMs: Date.now(),
+                note: "T3-Knowledge 원본 파일 동기화 중",
+              });
               const kRes = yield* uploadLocalKnowledgeForTarget({
                 row,
                 config,
@@ -2611,6 +2976,14 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 createdAtIso,
                 ...(pauseSignal ? { pauseSignal } : {}),
                 ignoreQuotaCooldown: Boolean(input.forceWhenBusy),
+                onProgress: (kp) =>
+                  updateLiveProgress({
+                    stage: "knowledge_upload",
+                    completedFiles: kp.completedFiles,
+                    totalFiles: kp.totalFiles,
+                    uploadedBytes: kp.uploadedBytes,
+                    totalBytes: kp.totalBytes,
+                  }),
               });
               totalFiles += kRes.uploadedCount;
               totalRawBytes += kRes.uploadedBytes;
@@ -2626,6 +2999,8 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 lastDestPath = kRes.lastDestPath;
               }
             }
+            processedTargets += 1;
+            updateLiveProgress({ completedTargets: processedTargets });
           }
 
           // 선택적 월별 이벤트 아카이브 증분 백업 (includeEventArchives 또는 통합 userdata:all ON일 때 신규/변경분만 업로드)
@@ -3029,6 +3404,10 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           }
           yield* clearCheckpoint();
         }).pipe(Effect.result);
+
+        if (activeLiveProgress?.runId === runId) {
+          activeLiveProgress = null;
+        }
 
         if (executionResult._tag === "Failure") {
           const failedRun: DriveBackupRunRecord = {

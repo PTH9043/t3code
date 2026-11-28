@@ -439,4 +439,81 @@ describe("GoogleDriveBackupService", () => {
     expect(state.snap.config.gdriveConnectedEmail).toBe("backup-user@example.com");
     expect(state.primaryRestored).toBe(true);
   });
+
+  it("exposes liveProgress from active/paused checkpoints and backupSummary totals in getState", async () => {
+    const baseDir = mkTempDir("t3-drv-prog-base-");
+    const projDir = mkTempDir("t3-drv-prog-proj-");
+    const stagedArchive = NodePath.join(baseDir, "staged.t3enc");
+    NodeFs.writeFileSync(stagedArchive, Buffer.alloc(1024));
+    const layer = makeTestLayer(projDir, baseDir);
+
+    const snap = await Effect.runPromise(
+      Effect.gen(function* () {
+        const svc = yield* GoogleDriveBackupService;
+        const sql = yield* SqlClient.SqlClient;
+        yield* svc.getState({});
+
+        const now = Date.now();
+        yield* sql`
+          INSERT INTO drive_backup_runs (
+            run_id, kind, status, transport_mode, target_ids_json,
+            file_count, raw_bytes, archive_bytes,
+            skipped_secrets_count, skipped_secrets_sample_json,
+            manifest_sha256, destination_path, error_message,
+            started_at_ms, finished_at_ms
+          ) VALUES (
+            'drvrun_prev_ok', 'backup', 'succeeded', 'gdrive_api', '["userdata:all"]',
+            12, 8000000000, 3200000000,
+            0, '[]', 'abc123', 'gdrive://T3-Backup/a.t3enc', NULL,
+            ${now - 3_600_000}, ${now - 3_000_000}
+          )
+        `;
+        yield* sql`
+          INSERT INTO drive_backup_runs (
+            run_id, kind, status, transport_mode, target_ids_json,
+            file_count, raw_bytes, archive_bytes,
+            skipped_secrets_count, skipped_secrets_sample_json,
+            manifest_sha256, destination_path, error_message,
+            started_at_ms, finished_at_ms
+          ) VALUES (
+            'drvrun_live_1', 'backup', 'running', 'gdrive_api', '["userdata:all"]',
+            0, 0, 0,
+            0, '[]', NULL, NULL, NULL,
+            ${now - 60_000}, NULL
+          )
+        `;
+        yield* sql`
+          INSERT INTO drive_backup_checkpoints (
+            run_id, stage, target_id, snapshot_path, archive_path,
+            entry_index, chunk_index, uploaded_offset_bytes, total_bytes,
+            resumable_session_uri, session_expires_at_ms, manifest_sha256,
+            payload_json, updated_at_ms
+          ) VALUES (
+            'drvrun_live_1', 'uploading', 'userdata:all', NULL, ${stagedArchive},
+            0, 0, 1100000000, 2200000000,
+            'https://example.com/upload', ${now + 86_400_000}, 'deadbeef',
+            '{}', ${now - 1000}
+          )
+        `;
+        return yield* svc.getState({});
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(snap.liveProgress).toMatchObject({
+      runId: "drvrun_live_1",
+      status: "running",
+      stage: "uploading",
+      targetId: "userdata:all",
+      uploadedBytes: 1_100_000_000,
+      totalBytes: 2_200_000_000,
+      percent: 50,
+    });
+    expect(snap.backupSummary).toMatchObject({
+      succeededBackupCount: 1,
+      totalBackedUpArchiveBytes: 3_200_000_000,
+      totalBackedUpRawBytes: 8_000_000_000,
+      totalBackedUpFiles: 12,
+      lastSucceededArchiveBytes: 3_200_000_000,
+    });
+  });
 });

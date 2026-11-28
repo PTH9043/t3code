@@ -1,7 +1,11 @@
 import type { DriveBackupTarget } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  computeBackupPercent,
   formatBackupBytes,
+  formatDurationKr,
+  formatTransferSpeed,
+  liveProgressStageLabelKr,
   runKindLabelKr,
   runStatusBadgeVariant,
   runStatusLabelKr,
@@ -67,5 +71,18 @@ describe("DriveBackupSection helpers", () => {
     expect(runStatusBadgeVariant("succeeded")).toBe("success");
     expect(runStatusBadgeVariant("skipped_busy")).toBe("warning");
     expect(runStatusBadgeVariant("failed")).toBe("error");
+  });
+
+  it("formats live backup progress stages, percentages, transfer speed, and ETA", () => {
+    expect(liveProgressStageLabelKr("uploading")).toBe("Google Drive 업로드 중");
+    expect(liveProgressStageLabelKr("paused_checkpoint")).toBe("이어올리기 체크포인트 대기 중");
+    expect(computeBackupPercent(1_108_684_872, 2_217_369_743)).toBe(50);
+    expect(computeBackupPercent(0, 0)).toBeNull();
+    expect(formatDurationKr(45)).toBe("약 45초");
+    expect(formatDurationKr(185)).toBe("약 3분 5초");
+    expect(formatDurationKr(3660)).toBe("약 1시간 1분");
+    expect(formatDurationKr(null)).toBe("계산 중");
+    expect(formatTransferSpeed(2_500_000)).toContain("Mbps");
+    expect(formatTransferSpeed(null)).toBe("-");
   });
 });

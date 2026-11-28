@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   DriveBackupDryRunResult,
+  DriveBackupLiveProgressStage,
   DriveBackupRunKind,
   DriveBackupRunStatus,
   DriveBackupSyncMirrorResult,
@@ -119,6 +120,57 @@ export function runKindLabelKr(kind: DriveBackupRunKind): string {
     case "exchange_sync":
       return "PC↔VPS 교환소";
   }
+}
+
+export function liveProgressStageLabelKr(stage: DriveBackupLiveProgressStage): string {
+  switch (stage) {
+    case "scanning":
+      return "파일 스캔 · 변경 비교 중";
+    case "snapshot":
+      return "SQLite 안전 스냅샷 생성 중";
+    case "packing":
+      return "압축 · AES-256-GCM 암호화 중";
+    case "uploading":
+      return "Google Drive 업로드 중";
+    case "knowledge_upload":
+      return "T3-Knowledge 지식 파일 업로드 중";
+    case "paused_checkpoint":
+      return "이어올리기 체크포인트 대기 중";
+  }
+}
+
+export function formatDurationKr(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return "계산 중";
+  }
+  const total = Math.round(seconds);
+  if (total < 60) return `약 ${total}초`;
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  if (mins < 60) return secs > 0 ? `약 ${mins}분 ${secs}초` : `약 ${mins}분`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return remMins > 0 ? `약 ${hours}시간 ${remMins}분` : `약 ${hours}시간`;
+}
+
+export function formatTransferSpeed(bytesPerSec: number | null | undefined): string {
+  if (
+    bytesPerSec === null ||
+    bytesPerSec === undefined ||
+    !Number.isFinite(bytesPerSec) ||
+    bytesPerSec <= 0
+  ) {
+    return "-";
+  }
+  const mbps = (bytesPerSec * 8) / 1_000_000;
+  return `${formatBackupBytes(bytesPerSec)}/s (${mbps >= 10 ? mbps.toFixed(1) : mbps.toFixed(2)} Mbps)`;
+}
+
+export function computeBackupPercent(uploadedBytes: number, totalBytes: number): number | null {
+  if (!Number.isFinite(uploadedBytes) || !Number.isFinite(totalBytes) || totalBytes <= 0) {
+    return null;
+  }
+  return Math.min(100, Math.max(0, Math.round((uploadedBytes / totalBytes) * 1000) / 10));
 }
 
 function formatMs(ms: number | null): string {
@@ -342,6 +394,24 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
     () => summarizeSelectedTargets(snapshot?.targets ?? []),
     [snapshot?.targets],
   );
+
+  const liveProgress = snapshot?.liveProgress ?? null;
+  const backupSummary = snapshot?.backupSummary ?? null;
+  const isBackupRunning =
+    liveProgress?.status === "running" ||
+    busyAction === "run-now" ||
+    (snapshot?.recentRuns ?? []).some((r) => r.status === "running");
+
+  // 백업이 실행 중이면 3초 간격으로 상태를 자동 새로고침해 진행률·전송량·속도를 실시간 표시
+  useEffect(() => {
+    if (!isBackupRunning) return;
+    const timer = window.setInterval(() => {
+      stateQuery.refresh();
+    }, 3000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isBackupRunning, stateQuery]);
 
   const handleSaveConfig = async () => {
     if (encryptionPassphrase.trim().length > 0 && !passphraseBackupAck) {
@@ -681,6 +751,202 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                 민감 폴더 {summary.riskySelectedCount}개 선택됨 — 암호화 필수
               </Badge>
             ) : null}
+          </div>
+
+          {/* 실시간 진행률 & 이어올리기 대기 현황 카드 */}
+          {liveProgress ? (
+            <div
+              role="status"
+              className={`grid gap-3 rounded-xl border p-4 text-xs ${
+                liveProgress.status === "running"
+                  ? "border-sky-500/40 bg-sky-500/8"
+                  : "border-amber-500/40 bg-amber-500/8"
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={liveProgress.status === "running" ? "info" : "warning"} size="sm">
+                    {liveProgressStageLabelKr(liveProgress.stage)}
+                  </Badge>
+                  <span className="font-semibold text-foreground">
+                    {liveProgress.targetDisplayName ?? liveProgress.targetId ?? "선택 대상"}
+                  </span>
+                  {liveProgress.totalTargets > 0 ? (
+                    <span className="text-[11px] text-muted-foreground">
+                      대상{" "}
+                      {Math.min(
+                        liveProgress.totalTargets,
+                        liveProgress.completedTargets + (liveProgress.status === "running" ? 1 : 0),
+                      )}{" "}
+                      / {liveProgress.totalTargets}개
+                    </span>
+                  ) : null}
+                  {liveProgress.throttledByActiveWork ? (
+                    <Badge variant="warning" size="sm">
+                      저속 백그라운드 (≤{liveProgress.effectiveUploadLimitMbps} Mbps)
+                    </Badge>
+                  ) : null}
+                </div>
+                <div className="font-mono text-base font-bold text-foreground">
+                  {liveProgress.percent !== null
+                    ? `${liveProgress.percent.toFixed(1)}%`
+                    : "진행 중"}
+                </div>
+              </div>
+
+              <div
+                role="progressbar"
+                aria-label="Google Drive 백업 진행률"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={liveProgress.percent ?? undefined}
+                className="h-2.5 w-full overflow-hidden rounded-full bg-muted"
+              >
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    liveProgress.status === "running"
+                      ? liveProgress.percent === null
+                        ? "w-1/3 animate-pulse bg-sky-500"
+                        : "bg-sky-500"
+                      : "bg-amber-500"
+                  }`}
+                  style={
+                    liveProgress.percent !== null
+                      ? { width: `${Math.min(100, Math.max(2, liveProgress.percent))}%` }
+                      : undefined
+                  }
+                />
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+                  <div className="text-[11px] text-muted-foreground">올라간 용량 / 전체</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">
+                    {liveProgress.totalBytes > 0
+                      ? `${formatBackupBytes(liveProgress.uploadedBytes)} / ${formatBackupBytes(liveProgress.totalBytes)}`
+                      : liveProgress.totalFiles > 0
+                        ? `${liveProgress.completedFiles.toLocaleString()} / ${liveProgress.totalFiles.toLocaleString()} 파일`
+                        : "크기 집계 중"}
+                  </div>
+                  {liveProgress.resumedFromBytes > 0 ? (
+                    <div className="mt-0.5 text-[10px] text-muted-foreground">
+                      {formatBackupBytes(liveProgress.resumedFromBytes)} 지점부터 이어올리기
+                    </div>
+                  ) : null}
+                </div>
+                <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+                  <div className="text-[11px] text-muted-foreground">남은 용량</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">
+                    {liveProgress.totalBytes > 0
+                      ? formatBackupBytes(
+                          Math.max(0, liveProgress.totalBytes - liveProgress.uploadedBytes),
+                        )
+                      : "-"}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+                  <div className="text-[11px] text-muted-foreground">전송 속도</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">
+                    {liveProgress.status === "running"
+                      ? formatTransferSpeed(liveProgress.bytesPerSec)
+                      : "일시정지됨"}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+                  <div className="text-[11px] text-muted-foreground">예상 남은 시간</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">
+                    {liveProgress.status === "running"
+                      ? formatDurationKr(liveProgress.etaSeconds)
+                      : "다음 실행 시 재개"}
+                  </div>
+                </div>
+              </div>
+
+              {liveProgress.note ? (
+                <p className="text-[11px] text-muted-foreground">{liveProgress.note}</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* 항상 보이는 백업 용량 · 누적 완료 현황 요약 바 */}
+          <div className="grid gap-2.5 sm:grid-cols-4">
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-3 text-xs">
+              <div className="text-[11px] text-muted-foreground">최근 완료 백업</div>
+              <div className="mt-1 font-mono text-sm font-semibold text-foreground">
+                {backupSummary && backupSummary.succeededBackupCount > 0
+                  ? formatBackupBytes(backupSummary.lastSucceededArchiveBytes)
+                  : "완료 이력 없음"}
+              </div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                {backupSummary && backupSummary.succeededBackupCount > 0
+                  ? `원문 ${formatBackupBytes(backupSummary.lastSucceededRawBytes)} · ${formatMs(backupSummary.lastSucceededAtMs)}`
+                  : "첫 백업을 실행해 주세요"}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-3 text-xs">
+              <div className="text-[11px] text-muted-foreground">누적 완료 백업</div>
+              <div className="mt-1 font-mono text-sm font-semibold text-foreground">
+                {backupSummary
+                  ? `${backupSummary.succeededBackupCount.toLocaleString()}회 · ${formatBackupBytes(backupSummary.totalBackedUpArchiveBytes)}`
+                  : "0회 · 0 B"}
+              </div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                {backupSummary && backupSummary.succeededBackupCount > 0
+                  ? `원문 누적 ${formatBackupBytes(backupSummary.totalBackedUpRawBytes)} · 파일 ${backupSummary.totalBackedUpFiles.toLocaleString()}개`
+                  : "Drive에 업로드된 스냅샷 합계"}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-3 text-xs">
+              <div className="text-[11px] text-muted-foreground">최근 24시간 전송량</div>
+              <div className="mt-1 font-mono text-sm font-semibold text-foreground">
+                {formatBackupBytes(snapshot?.dailyUploadedBytes ?? 0)}{" "}
+                <span className="text-[11px] font-normal text-muted-foreground">
+                  /{" "}
+                  {formatBackupBytes(snapshot?.dailyUploadBudgetBytes ?? 700 * 1024 * 1024 * 1024)}
+                </span>
+              </div>
+              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-primary transition-all"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(
+                        (snapshot?.dailyUploadedBytes ?? 0) > 0 ? 1 : 0,
+                        ((snapshot?.dailyUploadedBytes ?? 0) /
+                          Math.max(
+                            1,
+                            snapshot?.dailyUploadBudgetBytes ?? 700 * 1024 * 1024 * 1024,
+                          )) *
+                          100,
+                      ),
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-3 text-xs">
+              <div className="text-[11px] text-muted-foreground">현재 백업 상태</div>
+              <div className="mt-1 text-sm font-semibold text-foreground">
+                {liveProgress?.status === "running"
+                  ? `업로드 진행 중${liveProgress.percent !== null ? ` (${liveProgress.percent.toFixed(1)}%)` : ""}`
+                  : liveProgress?.status === "paused"
+                    ? `이어올리기 대기${liveProgress.percent !== null ? ` (${liveProgress.percent.toFixed(1)}%)` : ""}`
+                    : dryRunResult
+                      ? `예상 ${formatBackupBytes(dryRunResult.totalEstimatedArchiveBytes)}`
+                      : `대기 중 · 선택 ${summary.selectedCount}개`}
+              </div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                {liveProgress?.status === "running"
+                  ? "3초마다 자동으로 진행률이 갱신됩니다"
+                  : dryRunResult
+                    ? `원문 ${formatBackupBytes(dryRunResult.totalRawBytes)} · 파일 ${dryRunResult.totalFilesCount.toLocaleString()}개`
+                    : "미리보기(Dry-Run)로 예상 용량 확인 가능"}
+              </div>
+            </div>
           </div>
 
           {snapshot?.quotaPausedUntilMs && snapshot.quotaPausedUntilMs > Date.now() ? (
@@ -1498,11 +1764,32 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
                     </span>
                   </div>
                   <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-                    <span>파일 {run.fileCount.toLocaleString()}개</span>
-                    <span>
-                      {formatBackupBytes(run.rawBytes)} → {formatBackupBytes(run.archiveBytes)}
-                    </span>
-                    <span>차단 시크릿 {run.skippedSecretsCount}건</span>
+                    {run.status === "running" &&
+                    liveProgress &&
+                    liveProgress.runId === run.runId ? (
+                      <>
+                        <span className="font-medium text-sky-700 dark:text-sky-300">
+                          {liveProgressStageLabelKr(liveProgress.stage)}
+                          {liveProgress.percent !== null
+                            ? ` (${liveProgress.percent.toFixed(1)}%)`
+                            : ""}
+                        </span>
+                        {liveProgress.totalBytes > 0 ? (
+                          <span className="font-mono">
+                            {formatBackupBytes(liveProgress.uploadedBytes)} /{" "}
+                            {formatBackupBytes(liveProgress.totalBytes)}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <>
+                        <span>파일 {run.fileCount.toLocaleString()}개</span>
+                        <span>
+                          {formatBackupBytes(run.rawBytes)} → {formatBackupBytes(run.archiveBytes)}
+                        </span>
+                        <span>차단 시크릿 {run.skippedSecretsCount}건</span>
+                      </>
+                    )}
                     {run.manifestSha256 ? (
                       <span className="font-mono">SHA256:{run.manifestSha256.slice(0, 12)}</span>
                     ) : null}

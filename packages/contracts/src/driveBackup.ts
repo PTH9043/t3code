@@ -196,6 +196,52 @@ export const DriveBackupDryRunResult = Schema.Struct({
 });
 export type DriveBackupDryRunResult = typeof DriveBackupDryRunResult.Type;
 
+export const DriveBackupLiveProgressStage = Schema.Literals([
+  "scanning",
+  "snapshot",
+  "packing",
+  "uploading",
+  "knowledge_upload",
+  "paused_checkpoint",
+]);
+export type DriveBackupLiveProgressStage = typeof DriveBackupLiveProgressStage.Type;
+
+export const DriveBackupLiveProgress = Schema.Struct({
+  runId: Schema.String,
+  status: Schema.Literals(["running", "paused"]),
+  stage: DriveBackupLiveProgressStage,
+  targetId: Schema.NullOr(Schema.String),
+  targetDisplayName: Schema.NullOr(Schema.String),
+  completedTargets: NonNegativeInt,
+  totalTargets: NonNegativeInt,
+  uploadedBytes: NonNegativeInt,
+  totalBytes: NonNegativeInt,
+  resumedFromBytes: NonNegativeInt,
+  completedFiles: NonNegativeInt,
+  totalFiles: NonNegativeInt,
+  percent: Schema.NullOr(Schema.Number),
+  bytesPerSec: Schema.NullOr(Schema.Number),
+  etaSeconds: Schema.NullOr(Schema.Number),
+  startedAtMs: Schema.Number,
+  updatedAtMs: Schema.Number,
+  throttledByActiveWork: Schema.Boolean,
+  effectiveUploadLimitMbps: NonNegativeInt,
+  note: Schema.NullOr(Schema.String),
+});
+export type DriveBackupLiveProgress = typeof DriveBackupLiveProgress.Type;
+
+export const DriveBackupSummaryStats = Schema.Struct({
+  succeededBackupCount: NonNegativeInt,
+  totalBackedUpArchiveBytes: NonNegativeInt,
+  totalBackedUpRawBytes: NonNegativeInt,
+  totalBackedUpFiles: NonNegativeInt,
+  lastSucceededAtMs: Schema.NullOr(Schema.Number),
+  lastSucceededArchiveBytes: NonNegativeInt,
+  lastSucceededRawBytes: NonNegativeInt,
+  lastSucceededFileCount: NonNegativeInt,
+});
+export type DriveBackupSummaryStats = typeof DriveBackupSummaryStats.Type;
+
 export const DriveBackupStateSnapshot = Schema.Struct({
   config: DriveBackupConfig,
   detectedLocalDriveRoots: Schema.Array(Schema.String),
@@ -208,6 +254,10 @@ export const DriveBackupStateSnapshot = Schema.Struct({
   dailyUploadBudgetBytes: Schema.optionalKey(NonNegativeInt),
   /** 일일 750 GB 한도/안전 예산 도달로 자동 이어올리기 대기 중인 종료 시각(epoch ms) */
   quotaPausedUntilMs: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  /** 진행 중이거나 이어올리기 대기 중인 실시간 백업 진행률 */
+  liveProgress: Schema.optionalKey(Schema.NullOr(DriveBackupLiveProgress)),
+  /** 누적 및 최근 성공 백업 요약 통계 */
+  backupSummary: Schema.optionalKey(DriveBackupSummaryStats),
   targets: Schema.Array(DriveBackupTarget),
   recentRuns: Schema.Array(DriveBackupRunRecord),
 });
