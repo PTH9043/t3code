@@ -4,6 +4,7 @@ import {
   normalizeClaudeActiveTokenUsage,
   normalizeClaudeContextUsageApiSnapshot,
   resolveAuthoritativeContextWindow,
+  resolveClaudeConnectorAndPluginOverrides,
   resolveClaudePromptCacheTtlEnv,
 } from "./ClaudeTokenLedger.ts";
 
@@ -92,6 +93,74 @@ describe("ClaudeTokenLedger (Wave 2-B4 & B-3)", () => {
       ),
     ).toEqual({
       CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: "5m",
+    });
+  });
+
+  it("resolves claude.ai connector blocking and non-destructive user plugin overrides", () => {
+    const installed = ["context-mode@context-mode", "runpod@runpod"];
+
+    // Default: disableClaudeAiConnectors=true (undefined defaults on), plugins untouched
+    expect(resolveClaudeConnectorAndPluginOverrides({}, {}, installed)).toEqual({
+      env: { ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
+      disabledEnabledPlugins: {},
+      disabledPluginIds: [],
+      claudeAiConnectorsDisabled: true,
+      userPluginsDisabled: false,
+    });
+
+    // Reverse state: explicitly re-enable claude.ai connectors
+    expect(
+      resolveClaudeConnectorAndPluginOverrides({ disableClaudeAiConnectors: false }, {}, installed),
+    ).toEqual({
+      env: {},
+      disabledEnabledPlugins: {},
+      disabledPluginIds: [],
+      claudeAiConnectorsDisabled: false,
+      userPluginsDisabled: false,
+    });
+
+    // Explicit user env var wins over setting
+    expect(
+      resolveClaudeConnectorAndPluginOverrides(
+        { disableClaudeAiConnectors: true },
+        { ENABLE_CLAUDEAI_MCP_SERVERS: "true" },
+        installed,
+      ).env,
+    ).toEqual({});
+
+    // Bulk disable all user plugins
+    expect(
+      resolveClaudeConnectorAndPluginOverrides({ disableUserPlugins: true }, {}, installed),
+    ).toEqual({
+      env: {
+        ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+        CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS: "1",
+      },
+      disabledEnabledPlugins: {
+        "context-mode@context-mode": false,
+        "runpod@runpod": false,
+      },
+      disabledPluginIds: ["context-mode@context-mode", "runpod@runpod"],
+      claudeAiConnectorsDisabled: true,
+      userPluginsDisabled: true,
+    });
+
+    // Selective disable by short name or full plugin@marketplace id
+    expect(
+      resolveClaudeConnectorAndPluginOverrides(
+        { disabledPlugins: "runpod, custom-plug@org" },
+        {},
+        installed,
+      ),
+    ).toEqual({
+      env: { ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
+      disabledEnabledPlugins: {
+        "runpod@runpod": false,
+        "custom-plug@org": false,
+      },
+      disabledPluginIds: ["custom-plug@org", "runpod@runpod"],
+      claudeAiConnectorsDisabled: true,
+      userPluginsDisabled: false,
     });
   });
 });

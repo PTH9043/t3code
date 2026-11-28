@@ -94,8 +94,12 @@ import {
 import { readAgentsMdForClaude } from "../projectAgentInstructions.ts";
 import { resolveClaudeAutoCompactSdkSettings } from "../../orchestration/ProactiveContextCompactor.ts";
 import {
+  buildClaudeFirstTurnActualUsage,
+  buildClaudeSessionInitMeta,
   computeClaudeFirstPromptBreakdown,
   flattenBreakdownToSpanAttributes,
+  readClaudeUserEnabledPluginIds,
+  resolveClaudeConfigDir,
   writeClaudePromptMetricRecord,
 } from "../ClaudePromptTelemetry.ts";
 import { isSafeguardBlock } from "../providerContentRefusal.ts";
@@ -149,6 +153,7 @@ import {
   normalizeClaudeTaskProgressTokenUsage,
   readClaudeResumeState,
   resolveAuthoritativeContextWindow,
+  resolveClaudeConnectorAndPluginOverrides,
   resolveClaudePromptCacheTtlEnv,
   trimmedString,
   normalizeTaskUsage,
@@ -1581,6 +1586,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    if (context.firstTurnUsageTelemetryPending) {
+      const actualUsage = buildClaudeFirstTurnActualUsage({
+        ts: yield* nowIso,
+        threadId: context.session.threadId,
+        sessionId: context.resumeSessionId ?? "",
+        cwd: context.session.cwd ?? "",
+        model: snapshotModel ?? context.currentApiModelId ?? context.session.model ?? "",
+        isResume: context.firstTurnUsageTelemetryPending.isResume,
+        isExecution: context.firstTurnUsageTelemetryPending.isExecution,
+        rawUsage: message.message?.usage,
+        systemAppendTokens: context.firstTurnUsageTelemetryPending.systemAppendTokens,
+        autoLoadedMemoryTokens: context.firstTurnUsageTelemetryPending.autoLoadedMemoryTokens,
+        firstTurnPromptTokens: context.firstTurnUsageTelemetryPending.firstTurnPromptTokens,
+        initCounts: context.lastInitCounts,
+      });
+      if (actualUsage) {
+        context.firstTurnUsageTelemetryPending = undefined;
+        writeClaudePromptMetricRecord(serverConfig.logsDir, actualUsage);
+      }
+    }
+
     const content = message.message?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
@@ -1806,35 +1832,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     switch (message.subtype) {
       case "init": {
         const initMsg = message as unknown as Record<string, unknown>;
-        const tools = Array.isArray(initMsg.tools) ? initMsg.tools : [];
-        const skills = Array.isArray(initMsg.skills) ? initMsg.skills : [];
-        const slashCommands = Array.isArray(initMsg.slash_commands) ? initMsg.slash_commands : [];
-        const agents = Array.isArray(initMsg.agents) ? initMsg.agents : [];
-        const mcpRaw = Array.isArray(initMsg.mcp_servers) ? initMsg.mcp_servers : [];
-        const mcpNames = mcpRaw
-          .map((item) =>
-            typeof item === "string"
-              ? item
-              : item && typeof item === "object" && "name" in item && typeof item.name === "string"
-                ? item.name
-                : "",
-          )
-          .filter((name) => name.length > 0);
-        writeClaudePromptMetricRecord(serverConfig.logsDir, {
+        const initMeta = buildClaudeSessionInitMeta({
           ts: stamp.createdAt,
-          event: "session_init_meta",
           threadId: context.session.threadId,
           sessionId: context.resumeSessionId ?? "",
           cwd: context.session.cwd ?? "",
           model: context.currentApiModelId ?? context.session.model ?? "",
-          isExecution: context.firstPromptTelemetryPending?.isExecution ?? false,
-          toolsCount: tools.length,
-          skillsCount: skills.length,
-          slashCommandsCount: slashCommands.length,
-          agentsCount: agents.length,
-          mcpServersCount: mcpNames.length,
-          mcpServerNames: mcpNames,
+          isExecution:
+            context.firstPromptTelemetryPending?.isExecution ??
+            context.firstTurnUsageTelemetryPending?.isExecution ??
+            false,
+          initMsg,
+          sessionIsolation: context.sessionIsolationMeta,
         });
+        context.lastInitCounts = {
+          toolsCount: initMeta.toolsCount,
+          skillsCount: initMeta.skillsCount,
+          slashCommandsCount: initMeta.slashCommandsCount,
+          agentsCount: initMeta.agentsCount,
+          pluginsCount: initMeta.pluginsCount,
+          mcpServersCount: initMeta.mcpServersCount,
+        };
+        writeClaudePromptMetricRecord(serverConfig.logsDir, initMeta);
         yield* offerRuntimeEvent({
           ...base,
           type: "session.configured",
@@ -3056,6 +3075,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           proactiveCompactThresholdTokens: claudeSettings.proactiveCompactThresholdTokens,
           threadDisabled: threadCompactDisabled,
         });
+        const claudeConfigDir = resolveClaudeConfigDir(claudeEnvironment);
+        const userEnabledPluginIds =
+          claudeSettings.disableUserPlugins === true ||
+          (claudeSettings.disabledPlugins?.trim().length ?? 0) > 0
+            ? readClaudeUserEnabledPluginIds(claudeConfigDir)
+            : [];
+        const connectorAndPluginOverrides = resolveClaudeConnectorAndPluginOverrides(
+          claudeSettings,
+          claudeEnvironment,
+          userEnabledPluginIds,
+        );
         const settings = {
           ...(claudeSettings.promptCacheTtl && claudeSettings.promptCacheTtl !== "inherit"
             ? { promptCacheTtl: claudeSettings.promptCacheTtl }
@@ -3065,6 +3095,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ? { subagentPromptCacheTtl: claudeSettings.subagentPromptCacheTtl }
             : {}),
           ...autoCompactSdk,
+          ...(connectorAndPluginOverrides.disabledPluginIds.length > 0
+            ? { enabledPlugins: connectorAndPluginOverrides.disabledEnabledPlugins }
+            : {}),
           ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
@@ -3160,6 +3193,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           env: {
             MCP_TOOL_TIMEOUT: "300000",
             ...resolveClaudePromptCacheTtlEnv(claudeSettings, claudeEnvironment),
+            ...connectorAndPluginOverrides.env,
             ...claudeEnvironment,
             ...managedServers.environment,
           },
@@ -3300,6 +3334,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           lastThreadStartedId: undefined,
           stopped: false,
           firstPromptTelemetryPending: {
+            claudeConfigDir,
             systemAppendFull,
             projectAgentsMdInjected,
             subordinateRoster,
@@ -3310,6 +3345,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             programmaticAgentCount: programmaticAgents ? Object.keys(programmaticAgents).length : 0,
             isResume: existingResumeSessionId !== undefined,
             isExecution: input.execution !== undefined,
+          },
+          sessionIsolationMeta: {
+            claudeAiConnectorsDisabled: connectorAndPluginOverrides.claudeAiConnectorsDisabled,
+            userPluginsDisabled: connectorAndPluginOverrides.userPluginsDisabled,
+            disabledPluginIds: connectorAndPluginOverrides.disabledPluginIds,
           },
         };
         return yield* Effect.uninterruptibleMask((restore) =>
@@ -3598,6 +3638,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId: context.session.threadId,
         sessionId: context.resumeSessionId ?? "",
         cwd: context.session.cwd,
+        claudeConfigDir: pending.claudeConfigDir,
         model: context.currentApiModelId ?? context.session.model ?? "",
         isResume: pending.isResume,
         isExecution: pending.isExecution,
@@ -3611,6 +3652,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         mcpServerNames: pending.mcpServerNames,
         programmaticAgentCount: pending.programmaticAgentCount,
       });
+      context.firstTurnUsageTelemetryPending = {
+        isResume: pending.isResume,
+        isExecution: pending.isExecution,
+        systemAppendTokens: breakdown.components.systemAppendTotal.estTokens,
+        autoLoadedMemoryTokens: breakdown.components.claudeAutoLoadedMemory.totalEstTokens,
+        firstTurnPromptTokens: breakdown.components.firstTurnPromptTotal.estTokens,
+      };
       writeClaudePromptMetricRecord(serverConfig.logsDir, breakdown);
       yield* Effect.void.pipe(
         Effect.withSpan("ClaudeSession.firstPromptBreakdown", {

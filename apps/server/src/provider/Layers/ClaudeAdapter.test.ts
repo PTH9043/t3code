@@ -511,6 +511,215 @@ describe("ClaudeAdapterLive", () => {
       expect(settings ?? {}).not.toHaveProperty("subagentPromptCacheTtl");
     }).pipe(Effect.provide(harness.layer));
   });
+  it.effect(
+    "disables claude.ai remote connectors by default and supports reversible toggle + plugin overrides",
+    () =>
+      Effect.gen(function* () {
+        // Default: ENABLE_CLAUDEAI_MCP_SERVERS=false
+        const defaultHarness = makeHarness();
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          expect(defaultHarness.getLastCreateQueryInput()?.options.env).toMatchObject({
+            ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+          });
+        }).pipe(Effect.provide(defaultHarness.layer));
+
+        // Re-enabled connectors + selective disabledPlugins passed via flag-tier settings.enabledPlugins
+        const customHarness = makeHarness({
+          claudeConfig: {
+            disableClaudeAiConnectors: false,
+            disabledPlugins: "runpod@runpod, context-mode@context-mode",
+          },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          const opts = customHarness.getLastCreateQueryInput()?.options;
+          expect(opts?.env).not.toHaveProperty("ENABLE_CLAUDEAI_MCP_SERVERS");
+          expect(opts?.settings).toMatchObject({
+            enabledPlugins: {
+              "context-mode@context-mode": false,
+              "runpod@runpod": false,
+            },
+          });
+        }).pipe(Effect.provide(customHarness.layer));
+      }),
+  );
+  it.effect(
+    "writes enriched session_init_meta, first_prompt_breakdown, and first_turn_actual_usage to NDJSON",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-metrics-e2e-" });
+        const workspaceDir = NodePath.join(baseDir, "workspace");
+        yield* fs.makeDirectory(workspaceDir, { recursive: true });
+        yield* fs.writeFileString(
+          NodePath.join(workspaceDir, "AGENTS.md"),
+          "# Project Rules\n한국어 프로젝트 핵심 규칙입니다.\n",
+        );
+
+        const harness = makeHarness({
+          baseDir,
+          cwd: workspaceDir,
+          claudeConfig: {
+            disableClaudeAiConnectors: true,
+            disabledPlugins: "runpod@runpod",
+          },
+        });
+
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const config = yield* ServerConfig;
+          const runtimeEventsFiber = yield* Stream.takeUntil(
+            adapter.streamEvents,
+            (event) => event.type === "turn.completed",
+          ).pipe(Stream.runCollect, Effect.forkChild);
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            cwd: workspaceDir,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+
+          yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: "간단한 확인",
+            attachments: [],
+          });
+
+          harness.query.emit({
+            type: "system",
+            subtype: "init",
+            session_id: "sess-metrics-e2e",
+            cwd: workspaceDir,
+            model: "claude-opus-5-5[1m]",
+            tools: ["Bash", "mcp__t3-code__workspace_memory", "mcp__t3-filesystem__read_file"],
+            skills: ["plain-skill", "runpod:runpod-mcp"],
+            slash_commands: ["help"],
+            agents: ["worker"],
+            plugins: [{ name: "t3-chat-skills" }],
+            mcp_servers: [{ name: "t3-code" }, { name: "t3-filesystem" }],
+          } as unknown as SDKMessage);
+
+          harness.query.emit({
+            type: "assistant",
+            uuid: "asst-metrics-e2e-1",
+            session_id: "sess-metrics-e2e",
+            parent_tool_use_id: null,
+            message: {
+              id: "msg_metrics_1",
+              type: "message",
+              role: "assistant",
+              model: "claude-opus-5-5",
+              content: [{ type: "text", text: "확인했습니다." }],
+              stop_reason: "end_turn",
+              usage: {
+                input_tokens: 2,
+                cache_creation_input_tokens: 40_000,
+                cache_read_input_tokens: 26_000,
+                output_tokens: 120,
+                cache_creation: {
+                  ephemeral_1h_input_tokens: 40_000,
+                  ephemeral_5m_input_tokens: 0,
+                },
+              },
+            },
+          } as unknown as SDKMessage);
+
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            duration_ms: 1,
+            duration_api_ms: 1,
+            num_turns: 1,
+            result: "확인했습니다.",
+            stop_reason: "end_turn",
+            session_id: "sess-metrics-e2e",
+            uuid: "res-metrics-e2e-1",
+            usage: {
+              input_tokens: 2,
+              cache_creation_input_tokens: 40_000,
+              cache_read_input_tokens: 26_000,
+              output_tokens: 120,
+            },
+          } as unknown as SDKMessage);
+          harness.query.finish();
+          yield* Fiber.join(runtimeEventsFiber);
+
+          const metricsPath = NodePath.join(config.logsDir, "claude-prompt-metrics.ndjson");
+          const raw = yield* fs.readFileString(metricsPath);
+          const records = raw
+            .trim()
+            .split(/\r?\n/)
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+          const breakdown = records.find((r) => r.event === "first_prompt_breakdown") as
+            | {
+                components: {
+                  claudeAutoLoadedMemory: { filesScanned: Array<{ relPath: string }> };
+                };
+              }
+            | undefined;
+          const initMeta = records.find((r) => r.event === "session_init_meta") as
+            | {
+                toolsBySource: Record<string, number>;
+                skillsBySource: Record<string, number>;
+                mcpServersByCategory: Record<string, number>;
+                sessionIsolation: {
+                  claudeAiConnectorsDisabled: boolean;
+                  disabledPluginIds: string[];
+                };
+              }
+            | undefined;
+          const actualUsage = records.find((r) => r.event === "first_turn_actual_usage") as
+            | {
+                usage: { totalContextTokens: number; cacheCreation1hTokens: number };
+                t3Estimated: { accountedSumTokens: number; unaccountedCliOverheadTokens: number };
+                initCounts: { toolsCount: number; mcpServersCount: number };
+              }
+            | undefined;
+
+          expect(breakdown).toBeDefined();
+          expect(
+            breakdown!.components.claudeAutoLoadedMemory.filesScanned.some(
+              (f) => f.relPath === "AGENTS.md",
+            ),
+          ).toBe(true);
+          expect(initMeta).toBeDefined();
+          expect(initMeta!.toolsBySource).toEqual({
+            builtin: 1,
+            "mcp__t3-code": 1,
+            "mcp__t3-filesystem": 1,
+          });
+          expect(initMeta!.skillsBySource).toEqual({ plain: 1, runpod: 1 });
+          expect(initMeta!.mcpServersByCategory).toEqual({
+            t3Managed: 2,
+            claudeAiConnectors: 0,
+            plugins: 0,
+            other: 0,
+          });
+          expect(initMeta!.sessionIsolation).toMatchObject({
+            claudeAiConnectorsDisabled: true,
+            disabledPluginIds: ["runpod@runpod"],
+          });
+          expect(actualUsage).toBeDefined();
+          expect(actualUsage!.usage.totalContextTokens).toBe(66_002);
+          expect(actualUsage!.usage.cacheCreation1hTokens).toBe(40_000);
+          expect(actualUsage!.t3Estimated.accountedSumTokens).toBeGreaterThan(0);
+          expect(actualUsage!.initCounts).toMatchObject({ toolsCount: 3, mcpServersCount: 2 });
+        }).pipe(Effect.provide(harness.layer));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it.effect("reports a missing workspace before starting a Claude process", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

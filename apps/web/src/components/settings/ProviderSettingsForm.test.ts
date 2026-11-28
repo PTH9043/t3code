@@ -22,6 +22,33 @@ describe("ProviderSettingsForm helpers", () => {
       ).toEqual({ [key]: "inherit", binaryPath: "claude" });
     }
   });
+  it("exposes reversible Claude connector and user plugin isolation controls", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")]!;
+    const fields = deriveProviderSettingsFields(claude);
+
+    const connectors = fields.find((f) => f.key === "disableClaudeAiConnectors")!;
+    expect(connectors.control).toBe("switch");
+    expect(connectors.defaultBooleanValue).toBe(true);
+    expect(nextProviderConfigWithFieldValue(undefined, connectors, false)).toEqual({
+      disableClaudeAiConnectors: false,
+    });
+    expect(
+      nextProviderConfigWithFieldValue({ disableClaudeAiConnectors: false }, connectors, true),
+    ).toBeUndefined();
+
+    const bulkPlugins = fields.find((f) => f.key === "disableUserPlugins")!;
+    expect(bulkPlugins.control).toBe("switch");
+    expect(bulkPlugins.defaultBooleanValue).toBe(false);
+
+    const selectivePlugins = fields.find((f) => f.key === "disabledPlugins")!;
+    expect(selectivePlugins.control).toBe("text");
+    expect(selectivePlugins.clearWhenEmpty).toBe("omit");
+
+    const skipAgents = fields.find((f) => f.key === "skipDuplicateAgentsMdInjection")!;
+    expect(skipAgents.control).toBe("switch");
+    const proactive = fields.find((f) => f.key === "proactiveCompactEnabled")!;
+    expect(proactive.control).toBe("switch");
+  });
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 

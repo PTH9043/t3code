@@ -225,6 +225,7 @@ export interface ClaudeSessionContext {
     | {
         readonly isResume: boolean;
         readonly isExecution: boolean;
+        readonly claudeConfigDir: string | undefined;
         readonly systemAppendFull: string;
         readonly projectAgentsMdInjected: string | undefined;
         readonly subordinateRoster: string | undefined;
@@ -233,6 +234,35 @@ export interface ClaudeSessionContext {
         readonly pluginCount: number;
         readonly mcpServerNames: ReadonlyArray<string>;
         readonly programmaticAgentCount: number;
+      }
+    | undefined;
+  /** Pending first-turn actual API usage telemetry (recorded once on first main assistant usage). */
+  firstTurnUsageTelemetryPending?:
+    | {
+        readonly isResume: boolean;
+        readonly isExecution: boolean;
+        readonly systemAppendTokens: number;
+        readonly autoLoadedMemoryTokens: number;
+        readonly firstTurnPromptTokens: number;
+      }
+    | undefined;
+  /** Session connector/plugin isolation flags applied at startup (for session_init_meta). */
+  readonly sessionIsolationMeta?:
+    | {
+        readonly claudeAiConnectorsDisabled: boolean;
+        readonly userPluginsDisabled: boolean;
+        readonly disabledPluginIds: ReadonlyArray<string>;
+      }
+    | undefined;
+  /** Latest session init summary counts paired with first_turn_actual_usage. */
+  lastInitCounts?:
+    | {
+        readonly toolsCount: number;
+        readonly skillsCount: number;
+        readonly slashCommandsCount: number;
+        readonly agentsCount: number;
+        readonly pluginsCount: number;
+        readonly mcpServersCount: number;
       }
     | undefined;
   lastAssistantUuid: string | undefined;

@@ -11,12 +11,24 @@ import * as path from "node:path";
 
 function estMixedTokens(text) {
   if (!text) return 0;
-  let nonAscii = 0;
+  let hangul = 0;
+  let otherNonAscii = 0;
   for (let i = 0; i < text.length; i += 1) {
-    if (text.charCodeAt(i) > 0x7f) nonAscii += 1;
+    const code = text.charCodeAt(i);
+    if (code > 0x7f) {
+      if (
+        (code >= 0xac00 && code <= 0xd7a3) ||
+        (code >= 0x1100 && code <= 0x11ff) ||
+        (code >= 0x3130 && code <= 0x318f)
+      ) {
+        hangul += 1;
+      } else {
+        otherNonAscii += 1;
+      }
+    }
   }
-  const ascii = text.length - nonAscii;
-  return Math.ceil(ascii * 0.27 + nonAscii * 0.65);
+  const ascii = text.length - hangul - otherNonAscii;
+  return Math.ceil(ascii * 0.27 + hangul * 2.0 + otherNonAscii * 1.1);
 }
 
 function inspectSessionJsonl(filePath) {
@@ -37,6 +49,8 @@ function inspectSessionJsonl(filePath) {
     skillChars: 0,
     deferredToolsCount: 0,
     deferredToolsChars: 0,
+    deferredToolsBySource: {},
+    skillsBySource: {},
     mcpInstructionsChars: 0,
     t3SystemAppendChars: 0,
     t3AgentsMdInjected: false,
@@ -84,12 +98,30 @@ function inspectSessionJsonl(filePath) {
       } else if (att.type === "skill_listing") {
         result.skillCount = att.skillCount ?? (Array.isArray(att.names) ? att.names.length : 0);
         result.skillChars = typeof att.content === "string" ? att.content.length : 0;
+        if (Array.isArray(att.names)) {
+          for (const name of att.names) {
+            if (typeof name !== "string") continue;
+            const src = name.includes(":") ? name.slice(0, name.indexOf(":")) : "plain";
+            result.skillsBySource[src] = (result.skillsBySource[src] ?? 0) + 1;
+          }
+        }
       } else if (att.type === "deferred_tools_delta") {
-        result.deferredToolsCount = Array.isArray(att.addedNames) ? att.addedNames.length : 0;
+        const addedNames = Array.isArray(att.addedNames) ? att.addedNames : [];
+        result.deferredToolsCount = addedNames.length;
         result.deferredToolsChars = JSON.stringify(att.addedLines ?? []).length;
+        for (const name of addedNames) {
+          if (typeof name !== "string") continue;
+          const src = name.startsWith("mcp__")
+            ? `mcp__${name.split("__")[1] ?? "unknown"}`
+            : "builtin";
+          result.deferredToolsBySource[src] = (result.deferredToolsBySource[src] ?? 0) + 1;
+        }
       } else if (att.type === "mcp_instructions_delta") {
-        result.mcpInstructionsChars =
-          typeof att.addedServerInstructions === "string" ? att.addedServerInstructions.length : 0;
+        result.mcpInstructionsChars = Array.isArray(att.addedServerInstructions)
+          ? att.addedServerInstructions.reduce((acc, item) => acc + JSON.stringify(item).length, 0)
+          : typeof att.addedServerInstructions === "string"
+            ? att.addedServerInstructions.length
+            : 0;
       } else if (att.type === "prompt_snapshot" && Array.isArray(att.systemPrompt)) {
         for (const blk of att.systemPrompt) {
           const text =
@@ -156,9 +188,16 @@ for (const proj of report) {
     console.log(
       `  - ${s.file.slice(0, 8)} | ${s.model} | 총 ${s.usage.total.toLocaleString()} tok (read=${s.usage.cacheRead.toLocaleString()}, create=${s.usage.cacheCreate.toLocaleString()})`,
     );
+    const externalToolParts = Object.entries(s.deferredToolsBySource)
+      .filter(([src]) => src !== "builtin")
+      .map(([src, cnt]) => `${src}:${cnt}`);
+    const skillSrcParts = Object.entries(s.skillsBySource).map(([src, cnt]) => `${src}:${cnt}`);
     console.log(
-      `    instructions=${instTotalChars.toLocaleString()}자(~${instTotalTok.toLocaleString()} tok) | T3 systemAppend=${s.t3SystemAppendChars.toLocaleString()}자(AGENTS이중=${duplicateAgents}) | skills=${s.skillCount}개(${s.skillChars.toLocaleString()}자) | deferredTools=${s.deferredToolsCount}개 | user=${s.firstUserChars.toLocaleString()}자`,
+      `    instructions=${instTotalChars.toLocaleString()}자(~${instTotalTok.toLocaleString()} tok) | T3 systemAppend=${s.t3SystemAppendChars.toLocaleString()}자(AGENTS이중=${duplicateAgents}) | skills=${s.skillCount}개(${s.skillChars.toLocaleString()}자, ${skillSrcParts.join(", ")}) | deferredTools=${s.deferredToolsCount}개 | user=${s.firstUserChars.toLocaleString()}자`,
     );
+    if (externalToolParts.length > 0) {
+      console.log(`      * MCP tools: ${externalToolParts.join(", ")}`);
+    }
     for (const f of s.instructionFiles) {
       if (f.chars >= 2000) {
         console.log(

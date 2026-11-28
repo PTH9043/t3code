@@ -90,6 +90,103 @@ export function resolveClaudePromptCacheTtlEnv(
   return env;
 }
 
+export interface ClaudeConnectorAndPluginOverrides {
+  readonly env: Record<string, string>;
+  readonly disabledEnabledPlugins: Record<string, false>;
+  readonly disabledPluginIds: ReadonlyArray<string>;
+  readonly claudeAiConnectorsDisabled: boolean;
+  readonly userPluginsDisabled: boolean;
+}
+
+/**
+ * Resolves non-destructive per-session overrides for claude.ai remote MCP connectors
+ * and user-installed Claude plugins (`~/.claude/settings.json`'s `enabledPlugins`).
+ *
+ * Uses official SDK mechanisms only:
+ * - `ENABLE_CLAUDEAI_MCP_SERVERS="false"` (without overriding an explicit user env var)
+ * - `--settings` (`flag` tier > `user` tier) `enabledPlugins: { "<id>": false }`
+ * - `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS="1"` when all user plugins are disabled
+ */
+export function resolveClaudeConnectorAndPluginOverrides(
+  settings: {
+    readonly disableClaudeAiConnectors?: boolean | undefined;
+    readonly disableUserPlugins?: boolean | undefined;
+    readonly disabledPlugins?: string | undefined;
+  },
+  baseEnv: Readonly<Record<string, string | undefined>>,
+  userEnabledPluginIds: ReadonlyArray<string>,
+): ClaudeConnectorAndPluginOverrides {
+  const env: Record<string, string> = {};
+  const disableConnectors = settings.disableClaudeAiConnectors !== false;
+  let claudeAiConnectorsDisabled = false;
+  if (disableConnectors) {
+    if (!baseEnv.ENABLE_CLAUDEAI_MCP_SERVERS) {
+      env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
+      claudeAiConnectorsDisabled = true;
+    } else if (baseEnv.ENABLE_CLAUDEAI_MCP_SERVERS.trim().toLowerCase() === "false") {
+      claudeAiConnectorsDisabled = true;
+    }
+  }
+
+  const disabledEnabledPlugins: Record<string, false> = {};
+  const disableAllUserPlugins = settings.disableUserPlugins === true;
+  if (disableAllUserPlugins) {
+    for (const pluginId of userEnabledPluginIds) {
+      const trimmed = pluginId.trim();
+      if (trimmed.length > 0) {
+        disabledEnabledPlugins[trimmed] = false;
+      }
+    }
+    if (!baseEnv.CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS) {
+      env.CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS = "1";
+    }
+  }
+
+  const requestedTokens = (settings.disabledPlugins ?? "")
+    .split(/[,\r\n]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+  for (const token of requestedTokens) {
+    if (token === "*") {
+      for (const pluginId of userEnabledPluginIds) {
+        const trimmed = pluginId.trim();
+        if (trimmed.length > 0) disabledEnabledPlugins[trimmed] = false;
+      }
+      if (!baseEnv.CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS) {
+        env.CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS = "1";
+      }
+      continue;
+    }
+    if (token.includes("@")) {
+      disabledEnabledPlugins[token] = false;
+      continue;
+    }
+    const lower = token.toLowerCase();
+    let matched = false;
+    for (const pluginId of userEnabledPluginIds) {
+      const idLower = pluginId.toLowerCase();
+      if (idLower === lower || idLower.startsWith(`${lower}@`)) {
+        disabledEnabledPlugins[pluginId] = false;
+        matched = true;
+      }
+    }
+    if (!matched) {
+      // Defensive fallback when user settings were unreadable or plugin uses `<name>@<name>`.
+      disabledEnabledPlugins[`${token}@${token}`] = false;
+    }
+  }
+
+  const disabledPluginIds = Object.keys(disabledEnabledPlugins).toSorted();
+  return {
+    env,
+    disabledEnabledPlugins,
+    disabledPluginIds,
+    claudeAiConnectorsDisabled,
+    userPluginsDisabled: disableAllUserPlugins || requestedTokens.includes("*"),
+  };
+}
+
 export function maxClaudeContextWindowFromModelUsage(
   modelUsage: Record<string, ModelUsage> | undefined,
 ): number | undefined {

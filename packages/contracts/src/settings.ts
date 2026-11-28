@@ -567,7 +567,38 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "AGENTS.md 중복 주입 방지",
         description:
-          "Claude Code 0.3.x가 프로젝트 루트 AGENTS.md를 자체 로드할 때 시스템 프롬프트에 64KB 사본을 중복 주입하지 않습니다(OIBOT 기준 세션당 약 5.1만 토큰 절감). 구버전 CLI에서만 끄세요.",
+          "Claude Code 0.3.x가 프로젝트 루트 AGENTS.md를 자체 로드할 때 시스템 프롬프트에 64KB 사본을 중복 주입하지 않습니다(OIBOT 실측 세션당 약 5.5만 토큰 중복 제거). 구버전 CLI에서만 끄세요.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    disableClaudeAiConnectors: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "claude.ai 원격 커넥터 끄기",
+        description:
+          "T3 Claude 세션에서 claude.ai 원격 MCP 커넥터(Claude Docs·Google Drive·Gmail·Google Calendar 등)를 ENABLE_CLAUDEAI_MCP_SERVERS=false로 차단해 시작 토큰과 연결 지연을 줄입니다. 사용하려면 끄세요. 새 세션부터 적용됩니다.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    disableUserPlugins: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "사용자 Claude 플러그인 일괄 끄기",
+        description:
+          "T3 Claude 세션에서 ~/.claude/settings.json에 켜진 사용자 플러그인(예: context-mode, runpod)과 플러그인 MCP 서버를 비활성화합니다. 원본 설정 파일은 수정하지 않으며 새 세션부터 적용됩니다.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    disabledPlugins: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "비활성화할 Claude 플러그인",
+        description:
+          "T3 세션에서만 끌 사용자 플러그인을 쉼표로 구분해 적습니다(예: context-mode, runpod 또는 runpod@runpod). 일괄 끄기가 꺼져 있을 때도 지정한 플러그인만 비활성화됩니다. 새 세션부터 적용됩니다.",
+        providerSettingsForm: {
+          placeholder: "context-mode, runpod",
+          clearWhenEmpty: "omit",
+        },
       }),
     ),
     proactiveCompactEnabled: Schema.Boolean.pipe(
@@ -576,6 +607,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         title: "문맥 사전 압축 활성화",
         description:
           "턴 종료 경계에서 입력 토큰이 임계치를 넘으면 핵심 맥락을 기억에 저장한 뒤 문맥을 사전 압축합니다. 턴 도중에는 절대 압축하지 않으며 스레드별로 끌 수 있습니다.",
+        providerSettingsForm: { control: "switch" },
       }),
     ),
     proactiveCompactThresholdTokens: Schema.Int.check(
@@ -652,6 +684,9 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       "promptCacheTtl",
       "subagentPromptCacheTtl",
       "skipDuplicateAgentsMdInjection",
+      "disableClaudeAiConnectors",
+      "disableUserPlugins",
+      "disabledPlugins",
       "proactiveCompactEnabled",
       "proactiveCompactThresholdTokens",
     ],
