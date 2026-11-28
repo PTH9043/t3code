@@ -66,6 +66,13 @@ export const runDriveBackupSchedulerCycle = (input: {
       return { action: "skipped" as const, reason: "no_targets_selected" };
     }
 
+    // 일일 750 GB 안전 한도(700 GiB/24h 또는 Google 403 한도 초과) 대기 중이면
+    // 불필요한 API 재호출 없이 지정 시각까지 조용히 대기한 뒤 자동으로 이어올린다.
+    const nowMs = (input.nowDate ?? new Date()).getTime();
+    if (state.quotaPausedUntilMs && state.quotaPausedUntilMs > nowMs) {
+      return { action: "skipped" as const, reason: "quota_cooldown" };
+    }
+
     const hostPower = yield* input.hostPowerMonitor.snapshot;
     const activeWorkCount =
       input.activeWorkCountOverride ?? activeWorkRegistry.snapshot().totalActive;

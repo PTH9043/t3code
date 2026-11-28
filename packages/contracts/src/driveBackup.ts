@@ -202,6 +202,12 @@ export const DriveBackupStateSnapshot = Schema.Struct({
   mirrorLocalDir: Schema.String,
   localStagingDir: Schema.String,
   activeWorkCount: NonNegativeInt,
+  /** 최근 24시간 롤링 Google Drive 업로드 누적 바이트 */
+  dailyUploadedBytes: Schema.optionalKey(NonNegativeInt),
+  /** 일일 안전 업로드 예산 상한(기본 700 GiB) */
+  dailyUploadBudgetBytes: Schema.optionalKey(NonNegativeInt),
+  /** 일일 750 GB 한도/안전 예산 도달로 자동 이어올리기 대기 중인 종료 시각(epoch ms) */
+  quotaPausedUntilMs: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   targets: Schema.Array(DriveBackupTarget),
   recentRuns: Schema.Array(DriveBackupRunRecord),
 });

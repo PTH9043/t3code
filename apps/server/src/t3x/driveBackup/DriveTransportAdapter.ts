@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
+import {
+  DriveUploadQuotaExceededError,
+  isGoogleDriveDailyUploadQuotaResponse,
+  REMOTE_QUOTA_COOLDOWN_MS,
+} from "./DriveBackupQuota.ts";
 import { mbpsToBytesPerSec, sleepAbortable, TokenBucket } from "./TokenBucket.ts";
 
 /**
@@ -165,6 +170,8 @@ export interface DriveFileUploadInput {
     readonly offsetBytes: number;
     readonly totalBytes: number;
   }) => Promise<void> | void;
+  /** 청크 1건이 Google Drive에 정상 반영될 때마다 호출 (24시간 700 GiB 안전 예산 누적용) */
+  readonly onChunkUploaded?: (bytesUploaded: number) => Promise<void> | void;
   readonly signal?: AbortSignal;
   readonly fetcher?: typeof fetch;
 }
@@ -657,6 +664,15 @@ async function fetchWithRetry(
     try {
       const res = await fetcher(url, { ...init, ...(signal ? { signal } : {}) });
       if (res.status === 429 || res.status === 403 || res.status >= 500) {
+        if (res.status === 403) {
+          const preview = await res
+            .clone()
+            .text()
+            .catch(() => "");
+          if (isGoogleDriveDailyUploadQuotaResponse(res.status, preview)) {
+            return res;
+          }
+        }
         if (attempt === maxRetries) return res;
         const retryAfterRaw = res.headers.get("retry-after");
         const retryAfterSec = retryAfterRaw ? Number(retryAfterRaw) : Number.NaN;
@@ -771,6 +787,13 @@ export async function uploadFileResumableToGoogleDriveApi(
     );
     if (!initRes.ok) {
       const errText = await initRes.text().catch(() => "");
+      if (isGoogleDriveDailyUploadQuotaResponse(initRes.status, errText)) {
+        throw new DriveUploadQuotaExceededError({
+          kind: "remote_quota_exceeded",
+          retryAfterMs: Date.now() + REMOTE_QUOTA_COOLDOWN_MS,
+          detail: errText,
+        });
+      }
       throw new Error(
         `Google Drive 업로드 세션 시작 실패 (${initRes.status}): ${errText.slice(0, 200)}`,
       );
@@ -920,6 +943,7 @@ export async function uploadFileResumableToGoogleDriveApi(
 
       if (putRes.status === 200 || putRes.status === 201) {
         uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
+        await input.onChunkUploaded?.(bytesRead);
         offset = totalBytes;
         await input.onCheckpoint?.({ sessionUri, offsetBytes: offset, totalBytes });
         break;
@@ -929,7 +953,12 @@ export async function uploadFileResumableToGoogleDriveApi(
         const nextLoc = putRes.headers.get("location");
         if (nextLoc) sessionUri = nextLoc;
         const confirmed = parseResumeRangeOffset(putRes.headers.get("range"));
-        offset = confirmed ?? offset + bytesRead;
+        const nextOffset = confirmed ?? offset + bytesRead;
+        const delta = Math.max(0, nextOffset - offset);
+        offset = nextOffset;
+        if (delta > 0) {
+          await input.onChunkUploaded?.(delta);
+        }
         await input.onCheckpoint?.({ sessionUri, offsetBytes: offset, totalBytes });
         continue;
       }
@@ -943,6 +972,17 @@ export async function uploadFileResumableToGoogleDriveApi(
       }
 
       const errText = await putRes.text().catch(() => "");
+      if (isGoogleDriveDailyUploadQuotaResponse(putRes.status, errText)) {
+        await input.onCheckpoint?.({ sessionUri, offsetBytes: offset, totalBytes });
+        throw new DriveUploadQuotaExceededError({
+          kind: "remote_quota_exceeded",
+          retryAfterMs: Date.now() + REMOTE_QUOTA_COOLDOWN_MS,
+          sessionUri,
+          offsetBytes: offset,
+          totalBytes,
+          detail: errText,
+        });
+      }
       throw new Error(`Google Drive 청크 업로드 실패 (${putRes.status}): ${errText.slice(0, 200)}`);
     }
   } finally {
@@ -1584,6 +1624,7 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
     readonly getUploadLimitMbps?: () => number;
     readonly chunkSizeBytes?: number;
     readonly accessToken?: string;
+    readonly onChunkUploaded?: (bytesUploaded: number) => Promise<void> | void;
     readonly fetcher?: typeof fetch;
     readonly signal?: AbortSignal;
   },
@@ -1667,6 +1708,13 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
   );
   if (!initRes.ok) {
     const errText = await initRes.text().catch(() => "");
+    if (isGoogleDriveDailyUploadQuotaResponse(initRes.status, errText)) {
+      throw new DriveUploadQuotaExceededError({
+        kind: "remote_quota_exceeded",
+        retryAfterMs: Date.now() + REMOTE_QUOTA_COOLDOWN_MS,
+        detail: errText,
+      });
+    }
     throw new Error(
       `Google Drive 지식 파일 업로드 세션 시작 실패 (${initRes.status}): ${errText.slice(0, 200)}`,
     );
@@ -1694,6 +1742,14 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
       `지식 빈 파일 업로드(${safeName})`,
     );
     if (!putRes.ok) {
+      const errText = await putRes.text().catch(() => "");
+      if (isGoogleDriveDailyUploadQuotaResponse(putRes.status, errText)) {
+        throw new DriveUploadQuotaExceededError({
+          kind: "remote_quota_exceeded",
+          retryAfterMs: Date.now() + REMOTE_QUOTA_COOLDOWN_MS,
+          detail: errText,
+        });
+      }
       throw new Error(`Google Drive 빈 지식 파일 업로드 실패 (${putRes.status})`);
     }
     uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
@@ -1736,16 +1792,29 @@ export async function uploadKnowledgeFileToGoogleDriveApi(
         );
         if (putRes.status === 200 || putRes.status === 201) {
           uploadedFile = (await putRes.json()) as { readonly id: string; readonly name: string };
+          await input.onChunkUploaded?.(bytesRead);
           break;
         }
         if (putRes.status === 308) {
           const nextLoc = putRes.headers.get("location");
           if (nextLoc) activeSessionUri = nextLoc;
           const confirmed = parseResumeRangeOffset(putRes.headers.get("range"));
-          offset = confirmed ?? offset + bytesRead;
+          const nextOffset = confirmed ?? offset + bytesRead;
+          const delta = Math.max(0, nextOffset - offset);
+          offset = nextOffset;
+          if (delta > 0) {
+            await input.onChunkUploaded?.(delta);
+          }
           continue;
         }
         const errText = await putRes.text().catch(() => "");
+        if (isGoogleDriveDailyUploadQuotaResponse(putRes.status, errText)) {
+          throw new DriveUploadQuotaExceededError({
+            kind: "remote_quota_exceeded",
+            retryAfterMs: Date.now() + REMOTE_QUOTA_COOLDOWN_MS,
+            detail: errText,
+          });
+        }
         throw new Error(
           `Google Drive 지식 파일 청크 업로드 실패 (${putRes.status}): ${errText.slice(0, 200)}`,
         );

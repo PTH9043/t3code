@@ -669,6 +669,12 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
             <Badge variant={(snapshot?.activeWorkCount ?? 0) > 0 ? "warning" : "success"}>
               진행 중 활성 작업 {snapshot?.activeWorkCount ?? 0}건
             </Badge>
+            {config?.transportMode === "gdrive_api" && (snapshot?.dailyUploadedBytes ?? 0) > 0 ? (
+              <Badge variant="outline">
+                24시간 전송 {formatBackupBytes(snapshot?.dailyUploadedBytes ?? 0)} /{" "}
+                {formatBackupBytes(snapshot?.dailyUploadBudgetBytes ?? 700 * 1024 * 1024 * 1024)}
+              </Badge>
+            ) : null}
             {summary.riskySelectedCount > 0 ? (
               <Badge variant="warning">
                 <AlertTriangleIcon className="size-3" />
@@ -676,6 +682,23 @@ export function DriveBackupSection({ project, environmentId }: DriveBackupSectio
               </Badge>
             ) : null}
           </div>
+
+          {snapshot?.quotaPausedUntilMs && snapshot.quotaPausedUntilMs > Date.now() ? (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs"
+            >
+              <div className="flex items-center gap-1.5 font-semibold text-amber-800 dark:text-amber-200">
+                <AlertTriangleIcon className="size-4 shrink-0" />
+                일일 750 GB 업로드 한도 보호 대기 중 (에러 아님 · 자동 이어올리기 예약됨)
+              </div>
+              <p className="mt-1 leading-relaxed text-amber-900/90 dark:text-amber-100/90">
+                Google Drive 계정당 일일 업로드 한도(750 GB)를 안전하게 지키기 위해
+                일시정지했습니다. <strong>{formatMs(snapshot.quotaPausedUntilMs)}</strong> 이후 남은
+                파일·오프셋부터 자동으로 이어서 업로드됩니다.
+              </p>
+            </div>
+          ) : null}
 
           {config?.lastAuthErrorCode === "invalid_grant" ? (
             <div

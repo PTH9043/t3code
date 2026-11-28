@@ -36,7 +36,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { activeWorkRegistry } from "../../orchestration/ActiveWorkTracker.ts";
-import { computeKeyFingerprint } from "./DriveBackupCrypto.ts";
+import { computeKeyFingerprint, sha256Hex } from "./DriveBackupCrypto.ts";
 import {
   isForbiddenExchangeFile,
   syncKnowledgeMirrorViaGoogleDriveApi,
@@ -50,7 +50,24 @@ import {
   UNIFIED_USERDATA_DISPLAY_NAME,
   UNIFIED_USERDATA_TARGET_ID,
 } from "./DriveBackupFilter.ts";
-import { computeIncrementalDiff, parseIncrementalManifest } from "./DriveBackupIncremental.ts";
+import {
+  computeIncrementalDiff,
+  parseIncrementalManifest,
+  type IncrementalFileRecord,
+  type IncrementalTargetManifest,
+} from "./DriveBackupIncremental.ts";
+import {
+  DAILY_QUOTA_STATE_KEY,
+  DEFAULT_DAILY_UPLOAD_BUDGET_BYTES,
+  DriveUploadQuotaExceededError,
+  computeNextQuotaResumeAtMs,
+  formatResumeTimeKst,
+  getRolling24hUploadedBytes,
+  markLedgerQuotaPaused,
+  parseDailyUploadLedger,
+  recordUploadedBytesInLedger,
+  type DailyUploadLedger,
+} from "./DriveBackupQuota.ts";
 import {
   copyFileToLocalDriveFolder,
   copyKnowledgeFileToLocalDriveFolder,
@@ -352,6 +369,85 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
         }
       }
       return null;
+    });
+
+  const resolveDailyUploadBudgetBytes = (): number => {
+    const raw = process.env.T3_DRIVE_BACKUP_DAILY_BUDGET_BYTES;
+    if (raw) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.floor(parsed);
+      }
+    }
+    return DEFAULT_DAILY_UPLOAD_BUDGET_BYTES;
+  };
+
+  const loadDailyQuotaLedger = (nowMs = Date.now()): Effect.Effect<DailyUploadLedger, never> =>
+    sql<{ readonly state_json: string }>`
+      SELECT state_json FROM drive_exchange_state WHERE id = ${DAILY_QUOTA_STATE_KEY} LIMIT 1
+    `.pipe(
+      Effect.map((rows) => parseDailyUploadLedger(rows[0]?.state_json, nowMs)),
+      Effect.orElseSucceed(() => parseDailyUploadLedger(null, nowMs)),
+    );
+
+  const saveDailyQuotaLedger = (ledger: DailyUploadLedger): Effect.Effect<void, never> =>
+    sql`
+      INSERT INTO drive_exchange_state (id, start_page_token, last_sync_at_ms, state_json)
+      VALUES (${DAILY_QUOTA_STATE_KEY}, NULL, ${ledger.updatedAtMs}, ${JSON.stringify(ledger)})
+      ON CONFLICT(id) DO UPDATE SET
+        last_sync_at_ms = excluded.last_sync_at_ms,
+        state_json = excluded.state_json
+    `.pipe(
+      Effect.asVoid,
+      Effect.catch(() => Effect.void),
+    );
+
+  const recordDailyUploadedBytes = (bytes: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (!Number.isFinite(bytes) || bytes <= 0) return;
+      const now = Date.now();
+      const current = yield* loadDailyQuotaLedger(now);
+      const next = recordUploadedBytesInLedger(current, bytes, now);
+      yield* saveDailyQuotaLedger(next);
+    });
+
+  const markDailyQuotaPaused = (retryAfterMs: number, reason: string): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      const now = Date.now();
+      const current = yield* loadDailyQuotaLedger(now);
+      const next = markLedgerQuotaPaused(current, retryAfterMs, reason, now);
+      yield* saveDailyQuotaLedger(next);
+    });
+
+  const checkDailyQuotaBeforeNewFile = (opts?: {
+    readonly ignoreCooldown?: boolean;
+  }): Effect.Effect<void, DriveBackupError> =>
+    Effect.gen(function* () {
+      const now = Date.now();
+      const ledger = yield* loadDailyQuotaLedger(now);
+      if (!opts?.ignoreCooldown && ledger.pausedUntilMs !== null && ledger.pausedUntilMs > now) {
+        return yield* new DriveBackupError({
+          code: "BUSY_DEFERRED",
+          message:
+            ledger.pauseReason ??
+            `일일 750 GB 안전 한도 대기 중 — ${formatResumeTimeKst(ledger.pausedUntilMs)} 이후 남은 지점부터 자동 이어올리기`,
+        });
+      }
+      const budgetBytes = resolveDailyUploadBudgetBytes();
+      const usedBytes = getRolling24hUploadedBytes(ledger, now);
+      if (usedBytes >= budgetBytes) {
+        const retryAfterMs = computeNextQuotaResumeAtMs(ledger, budgetBytes, now);
+        const quotaErr = new DriveUploadQuotaExceededError({
+          kind: "daily_budget_reached",
+          retryAfterMs,
+          uploadedBytesInWindow: usedBytes,
+        });
+        yield* markDailyQuotaPaused(retryAfterMs, quotaErr.message);
+        return yield* new DriveBackupError({
+          code: "BUSY_DEFERRED",
+          message: quotaErr.message,
+        });
+      }
     });
 
   const ensureConfigRow = (): Effect.Effect<ConfigRow, DriveBackupError> =>
@@ -910,12 +1006,16 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       const targetRows = yield* listTargetRows();
       const targets = yield* Effect.forEach(targetRows, hydrateTarget, { concurrency: 4 });
       const recentRuns = yield* listRecentRuns(20);
+      const quotaLedger = yield* loadDailyQuotaLedger();
       return {
         config,
         detectedLocalDriveRoots: [...detectLocalGoogleDriveRoots()],
         mirrorLocalDir,
         localStagingDir,
         activeWorkCount: activeWorkRegistry.snapshot().totalActive,
+        dailyUploadedBytes: getRolling24hUploadedBytes(quotaLedger),
+        dailyUploadBudgetBytes: resolveDailyUploadBudgetBytes(),
+        quotaPausedUntilMs: quotaLedger.pausedUntilMs,
         targets,
         recentRuns: [...recentRuns],
       };
@@ -1267,6 +1367,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
     readonly accessToken?: string;
     readonly createdAtIso: string;
     readonly pauseSignal?: AbortSignal;
+    readonly ignoreQuotaCooldown?: boolean;
   }): Effect.Effect<
     {
       readonly uploadedCount: number;
@@ -1358,6 +1459,27 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
       let uploadedCount = 0;
       let uploadedBytes = 0;
       let lastDestPath: string | null = null;
+      const runQuotaEffect = Effect.runPromiseWith(yield* Effect.context<never>());
+      // 파일 1건 업로드 완료 즉시 점진 매니페스트를 갱신해 중간 한도 도달/끊김 시 앞선 파일 재전송을 0건으로 막는다.
+      const rollingFiles: Record<string, IncrementalFileRecord> = {
+        ...(prevManifest?.files ?? {}),
+      };
+      const persistIncrementalFile = (file: (typeof diff.changedFiles)[number]) => {
+        rollingFiles[file.relativePath] = {
+          path: file.relativePath,
+          sizeBytes: file.sizeBytes,
+          mtimeMs: Math.floor(file.mtimeMs),
+          sha256: file.sha256,
+        };
+        const partialManifest: IncrementalTargetManifest = {
+          schemaVersion: 1,
+          targetId: manifestKey,
+          updatedAtIso: opts.createdAtIso,
+          files: { ...rollingFiles },
+        };
+        const partialJson = JSON.stringify(partialManifest);
+        return saveTargetManifest(manifestKey, partialJson, sha256Hex(partialJson));
+      };
 
       for (const file of diff.changedFiles) {
         if (isForbiddenExchangeFile(file.relativePath)) continue;
@@ -1406,7 +1528,13 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           uploadedCount += 1;
           uploadedBytes += copied.bytesCopied;
           lastDestPath = copied.destinationPath;
+          yield* persistIncrementalFile(file);
         } else {
+          // 다음 새 파일 시작 전 24시간 안전 업로드 예산(기본 700 GiB) 검사
+          yield* checkDailyQuotaBeforeNewFile({
+            ignoreCooldown: Boolean(opts.ignoreQuotaCooldown),
+          });
+          let remoteQuotaPause: DriveUploadQuotaExceededError | null = null;
           const uploaded = yield* Effect.tryPromise({
             try: () =>
               uploadKnowledgeFileToGoogleDriveApi(
@@ -1428,11 +1556,19 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                     return base;
                   },
                   ...(cachedAccessToken ? { accessToken: cachedAccessToken } : {}),
+                  onChunkUploaded: (bytes) => runQuotaEffect(recordDailyUploadedBytes(bytes)),
                   ...(opts.pauseSignal ? { signal: opts.pauseSignal } : {}),
                 },
               ),
-            catch: (e) =>
-              new DriveBackupError({
+            catch: (e) => {
+              if (e instanceof DriveUploadQuotaExceededError) {
+                remoteQuotaPause = e;
+                return new DriveBackupError({
+                  code: "BUSY_DEFERRED",
+                  message: e.message,
+                });
+              }
+              return new DriveBackupError({
                 code:
                   e instanceof OAuthTokenRefreshError
                     ? "AUTH_REQUIRED"
@@ -1443,21 +1579,25 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   e instanceof OAuthTokenRefreshError
                     ? e.message
                     : `지식 파일 업로드 실패 (${file.relativePath}): ${errMsg(e)}`,
-              }),
+              });
+            },
           }).pipe(
             Effect.tapError((err) =>
-              err.code === "AUTH_REQUIRED"
-                ? recordAuthError(
-                    isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
-                    err.message,
-                  )
-                : Effect.void,
+              remoteQuotaPause
+                ? markDailyQuotaPaused(remoteQuotaPause.retryAfterMs, remoteQuotaPause.message)
+                : err.code === "AUTH_REQUIRED"
+                  ? recordAuthError(
+                      isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                      err.message,
+                    )
+                  : Effect.void,
             ),
             Effect.tap(() => clearAuthError()),
           );
           uploadedCount += 1;
           uploadedBytes += uploaded.bytesUploaded;
           lastDestPath = uploaded.destinationPath;
+          yield* persistIncrementalFile(file);
         }
       }
 
@@ -1717,6 +1857,35 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
           }
         }
 
+        // 일일 750 GB 안전 한도/403 쿨다운 대기 중이면 에러 대신 paused 상태로 깨끗하게 대기
+        if (config.transportMode === "gdrive_api" && !input.forceWhenBusy) {
+          const preQuota = yield* loadDailyQuotaLedger(startedAtMs);
+          if (preQuota.pausedUntilMs !== null && preQuota.pausedUntilMs > startedAtMs) {
+            const pausedRun: DriveBackupRunRecord = {
+              runId,
+              kind: "backup",
+              status: "paused",
+              transportMode: config.transportMode,
+              targetIds,
+              fileCount: 0,
+              rawBytes: 0,
+              archiveBytes: 0,
+              skippedSecretsCount: 0,
+              skippedSecretsSample: [],
+              manifestSha256: null,
+              destinationPath: null,
+              errorMessage:
+                preQuota.pauseReason ??
+                `일일 750 GB 업로드 한도 대기 중 — ${formatResumeTimeKst(preQuota.pausedUntilMs)} 이후 남은 지점부터 자동 이어올리기`,
+              startedAtMs,
+              finishedAtMs: Date.now(),
+              pausedCount: 1,
+            };
+            yield* recordRun(pausedRun);
+            return pausedRun;
+          }
+        }
+
         const initialRun: DriveBackupRunRecord = {
           runId,
           kind: "backup",
@@ -1801,6 +1970,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 ? { resumeOffsetBytes: opts.resumeOffsetBytes }
                 : {}),
               ...(opts.onCheckpoint ? { onCheckpoint: opts.onCheckpoint } : {}),
+              onChunkUploaded: (bytes) => runCheckpointEffect(recordDailyUploadedBytes(bytes)),
               ...(pauseSignal ? { signal: pauseSignal } : {}),
             },
           );
@@ -1915,6 +2085,13 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   return Math.max(0, Number(resumableCp.total_bytes ?? 0));
                 }
               })();
+              const resumeOffset = Math.max(0, Number(resumableCp.uploaded_offset_bytes ?? 0));
+              if (config.transportMode === "gdrive_api" && resumeOffset === 0) {
+                yield* checkDailyQuotaBeforeNewFile({
+                  ignoreCooldown: Boolean(input.forceWhenBusy),
+                });
+              }
+              let resumedQuotaPause: DriveUploadQuotaExceededError | null = null;
               const uploadedResumed = yield* Effect.tryPromise({
                 try: () =>
                   uploadArchiveFile({
@@ -1925,7 +2102,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                     ...(resumableCp.resumable_session_uri
                       ? { resumeSessionUri: resumableCp.resumable_session_uri }
                       : {}),
-                    resumeOffsetBytes: Math.max(0, Number(resumableCp.uploaded_offset_bytes ?? 0)),
+                    resumeOffsetBytes: resumeOffset,
                     onCheckpoint: (cp) =>
                       runCheckpointEffect(
                         saveCheckpoint({
@@ -1940,6 +2117,10 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       ),
                   }),
                 catch: (e) => {
+                  if (e instanceof DriveUploadQuotaExceededError) {
+                    resumedQuotaPause = e;
+                    return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                  }
                   if (e instanceof ResumableUploadPausedError) {
                     return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
                   }
@@ -1953,12 +2134,17 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 },
               }).pipe(
                 Effect.tapError((err) =>
-                  err.code === "AUTH_REQUIRED"
-                    ? recordAuthError(
-                        isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
-                        err.message,
+                  resumedQuotaPause
+                    ? markDailyQuotaPaused(
+                        resumedQuotaPause.retryAfterMs,
+                        resumedQuotaPause.message,
                       )
-                    : Effect.void,
+                    : err.code === "AUTH_REQUIRED"
+                      ? recordAuthError(
+                          isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                          err.message,
+                        )
+                      : Effect.void,
                 ),
                 Effect.tap(() =>
                   config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
@@ -2254,6 +2440,11 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
             }
 
             if (shouldPackArchive) {
+              if (config.transportMode === "gdrive_api") {
+                yield* checkDailyQuotaBeforeNewFile({
+                  ignoreCooldown: Boolean(input.forceWhenBusy),
+                });
+              }
               const safeFolder = isUnifiedUserdata
                 ? "t3-all-userdata"
                 : sanitizeSegment(row.display_name || row.id);
@@ -2305,6 +2496,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   manifestSha256: built.manifestSha256,
                 });
 
+                let uploadQuotaPause: DriveUploadQuotaExceededError | null = null;
                 const uploaded = yield* Effect.tryPromise({
                   try: () =>
                     uploadArchiveFile({
@@ -2326,9 +2518,18 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                         ),
                     }),
                   catch: (e) => {
+                    if (e instanceof DriveUploadQuotaExceededError) {
+                      preserveArchiveForResume = true;
+                      uploadQuotaPause = e;
+                      return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
                     if (e instanceof ResumableUploadPausedError) {
                       preserveArchiveForResume = true;
                       return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
+                    // 403·네트워크 끊김 등 전송 실패 시에도 완성된 스테이징 아카이브와 체크포인트를 보존해 재패킹 없이 이어올린다.
+                    if (!(e instanceof OAuthTokenRefreshError)) {
+                      preserveArchiveForResume = true;
                     }
                     return new DriveBackupError({
                       code:
@@ -2341,12 +2542,17 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   },
                 }).pipe(
                   Effect.tapError((err) =>
-                    err.code === "AUTH_REQUIRED"
-                      ? recordAuthError(
-                          isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
-                          err.message,
+                    uploadQuotaPause
+                      ? markDailyQuotaPaused(
+                          uploadQuotaPause.retryAfterMs,
+                          uploadQuotaPause.message,
                         )
-                      : Effect.void,
+                      : err.code === "AUTH_REQUIRED"
+                        ? recordAuthError(
+                            isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                            err.message,
+                          )
+                        : Effect.void,
                   ),
                   Effect.tap(() =>
                     config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
@@ -2404,6 +2610,7 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 oauthCreds,
                 createdAtIso,
                 ...(pauseSignal ? { pauseSignal } : {}),
+                ignoreQuotaCooldown: Boolean(input.forceWhenBusy),
               });
               totalFiles += kRes.uploadedCount;
               totalRawBytes += kRes.uploadedBytes;
@@ -2503,67 +2710,123 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                     );
                     evTemps.push(stagedEvPath);
 
-                    const packedEv = yield* Effect.tryPromise({
-                      try: () =>
-                        runPackAndEncryptInWorker({
-                          targetId: "core:event-archives",
-                          targetDisplayName: "T3 월별 이벤트 아카이브",
-                          entries: evEntries,
-                          outputPath: stagedEvPath,
-                          createdAtIso,
-                          encryptionPassphrase: passphrase,
-                          readLimitMBps: resolveEffectiveReadLimitMBps(),
-                          rssLimitMb: config.workerRssLimitMb,
-                          ...(pauseSignal ? { signal: pauseSignal } : {}),
-                        }),
-                      catch: (e) =>
-                        new DriveBackupError({
-                          code:
-                            e instanceof SnapshotPausedError ? "BUSY_DEFERRED" : "TRANSPORT_ERROR",
-                          message: `이벤트 아카이브 패킹 실패: ${errMsg(e)}`,
-                        }),
-                    });
-                    const uploadedEv = yield* Effect.tryPromise({
-                      try: () =>
-                        uploadArchiveFile({
-                          targetId: "core:event-archives",
-                          subFolder: "event-archives",
-                          fileName: evFileName,
-                          stagedArchivePath: stagedEvPath,
-                          localRetentionOverride: config.snapshotLocalRetentionCount,
-                        }),
-                      catch: (e) =>
-                        new DriveBackupError({
-                          code:
-                            e instanceof ResumableUploadPausedError
-                              ? "BUSY_DEFERRED"
-                              : e instanceof OAuthTokenRefreshError
+                    if (config.transportMode === "gdrive_api") {
+                      yield* checkDailyQuotaBeforeNewFile({
+                        ignoreCooldown: Boolean(input.forceWhenBusy),
+                      });
+                    }
+                    let preserveEvArchiveForResume = false;
+                    let evQuotaPause: DriveUploadQuotaExceededError | null = null;
+                    try {
+                      const packedEv = yield* Effect.tryPromise({
+                        try: () =>
+                          runPackAndEncryptInWorker({
+                            targetId: "core:event-archives",
+                            targetDisplayName: "T3 월별 이벤트 아카이브",
+                            entries: evEntries,
+                            outputPath: stagedEvPath,
+                            createdAtIso,
+                            encryptionPassphrase: passphrase,
+                            readLimitMBps: resolveEffectiveReadLimitMBps(),
+                            rssLimitMb: config.workerRssLimitMb,
+                            ...(pauseSignal ? { signal: pauseSignal } : {}),
+                          }),
+                        catch: (e) =>
+                          new DriveBackupError({
+                            code:
+                              e instanceof SnapshotPausedError
+                                ? "BUSY_DEFERRED"
+                                : "TRANSPORT_ERROR",
+                            message: `이벤트 아카이브 패킹 실패: ${errMsg(e)}`,
+                          }),
+                      });
+                      yield* saveCheckpoint({
+                        stage: "uploading",
+                        targetId: "core:event-archives",
+                        archivePath: stagedEvPath,
+                        totalBytes: packedEv.archiveBytes,
+                        manifestSha256: packedEv.manifestSha256,
+                      });
+                      const uploadedEv = yield* Effect.tryPromise({
+                        try: () =>
+                          uploadArchiveFile({
+                            targetId: "core:event-archives",
+                            subFolder: "event-archives",
+                            fileName: evFileName,
+                            stagedArchivePath: stagedEvPath,
+                            localRetentionOverride: config.snapshotLocalRetentionCount,
+                            onCheckpoint: (cp) =>
+                              runCheckpointEffect(
+                                saveCheckpoint({
+                                  stage: "uploading",
+                                  targetId: "core:event-archives",
+                                  archivePath: stagedEvPath,
+                                  uploadedOffsetBytes: cp.offsetBytes,
+                                  totalBytes: cp.totalBytes,
+                                  resumableSessionUri: cp.sessionUri,
+                                  manifestSha256: packedEv.manifestSha256,
+                                }),
+                              ),
+                          }),
+                        catch: (e) => {
+                          if (e instanceof DriveUploadQuotaExceededError) {
+                            preserveEvArchiveForResume = true;
+                            evQuotaPause = e;
+                            return new DriveBackupError({
+                              code: "BUSY_DEFERRED",
+                              message: e.message,
+                            });
+                          }
+                          if (e instanceof ResumableUploadPausedError) {
+                            preserveEvArchiveForResume = true;
+                            return new DriveBackupError({
+                              code: "BUSY_DEFERRED",
+                              message: e.message,
+                            });
+                          }
+                          if (!(e instanceof OAuthTokenRefreshError)) {
+                            preserveEvArchiveForResume = true;
+                          }
+                          return new DriveBackupError({
+                            code:
+                              e instanceof OAuthTokenRefreshError
                                 ? "AUTH_REQUIRED"
                                 : "TRANSPORT_ERROR",
-                          message:
-                            e instanceof OAuthTokenRefreshError
-                              ? e.message
-                              : `이벤트 아카이브 업로드 실패: ${errMsg(e)}`,
-                        }),
-                    });
-                    yield* saveTargetManifest(
-                      "core:event-archives",
-                      evDiff.nextManifestJson,
-                      evDiff.nextManifestSha256,
-                    );
-                    totalFiles += packedEv.fileCount;
-                    totalRawBytes += packedEv.rawBytes;
-                    totalArchiveBytes += packedEv.archiveBytes;
-                    if (!lastManifestSha256) lastManifestSha256 = packedEv.manifestSha256;
-                    if (!lastDestPath) lastDestPath = uploadedEv.destinationPath;
-                  } finally {
-                    for (const tmp of evTemps) {
-                      try {
-                        if (NodeFs.existsSync(tmp)) NodeFs.rmSync(tmp, { force: true });
-                      } catch {
-                        // ignore
+                            message:
+                              e instanceof OAuthTokenRefreshError
+                                ? e.message
+                                : `이벤트 아카이브 업로드 실패: ${errMsg(e)}`,
+                          });
+                        },
+                      }).pipe(
+                        Effect.tapError(() =>
+                          evQuotaPause
+                            ? markDailyQuotaPaused(evQuotaPause.retryAfterMs, evQuotaPause.message)
+                            : Effect.void,
+                        ),
+                      );
+                      yield* saveTargetManifest(
+                        "core:event-archives",
+                        evDiff.nextManifestJson,
+                        evDiff.nextManifestSha256,
+                      );
+                      totalFiles += packedEv.fileCount;
+                      totalRawBytes += packedEv.rawBytes;
+                      totalArchiveBytes += packedEv.archiveBytes;
+                      if (!lastManifestSha256) lastManifestSha256 = packedEv.manifestSha256;
+                      if (!lastDestPath) lastDestPath = uploadedEv.destinationPath;
+                    } finally {
+                      for (const tmp of evTemps) {
+                        if (preserveEvArchiveForResume && tmp === stagedEvPath) continue;
+                        try {
+                          if (NodeFs.existsSync(tmp)) NodeFs.rmSync(tmp, { force: true });
+                        } catch {
+                          // ignore
+                        }
                       }
                     }
+                  } finally {
+                    // evTemps already cleaned above
                   }
                 }
               }
@@ -2673,6 +2936,12 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   totalBytes: packedCore.archiveBytes,
                   manifestSha256: packedCore.manifestSha256,
                 });
+                if (config.transportMode === "gdrive_api") {
+                  yield* checkDailyQuotaBeforeNewFile({
+                    ignoreCooldown: Boolean(input.forceWhenBusy),
+                  });
+                }
+                let coreQuotaPause: DriveUploadQuotaExceededError | null = null;
                 const uploadedCore = yield* Effect.tryPromise({
                   try: () =>
                     uploadArchiveFile({
@@ -2683,11 +2952,31 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                       ...(snapshotDue
                         ? { localRetentionOverride: config.snapshotLocalRetentionCount }
                         : {}),
+                      onCheckpoint: (cp) =>
+                        runCheckpointEffect(
+                          saveCheckpoint({
+                            stage: "uploading",
+                            targetId: "core:t3-state",
+                            archivePath: stagedCorePath,
+                            uploadedOffsetBytes: cp.offsetBytes,
+                            totalBytes: cp.totalBytes,
+                            resumableSessionUri: cp.sessionUri,
+                            manifestSha256: packedCore.manifestSha256,
+                          }),
+                        ),
                     }),
                   catch: (e) => {
+                    if (e instanceof DriveUploadQuotaExceededError) {
+                      preserveForResume = true;
+                      coreQuotaPause = e;
+                      return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
                     if (e instanceof ResumableUploadPausedError) {
                       preserveForResume = true;
                       return new DriveBackupError({ code: "BUSY_DEFERRED", message: e.message });
+                    }
+                    if (!(e instanceof OAuthTokenRefreshError)) {
+                      preserveForResume = true;
                     }
                     return new DriveBackupError({
                       code:
@@ -2700,12 +2989,14 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                   },
                 }).pipe(
                   Effect.tapError((err) =>
-                    err.code === "AUTH_REQUIRED"
-                      ? recordAuthError(
-                          isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
-                          err.message,
-                        )
-                      : Effect.void,
+                    coreQuotaPause
+                      ? markDailyQuotaPaused(coreQuotaPause.retryAfterMs, coreQuotaPause.message)
+                      : err.code === "AUTH_REQUIRED"
+                        ? recordAuthError(
+                            isInvalidGrantError(err.message) ? "invalid_grant" : "auth_failed",
+                            err.message,
+                          )
+                        : Effect.void,
                   ),
                   Effect.tap(() =>
                     config.transportMode === "gdrive_api" ? clearAuthError() : Effect.void,
@@ -2724,14 +3015,13 @@ export const makeGoogleDriveBackupService = Effect.gen(function* () {
                 `.pipe(Effect.catch(() => Effect.void));
                 }
               } finally {
-                if (!preserveForResume) {
-                  for (const p of [stagedCorePath, snapshotPathToCleanup]) {
-                    if (!p) continue;
-                    try {
-                      if (NodeFs.existsSync(p)) NodeFs.rmSync(p, { force: true });
-                    } catch {
-                      // ignore cleanup failure
-                    }
+                for (const p of [stagedCorePath, snapshotPathToCleanup]) {
+                  if (!p) continue;
+                  if (preserveForResume && p === stagedCorePath) continue;
+                  try {
+                    if (NodeFs.existsSync(p)) NodeFs.rmSync(p, { force: true });
+                  } catch {
+                    // ignore cleanup failure
                   }
                 }
               }
